@@ -656,6 +656,111 @@ mod bound {
         assert!(!log.contains("did not start"), "{log}");
     }
 
+    /// host-daemon, "A changed collector" (135; 151; record 0107 as
+    /// amended 2026-11-13; rules core.53, core.54; design D5 of
+    /// `sluice-runs-as-a-daemon`): `[telemetry]` changed to another
+    /// collector while `sluice daemon` runs the first combination's check
+    /// is taken up by the daemon starting afresh in place as the executable
+    /// it started as, which reads the file itself: the second collector is
+    /// sent traces, both submissions land, and the host process that
+    /// answers has the daemon's pid and a later `since`.
+    #[test]
+    fn a_daemon_takes_up_a_changed_telemetry_table_in_place() {
+        use std::collections::BTreeSet;
+        let ok = |_: &support::http::Request| (200, Vec::new(), String::new());
+        let first = support::http::Fake::start(ok);
+        let second = support::http::Fake::start(ok);
+        let seen = Scratch::new("instance-daemon-afresh-seen");
+        let sending = |collector: &str| {
+            vec![
+                "[runs]".to_string(),
+                "max = 1".to_string(),
+                String::new(),
+                "[telemetry]".to_string(),
+                "send = true".to_string(),
+                format!("collector = \"{collector}\""),
+            ]
+        };
+        let changed = sending(second.url());
+        let (s, file) = two_queued("daemon-afresh", |file| {
+            let lines: Vec<&str> = changed.iter().map(String::as_str).collect();
+            check_writing(seen.path(), file, &lines, 30)
+        });
+        std::fs::write(&file, sending(first.url()).join("\n") + "\n").unwrap();
+
+        // The caller's OpenTelemetry variables turn a signal off whatever
+        // the table says (core.53): the daemon is given none.
+        let mut command = s.command(s.repo.dir());
+        for (name, _) in std::env::vars_os() {
+            if name.to_string_lossy().starts_with("OTEL_") {
+                command.env_remove(name);
+            }
+        }
+        /// The daemon, killed and waited for once dropped: it never ends
+        /// for being idle.
+        struct Kept(std::process::Child);
+        impl Drop for Kept {
+            fn drop(&mut self) {
+                let _ = self.0.kill();
+                let _ = self.0.wait();
+            }
+        }
+        let mut daemon = Kept(
+            command
+                .arg("daemon")
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .spawn()
+                .expect("sluice daemon starts"),
+        );
+        let pid = daemon.0.id();
+        let version = s.state.path().join("sluice/host/version");
+        let named = || -> Option<serde_json::Value> {
+            std::fs::read(&version)
+                .ok()
+                .and_then(|b| serde_json::from_slice(&b).ok())
+        };
+        let until = std::time::Instant::now() + std::time::Duration::from_secs(30);
+        let since = loop {
+            if let Some(n) = named().filter(|n| n["pid"] == pid) {
+                break n["since"].clone();
+            }
+            assert!(
+                std::time::Instant::now() < until,
+                "the daemon never held the host"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(100));
+        };
+
+        let until = std::time::Instant::now() + std::time::Duration::from_secs(120);
+        while states(&s, "bolt/a") != ["landed", "landed"] {
+            assert!(
+                daemon.0.try_wait().unwrap().is_none(),
+                "the daemon ended: {}",
+                host_log(&s)
+            );
+            assert!(
+                std::time::Instant::now() < until,
+                "never landed: {:?}\n{}",
+                states(&s, "bolt/a"),
+                host_log(&s)
+            );
+            std::thread::sleep(std::time::Duration::from_millis(200));
+        }
+        let log = host_log(&s);
+        let paths = |c: &support::http::Fake| -> BTreeSet<String> {
+            c.requests().into_iter().map(|r| r.path).collect()
+        };
+        let to_second = paths(&second);
+        assert!(to_second.contains("/v1/traces"), "{to_second:?}\n{log}");
+        let now = named().expect("host/version");
+        assert_eq!(now["pid"], pid, "{log}");
+        assert_ne!(now["since"], since, "{log}");
+        assert_eq!(now["daemon"], true, "{log}");
+        assert!(log.contains("it starts afresh in its own process"), "{log}");
+        assert!(!log.contains("could not start afresh"), "{log}");
+    }
+
     /// The settings-take-up spec's "Settings it would hand over for that
     /// do not bind" (135; record 0107 as amended 2026-11-13; rule core.54;
     /// design D20): a change of `[runs]`, `[forge]` and `[telemetry]` whose

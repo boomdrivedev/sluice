@@ -4397,14 +4397,19 @@ fn sluice_run_follows_the_host_process() {
 }
 
 /// host-driver, "Started by hand": `sluice run` says once on stderr that
-/// nothing needs it, and `sluice --help` names no `run` (135).
+/// nothing needs it and that `sluice daemon` keeps the host process running
+/// on a machine that chooses to, and `sluice --help` names no `run` (135,
+/// 137; design D13 of `sluice-runs-as-a-daemon`).
 #[test]
 fn sluice_run_says_nothing_needs_it() {
     if let Some(err) = stderr_of("sluice_run_says_nothing_needs_it") {
         let said: Vec<&str> = err.lines().filter(|l| l.starts_with("sluice: ")).collect();
         assert_eq!(
             said,
-            ["sluice: sluice starts its own host process; nothing needs `sluice run`"],
+            [
+                "sluice: sluice starts its own host process; nothing needs `sluice run`, and \
+                 `sluice daemon` keeps it running on a machine that chooses to"
+            ],
             "{err}"
         );
         return;
@@ -4419,6 +4424,29 @@ fn sluice_run_says_nothing_needs_it() {
         !help.lines().any(|l| l.trim_start().starts_with("run ")),
         "{help}"
     );
+}
+
+/// host-daemon, "The help" (135, 137; design D1 of
+/// `sluice-runs-as-a-daemon`): `sluice --help` names `daemon`, saying it
+/// keeps sluice's host process running on a machine that chooses to and
+/// that nothing needs it, and `sluice daemon --help` says nothing needs it.
+#[test]
+fn the_help_names_sluice_daemon() {
+    let help = <Cli as clap::CommandFactory>::command()
+        .render_long_help()
+        .to_string();
+    let line = help
+        .lines()
+        .find(|l| l.trim_start().starts_with("daemon "))
+        .unwrap_or_else(|| panic!("no daemon: {help}"));
+    assert!(line.contains("host process running"), "{line}");
+    assert!(line.contains("on a machine that chooses to"), "{line}");
+    assert!(line.contains("nothing needs it"), "{line}");
+    let own = match Cli::try_parse_from(["sluice", "daemon", "--help"]) {
+        Err(e) => e.to_string(),
+        Ok(_) => panic!("--help parses to an error carrying the help"),
+    };
+    assert!(own.contains("nothing needs `sluice daemon`"), "{own}");
 }
 
 /// Submission `id`'s state, as its record says.
