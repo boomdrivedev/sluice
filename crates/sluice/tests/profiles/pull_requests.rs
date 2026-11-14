@@ -5359,6 +5359,147 @@ fn an_older_mark_is_read_by_nothing() {
     );
 }
 
+impl OnGitHub {
+    /// Rewrite the JSON file `path` of main's records on the remote by `f`,
+    /// as an older sluice wrote it, with a commit on
+    /// `refs/sluice/state/main` over the last, its version one more.
+    fn rewrite_on_remote(&self, path: &str, f: impl FnOnce(Value) -> Value) {
+        let bare = self.bare.path();
+        let git = |args: &[&str], input: Option<&str>, index: Option<&Path>| -> String {
+            let mut c = Command::new("git");
+            c.args(["--git-dir", bare.to_str().unwrap()])
+                .args(args)
+                .env("GIT_AUTHOR_NAME", "sluice")
+                .env("GIT_AUTHOR_EMAIL", "sluice@localhost")
+                .env("GIT_COMMITTER_NAME", "sluice")
+                .env("GIT_COMMITTER_EMAIL", "sluice@localhost")
+                .stdin(Stdio::piped())
+                .stdout(Stdio::piped())
+                .stderr(Stdio::piped());
+            if let Some(i) = index {
+                c.env("GIT_INDEX_FILE", i);
+            }
+            let mut child = c.spawn().unwrap();
+            if let Some(text) = input {
+                use std::io::Write as _;
+                child
+                    .stdin
+                    .take()
+                    .unwrap()
+                    .write_all(text.as_bytes())
+                    .unwrap();
+            }
+            drop(child.stdin.take());
+            let out = child.wait_with_output().unwrap();
+            assert!(out.status.success(), "git {args:?}: {}", text(&out));
+            String::from_utf8_lossy(&out.stdout).trim().to_string()
+        };
+        let state = "refs/sluice/state/main";
+        let old = git(&["rev-parse", state], None, None);
+        let doc: Value =
+            serde_json::from_str(&git(&["show", &format!("{old}:{path}")], None, None)).unwrap();
+        let blob = git(
+            &["hash-object", "-w", "--stdin"],
+            Some(&serde_json::to_string_pretty(&f(doc)).unwrap()),
+            None,
+        );
+        let version: u64 = git(&["show", &format!("{old}:version")], None, None)
+            .parse()
+            .unwrap();
+        let next = git(
+            &["hash-object", "-w", "--stdin"],
+            Some(&format!("{}\n", version + 1)),
+            None,
+        );
+        let scratch = Scratch::new("rewrite-index");
+        let index = scratch.path().join("index");
+        git(&["read-tree", &old], None, Some(&index));
+        for (p, b) in [(path, &blob), ("version", &next)] {
+            git(
+                &["update-index", "--cacheinfo", &format!("100644,{b},{p}")],
+                None,
+                Some(&index),
+            );
+        }
+        let tree = git(&["write-tree"], None, Some(&index));
+        let commit = git(
+            &["commit-tree", &tree, "-p", &old, "-m", "an older sluice"],
+            None,
+            None,
+        );
+        git(&["update-ref", state, &commit, &old], None, None);
+    }
+
+    /// Host A, called `a`, keeps main and took pull request `<name>` in;
+    /// main's records on the remote are then rewritten as an older sluice
+    /// left them when its hand-over to `b` withdrew that submission: its
+    /// record withdrawn in the hand-over's words, naming `b`, and its
+    /// combination gone. The request's number and head, and the
+    /// submission's id.
+    fn handed_over_before(&self, name: &str) -> (u64, String, u64) {
+        self.named("a", "");
+        let (n, head) = self.by_hand(name, &[("slow", Some("o\n"))], false);
+        self.step();
+        let id = self.of(n)[0]["id"].as_u64().expect("taken in");
+        self.rewrite_on_remote(&format!("submissions/{id}.json"), |mut sub| {
+            sub["state"] = "withdrawn".into();
+            sub["withdrawn"] = serde_json::json!({
+                "by": "b takes main's pull requests in",
+                "at": "2026-11-06T12:00:00Z",
+                "handed_over_to": "b",
+            });
+            sub
+        });
+        self.rewrite_on_remote("branch.json", |mut doc| {
+            doc["candidates"] = serde_json::json!([]);
+            doc
+        });
+        (n, head, id)
+    }
+}
+
+/// request-intake-host, "An older hand-over" (120; record 0088 as amended;
+/// design D24): main's records on the remote hold a submission an older
+/// sluice withdrew in a hand-over to host B; the host that keeps main reads
+/// it as holding no request and takes the pull request in again at its
+/// head, with no draft made.
+#[test]
+fn an_older_hand_over_carried_onto_the_remote_is_taken_in_again() {
+    let g = OnGitHub::new("intake-older-hand-over", "");
+    let (n, head, id) = g.handed_over_before("unit/older");
+    g.discovery_passes();
+    let said = g.round();
+    let subs = g.of(n);
+    assert_eq!(subs.len(), 2, "{said}{subs:?}");
+    assert_eq!(subs[0]["id"], id, "{subs:?}");
+    assert_eq!(subs[1]["head"], head.as_str(), "{subs:?}");
+    assert_ne!(subs[1]["state"], "withdrawn", "{subs:?}");
+    assert!(!g.pull_from("unit/older").draft, "no draft made");
+}
+
+/// request-intake-host, "A wait on an older hand-over" (120; core.48;
+/// record 0100; design D24): `sluice wait <id>` on a submission an older
+/// sluice withdrew in a hand-over follows its pull request rather than
+/// ending withdrawn.
+#[test]
+fn a_wait_on_an_older_hand_over_follows_its_pull_request() {
+    let g = OnGitHub::new("wait-older-hand-over", "");
+    let (n, _, id) = g.handed_over_before("unit/followed");
+    let out = g.skipping(
+        g.repo.dir(),
+        &["wait", &id.to_string(), "--timeout", "2s", "--json"],
+    );
+    assert_ne!(out.status.code(), Some(sluice::WITHDRAWN), "{}", text(&out));
+    let doc: Value =
+        serde_json::from_slice(&out.stdout).unwrap_or_else(|e| panic!("{e}: {}", text(&out)));
+    // The request taken in again at its head carries its work.
+    let carrier = doc["carried_by"]["id"]
+        .as_u64()
+        .unwrap_or_else(|| panic!("{doc}"));
+    assert!(carrier > id, "{doc}");
+    assert_eq!(g.of(n).last().unwrap()["id"], carrier, "{doc}");
+}
+
 /// request-intake-host, "Another host keeps it": host B's pass keeps
 /// main, and host A's step takes nothing in and asks GitHub nothing of
 /// main's open pull requests (137; design D21).
