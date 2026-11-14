@@ -304,6 +304,25 @@ impl Client {
         }
     }
 
+    /// The results `ask` names of `repository`, as `branch`'s gate reads
+    /// them, from the host process's index, started where none answers
+    /// (D17).
+    pub fn results(
+        &self,
+        repository: &Path,
+        branch: &str,
+        ask: &sluice_seams::ResultAsk,
+    ) -> Result<Vec<u8>> {
+        match self.ask(&Request::Results {
+            repository: repository.to_path_buf(),
+            branch: branch.to_string(),
+            wants: ask.clone(),
+        })? {
+            Answer::Results(lines) => Ok(lines.into_bytes()),
+            other => Err(unexpected(other)),
+        }
+    }
+
     /// A pass of `repository` now, once it ends (D14).
     pub fn pass(&self, repository: &Path) -> Result<Report> {
         match self.ask(&Request::Pass {

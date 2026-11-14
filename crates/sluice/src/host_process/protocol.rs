@@ -69,6 +69,14 @@ pub enum Request {
         #[serde(default, skip_serializing_if = "std::ops::Not::not")]
         afresh: bool,
     },
+    /// The results `wants` names, as `branch`'s gate reads them, answered
+    /// from the host process's index of the repository on the connection's
+    /// own thread (D17).
+    Results {
+        repository: PathBuf,
+        branch: String,
+        wants: sluice_seams::ResultAsk,
+    },
     /// A session's or a preview's room, the connection kept while it
     /// waits and while it is held (D12).
     Hold {
@@ -137,6 +145,8 @@ pub enum Answer {
     Room(RoomView),
     /// A reading of the repository, as it stood when answered (D16).
     Read(Reading),
+    /// The results asked for, one JSON document per line (D17).
+    Results(String),
     /// The request could not be answered, in these words.
     Error(String),
 }

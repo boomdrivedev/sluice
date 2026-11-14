@@ -206,6 +206,22 @@ impl RemoteRefs {
     /// key `signers` lists for it and with no other, and this host's own
     /// replays (core.9). `signers` is the list the policy of the branch
     /// whose gate reads them names (78; rule core.22).
+    /// Where this host's own replays on the remote are kept (design D17).
+    pub fn own_results_path(&self) -> PathBuf {
+        self.own.results_path()
+    }
+
+    /// `signer`'s runs on the remote as this host last fetched them, read
+    /// for a branch whose policy lists `key` for it: what the host
+    /// process's results index reads (design D17; rule core.22).
+    pub fn signer_ref<'a>(&'a self, signer: &'a str, key: &'a SignerKey) -> FetchedRuns<'a> {
+        FetchedRuns {
+            refs: self,
+            signer,
+            key,
+        }
+    }
+
     pub fn results_with(&self, signers: &BTreeMap<String, SignerKey>) -> Result<Vec<u8>> {
         let mut bytes = self.own.results_log()?;
         for (signer, key) in signers {
@@ -449,6 +465,12 @@ impl RemoteRefs {
             all.extend(blobs.clone());
             let commit = self.commit(&all, tip.as_deref(), message)?;
             if self.push_leased(&commit, name, tip.as_deref())? {
+                // What was pushed is read here as fetched, so the host
+                // process's index reads a round's own runs with no fetch
+                // (design D17).
+                self.pushed
+                    .local()
+                    .write_ref(&self.fetched(name), &Rev(commit.clone()))?;
                 return Ok(());
             }
         }
@@ -616,7 +638,10 @@ pub(crate) fn ask(pushed: &PushedRefs) -> Result<()> {
     let heads = format!("+{HEADS}:refs/sluice-fetched/{remote}/heads/*");
     let combinations =
         format!("+refs/sluice/combinations/*:refs/sluice-fetched/{remote}/combinations/*");
-    let specs = [&state, &hosts, &branches, &heads, &combinations].map(String::as_str);
+    // Design D17: each signer's runs, which the host process's results
+    // index reads as this ask last fetched them.
+    let runs = format!("+refs/sluice/runs/*:refs/sluice-fetched/{remote}/runs/*");
+    let specs = [&state, &hosts, &branches, &heads, &combinations, &runs].map(String::as_str);
     pushed.fetch_specs("refs/sluice/*", &specs, &["--prune"])?;
     Ok(())
 }
@@ -628,6 +653,41 @@ pub(crate) fn fetched_branches(pushed: &PushedRefs) -> Result<Vec<(String, Rev)>
         .local()
         .refs_under(&format!("refs/sluice-fetched/{}/state/", pushed.remote()))
 }
+/// A signer's runs on a remote as this host last fetched them, read for a
+/// branch whose policy lists `key` for the signer (design D17; rule
+/// core.22).
+pub struct FetchedRuns<'a> {
+    refs: &'a RemoteRefs,
+    signer: &'a str,
+    key: &'a SignerKey,
+}
+
+impl crate::host_process::results::SignerRef for FetchedRuns<'_> {
+    fn signer(&self) -> &str {
+        self.signer
+    }
+
+    fn digest(&self) -> &str {
+        self.key.digest()
+    }
+
+    fn entries(&self) -> Result<Vec<(String, String)>> {
+        let name = format!("refs/sluice/runs/{}", self.signer);
+        match self.refs.pushed.read_ref(&self.refs.fetched(&name))? {
+            Some(commit) => self.refs.pushed.local().tree_entries(commit.as_str()),
+            None => Ok(Vec::new()),
+        }
+    }
+
+    fn blob(&self, oid: &str) -> Result<Vec<u8>> {
+        self.refs.pushed.local().blob(oid)
+    }
+
+    fn verify(&self, bytes: &[u8]) -> Result<Vec<ResultLine>> {
+        verify(self.signer, self.key, bytes)
+    }
+}
+
 /// `refs/sluice/state/<branch>`, for a branch git may name.
 fn state_ref(branch: &str) -> Result<String> {
     if branch.is_empty()

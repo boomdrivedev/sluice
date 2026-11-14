@@ -117,6 +117,11 @@ impl LocalFiles {
         Ok(self.root.join(branch))
     }
 
+    /// 69: where the results log is (design D17).
+    pub(crate) fn results_path(&self) -> PathBuf {
+        self.root.join(RESULTS)
+    }
+
     /// 69: the results log as written, one JSON document per line.
     pub(crate) fn results_log(&self) -> Result<Vec<u8>> {
         match std::fs::read(self.root.join(RESULTS)) {

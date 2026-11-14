@@ -182,6 +182,13 @@ fn main() {
     let opened = repository_dir(&cli).and_then(|dir| {
         let program = std::env::current_exe()?;
         let bound = Bound::open_with(&dir, program.clone(), instance, retry.clone())?;
+        // Design D17: a command asks sluice's host process for results.
+        let bound = Bound {
+            state: bound
+                .state
+                .reading_results(sluice::profiles::records::ResultsFrom::Asked),
+            ..bound
+        };
         let kept = held.map(|settings| Kept {
             dir,
             program,

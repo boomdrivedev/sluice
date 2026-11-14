@@ -85,6 +85,24 @@ pub struct Records {
     lists_read: Cell<u64>,
     /// The public half of the key this host signs with, once read.
     own_key: RefCell<Option<ssh_key::PublicKey>>,
+    /// Where the results log is read from (design D17).
+    results_from: ResultsFrom,
+}
+
+/// Where a binding reads the results log from (69, 129; design D17).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum ResultsFrom {
+    /// The log and each signer's runs, read by the binding itself: a
+    /// binding that no host process serves, a test's or the hook's.
+    #[default]
+    Here,
+    /// The host process's index of each log, in the host process itself:
+    /// a repository's task's binding and a connection's.
+    Indexed,
+    /// The host process, asked with `results` and started where none
+    /// answers: a command's. Where it cannot be asked, the command reads
+    /// them itself, and says so.
+    Asked,
 }
 
 /// A branch's signers and the keys its runs are verified with (78).
@@ -107,7 +125,70 @@ impl Records {
             lists: RefCell::default(),
             lists_read: Cell::new(0),
             own_key: RefCell::default(),
+            results_from: ResultsFrom::Here,
         }
+    }
+
+    /// The same binding, reading the results log from `from` (design D17).
+    pub fn reading_results(self, from: ResultsFrom) -> Self {
+        Records {
+            results_from: from,
+            ..self
+        }
+    }
+
+    /// The results `ask` names, as `branch`'s gate reads them, read by this
+    /// binding itself from the log and each signer's runs (78; rule
+    /// core.22).
+    fn results_here(&self, branch: &str, ask: &ResultAsk) -> Result<Vec<u8>> {
+        let mut bytes = self.local.results_for(branch, ask)?;
+        let routed = self.route(branch)?;
+        let remotes: Vec<Rc<RemoteRefs>> = self.remotes.borrow().values().cloned().collect();
+        if remotes.is_empty() {
+            return Ok(bytes);
+        }
+        let signers = self.signers_of(branch, routed.as_ref().map(|r| r.remote()))?;
+        for r in remotes {
+            bytes.extend(ask.answer(&r.results_with(&signers)?));
+        }
+        Ok(bytes)
+    }
+
+    /// The same, from the host process's index of each log: the host's
+    /// own results, then each remote's replays and the runs each signer
+    /// `branch`'s policy names signed there, as the host last fetched
+    /// them, a statement verified once for each key (design D17). Each
+    /// answer that verified a statement says how many in the host
+    /// process's log.
+    fn results_indexed(&self, branch: &str, ask: &ResultAsk) -> Result<Vec<u8>> {
+        use crate::host_process::results::{self, SignerRef};
+        let own = results::of(&self.local.results_path());
+        let mut bytes = own.answer(ask, &[])?;
+        let routed = self.route(branch)?;
+        let remotes: Vec<Rc<RemoteRefs>> = self.remotes.borrow().values().cloned().collect();
+        if remotes.is_empty() {
+            return Ok(bytes);
+        }
+        let signers = self.signers_of(branch, routed.as_ref().map(|r| r.remote()))?;
+        for r in remotes {
+            let index = results::of(&r.own_results_path());
+            let refs: Vec<_> = signers
+                .iter()
+                .map(|(name, key)| r.signer_ref(name, key))
+                .collect();
+            let dyns: Vec<&dyn SignerRef> = refs.iter().map(|f| f as &dyn SignerRef).collect();
+            let before = index.verifications();
+            bytes.extend(index.answer(ask, &dyns)?);
+            let verified = index.verifications() - before;
+            if verified > 0 {
+                crate::host_process::log(&format!(
+                    "sluice host: {}: verified {verified} signed run record(s) on {}",
+                    self.common.display(),
+                    r.remote()
+                ));
+            }
+        }
+        Ok(bytes)
     }
 
     /// How many times this binding read a branch's policy whole for the
@@ -718,20 +799,27 @@ impl State for Records {
     /// Of this host's own results, and the runs on every remote opened,
     /// each signer's verified with the key `branch`'s own policy lists for
     /// it at its revision and read for no signer it does not name
-    /// ([`Records::signers_of`]; 78; rule core.22), the lines `ask` names
-    /// (design D17).
+    /// ([`Records::signers_of`]; 78; rule core.22), the lines `ask` names:
+    /// from the host process's index in the host process, asked of it from
+    /// a command, and read here otherwise (design D17).
     fn results_for(&self, branch: &str, ask: &ResultAsk) -> Result<Vec<u8>> {
-        let mut bytes = self.local.results_for(branch, ask)?;
-        let routed = self.route(branch)?;
-        let remotes: Vec<Rc<RemoteRefs>> = self.remotes.borrow().values().cloned().collect();
-        if remotes.is_empty() {
-            return Ok(bytes);
+        match self.results_from {
+            ResultsFrom::Here => self.results_here(branch, ask),
+            ResultsFrom::Indexed => self.results_indexed(branch, ask),
+            ResultsFrom::Asked => {
+                let asked = crate::host_process::client::Client::host()
+                    .and_then(|c| c.results(&self.common, branch, ask));
+                match asked {
+                    Ok(bytes) => Ok(bytes),
+                    Err(e) => {
+                        crate::telemetry::warn(&format!(
+                            "sluice: warning: sluice's host process could not be asked for {branch}'s results, so this command reads them itself: {e:#}"
+                        ));
+                        self.results_here(branch, ask)
+                    }
+                }
+            }
         }
-        let signers = self.signers_of(branch, routed.as_ref().map(|r| r.remote()))?;
-        for r in remotes {
-            bytes.extend(ask.answer(&r.results_with(&signers)?));
-        }
-        Ok(bytes)
     }
 
     /// 78, 87: whether `branch`'s own policy at `at`, the list its runs are

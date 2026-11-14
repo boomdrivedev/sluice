@@ -15,7 +15,7 @@ use std::fs::File;
 use std::io::{ErrorKind, Read, Seek, SeekFrom};
 use std::os::unix::fs::MetadataExt;
 use std::path::{Path, PathBuf};
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex, OnceLock};
 
 use anyhow::{Context, Result};
 use serde::Deserialize;
@@ -135,6 +135,22 @@ impl Lines {
             out.extend_from_slice(&self.lines[i]);
         }
     }
+}
+
+/// The host process's index of the results log at `log`, made at its
+/// first ask and kept for the process's life: one for each log of each
+/// repository it holds, the repository's own and each remote's replays,
+/// shared by the repository's task and the connection threads that answer
+/// `results` (design D17).
+pub fn of(log: &Path) -> Arc<Index> {
+    static INDEXES: OnceLock<Mutex<BTreeMap<PathBuf, Arc<Index>>>> = OnceLock::new();
+    let mut all = INDEXES
+        .get_or_init(Mutex::default)
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    all.entry(log.to_path_buf())
+        .or_insert_with(|| Arc::new(Index::new(log)))
+        .clone()
 }
 
 impl Index {

@@ -526,6 +526,17 @@ fn answer(hosting: &Arc<Hosting>, stream: UnixStream) -> Result<()> {
                 .read(&repository, READ_TICK, read_for(), afresh);
             send(&mut writer, &Answer::Read(reading))
         }
+        Request::Results {
+            repository,
+            branch,
+            wants,
+        } => {
+            let answer = match results_of(&repository, &branch, &wants) {
+                Ok(lines) => Answer::Results(String::from_utf8_lossy(&lines).into_owned()),
+                Err(e) => Answer::Error(format!("{e:#}")),
+            };
+            send(&mut writer, &answer)
+        }
         Request::Room => send(&mut writer, &Answer::Room(view(hosting)?)),
         Request::HandOver => {
             log(&format!(
@@ -536,6 +547,22 @@ fn answer(hosting: &Arc<Hosting>, stream: UnixStream) -> Result<()> {
             send(&mut writer, &Answer::Ok)
         }
     }
+}
+
+/// The results `ask` names of `repository`, as `branch`'s gate reads them,
+/// from the host process's index, on the connection's own thread and with
+/// no wait on the repository's task: its binding reads every remote as the
+/// last ask fetched it (design D17).
+fn results_of(repository: &Path, branch: &str, ask: &sluice_seams::ResultAsk) -> Result<Vec<u8>> {
+    let bound = crate::profiles::Bound::open(
+        &tasks::open_dir(repository),
+        std::rc::Rc::new(crate::retry::Policy::round().recording_where_set()),
+    )?;
+    let state = bound
+        .state
+        .reading_results(crate::profiles::records::ResultsFrom::Indexed);
+    sluice_seams::State::hold(&state);
+    sluice_seams::State::results_for(&state, branch, ask)
 }
 
 /// Note `repository` in the index (design D4).

@@ -601,6 +601,10 @@ fn repository(inbox: Inbox, room: Shared, asked_only: bool, named: Named) {
     };
     let bound = Bound {
         tests: bound.tests.with_room(RoomHandle::Here(room.clone())),
+        // Design D17: results from the host process's index.
+        state: bound
+            .state
+            .reading_results(crate::profiles::records::ResultsFrom::Indexed),
         host_process: Box::new(Inside { room, named }),
         ..bound
     };

@@ -1844,6 +1844,7 @@ pub fn run(
                     if let Some(d) = s.delivery_of(&sub)? {
                         doc["delivery"] = d.to_json();
                     }
+                    with_checks(&s, &sub, &mut doc);
                     writeln!(out, "{}", serde_json::to_string_pretty(&doc)?)?;
                     Ok(0)
                 }
@@ -3255,6 +3256,21 @@ fn decided_document(sub: &Submission, decided: Option<&Decided>) -> Result<serde
         doc["notice"] = sluice_core::notice(sub.id, &sub.branch, d).into();
     }
     Ok(doc)
+}
+
+/// 49, 69 (design D17): `doc`, `sub`'s record, with `checks`, a row for
+/// each required check of the combination it was last tested in, as its
+/// report gives them, read from the results of that combination alone. It
+/// decides nothing, so a read that fails adds nothing, and says so.
+fn with_checks(s: &Sluice<'_>, sub: &Submission, doc: &mut serde_json::Value) {
+    match s.verdict_of(&sub.branch, sub.id) {
+        Ok(Some(v)) if !v.rows.is_empty() => doc["checks"] = serde_json::json!(v.rows),
+        Ok(_) => {}
+        Err(e) => telemetry::warn(&format!(
+            "sluice: warning: could not read #{}'s checks: {e:#}",
+            sub.id
+        )),
+    }
 }
 
 /// 84, record 0074; 114, record 0105: `doc`, `sub`'s record, with what its

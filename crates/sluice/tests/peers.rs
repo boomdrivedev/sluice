@@ -753,3 +753,71 @@ fn a_status_beside_a_current_reading_asks_origin_nothing() {
     let v: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
     assert_eq!(v["submissions"].as_array().map(Vec::len), Some(1), "{v}");
 }
+
+/// 129, 69 (design D17): with `main`'s records on origin holding several
+/// signed run records, a host process started afresh and passing the
+/// repository ten times, and `sluice status <n>` run three times, each
+/// record was verified once, by the host process, and no command read one
+/// itself.
+#[test]
+fn a_signed_record_is_verified_once() {
+    let (host, origin) = two_branches_landed("verified-once");
+    let mut landed = Vec::new();
+    for n in ["m2", "m3"] {
+        let id = host.submit_to(n, "main");
+        let deadline = Instant::now() + Duration::from_secs(60);
+        while host.state_of(id) != "landed" {
+            let out = host.sluice(&["step", "main"]);
+            assert!(out.status.success(), "{}", text(&out));
+            assert!(Instant::now() < deadline, "#{id}: {}", host.state_of(id));
+            std::thread::sleep(Duration::from_millis(200));
+        }
+        landed.push(id);
+    }
+    let listed = support::git_command()
+        .args(["--git-dir", origin.path().to_str().unwrap()])
+        .args(["ls-tree", "-r", "--name-only", "refs/sluice/runs/a"])
+        .output()
+        .unwrap();
+    let records = String::from_utf8_lossy(&listed.stdout).lines().count();
+    assert!(records >= 4, "{}", String::from_utf8_lossy(&listed.stderr));
+
+    // A host process started afresh, kept by a follow, so one index reads
+    // what every command after asks.
+    host.host_process_ended();
+    let out = host.sluice(&["overview", "--json"]);
+    assert!(out.status.success(), "{}", text(&out));
+    let doc: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    let repository = doc["repository"].as_str().unwrap().to_string();
+    let client = sluice::host_process::client::Client::new(
+        Path::new(env!("CARGO_BIN_EXE_sluice")),
+        support::env_of(&host.command(host.repo.dir())),
+    )
+    .unwrap();
+    let _kept = client
+        .follow(
+            Path::new(&repository),
+            sluice::host_process::protocol::FollowKind::Wait,
+        )
+        .unwrap();
+
+    let out = host.sluice(&["run", "--rounds", "10"]);
+    assert!(out.status.success(), "{}", text(&out));
+    for _ in 0..3 {
+        let out = host.sluice(&["status", &landed[1].to_string(), "--json"]);
+        assert!(out.status.success(), "{}", text(&out));
+        let said = text(&out);
+        assert!(!said.contains("reads them itself"), "{said}");
+        let v: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+        assert_eq!(v["state"], "landed", "{v}");
+        assert!(v["checks"].as_array().is_some_and(|c| !c.is_empty()), "{v}");
+    }
+    let log = std::fs::read_to_string(client.paths().log()).unwrap();
+    let verified: usize = log
+        .lines()
+        .filter_map(|l| l.split(": verified ").nth(1))
+        .filter_map(|rest| rest.split(' ').next())
+        .map(|n| n.parse::<usize>().unwrap())
+        .sum();
+    assert_eq!(verified, records, "{log}");
+}
