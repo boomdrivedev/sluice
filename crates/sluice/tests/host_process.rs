@@ -1434,3 +1434,64 @@ fn a_status_reads_only_the_results_it_asks_for() {
     drop(f);
     assert_eq!(tasks(&status()), three);
 }
+
+/// 135, record 0107 (design D19): with #1's run going under a check that
+/// waits for a mark, a watch following the host process, and the host's
+/// settings changed meanwhile, the host process takes the change up and
+/// its next passes run under a binding made afresh: the watch prints on,
+/// the run's part and its repository are kept, and #1 lands once its
+/// check ends.
+#[test]
+fn the_host_process_keeps_its_repositories_across_a_new_binding() {
+    let marks = support::Scratch::new("host-rebind-marks");
+    let go = marks.path().join("go");
+    let policy = format!(
+        "[tests]\nrunner = \"command\"\ncommand = \"while [ ! -f {} ]; do sleep 0.1; done\"\n\n\
+         [branches.main]\ntimeout = \"1m\"\n",
+        go.display()
+    );
+    let d = OnDisk::new("host-rebind", &policy);
+    let config = d.config.path().join("sluice/config.toml");
+    std::fs::create_dir_all(config.parent().unwrap()).unwrap();
+    std::fs::write(&config, "[runs]\nmax = 2\n").unwrap();
+    let id = queued(&d, "a");
+
+    let mut watch = d
+        .command(d.repo.dir())
+        .env("SLUICE_ROUND_SLEEP", "record")
+        .args(["overview", "--json", "--watch"])
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .unwrap();
+    let lines = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let counted = lines.clone();
+    let stdout = watch.stdout.take().unwrap();
+    std::thread::spawn(move || {
+        for _ in BufReader::new(stdout).lines() {
+            counted.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        }
+    });
+    within(60, "#1 is under test", || {
+        state(&d, d.repo.dir(), id) == "testing"
+    });
+
+    std::fs::write(&config, "[runs]\nmax = 3\n").unwrap();
+    let log = d.client(d.repo.dir()).paths().log();
+    within(30, "the host process takes the change up", || {
+        std::fs::read_to_string(&log)
+            .unwrap_or_default()
+            .contains("took up the host's settings in")
+    });
+    let before = lines.load(std::sync::atomic::Ordering::SeqCst);
+    std::fs::write(&go, "").unwrap();
+    within(60, "#1 lands", || state(&d, d.repo.dir(), id) == "landed");
+    within(10, "the watch prints on", || {
+        lines.load(std::sync::atomic::Ordering::SeqCst) > before
+    });
+    assert!(watch.try_wait().unwrap().is_none(), "the watch goes on");
+    let _ = watch.kill();
+    let _ = watch.wait();
+    let said = std::fs::read_to_string(&log).unwrap();
+    assert!(!said.contains("do not bind here"), "{said}");
+}
