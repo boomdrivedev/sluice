@@ -9,9 +9,13 @@ deployment), or so each landing has a page. Needs
 ## Keys
 
 ```toml
+[signers.box]
+ssh = ".config/sluice.boxes"   # one line per host's key; see peers.md
+
 [branches.main]
 remote = "origin"
 required = ["#check-fast", "#check-tools"]   # what sluice tests
+trust = ["box"]                              # the signers whose runs count
 
 [branches.main.pull_requests]
 reviews = 1                  # approving reviews on the latest commit
@@ -24,6 +28,11 @@ log_lines = 40               # optional: post the end of a failed test's output
 - They are read from the branch itself, so a pull request cannot loosen its
   own.
 - The table needs `remote`; sluice refuses it without one.
+- The policy needs `[signers]` ([peers](peers.md)): the branch's state is
+  then on its remote, and the host that keeps it there takes its pull
+  requests in. Without them each host keeps its own state, and sluice
+  refuses that branch alone, a submit to it exiting 2 before anything is
+  pushed or opened: `main takes pull requests, which only the host that keeps it on origin takes in, and its state is each host's own: name [signers] in .config/sluice.toml so its state is kept on origin (137)`.
 - `log_lines` posts that many last lines of a failed test's output in the
   pull request's report, scrubbed of what looks like a secret. Leave it out
   unless the tests' output is safe for every reader of the repository: the
@@ -45,11 +54,10 @@ log_lines = 40               # optional: post the end of a failed test's output
   back, or withdrawn by the operator or a planner, it is taken again on new
   commits, or once marked a draft and then ready for review. Withdrawn, its
   check names who withdrew it: `waiting: withdrawn by the operator`.
-- Where several hosts reach the branch, one takes its pull requests in.
-  A host that finds another taking them in withdraws its own submissions
-  of them, and `sluice status` shows each `handed over to` that host.
-  That withdrawal holds nothing and marks no draft: whichever host takes
-  the pull requests in submits each again at its latest commit.
+- Where several hosts reach the branch, the host that keeps it on its
+  remote takes its pull requests in. Every other host asks GitHub nothing
+  of them and withdraws nothing, and `sluice status` there shows the
+  requests it follows, with the host that keeps the branch.
 - sluice posts one check named `sluice` with the state (`waiting: …`,
   `queued behind …`, `testing …`, `failed: …`, `conflict: …`, `landed as …`)
   and comments when it sends one back.
@@ -62,11 +70,14 @@ log_lines = 40               # optional: post the end of a failed test's output
   check` says so.
 - Pull requests from forks are never taken.
 
-## Keep `sluice run` going
+## Who notices them
 
-A pull request opened by hand has nobody waiting on it. Keep `sluice run`
-running (a terminal, a login item, a service manager) so each round reads
-open pull requests and moves the queue. sluice starts no service itself.
+sluice starts its own host process when work arrives, which reads open
+pull requests at each pass and moves the queue, and ends once nothing is
+in play; nothing is installed for it. A pull request opened by hand has
+nobody waiting on it: the host process notices it while it lives, or once
+the next command of sluice's starts it. A watch kept going, `sluice
+overview --json --watch`, keeps it noticing.
 
 ## GitHub settings
 
