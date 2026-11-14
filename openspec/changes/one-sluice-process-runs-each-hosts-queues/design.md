@@ -469,7 +469,9 @@ The command then reads with nothing fetched:
 
 - **The overview and the home view** print from the reader's document
   of that reading, the text rendered from it as the watch's document is
-  (`BranchView` is read back from it today, `branch_in`).
+  (`BranchView` is read back from it today, `branch_in`); where no
+  reader keeps its tick, as after a look, which writes no document, from
+  the records as the host holds them.
 - **A status**, in each form, reads with the core in held mode: every
   branch through `State::read_held`, as the host holds it since the host
   process's last ask, no `refresh`, the pull requests it follows as the
@@ -480,10 +482,12 @@ The command then reads with nothing fetched:
   what a status and the overview show of one is as fresh as that bound
   allows.
 - **A forecast** forms from the reader's document as it does today
-  beside a live reader. Where that reading does not hold the branch or
-  a revision it forms from is not on the host, it sends `read` once more
-  with a reading asked afresh; what is still missing is said as a read
-  it could not make, exit 3.
+  beside a live reader, and otherwise on every branch as the host holds
+  it. Where a revision it forms from is not on the host, it sends `read`
+  once more with a reading asked afresh: a branch of which that reading,
+  current and refused by no remote, brings no revision is no branch,
+  refused as a forecast refuses one, exit 2; what is still missing
+  otherwise is said as a read it could not make, exit 3.
 
 A read thereby fetches nothing of its own while the host process keeps
 its tick, and loads no results but those it asks for. Not taken:
