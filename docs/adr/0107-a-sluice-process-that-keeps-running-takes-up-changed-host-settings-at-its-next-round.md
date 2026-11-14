@@ -125,3 +125,14 @@ Record 0093 gives a host one sluice process for its queues, and `sluice run` dri
 - Rule core.54's details rule out a host process's hand-over after which work in play waits for a command, one that lets its lock or the start lock go out of that order, one that ends where no successor answers, and anything carried to the successor but what the records and the host's state hold; a kept `sluice run`'s details drop the driver's lock.
 - The settings-take-up spec gives the host process the take-up and the hand-over, and a kept `sluice run` its telemetry alone.
 - The plan's unit `the-host-process-takes-up-changed-settings` is built by `one-sluice-process-runs-each-hosts-queues`.
+
+### What the build chose
+
+The build of the change `one-sluice-process-runs-each-hosts-queues` chose these within decisions 1 to 4, each cheap to change.
+
+6. **The file's sign is looked at once a second, and a change is bound on a thread of its own.** The main loop takes the sign each second; a change is bound on a thread of its own against each repository the host process holds, or those its index names where it holds none, sluice's identity on the forge opened and the host's systems checked against each one's policies, and the main loop takes the answer up at a later look. *Not taken:* binding on the loop that accepts commands' connections, where a remote slow to answer the systems check holds every command (design D5).
+7. **The host process sends its rounds' telemetry.** It starts telemetry from the host's settings and the choices its own command line and sluice's variables make, as a command does, before any thread of its own, so a change of `[telemetry]` has a sending to hand over; the successor sends where the file now says. *Not taken:* a host process that sends nothing, which leaves the rounds a kept `sluice run` used to send unsent.
+8. **The start lock is taken before its tasks finish.** It takes the start lock before it stops its ticks, rather than after its tasks finish as decision 2 orders it, so a command that meets no answer while they finish waits for the successor rather than starting a host process of its own. *Not taken:* the order of decision 2, under which such a command may start a host process the successor then finds holding the lock.
+9. **The hand-over is said as it begins.** Its log says `sluice: <path> changed <tables>, which the host process takes up by handing its repositories to a fresh one` once it has bound the change; the successor says nothing of it, since it reads the file as any start does.
+10. **A successor that did not start leaves its repositories held again at once.** Once it takes its lock back, it looks at every repository in its index, so work in play is held again before its loop could find it idle and end. *Not taken:* waiting for the next look, three seconds in which the process may end with work in play.
+
