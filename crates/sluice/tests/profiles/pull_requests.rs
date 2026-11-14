@@ -6787,11 +6787,17 @@ fn a_watch_reads_no_followed_request_itself() {
 /// 137 (design D21, D25): A took nothing of `#n` in. main's records are
 /// on its remote, so A's status shows the submissions of `#n` B took in,
 /// as A's host process last fetched them; every one it shows is one B's
-/// status shows, and none is A's own.
+/// status shows, and none is A's own. A submission is told by what made
+/// it, its number, branch, head, submitter and time, never by how it
+/// stands: A's reading is current within its tick (129), so it may show
+/// one a write of B's older than B's own status does, `landing` where B's
+/// shows it `landed`.
 fn took_nothing_in(g: &OnGitHub, b: &Other<'_>, n: u64) {
+    let made = |s: &Value| ["id", "branch", "head", "from", "submitted"].map(|k| s.get(k).cloned());
     let (mine, theirs) = (g.of(n), b.of(n));
+    let theirs_made: Vec<_> = theirs.iter().map(made).collect();
     assert!(
-        mine.iter().all(|s| theirs.contains(s)),
+        mine.iter().all(|s| theirs_made.contains(&made(s))),
         "A took #{n} in: {mine:?} beside B's {theirs:?}"
     );
 }
