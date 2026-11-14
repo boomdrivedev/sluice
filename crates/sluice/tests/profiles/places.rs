@@ -382,7 +382,7 @@ fn places_alive_at_once_hold_their_own_ports() {
     let _ports = ports_lock();
     let (repo, rev) = scratch("places-ports");
     let blocks = support::Scratch::new("places-blocks");
-    let p = places(&repo).with_blocks(blocks.path().to_path_buf());
+    let p = places(&repo).with_ports(blocks.path().to_path_buf());
     let from = ports(4);
     let settings = ported(&["web", "api-server"], &from.to_string());
     // The block a place holds, read from the ports it was given.
@@ -435,7 +435,7 @@ fn a_block_with_a_port_in_use_is_passed_over() {
     let _ports = ports_lock();
     let (repo, rev) = scratch("places-busy");
     let blocks = support::Scratch::new("places-busy-blocks");
-    let p = places(&repo).with_blocks(blocks.path().to_path_buf());
+    let p = places(&repo).with_ports(blocks.path().to_path_buf());
     let from = ports(4);
     let _held = std::net::TcpListener::bind(("127.0.0.1", from + 1)).unwrap();
     let a = p
@@ -458,7 +458,7 @@ fn ports_with_bad_names_are_refused() {
     let _spawns = spawns();
     let (repo, rev) = scratch("places-bad-ports");
     let blocks = support::Scratch::new("places-bad-blocks");
-    let p = places(&repo).with_blocks(blocks.path().to_path_buf());
+    let p = places(&repo).with_ports(blocks.path().to_path_buf());
     for (names, from) in [
         (&["a b"][..], "41200"),
         (&["web", "WEB"][..], "41200"),
@@ -501,7 +501,7 @@ fn a_sessions_worktree_is_adopted_with_ports_it_keeps() {
     let _ports = ports_lock();
     let (repo, _) = scratch("places-adopt");
     let blocks = support::Scratch::new("places-adopt-blocks");
-    let p = places(&repo).with_blocks(blocks.path().to_path_buf());
+    let p = places(&repo).with_ports(blocks.path().to_path_buf());
     let session = repo.dir().with_extension("session");
     let other = another_session(&repo, "other");
     let from = ports(4);
@@ -566,7 +566,7 @@ fn releasing_a_sessions_place_leaves_its_worktree() {
     let _ports = ports_lock();
     let (repo, _) = scratch("places-session-release");
     let blocks = support::Scratch::new("places-session-blocks");
-    let p = places(&repo).with_blocks(blocks.path().to_path_buf());
+    let p = places(&repo).with_ports(blocks.path().to_path_buf());
     let session = repo.dir().with_extension("session");
     let settings = ported(&["web"], &ports(1).to_string());
     let (before, listed) = (others(&repo), worktrees(&repo));
@@ -659,7 +659,7 @@ fn a_sessions_place_is_released_under_the_policy_read_now() {
     let blocks = support::Scratch::new("places-release-now-blocks");
     let jobs = 2;
     let p = places(&repo)
-        .with_blocks(blocks.path().to_path_buf())
+        .with_ports(blocks.path().to_path_buf())
         .with_release(Box::new(move |place, tests, limits, dir| {
             sluice::profiles::checks::release_request(place, tests, limits, jobs, &[], dir)
         }));
@@ -775,7 +775,7 @@ fn a_preview_is_made_kept_apart_and_released() {
     let _ports = ports_lock();
     let (repo, rev) = scratch("places-preview");
     let blocks = support::Scratch::new("places-preview-blocks");
-    let p = places(&repo).with_blocks(blocks.path().to_path_buf());
+    let p = places(&repo).with_ports(blocks.path().to_path_buf());
     let from = ports(6);
     let settings = ported(&["web", "api"], &from.to_string());
     let name = preview_name(&rev);
@@ -886,7 +886,7 @@ fn a_preview_naming_an_unlisted_port_is_refused() {
     let _spawns = spawns();
     let (repo, rev) = scratch("places-preview-refused");
     let blocks = support::Scratch::new("places-preview-refused-blocks");
-    let p = places(&repo).with_blocks(blocks.path().to_path_buf());
+    let p = places(&repo).with_ports(blocks.path().to_path_buf());
     let name = preview_name(&rev);
     let e = p
         .preview(
@@ -921,7 +921,7 @@ fn a_failed_preview_is_kept_holding_nothing() {
     let _ports = ports_lock();
     let (repo, rev) = scratch("places-preview-failed");
     let blocks = support::Scratch::new("places-preview-failed-blocks");
-    let p = places(&repo).with_blocks(blocks.path().to_path_buf());
+    let p = places(&repo).with_ports(blocks.path().to_path_buf());
     let name = preview_name(&rev);
     let (place, _) = p
         .preview(
@@ -981,7 +981,7 @@ fn a_name_another_preview_holds_takes_the_longer_revision() {
     let _ports = ports_lock();
     let (repo, rev) = scratch("places-preview-clash");
     let blocks = support::Scratch::new("places-preview-clash-blocks");
-    let p = places(&repo).with_blocks(blocks.path().to_path_buf());
+    let p = places(&repo).with_ports(blocks.path().to_path_buf());
     let settings = ported(&["web"], &ports(1).to_string());
     let name = preview_name(&rev);
     let (_, first) = p
@@ -1159,7 +1159,7 @@ fn a_deleted_checkout_is_gone_and_freed_with_nothing_run() {
     let _ports = ports_lock();
     let (repo, rev) = scratch("places-gone");
     let blocks = support::Scratch::new("places-gone-blocks");
-    let p = places(&repo).with_blocks(blocks.path().to_path_buf());
+    let p = places(&repo).with_ports(blocks.path().to_path_buf());
     let settings = ported(&["web"], &ports(1).to_string());
     let place = p.materialize(NAME, &rev, &settings).unwrap();
     let r = runs(&repo);
@@ -1198,7 +1198,7 @@ fn freeing_a_sessions_place_leaves_its_worktree() {
     let _ports = ports_lock();
     let (repo, _) = scratch("places-session-free");
     let blocks = support::Scratch::new("places-session-free-blocks");
-    let p = places(&repo).with_blocks(blocks.path().to_path_buf());
+    let p = places(&repo).with_ports(blocks.path().to_path_buf());
     let session = repo.dir().with_extension("session");
     let settings = ported(&["web"], &ports(1).to_string());
     let (before, listed) = (others(&repo), worktrees(&repo));
@@ -1239,7 +1239,7 @@ fn a_failed_session_release_keeps_its_place_with_what_failed() {
     let _ports = ports_lock();
     let (repo, _) = scratch("places-session-failed");
     let blocks = support::Scratch::new("places-session-failed-blocks");
-    let p = places(&repo).with_blocks(blocks.path().to_path_buf());
+    let p = places(&repo).with_ports(blocks.path().to_path_buf());
     let session = repo.dir().with_extension("session");
     let place = p
         .adopt(
@@ -1294,7 +1294,7 @@ fn a_failed_preview_release_is_held_once_its_retries_are_spent() {
     let _ports = ports_lock();
     let (repo, rev) = scratch("places-preview-release-failed");
     let blocks = support::Scratch::new("places-preview-release-failed-blocks");
-    let p = places(&repo).with_blocks(blocks.path().to_path_buf());
+    let p = places(&repo).with_ports(blocks.path().to_path_buf());
     let name = preview_name(&rev);
     let (place, _) = p
         .preview(
@@ -1374,7 +1374,7 @@ fn ending(repo: &Repo, blocks: &std::path::Path, engine: &support::Engine) -> (P
     let seen: Seen = Default::default();
     let (noted, held, socket) = (seen.clone(), blocks.to_path_buf(), engine.socket());
     let p = places(repo)
-        .with_blocks(blocks.to_path_buf())
+        .with_ports(blocks.to_path_buf())
         .with_containers(Box::new(move |place| {
             noted
                 .borrow_mut()
@@ -1639,7 +1639,7 @@ fn a_deleted_checkouts_stored_release_runs_once_from_its_scratch_directory() {
     let _ports = ports_lock();
     let (repo, rev) = scratch("places-release-gone");
     let blocks = support::Scratch::new("places-release-gone-blocks");
-    let p = places(&repo).with_blocks(blocks.path().to_path_buf());
+    let p = places(&repo).with_ports(blocks.path().to_path_buf());
     let settings = ported(&["web"], &ports(1).to_string());
     let place = p.materialize(NAME, &rev, &settings).unwrap();
     let tmp = std::fs::canonicalize(&place.tmp).unwrap();
@@ -1705,7 +1705,7 @@ fn a_gone_checkout_is_freed_whatever_its_stored_release_did() {
     let _ports = ports_lock();
     let (repo, rev) = scratch("places-release-gone-fails");
     let blocks = support::Scratch::new("places-release-gone-fails-blocks");
-    let p = places(&repo).with_blocks(blocks.path().to_path_buf());
+    let p = places(&repo).with_ports(blocks.path().to_path_buf());
     let settings = ported(&["web"], &ports(1).to_string());
     let place = p.materialize(NAME, &rev, &settings).unwrap();
     let r = runs(&repo);
@@ -1798,7 +1798,7 @@ fn a_checkout_git_no_longer_lists_is_gone() {
     // git lists the folder by the path it resolves to.
     let through = Places::new(&link.join(".git"), runs(&repo))
         .with_scratch_root(user_dir(&repo))
-        .with_blocks(blocks.path().to_path_buf());
+        .with_ports(blocks.path().to_path_buf());
     let place = through.materialize(NAME, &rev, &Settings::new()).unwrap();
     assert!(place.path.starts_with(&link), "{}", place.path.display());
     assert!(
@@ -1806,7 +1806,7 @@ fn a_checkout_git_no_longer_lists_is_gone() {
         "git lists it as spelled"
     );
     assert!(!through.gone(NAME).unwrap());
-    let p = places(&repo).with_blocks(blocks.path().to_path_buf());
+    let p = places(&repo).with_ports(blocks.path().to_path_buf());
     assert!(!p.gone(NAME).unwrap());
 
     drop_entry(&repo, &place.path);
@@ -1883,7 +1883,7 @@ fn a_checkout_git_no_longer_lists_is_freed() {
     let _ports = ports_lock();
     let (repo, rev) = scratch("places-unlisted-freed");
     let blocks = support::Scratch::new("places-unlisted-freed-blocks");
-    let p = places(&repo).with_blocks(blocks.path().to_path_buf());
+    let p = places(&repo).with_ports(blocks.path().to_path_buf());
     let settings = ported(&["web"], &ports(1).to_string());
     let r = runs(&repo);
     let mark = repo.dir().with_extension("unlisted-released");

@@ -378,7 +378,7 @@ fn a_sessions_stack_stays_between_runs_and_goes_on_release() {
     let blocks = Scratch::new("stack-session-blocks");
     let running = Scratch::new("stack-session-running");
     let places = Places::new(&common, Runs::new(&common, program.clone()))
-        .with_blocks(blocks.path().to_path_buf())
+        .with_ports(blocks.path().to_path_buf())
         .with_scratch_root(support::test_user_scratch());
     let checks = Checks::new(
         &common,
