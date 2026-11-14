@@ -293,9 +293,6 @@ struct Inner {
     /// Where the run's record of a pass is looked for and not found:
     /// while set, every ran pass is unkept (114; record 0105).
     no_proof: Option<String>,
-    /// Submissions left behind when a branch's records moved to its
-    /// remote, by branch (design D10).
-    left: BTreeMap<String, Vec<Vec<u8>>>,
     /// What each host last saw of each branch, by host and branch (73).
     seen: BTreeMap<(String, String), (u64, String)>,
     /// The host that made each candidate's place (81).
@@ -1282,22 +1279,6 @@ impl World {
     fn state_refused(inner: &Inner, branch: &str) -> Option<String> {
         let key = (inner.host.clone(), branch.to_string());
         inner.refused_state.get(&key).cloned()
-    }
-
-    /// `doc`, a submission's document of this host's own records, left
-    /// behind on `branch` when its records moved to the remote.
-    pub fn leave_behind(&self, branch: &str, doc: &str) {
-        self.0
-            .borrow_mut()
-            .left
-            .entry(branch.into())
-            .or_default()
-            .push(doc.as_bytes().to_vec());
-    }
-
-    /// What is still left behind on `branch`.
-    pub fn left_behind(&self, branch: &str) -> usize {
-        self.0.borrow().left.get(branch).map_or(0, Vec::len)
     }
 
     /// Every run started on a pool.
@@ -3593,29 +3574,6 @@ impl State for FakeState {
         let mut inner = self.0 .0.borrow_mut();
         let key = (inner.host.clone(), branch.to_string());
         inner.seen.insert(key, (version, at.to_string()));
-        Ok(())
-    }
-
-    fn left_behind(&self, branch: &str) -> Result<Vec<Vec<u8>>> {
-        Ok(self
-            .0
-             .0
-            .borrow()
-            .left
-            .get(branch)
-            .cloned()
-            .unwrap_or_default())
-    }
-
-    fn forget_left_behind(&self, branch: &str, ids: &[u64]) -> Result<()> {
-        if let Some(left) = self.0 .0.borrow_mut().left.get_mut(branch) {
-            left.retain(|doc| {
-                let id = serde_json::from_slice::<serde_json::Value>(doc)
-                    .ok()
-                    .and_then(|v| v["id"].as_u64());
-                !id.is_some_and(|id| ids.contains(&id))
-            });
-        }
         Ok(())
     }
 

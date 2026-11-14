@@ -30,34 +30,6 @@ use super::remote_refs::{RemoteRefs, SignerKey, Signing};
 use crate::instance;
 use crate::signing::ssh;
 
-/// What this host noted when a branch's own records moved to its remote:
-/// the submissions it left behind, each its document.
-#[derive(Default, serde::Serialize, serde::Deserialize)]
-struct Moved {
-    #[serde(with = "docs")]
-    left: Vec<Vec<u8>>,
-}
-
-/// The documents as JSON text.
-mod docs {
-    use serde::{Deserialize, Deserializer, Serialize, Serializer};
-
-    pub fn serialize<S: Serializer>(docs: &[Vec<u8>], s: S) -> Result<S::Ok, S::Error> {
-        let text: Vec<String> = docs
-            .iter()
-            .map(|d| String::from_utf8_lossy(d).into_owned())
-            .collect();
-        text.serialize(s)
-    }
-
-    pub fn deserialize<'de, D: Deserializer<'de>>(d: D) -> Result<Vec<Vec<u8>>, D::Error> {
-        Ok(Vec::<String>::deserialize(d)?
-            .into_iter()
-            .map(String::into_bytes)
-            .collect())
-    }
-}
-
 pub struct Records {
     local: LocalFiles,
     /// The locks of the branches routed to a remote: one host's steps,
@@ -644,32 +616,6 @@ impl Records {
         Ok(signers)
     }
 
-    /// Where this host notes that `branch`'s own records moved to its
-    /// remote, and what of them it left behind.
-    fn moved_path(&self, branch: &str) -> PathBuf {
-        self.common
-            .join("sluice-remote")
-            .join("moved")
-            .join(format!("{branch}.json"))
-    }
-
-    fn moved(&self, branch: &str) -> Result<Option<Moved>> {
-        match std::fs::read(self.moved_path(branch)) {
-            Ok(b) => Ok(Some(serde_json::from_slice(&b)?)),
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
-            Err(e) => Err(e.into()),
-        }
-    }
-
-    fn put_moved(&self, branch: &str, m: &Moved) -> Result<()> {
-        let path = self.moved_path(branch);
-        std::fs::create_dir_all(path.parent().expect("a parent"))?;
-        let tmp = path.with_extension("json.tmp");
-        std::fs::write(&tmp, serde_json::to_vec(m)?)?;
-        std::fs::rename(&tmp, &path)?;
-        Ok(())
-    }
-
     /// The first remote opened, which keeps what this host has observed
     /// of the others' signs of life.
     fn shared(&self) -> Option<Rc<RemoteRefs>> {
@@ -872,23 +818,6 @@ impl State for Records {
             }
             None => Ok(Carried::default()),
         }
-    }
-
-    fn left_behind(&self, branch: &str) -> Result<Vec<Vec<u8>>> {
-        Ok(self.moved(branch)?.map(|m| m.left).unwrap_or_default())
-    }
-
-    fn forget_left_behind(&self, branch: &str, ids: &[u64]) -> Result<()> {
-        let Some(mut m) = self.moved(branch)? else {
-            return Ok(());
-        };
-        m.left.retain(|doc| {
-            let id = serde_json::from_slice::<serde_json::Value>(doc)
-                .ok()
-                .and_then(|v| v["id"].as_u64());
-            !id.is_some_and(|id| ids.contains(&id))
-        });
-        self.put_moved(branch, &m)
     }
 
     fn read(&self, branch: &str) -> Result<Snapshot> {

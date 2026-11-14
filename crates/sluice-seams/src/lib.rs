@@ -2011,20 +2011,6 @@ pub trait State {
         Ok(Carried::default())
     }
 
-    /// The submissions this host had queued on the branch in its own
-    /// records, when the branch's records moved to the remote and another
-    /// host's queue was there first (design D10): each a submission's
-    /// document, to be submitted again under a new id.
-    fn left_behind(&self, _branch: &str) -> Result<Vec<Vec<u8>>> {
-        Ok(Vec::new())
-    }
-
-    /// The submissions of [`State::left_behind`] by their old ids, once
-    /// submitted again.
-    fn forget_left_behind(&self, _branch: &str, _ids: &[u64]) -> Result<()> {
-        Ok(())
-    }
-
     /// 61, 131: one file of the branch's finished records, by its name
     /// under [`FINISHED`], as last written.
     fn read_finished(&self, branch: &str, name: &str) -> Result<Option<Vec<u8>>>;
