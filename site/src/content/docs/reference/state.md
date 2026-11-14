@@ -276,8 +276,12 @@ watch or wait ends, and the host process follows it meanwhile. Where an
 older `sluice run` holds the `.driver` file's lock, the host process runs
 no round of that repository and follows its file until it ends. The file
 names take the repository's git directory, which all its worktrees
-share, written as one file name as a checkout's is.
-`sluice overview` alone always reads the state itself.
+share, written as one file name as a checkout's is. A status, a
+one-shot `sluice overview`, `sluice` with no command and a forecast
+read none of these files' locks: each asks the host process for a
+reading, starting it where none answers, and reads the state as the
+host holds it since, fetching nothing of its own
+([one-shot reads](/sluice/reference/commands/#one-shot-reads)).
 
 ## A branch whose state is on its remote
 
@@ -326,6 +330,19 @@ git fetch origin '+refs/sluice/*:refs/sluice-fetched/origin/*'
 git show refs/sluice-fetched/origin/state/main:branch.json
 git ls-tree -r refs/sluice-fetched/origin/runs/box
 ```
+
+sluice's host process reads `results.jsonl` once for its life, each
+time from where it last read it, and the whole file again only where
+it shrank or was replaced. It reads each signer's ref as its last fetch
+brought it, checking each signed record's signature once. A command
+asks it for the results it needs, by a check's key, a combination or a
+task, and reads none of these itself.
+
+No landing, removal of a branch or release of a checkout takes a result
+out of `results.jsonl` or a signed record off a signer's ref. A result
+belongs to its check's key and its system, not to a branch, so a pass a
+removed branch recorded still counts for any branch whose tree gives
+that check the same key.
 
 A signed result is an [in-toto](https://in-toto.io) statement in a
 [DSSE](https://github.com/secure-systems-lab/dsse) envelope. Each test
