@@ -1085,3 +1085,72 @@ fn any_host_leads_a_remote_home_whose_policy_names_no_signer() {
         Some("here")
     );
 }
+
+fn lapses(h: &Harness) -> usize {
+    h.events()
+        .into_iter()
+        .filter(|e| matches!(e, Event::Lapsed { .. }))
+        .count()
+}
+
+/// satisfies: 72, 58, record 0122 (design D9); the peer-lead spec's "A run
+/// longer than the lease": host a leads `bolt/x` and runs a combination
+/// that takes 25 minutes against a five-minute lease, while host b, which
+/// `bolt/x` accepts, steps every minute; a writes `kept` every half lease,
+/// so b never takes `bolt/x`, the run's claim stands, and a lands the
+/// combination once its run passes.
+#[test]
+fn a_lead_keeps_its_branch_through_a_run_longer_than_the_lease() {
+    let h = peers();
+    let p = h.file(&h.tip(), ".config/sluice.toml").unwrap();
+    h.w().hand_commit(
+        BRANCH,
+        &[(
+            ".config/sluice.toml",
+            Some(&p.replace("timeout = \"20m\"", "timeout = \"40m\"")),
+        )],
+    );
+    h.w().hold_runs(true);
+    h.work("unit/a", "agent-a", &[("a/lib", Some("a2"))]);
+    let one = h.submit("unit/a");
+    on(&h, "a").step(BRANCH).unwrap();
+    assert_eq!(h.w().live_runs(), 1, "a runs the combination");
+    let mut kept = Vec::new();
+    for _ in 0..25 {
+        h.w().advance(chrono::Duration::minutes(1));
+        on(&h, "a").step(BRANCH).unwrap();
+        assert_eq!(on(&h, "b").step(BRANCH).unwrap(), Step::Led);
+        kept.push(h.doc().kept);
+    }
+    kept.dedup();
+    assert!(kept.len() >= 9, "kept every half lease: {kept:?}");
+    assert_eq!(took(&h), [("a".to_string(), None)]);
+    assert_eq!(lapses(&h), 0);
+    h.w().complete_all();
+    for _ in 0..4 {
+        on(&h, "a").step(BRANCH).unwrap();
+    }
+    assert_eq!(h.sub(one).state, State::Landed);
+    assert_eq!(took(&h), [("a".to_string(), None)]);
+}
+
+/// satisfies: 72, record 0122 (design D9); the peer-lead spec's "Nothing
+/// live": host a leads `bolt/x` and no run of it is claimed, under test or
+/// open; a's rounds write nothing that changes nothing, however long.
+#[test]
+fn a_lead_with_no_live_run_writes_nothing_to_keep_it() {
+    let h = peers();
+    h.work("unit/a", "agent-a", &[("a/lib", Some("a2"))]);
+    let one = h.submit("unit/a");
+    for _ in 0..4 {
+        on(&h, "a").step(BRANCH).unwrap();
+    }
+    assert_eq!(h.sub(one).state, State::Landed);
+    on(&h, "a").step(BRANCH).unwrap();
+    let version = h.version();
+    for _ in 0..12 {
+        h.w().advance(chrono::Duration::minutes(5));
+        on(&h, "a").step(BRANCH).unwrap();
+    }
+    assert_eq!(h.version(), version, "nothing written to keep it");
+}

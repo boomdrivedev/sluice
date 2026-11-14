@@ -382,6 +382,32 @@ impl Sluice<'_> {
         Ok(matches!(self.write(&taken)?, Written::Written(_)))
     }
 
+    /// 72, 58, record 0122 (design D9): in a round this instance keeps as
+    /// the lead of a remote home, while a run of the branch is claimed or
+    /// under test, or open on a combination under test, `kept` is written
+    /// once half a lease has passed by this instance's own clock since its
+    /// last, so the branch's state never stands a lease while the lead is
+    /// alive; a round that writes anything else writes it anyway
+    /// ([`Sluice::write`]), and with no such run nothing is written for it.
+    fn keep_lead(&self, line: &mut Line, now: &str) {
+        if line.doc.lead.as_deref() != Some(self.peer.name.as_str()) {
+            return;
+        }
+        if !line.doc.candidates.iter().any(|c| c.state.under_test()) {
+            return;
+        }
+        let half = self.peer.lease.as_secs_f64() / 2.0;
+        let due = line
+            .doc
+            .kept
+            .as_deref()
+            .and_then(|k| seconds_between(k, now))
+            .is_none_or(|s| s >= half);
+        if due {
+            line.doc.kept = Some(now.to_string());
+        }
+    }
+
     /// 137, record 0093 as amended 2026-11-08 (design D8): whether the
     /// rules at `tip`, a branch whose records are on its remote, accept this
     /// instance: it signs as a signer they trust, and the records say they
@@ -1467,6 +1493,7 @@ impl Sluice<'_> {
             derive_states(&mut line, &chain, moving);
         }
         self.keep_tasks(&line)?;
+        self.keep_lead(&mut line, &now);
         let queued = line.subs.values().filter(|s| !s.state.is_out()).count() as u64;
         let written = matches!(self.write(&line)?, Written::Written(_));
         if written {

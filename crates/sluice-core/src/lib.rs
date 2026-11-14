@@ -332,6 +332,20 @@ impl<'a> Sluice<'a> {
     /// even when `line` changes nothing else, and no cause of refused
     /// writes is ended unless it does.
     fn carry(&self, line: &Line, always: bool) -> Result<Written> {
+        // 72, record 0122 (design D9): every write the lead makes sets
+        // `kept`, its own time of its last write.
+        let led;
+        let line = match line.doc.lead.as_deref() == Some(self.peer.name.as_str())
+            && !line.changes().is_empty()
+        {
+            true => {
+                let mut l = line.clone();
+                l.doc.kept = Some(self.now());
+                led = l;
+                &led
+            }
+            false => line,
+        };
         let own = line.changes();
         if own.is_empty() && !always {
             return Ok(Written::Written(line.version));
