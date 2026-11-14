@@ -204,15 +204,26 @@ The old bolt's D5. Each repository with work in play or a follower has
 a thread of its own, which opens its own `Bound` with the round's retry
 policy. The pass `drive` runs today moves into
 `host_process::pass::pass`: the remote's one ask, the releases, the
-intake, a round of every branch in play, the intake again of a branch
-whose round stepped, and the reader's document; it returns a report of
-what it printed and the branches it passed by. The intake after the
-round posts what the round decided on each pull request, a request sent
-back marked a draft, before the pass writes the document a follower
-reads, as the wait's own intake did once a round had run; it asks the
-forge nothing where the round left the branch and its records as they
-were (136). Not taken: the round before the intake, which takes a
-request's submission in a pass late. A refused policy or a slow fetch holds only its
+intake, a round of every branch in play, what a round that stepped sent
+back of a pull request, and the reader's document; it returns a report
+of what it printed and the branches it passed by. After the round, a
+submit's request whose submission the round failed or found in conflict
+is marked a draft and shown held for the next submit before the pass
+writes the document a follower reads, as the wait's own intake did once
+a round had run (`PullRequests::settle`). What the round sent back is
+told by the entry the host keeps of each request against its submission
+now, and the request is the one the pass's intake listed, so it asks the
+forge nothing but a timeline the host keeps none of: no list and no
+query (136; rule core.32). The round's delivery posts the outcome and
+the comment; a request opened by hand, which no submit holds, keeps its
+`failed: ` check, which a host following it names. When the branch's
+requests were last asked for stands, so a pass after a landing still
+asks at once, and a request's move to testing is posted by the next
+pass's intake. Not taken: the round before the intake, which takes a
+request's submission in a pass late; the whole intake run again after
+the round, which asks the list and the query twice in one pass, posts
+every move a pass early, and shows a submit's request held on another
+host before any host could read it failed. A refused policy or a slow fetch holds only its
 own thread (26). A panic is caught, logged with the repository, and the
 task started again at the next tick. A task ends once its repository has
 nothing in play and nothing follows it. It ticks every second while a
@@ -299,8 +310,8 @@ entry as today, sends `serve`, and returns with `--no-wait` or waits as
 
 The old bolt's D10, with record 0103's D6. `Command::Step` sends `step`;
 the repository's task runs, between its own passes, the remote's one ask,
-the branch's intake, `s.round` and the intake again where the round
-stepped, as a pass does, so a step reads each signer's runs as a pass
+the branch's intake, `s.round` and what the round sent back of a pull
+request shown where it stepped (D5), as a pass does, so a step reads each signer's runs as a pass
 reads them (D17), and answers the document today's `step --json` prints,
 `outcome`, `released`, `previews_released`, `releases` and `held`, with
 `warnings`, each warning the round's intake met. The command prints the
