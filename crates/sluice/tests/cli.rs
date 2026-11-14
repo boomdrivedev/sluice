@@ -4549,7 +4549,7 @@ fn the_counts_say_when_agents_checks_hold_the_queue_back() {
     let (_, text) = sluice(&f, &["overview"]);
     assert!(text.lines().next().unwrap().ends_with(clause), "{text}");
     assert!(
-        text.contains("\nhost: 2 of 2 runs · 1 queue · 1 agent\n"),
+        text.contains("\nhost: 2 of 2 runs · 1 queue · 1 agent · waiting: 1 combination\n"),
         "{text}"
     );
     let (_, text) = sluice(&f, &["status", BRANCH]);
@@ -4630,7 +4630,11 @@ fn overview_shows_an_agents_check_and_the_hosts_room() {
     assert_eq!(w["run"]["tasks"][0]["state"], "running");
     assert_eq!(
         during["room"],
-        serde_json::json!({"bound": 3, "queue": 0, "sessions": 1, "reserve": 1})
+        serde_json::json!({
+            "bound": 3, "queue": 0, "sessions": 1, "reserve": 1,
+            "waiting": {"queue": 0, "sessions": 0}, "turn": "queue",
+            "repositories": {},
+        })
     );
     assert_eq!(
         f.world.version(BRANCH),
