@@ -173,6 +173,16 @@ pub fn pass(
             }
         };
         if let Some(round) = round {
+            // 120, 128: what the round decided of a pull request is posted
+            // on it, a request sent back marked a draft, before any
+            // follower reads the pass: intake again, which asks nothing
+            // where the round left the records as they were.
+            if round.step == Step::Stepped {
+                let again = crate::intake(pulls, s, clock, branch, false, &mut out);
+                for c in &again.logged {
+                    telemetry::warn(&format!("sluice: warning: {}", c.line(branch)));
+                }
+            }
             let mut gone: Vec<u8> = Vec::new();
             exec::tell_abandoned(&mut gone, false, &round.released)?;
             preview::tell_dropped(&mut gone, false, &round.previews)?;
@@ -242,11 +252,13 @@ pub fn in_play(s: &Sluice<'_>) -> bool {
 }
 
 /// `sluice step`'s round of `branch`, as the host process runs it between
-/// its passes (rule core.14; design D10): its intake as today, then the
-/// round, answered as the document `sluice step --json` prints, with what
-/// the round said beside it, each warning its intake met, which the step
-/// prints on stderr (128; design D26), and the line a step prints without
-/// `--json`.
+/// its passes (rule core.14; design D10): the remote's one ask, its intake
+/// as today, then the round, then intake again where the round stepped,
+/// as a pass's are, so a step reads each signer's runs as a pass does,
+/// answered as the document `sluice step --json` prints, with what the
+/// round said beside it, each warning its intakes met, once each, which
+/// the step prints on stderr (128; design D26), and the line a step prints
+/// without `--json`.
 pub fn step(
     s: &Sluice<'_>,
     pulls: &dyn PullRequests,
@@ -254,14 +266,28 @@ pub fn step(
     branch: &str,
 ) -> Result<serde_json::Value> {
     let mut said: Vec<u8> = Vec::new();
+    // 129 (design D10, D17): each remote that keeps branches' records asked
+    // once, first, its signers' runs among it, as a pass asks it; a
+    // refusal is said, and the round reads the remote as last fetched.
+    let refused = s.seams().state.refresh().err().map(|e| format!("{e:#}"));
     // 128 (design D26): each cause its intake met, which the step prints
     // on stderr, every step.
-    let warnings: Vec<String> = crate::intake(pulls, s, clock, branch, false, &mut said)
-        .causes
-        .iter()
-        .map(|c| c.line(branch))
-        .collect();
+    let mut warnings: Vec<String> = refused.into_iter().collect();
+    warnings.extend(
+        crate::intake(pulls, s, clock, branch, false, &mut said)
+            .causes
+            .iter()
+            .map(|c| c.line(branch)),
+    );
     let round = s.round(branch)?;
+    if round.step == Step::Stepped {
+        for c in &crate::intake(pulls, s, clock, branch, false, &mut said).causes {
+            let line = c.line(branch);
+            if !warnings.contains(&line) {
+                warnings.push(line);
+            }
+        }
+    }
     exec::tell_abandoned(&mut said, false, &round.released)?;
     preview::tell_dropped(&mut said, false, &round.previews)?;
     exec::tell_releases(&mut said, false, &round.releases)?;
