@@ -5500,6 +5500,39 @@ fn a_wait_on_an_older_hand_over_follows_its_pull_request() {
     assert_eq!(g.of(n).last().unwrap()["id"], carrier, "{doc}");
 }
 
+/// request-intake-host, "Two hosts beside the keeper" (120, 137; design
+/// D24): host A keeps main and takes `#1` in; hosts B and C each pass main
+/// ten times while its combination is tested, and it lands as the one
+/// submission A took in, main's records holding no other of it.
+#[test]
+fn a_request_keeps_one_number_while_other_hosts_pass() {
+    let g = OnGitHub::new("intake-one-number", "");
+    g.named("a", "");
+    let (n, head) = g.by_hand("unit/one", &[("slow", Some("o\n"))], false);
+    g.step();
+    assert_eq!(g.lead().as_deref(), Some("a"));
+    let id = g.of(n)[0]["id"].clone();
+    let b = g.other("b", "", "");
+    let c = g.other("c", "", "");
+    for host in [&b, &c] {
+        host.discovery_passes();
+        host.run("10");
+    }
+    let until = Instant::now() + Duration::from_secs(60);
+    while g.of(n)[0]["state"] != "landed" {
+        assert!(Instant::now() < until, "never landed: {:?}", g.of(n));
+        std::thread::sleep(Duration::from_millis(500));
+        g.round();
+    }
+    let subs = g.of(n);
+    assert_eq!(subs.len(), 1, "one submission of it: {subs:?}");
+    assert_eq!(
+        (&subs[0]["id"], &subs[0]["head"]),
+        (&id, &head.as_str().into())
+    );
+    assert_eq!(g.lead().as_deref(), Some("a"));
+}
+
 /// request-intake-host, "Another host keeps it": host B's pass keeps
 /// main, and host A's step takes nothing in and asks GitHub nothing of
 /// main's open pull requests (137; design D21).
