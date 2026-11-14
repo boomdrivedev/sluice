@@ -114,7 +114,23 @@ pub fn pass(
     exec::tell_abandoned(&mut freed, false, &s.release_abandoned()?)?;
     preview::tell_dropped(&mut freed, false, &s.release_unusable_previews()?)?;
     out.extend_from_slice(&freed);
-    let mut branches = seams.state.branches()?;
+    // 133: records it cannot list are its document, in the words it was
+    // refused with, read again at its next pass.
+    let mut branches = match seams.state.branches() {
+        Ok(b) => b,
+        Err(e) => {
+            if let Some(lead) = reader {
+                let doc = told::document(Kind::Internal, &format!("{e:#}"), &[]);
+                if !INTERRUPTED.load(Ordering::SeqCst) {
+                    let _ = lead.write(&overview::ticked(doc, tick));
+                }
+            }
+            report.lines = lines_of(&out);
+            report.freed = lines_of(&freed);
+            report.in_play = true;
+            return Ok(report);
+        }
+    };
     match pulls.branches(seams) {
         Ok(b) => branches.extend(b),
         Err(e) => telemetry::warn(&format!("sluice: warning: {e:#}")),

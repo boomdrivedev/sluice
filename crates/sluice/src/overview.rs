@@ -1,10 +1,9 @@
 //! `sluice overview`: every branch's queue at a glance, for a person, a
 //! pane or a status line (26, 49; ADR 0023). A reader only: it releases,
 //! counts and writes nothing (rules core.11, core.14), so `sluice
-//! previews`' own tidying is left to it. A watch writes only the reader's
-//! document in the host's state, when it is the reader, which it never is
-//! while `sluice run` lives on the host (135), and ends where the
-//! repository has no sluice (129; ADR 0056).
+//! previews`' own tidying is left to it. A watch writes nothing: it
+//! follows the reader's document sluice's host process writes (129, 135),
+//! and ends where the repository has no sluice (ADR 0056).
 
 use std::collections::BTreeSet;
 use std::io::Write;
@@ -19,8 +18,7 @@ use sluice_core::{Clock, Sluice};
 
 use crate::exec::Host;
 use crate::preview::preview_json;
-use crate::reader::{no_sluice, untimed, Drives, Reader};
-use crate::told::{self, Kind};
+use crate::reader::{no_sluice, untimed, Follow};
 use crate::{
     hashes, held_line, progress, sessions_json, telemetry, Across, Names, Pause, PullRequests,
     INTERRUPTED, STOPPED,
@@ -166,7 +164,6 @@ pub fn run(
     json: bool,
     watch: bool,
     pause: &dyn Pause,
-    tick: Duration,
     out: &mut dyn Write,
 ) -> Result<i32> {
     if !watch {
@@ -178,65 +175,56 @@ pub fn run(
         }
         return Ok(0);
     }
-    // 129: the first watch or wait of the repository on the host reads its
-    // queues and writes each document it prints; every other follows that
-    // document, reading nothing itself, until it finds the lock free
-    // (rule core.25). A watch of a newer sluice than the reader's takes
-    // its lease (129): the older reader lets go and follows, and the
-    // newer watch reads from its next tick. Where `sluice run` lives on the
-    // host, the place is its: the watch follows it, and one that read lets
-    // go (135).
+    // 129, 135: sluice's host process is the repository's reader on the
+    // host; the watch follows it, starting it where none answers, and its
+    // document, reading nothing itself and taking no lock or lease (rule
+    // core.25). A host process that stopped is reached again at the next
+    // tick, and the last document stands until the next is written.
     let (readers, repository) = (host.readers()?, host.repository()?);
-    let mut reader = Reader::take(&readers, &repository, host.version())?;
+    let follow = Follow::of(&readers, &repository, host.version());
+    let here = crate::host_process::Here {
+        s,
+        host,
+        pulls,
+        clock,
+    };
+    let mut follower = crate::host_process::ask::Follower::new(
+        &here,
+        crate::host_process::protocol::FollowKind::Watch,
+    );
     // Once at the start, then each time anything but the time it was read
     // changes: what reads the lines finds what happened by comparing
     // `recent`.
     let mut last: Option<serde_json::Value> = None;
-    // 129: what it last asked of whether the repository has sluice.
-    let mut asked: Option<Asked> = None;
     // 129: it ends only when stopped, when its output is closed, when its
     // repository is gone, or where the repository has no sluice; anything
     // else that fails is tried again at the next tick, which is its cadence
     // and no retry (rule core.29).
     loop {
-        let doc = match &mut reader {
-            Reader::Lead(lead) => {
-                // 129: what the last tick kept by revision and this one does
-                // not use is forgotten.
-                s.next_pass();
-                host.next_pass();
-                // A read whose start it could not mark leaves a forecast
-                // reading past this reader, which decides nothing (64).
-                let _ = lead.begin();
-                let doc = match read(s, host, clock, Follows::Kept(pulls), &mut asked) {
-                    // Ctrl-C reaches the git a read runs in the foreground:
-                    // a branch's read it ended is no refusal of the branch's
-                    // (26).
-                    _ if INTERRUPTED.load(Ordering::SeqCst) => return Ok(STOPPED),
-                    Ok(doc) => doc,
-                    Err(e) if host.repository_gone(&repository) => return Err(e),
-                    // The read it could not make is its document, in the
-                    // words it was refused with (133), as a failing
-                    // overview prints it.
-                    Err(e) => told::document(Kind::Internal, &format!("{e:#}"), &[]),
-                };
-                let doc = ticked(doc, tick);
-                // What it read is printed all the same; the reader's last
-                // document stands for a write that failed until one succeeds.
-                let _ = lead.write(&doc);
-                Some(doc)
+        follower.tick(&here);
+        if INTERRUPTED.load(Ordering::SeqCst) {
+            return Ok(STOPPED);
+        }
+        // 129: a repository gone ends the watch as a failing overview
+        // ends, with the host process's read's words where it wrote them.
+        if host.repository_gone(&repository) {
+            let said = follow
+                .read()
+                .and_then(|d| d["error"]["message"].as_str().map(str::to_string));
+            match said {
+                Some(words) => anyhow::bail!("{words}"),
+                None => anyhow::bail!("the repository at {repository} is gone"),
             }
-            Reader::Follow(follow) => follow.read(),
-        };
-        if let Some(doc) = doc {
+        }
+        if let Some(doc) = follow.read() {
             let now = untimed(&doc);
             if last.as_ref() != Some(&now) {
                 writeln!(out, "{}", serde_json::to_string(&doc)?)?;
                 out.flush()?;
                 last = Some(now);
             }
-            // 129: the repository has no sluice, as the reader read it or
-            // as this watch did: the document saying so is the last line.
+            // 129: the repository has no sluice, as the host process read
+            // it: the document saying so is the last line.
             if no_sluice(&doc) {
                 return Ok(0);
             }
@@ -244,9 +232,6 @@ pub fn run(
         if !pause.pause() {
             return Ok(STOPPED);
         }
-        // A watch may take an older reader's lease; a lock it could not
-        // try leaves it as it was.
-        let _ = reader.step(true, Drives::probe(&readers, &repository));
     }
 }
 
@@ -265,27 +250,14 @@ pub(crate) struct Asked {
     holds: bool,
 }
 
-/// The reader's document of one tick: the overview, which says
-/// `"set_up": false` where the records list no branch and no branch the
-/// host holds, its own or a remote's as last fetched, has the policy (129).
-/// The policy is looked for again only once the tips the host holds, or
-/// the records' list of branches, changed since `asked`: a list with a
-/// branch in it forgets what was asked, so its emptying asks again. A
-/// check of the branches that fails is a read it could not make (133).
-fn read(
-    s: &Sluice<'_>,
-    host: &dyn Host,
-    clock: &dyn Clock,
-    follows: Follows<'_>,
-    asked: &mut Option<Asked>,
-) -> Result<serde_json::Value> {
-    s.seams().state.refresh()?;
-    read_held(s, host, clock, follows, asked)
-}
-
-/// As [`read`], asking no remote: every branch read as the host holds it
-/// since the last ask, as `sluice run` reads after its pass's own (129,
-/// 135).
+/// The reader's document of one pass, asking no remote: every branch
+/// read as the host holds it since the pass's own ask (129, 135). The
+/// overview says `"set_up": false` where the records list no branch and
+/// no branch the host holds, its own or a remote's as last fetched, has
+/// the policy. The policy is looked for again only once the tips the host
+/// holds, or the records' list of branches, changed since `asked`: a list
+/// with a branch in it forgets what was asked, so its emptying asks again.
+/// A check of the branches that fails is a read it could not make (133).
 pub(crate) fn read_held(
     s: &Sluice<'_>,
     host: &dyn Host,

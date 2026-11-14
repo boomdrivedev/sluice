@@ -1429,7 +1429,6 @@ pub fn run(
     out: &mut dyn Write,
 ) -> Result<i32> {
     let s = Sluice::new(seams, clock).as_peer(host.peer());
-    let tick = tick(cli.command.as_ref());
     // 124: the hook reads the policy only as far as guarding needs.
     let s = match &cli.command {
         Some(Command::Hook { .. }) => s.guarding(),
@@ -1938,7 +1937,7 @@ pub fn run(
             }
         },
         Command::Overview { json, watch } => {
-            overview::run(&s, host, clock, pulls, json, watch, pause, tick, out)
+            overview::run(&s, host, clock, pulls, json, watch, pause, out)
         }
         Command::Amend {
             id,

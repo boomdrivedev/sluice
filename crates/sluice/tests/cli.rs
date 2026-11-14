@@ -2492,6 +2492,8 @@ impl Pause for Between<'_> {
 #[test]
 fn overview_watch_prints_a_line_at_start_and_on_each_change() {
     let f = setup();
+    // The host process's passes start its combination, which stays.
+    f.world.hold_runs(true);
     work(
         &f,
         "unit/touches",
@@ -2604,6 +2606,8 @@ fn seven_testing() -> serde_json::Value {
 #[test]
 fn watch_with_no_reader_writes_each_document() {
     let f = setup();
+    // The host process's passes start its combination, which stays.
+    f.world.hold_runs(true);
     work(
         &f,
         "unit/touches",
@@ -2783,10 +2787,11 @@ fn one_testing(done: usize) -> serde_json::Value {
     json(&out)
 }
 
-/// 129: a wait that finds no reader becomes it, and writes the whole
-/// overview, every branch's, not only its own.
+/// overview-reader, "A wait with no reader" (129, 135): the host process
+/// the wait reaches is the reader, and writes the whole overview, every
+/// branch's, not only the wait's own.
 #[test]
-fn wait_with_no_reader_writes_the_whole_overview() {
+fn a_wait_with_no_reader_has_the_host_process_write_the_whole_overview() {
     let f = setup();
     let other = "bolt/other";
     f.world.init(other, &[(".config/sluice.toml", POLICY)]);
@@ -2927,69 +2932,40 @@ fn followed_wait_reports_its_withdrawal() {
     assert_eq!(pause.n.get(), 2, "{out}");
 }
 
-/// 129: when the wait that is the reader ends, a watch that followed it
-/// is the reader within one pause, and printed nothing before but the
-/// documents the wait wrote.
+/// overview-reader, "The host process is killed" (129; design D7): a
+/// watch whose host process ended reaches it again at its next tick,
+/// starting it, and goes on following the last document until the new one
+/// writes the one it read from the records.
 #[test]
-fn watch_leads_once_the_readers_wait_ends() {
-    use std::sync::mpsc;
-
-    /// A pause that says it has paused and waits for the next tick; none
-    /// to come stops it.
-    struct Lockstep(mpsc::Sender<()>, mpsc::Receiver<()>);
-
-    impl Pause for Lockstep {
-        fn pause(&self) -> bool {
-            let _ = self.0.send(());
-            self.1.recv().is_ok()
+fn a_watch_follows_a_host_process_started_again() {
+    let f = one_queued();
+    f.world.hold_runs(true);
+    work(&f, "unit/b", "agent-b", &[("plugin/b", Some("b"))]);
+    let between = |n: usize| {
+        if n == 1 {
+            support::end_host_process();
+            sluice(&f, &["submit", BRANCH, "--worktree", "unit/b", "--no-wait"]);
         }
-    }
-
-    let readers = support::readers();
-    let (tick, ticks) = mpsc::channel();
-    let (paused, pauses) = mpsc::channel();
-    // Another process on the host, with fakes of its own: it reads them
-    // only once it is the reader.
-    let watch = std::thread::spawn(move || {
-        support::share_readers(readers);
-        ticks.recv().unwrap();
-        let g = setup();
-        sluice_with(
-            &g,
-            &Lockstep(paused, ticks),
-            &["overview", "--json", "--watch"],
-        )
-        .1
-    });
-
-    let f = setup();
-    work(&f, "unit/a", "agent-a", &[("plugin/a", Some("a"))]);
-    sluice(&f, &["submit", BRANCH, "--worktree", "unit/a", "--no-wait"]);
-    let wrote = RefCell::new(Vec::new());
-    let step = Then(Cell::new(0), |_| {
-        wrote
-            .borrow_mut()
-            .push(readers_doc().expect("the wait's document"));
-        tick.send(()).unwrap();
-        pauses.recv().unwrap();
-        true
-    });
-    let (code, out) = sluice_with(&f, &step, &["wait", "1"]);
-    assert_eq!(code, LANDED, "{out}");
-    // One tick once the wait has ended, then none.
-    tick.send(()).unwrap();
-    pauses.recv().unwrap();
-    drop(tick);
-    let out = watch.join().unwrap();
+    };
+    let pause = Between {
+        n: Cell::new(0),
+        rounds: 3,
+        between: &between,
+    };
+    let (code, out) = sluice_with(&f, &pause, &["overview", "--json", "--watch"]);
+    assert_eq!(code, sluice::STOPPED, "{out}");
     let lines: Vec<serde_json::Value> = out.lines().map(json).collect();
-    let (led, followed) = lines.split_last().expect("a line");
-    assert!(!followed.is_empty(), "{out}");
-    let wrote = wrote.into_inner();
-    for l in followed {
-        assert!(wrote.contains(l), "not the wait's: {l}");
-    }
-    assert_eq!(led["branches"], serde_json::json!([]), "{out}");
-    assert_eq!(readers_doc().as_ref(), Some(led));
+    // The first process's document, which stood while none wrote; then the
+    // one the process started again wrote.
+    assert_eq!(lines.len(), 2, "{out}");
+    let queued = |doc: &serde_json::Value| {
+        doc["branches"][0]["submissions"]
+            .as_array()
+            .map_or(0, Vec::len)
+    };
+    assert_eq!(queued(&lines[0]), 1, "{out}");
+    assert_eq!(queued(&lines[1]), 2, "{out}");
+    assert_eq!(readers_doc().map(|d| queued(&d)), Some(2));
 }
 
 /// The repository's reader's part as a sluice of `version`, the test's
@@ -3207,102 +3183,55 @@ fn an_older_watch_follows_once_its_lease_is_taken() {
     assert_eq!(readers_version().as_deref(), Some("0.53.0"));
 }
 
-/// 129: a wait of an older sluice that is the reader lets go once a newer
-/// watch takes its lease, and goes on as a follower wait: it says its
-/// combination's progress from the document the newer one writes, and
-/// ends as a follower wait does.
+/// overview-reader, "An older wait lets go" (129; design D7): a wait of an
+/// older sluice that is the reader lets go once the host process takes its
+/// lease, and the newer wait follows the document the host process writes
+/// from then on, saying its combination's progress from it.
 #[test]
-fn an_older_wait_follows_once_its_lease_is_taken() {
+fn an_older_wait_follows_once_the_host_process_takes_its_lease() {
     let f = setup();
     f.world.hold_runs(true);
     work(&f, "unit/a", "agent-a", &[("plugin/a", Some("a"))]);
-    work(&f, "unit/b", "agent-b", &[("plugin/b", Some("b"))]);
     sluice(&f, &["submit", BRANCH, "--worktree", "unit/a", "--no-wait"]);
-    let three = one_testing(3);
-    support::set_version("0.52.0");
-    let newer = RefCell::new(None);
-    let at_lease = RefCell::new(None);
+    // The older wait, reading, before any host process; the host process
+    // and the wait are a newer sluice.
+    let older = RefCell::new(reader_as("0.52.0"));
+    support::set_version("0.53.0");
+    assert!(is_reader(&older.borrow()));
     let between = |n: usize| match n {
         1 => {
-            assert!(readers_doc().is_some(), "the wait is no reader");
-            let mut r = reader_as("0.53.0");
-            assert!(
-                soon_stepped(&mut r, |_| leased()),
-                "no lease taken of an older reader"
+            assert!(leased(), "the host process took the older reader's lease");
+            assert_eq!(
+                readers_version().as_deref(),
+                Some("0.52.0"),
+                "it reads nothing before the older reader lets go"
             );
-            *at_lease.borrow_mut() = readers_doc();
-            // What the older wait would write, were it to read again.
-            sluice(&f, &["submit", BRANCH, "--worktree", "unit/b", "--no-wait"]);
-            *newer.borrow_mut() = Some(r);
+            // The older wait's next tick: it finds its lease taken.
+            older
+                .borrow_mut()
+                .step(false, sluice::reader::Drives::Nobody)
+                .unwrap();
+            assert!(!is_reader(&older.borrow()));
         }
         2 => {
-            assert_eq!(readers_doc(), *at_lease.borrow(), "written after its lease");
-            let mut newer = newer.borrow_mut();
-            let r = newer.as_mut().unwrap();
-            assert!(soon_stepped(r, is_reader), "the older reader's lock kept");
-            write_as(r, &three);
+            assert_eq!(readers_version().as_deref(), Some("0.53.0"));
         }
         _ => {}
     };
     let pause = Between {
         n: Cell::new(0),
-        rounds: 2,
+        rounds: 3,
         between: &between,
     };
     let (code, out) = sluice_with(&f, &pause, &["wait", "1"]);
     assert_eq!(code, sluice::STOPPED, "{out}");
-    let lines: Vec<&str> = out.lines().collect();
-    let [.., progress, last] = lines[..] else {
-        panic!("{out}");
-    };
     assert!(
-        progress.starts_with(&format!(
-            "testing {BRANCH} + #1 · 3/5 tasks · running t3:test"
-        )),
+        out.lines()
+            .any(|l| l.starts_with(&format!("testing {BRANCH} + #1 · "))),
         "{out}"
     );
-    assert_eq!(last, "still waiting: sluice wait 1");
+    assert!(out.ends_with("still waiting: sluice wait 1\n"), "{out}");
     assert_eq!(readers_version().as_deref(), Some("0.53.0"));
-}
-
-/// 129: a wait of a newer sluice than the live reader's takes no lease: it
-/// follows the reader's document until it ends, and the older reader stays
-/// the reader.
-#[test]
-fn a_newer_wait_never_takes_a_lease() {
-    let f = setup();
-    f.world.hold_runs(true);
-    for i in 1..=7 {
-        let (worktree, path) = (format!("unit/{i}"), format!("plugin/{i}"));
-        work(&f, &worktree, &format!("agent-{i}"), &[(&path, Some("x"))]);
-        sluice(
-            &f,
-            &["submit", BRANCH, "--worktree", &worktree, "--no-wait"],
-        );
-    }
-    let doc = seven_testing();
-    let reader = RefCell::new(reader_as("0.52.0"));
-    write_as(&mut reader.borrow_mut(), &doc);
-    support::set_version("0.53.0");
-    let between = |_: usize| {
-        assert!(!leased(), "a wait took the lease");
-        let mut reader = reader.borrow_mut();
-        reader.step(true, sluice::reader::Drives::Nobody).unwrap();
-        assert!(is_reader(&reader));
-    };
-    let pause = Between {
-        n: Cell::new(0),
-        rounds: 49,
-        between: &between,
-    };
-    // The fakes' clock moves a second at every read: time enough for the
-    // wait to pause, and be looked at, a few times before it runs out.
-    let (code, out) = sluice_with(&f, &pause, &["wait", "7", "--timeout", "10s", "--json"]);
-    assert_eq!(code, sluice::WAITING, "{out}");
-    assert!(pause.n.get() > 1, "{out}");
-    assert_eq!(json(&out), doc["branches"][0]["submissions"][0]);
-    assert_eq!(readers_version().as_deref(), Some("0.52.0"));
-    assert_eq!(readers_doc(), Some(doc));
 }
 
 // ---------------------------------------------------------------------------
@@ -3339,6 +3268,8 @@ fn assert_failure(doc: &serde_json::Value, words: &str) {
 #[test]
 fn a_watchs_read_fails_and_then_succeeds() {
     let f = one_queued();
+    // The host process's passes start its combination, which stays.
+    f.world.hold_runs(true);
     let written = RefCell::new(Vec::new());
     let between = |n: usize| {
         written
@@ -3370,6 +3301,8 @@ fn a_watchs_read_fails_and_then_succeeds() {
 #[test]
 fn a_failed_read_under_load() {
     let f = one_queued();
+    // The host process's passes start its combination, which stays.
+    f.world.hold_runs(true);
     let between = |n: usize| match n {
         1 => f.world.fail_state_list(Some(UNREADABLE)),
         2 => f.world.fail_state_list(None),
@@ -3389,11 +3322,15 @@ fn a_failed_read_under_load() {
     assert_eq!(untimed(&lines[2]), untimed(&lines[0]), "{out}");
 }
 
-/// 129: a failure that stands with the same words is written once and
-/// printed once: what the test put in its place after the first stands.
+/// 129: a failure that stands with the same words is written once by the
+/// host process: what the test put in its place after the first stands,
+/// and the watch, which prints what the document holds, printed the
+/// failure once.
 #[test]
 fn a_standing_failure_is_written_once() {
     let f = one_queued();
+    // The host process's passes start its combination, which stays.
+    f.world.hold_runs(true);
     let put = serde_json::json!({ "put": "by the test" });
     let between = |n: usize| match n {
         1 => f.world.fail_state_list(Some(UNREADABLE)),
@@ -3412,10 +3349,11 @@ fn a_standing_failure_is_written_once() {
     let (code, out) = sluice_with(&f, &pause, &["overview", "--json", "--watch"]);
     assert_eq!(code, sluice::STOPPED, "{out}");
     assert_eq!(pause.n.get(), 6, "{out}");
-    assert_eq!(readers_doc(), Some(put));
+    assert_eq!(readers_doc(), Some(put.clone()));
     let lines: Vec<serde_json::Value> = out.lines().map(json).collect();
-    assert_eq!(lines.len(), 2, "{out}");
+    assert_eq!(lines.len(), 3, "{out}");
     assert_failure(&lines[1], UNREADABLE);
+    assert_eq!(lines[2], put, "{out}");
 }
 
 /// 129: a watch whose repository is gone ends at its next read, as a
@@ -3451,6 +3389,8 @@ fn a_watch_ends_once_its_repository_is_removed() {
 #[test]
 fn a_watch_survives_a_failed_write_of_the_readers_document() {
     let f = one_queued();
+    // The host process's passes start its combination, which stays.
+    f.world.hold_runs(true);
     work(&f, "unit/b", "agent-b", &[("plugin/b", Some("b"))]);
     let name = sluice::runs::flat_name(REPOSITORY);
     // Where the document is written before it is renamed into place: a
