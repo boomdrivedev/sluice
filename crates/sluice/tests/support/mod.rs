@@ -811,6 +811,7 @@ impl sluice::host_process::HostProcess for FakeProcess {
                     .to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
             ),
             refused: None,
+            looked: false,
         })
     }
 

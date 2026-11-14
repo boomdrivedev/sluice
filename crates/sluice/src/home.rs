@@ -63,12 +63,17 @@ pub fn run(
     host: &dyn Host,
     worktree: &str,
     json: bool,
+    documented: bool,
     out: &mut dyn Write,
 ) -> Result<i32> {
     // 129 (design D16): from the reader's document of the host process's
-    // current reading, where its reader keeps its tick; otherwise from the
-    // records as the host holds them, asking no remote.
-    let (branches, room) = match crate::overview::reader_document(host) {
+    // current reading, where its reader keeps its tick and the look did not
+    // make the reading; otherwise from the records as the host holds them,
+    // asking no remote.
+    let read = documented
+        .then(|| crate::overview::reader_document(host))
+        .flatten();
+    let (branches, room) = match read {
         Some((branches, doc)) => match serde_json::from_value(doc["room"].clone()) {
             Ok(room) => (branches, room),
             Err(_) => (branches, s.room(host.reserved())?),

@@ -1491,9 +1491,9 @@ pub fn run(
             | Some(Command::Overview { watch: false, .. })
             | Some(Command::Submit { check: true, .. })
     );
-    let s = match one_shot {
+    let (s, reading) = match one_shot {
         true => {
-            host_process::ask::read(
+            let reading = host_process::ask::read(
                 &host_process::Here {
                     s: &s,
                     host,
@@ -1502,10 +1502,15 @@ pub fn run(
                 },
                 false,
             );
-            s.holding()
+            (s.holding(), reading)
         }
-        false => s,
+        false => (s, None),
     };
+    // 129 (design D16): a one-shot overview and the home view print the
+    // reader's document only where the reading the host process answered
+    // with is no look, which writes none, so neither prints a document an
+    // earlier pass wrote beside records the look read since.
+    let documented = !reading.as_ref().is_some_and(|r| r.looked);
     let here = host_process::Here {
         s: &s,
         host,
@@ -1513,7 +1518,7 @@ pub fn run(
         clock,
     };
     let Some(command) = cli.command else {
-        return home::run(&s, host, &cli.worktree, cli.json, out);
+        return home::run(&s, host, &cli.worktree, cli.json, documented, out);
     };
     // 135 (design D4): the repository, where it has sluice, listed for the
     // host process to find again.
@@ -2030,7 +2035,7 @@ pub fn run(
             }
         },
         Command::Overview { json, watch } => {
-            overview::run(&s, host, clock, pulls, json, watch, pause, out)
+            overview::run(&s, host, clock, pulls, json, watch, documented, pause, out)
         }
         Command::Amend {
             id,
@@ -2370,9 +2375,13 @@ pub fn run(
             Ok(0)
         }
         Command::Branch { command } => {
+            // D15: a branch made, accepted or removed changes what the
+            // host process reads of the repository.
             let changes = matches!(
                 command,
-                BranchCommand::Create { .. } | BranchCommand::Accept { .. }
+                BranchCommand::Create { .. }
+                    | BranchCommand::Accept { .. }
+                    | BranchCommand::Delete { .. }
             );
             let code = branch::run(&s, command, out)?;
             if changes && code == 0 {

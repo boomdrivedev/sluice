@@ -109,6 +109,11 @@ pub struct Reading {
     pub ended: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub refused: Option<String>,
+    /// Whether the look made it, which writes no reader's document: a
+    /// one-shot overview then renders the records as the host holds them,
+    /// never a document an earlier pass wrote (design D16).
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub looked: bool,
 }
 
 /// What a held room's command says once its run has begun.

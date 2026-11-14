@@ -67,21 +67,32 @@ pub struct Looked {
 pub type InPlay = Arc<dyn Fn(&Path) -> Looked + Send + Sync>;
 
 /// One repository's reading, as the host process marks it: when its last
-/// pass or look began and ended, and what a remote refused it (129;
-/// design D7, D16).
+/// pass or look began and ended, whether the look made it, what a remote
+/// refused it, and when a command last told of a change to the repository
+/// (129; design D7, D15, D16).
 #[derive(Clone, Debug, Default)]
 struct Marks {
     began: Option<Instant>,
     ended: Option<Instant>,
     ended_at: Option<String>,
     refused: Option<String>,
+    /// Whether the look made the last reading, which writes no reader's
+    /// document.
+    looked: bool,
+    /// When a command last told of a change, its `serve`.
+    told: Option<Instant>,
 }
 
 impl Marks {
     /// Whether the reading is current at `now` with `tick`: one that ended
     /// within its tick, or one under way that began within a tick of the
-    /// last one's end (64, 129).
+    /// last one's end (64, 129), and in either case one that began after a
+    /// command last told of a change, so a read after a submit, a
+    /// withdrawal or a branch's removal reads what it changed (D15, D16).
     fn current(&self, now: Instant, tick: Duration) -> bool {
+        if self.told.is_some_and(|t| self.began.is_none_or(|b| b < t)) {
+            return false;
+        }
         match (self.began, self.ended) {
             (Some(b), Some(e)) if b > e => b.saturating_duration_since(e) < tick,
             (_, Some(e)) => now.saturating_duration_since(e) < tick,
@@ -94,6 +105,7 @@ impl Marks {
             current,
             ended: self.ended_at.clone(),
             refused: self.refused.clone(),
+            looked: self.looked,
         }
     }
 }
@@ -265,7 +277,7 @@ impl Tasks {
                         in_play: true,
                         refused: None,
                     });
-            tasks.end_reading(&repository, looked.refused.clone());
+            tasks.end_reading(&repository, looked.refused.clone(), true);
             // Started before the look is let go, so the process never reads
             // itself idle between the two; a repository whose task could not
             // start is a command's to ask for again.
@@ -288,14 +300,26 @@ impl Tasks {
     }
 
     /// `repository`'s reading ends now, a remote having refused it with
-    /// `refused`, where one did (D16).
-    fn end_reading(&self, repository: &Path, refused: Option<String>) {
+    /// `refused`, where one did, the look having made it where `looked`
+    /// (D16).
+    fn end_reading(&self, repository: &Path, refused: Option<String>, looked: bool) {
         let mut readings = locked(&self.0.readings);
         let marks = readings.entry(repository.to_path_buf()).or_default();
         marks.ended = Some(Instant::now());
         marks.ended_at =
             Some(chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true));
         marks.refused = refused;
+        marks.looked = looked;
+    }
+
+    /// A command told of a change to `repository`, its `serve`: no reading
+    /// begun before now is current, so the next one-shot read waits for
+    /// one that reads the change (D15, D16).
+    pub fn told(&self, repository: &Path) {
+        locked(&self.0.readings)
+            .entry(repository.to_path_buf())
+            .or_default()
+            .told = Some(Instant::now());
     }
 
     /// 129 (design D16): `repository` read for a one-shot read: answered
@@ -587,7 +611,7 @@ impl Inbox {
     /// Its repository's reading ends now, a remote having refused it with
     /// `refused`, where one did (D7, D16).
     pub fn end_reading(&self, refused: Option<String>) {
-        self.tasks.end_reading(&self.repository, refused);
+        self.tasks.end_reading(&self.repository, refused, false);
     }
 }
 
@@ -1178,6 +1202,52 @@ mod tests {
         assert_eq!(looks.load(Ordering::SeqCst), 3);
         assert!(asked.read(&repo, tick, within, true).current);
         assert_eq!(looks.load(Ordering::SeqCst), 4);
+    }
+
+    /// 129 (design D15, D16): a reading begun before a command told of a
+    /// change, its `serve`, is not current, so the next read reads the
+    /// change, by the look under passes when asked; the look's answer says
+    /// the look made it, which wrote no reader's document.
+    #[test]
+    fn a_read_after_a_change_reads_it() {
+        let repo = PathBuf::from("/host/told.git");
+        let looks = Arc::new(AtomicUsize::new(0));
+        let counted = looks.clone();
+        let body: Body = Arc::new(move |inbox: Inbox| loop {
+            match inbox.next(Duration::from_millis(20)) {
+                Some(Job::Pass(reply, _)) => {
+                    inbox.begin_reading();
+                    inbox.end_reading(None);
+                    let _ = reply.send(Ok(Report::default()));
+                }
+                Some(_) => {}
+                None => {
+                    if inbox.end_if_idle().is_ok() {
+                        return;
+                    }
+                }
+            }
+        });
+        let in_play: InPlay = Arc::new(move |_: &Path| {
+            counted.fetch_add(1, Ordering::SeqCst);
+            Looked::default()
+        });
+        let tasks = Tasks::new(body, in_play).passes_when_asked();
+        let (tick, within) = (Duration::from_secs(60), Duration::from_secs(5));
+        let _task = tasks.handle(&repo).follow(FollowKind::Wait);
+        // A pass's reading: current, and no look's.
+        tasks.handle(&repo).pass(None).unwrap();
+        let read = tasks.read(&repo, tick, within, false);
+        assert!(read.current && !read.looked, "{read:?}");
+        assert_eq!(looks.load(Ordering::SeqCst), 0);
+        // Told of a change: read again, by the look, though within its tick.
+        tasks.told(&repo);
+        let read = tasks.read(&repo, tick, within, false);
+        assert!(read.current && read.looked, "{read:?}");
+        assert_eq!(looks.load(Ordering::SeqCst), 1);
+        // The look's reading began after the change: current, read once.
+        assert!(tasks.read(&repo, tick, within, false).current);
+        assert_eq!(looks.load(Ordering::SeqCst), 1);
     }
 
     /// `check` holds within ten seconds.

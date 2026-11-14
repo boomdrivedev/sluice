@@ -223,7 +223,9 @@ fn followed(
 }
 
 /// `tick` is how long `pause` pauses, which a watch that reads names in
-/// its documents (64, 129).
+/// its documents (64, 129). A one-shot overview prints the reader's
+/// document only where `documented`: the host process's reading was no
+/// look (design D16).
 #[allow(clippy::too_many_arguments)]
 pub fn run(
     s: &Sluice<'_>,
@@ -232,16 +234,19 @@ pub fn run(
     pulls: &dyn PullRequests,
     json: bool,
     watch: bool,
+    documented: bool,
     pause: &dyn Pause,
     out: &mut dyn Write,
 ) -> Result<i32> {
     if !watch {
         // 129 (design D16): once the host process's reading is current, the
         // reader's document of that reading, the text rendered from it as
-        // the watch's is; where no reader keeps its tick, the records as
-        // the host holds them, asking no remote, and the pull requests it
-        // follows as the host last kept them.
-        let (branches, doc) = match reader_document(host) {
+        // the watch's is; where no reader keeps its tick, or the look made
+        // the reading, which writes no document, the records as the host
+        // holds them, asking no remote, and the pull requests it follows as
+        // the host last kept them.
+        let read = documented.then(|| reader_document(host)).flatten();
+        let (branches, doc) = match read {
             Some(read) => read,
             None => document_held(s, host, clock, Follows::Kept(pulls))?,
         };

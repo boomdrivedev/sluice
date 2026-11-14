@@ -855,6 +855,8 @@ fn answer(hosting: &Arc<Hosting>, stream: UnixStream) -> Result<()> {
     match request {
         Request::Serve { repository } => {
             note(hosting, &repository);
+            // D16: no reading begun before the change is current.
+            hosting.tasks.told(&repository);
             // Where passes are taken only when asked, the repository is
             // held for the next ask; otherwise it is passed at once.
             let task = hosting.tasks.handle(&repository);
