@@ -350,10 +350,10 @@ fn free(port: u16) -> bool {
 /// the host holds none of, from where the process's forty begin. Its id
 /// places them, so two runs of these tests on one host, as two candidates
 /// under test at once are, ask for different ports; the suite asks for
-/// fewer than forty. All are from 25000 to 32767: above the blocks the
+/// fewer than forty. All are from 25000 to 32767: above the ports the
 /// host's own places take from 20000, and below 32768, where Linux starts
 /// the ports it gives a host's own connections for a moment, which would
-/// make a block look busy; macOS starts at 49152.
+/// make a port look busy; macOS starts at 49152.
 fn ports(n: u16) -> u16 {
     static NEXT: std::sync::Mutex<Option<u16>> = std::sync::Mutex::new(None);
     let mut next = NEXT.lock().unwrap_or_else(|e| e.into_inner());
@@ -371,84 +371,176 @@ fn ports(n: u16) -> u16 {
     from
 }
 
-/// 31: two places alive at once hold two blocks of ports: each block its
-/// names' ports in a row, in the order written, no port shared, and a
-/// short name each; a block is free again once its place is released.
-/// A port something else on the host takes is passed over, so which
-/// blocks are given is the host's to say: the test reads the ports each
-/// place was given, and the blocks held, rather than expecting numbers.
+/// The ports the host holds in `dir`, `held/<port>`, each naming the
+/// record of the place that holds it.
+fn held_ports(dir: &std::path::Path) -> Vec<u16> {
+    let mut held: Vec<u16> = match std::fs::read_dir(dir.join("held")) {
+        Ok(entries) => entries
+            .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+            .map(|n| n.parse().unwrap())
+            .collect(),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Vec::new(),
+        Err(e) => panic!("{e}"),
+    };
+    held.sort();
+    held
+}
+
+/// The ports `place` was given, sorted.
+fn given(place: &Place) -> Vec<u16> {
+    let mut ports: Vec<u16> = place
+        .env
+        .iter()
+        .filter(|(k, _)| k.starts_with("SLUICE_PORT_"))
+        .map(|(_, v)| v.parse().unwrap())
+        .collect();
+    ports.sort();
+    ports
+}
+
+/// 31, 32, record 0016 as amended 2026-11-13: two places alive at once
+/// hold their own ports, each its names' ports in a row, in the order
+/// written, no port shared, and a short name each; a place's ports are
+/// free again once it is released. A port something else on the host
+/// takes is passed over, so which ports are given is the host's to say:
+/// the test reads the ports each place was given, and the ports held,
+/// rather than expecting numbers.
 #[test]
 fn places_alive_at_once_hold_their_own_ports() {
     let _ports = ports_lock();
     let (repo, rev) = scratch("places-ports");
-    let blocks = support::Scratch::new("places-blocks");
-    let p = places(&repo).with_ports(blocks.path().to_path_buf());
-    let from = ports(4);
+    let held_dir = support::Scratch::new("places-held");
+    let p = places(&repo).with_ports(held_dir.path().to_path_buf());
+    let from = ports(6);
     let settings = ported(&["web", "api-server"], &from.to_string());
-    // The block a place holds, read from the ports it was given.
-    let block = |place: &Place| -> u32 {
+    let in_a_row = |place: &Place| {
         let web = port(place, "SLUICE_PORT_WEB");
         assert_eq!(
             port(place, "SLUICE_PORT_API_SERVER"),
             web + 1,
             "not in a row"
         );
-        assert!(
-            web >= from && (web - from).is_multiple_of(2),
-            "not a block's first port: {web}"
-        );
-        u32::from(web - from) / 2
+        assert!(web >= from, "below ports_from: {web}");
     };
-    // The blocks the host holds for a place.
-    let held = || -> Vec<u32> {
-        let mut held: Vec<u32> = std::fs::read_dir(blocks.path())
-            .unwrap()
-            .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
-            .filter(|n| !n.starts_with('.'))
-            .map(|n| n.parse().unwrap())
-            .collect();
-        held.sort();
-        held
-    };
+    let held = || held_ports(held_dir.path());
     let a = p.materialize("sluice/try/a/1", &rev, &settings).unwrap();
     let b = p.materialize("sluice/try/b/1", &rev, &settings).unwrap();
-    let (na, nb) = (block(&a), block(&b));
-    assert_ne!(na, nb, "two places hold one block");
-    let mut both = vec![na, nb];
+    in_a_row(&a);
+    in_a_row(&b);
+    let mut both = [given(&a), given(&b)].concat();
     both.sort();
+    both.dedup();
+    assert_eq!(both.len(), 4, "two places hold one port");
     assert_eq!(held(), both);
     assert_ne!(a.env["SLUICE_PLACE"], b.env["SLUICE_PLACE"]);
     assert!(a.env["SLUICE_PLACE"].starts_with("sluice-"));
 
     p.release("sluice/try/a/1").unwrap();
-    assert_eq!(held(), vec![nb], "a's block is free again");
+    assert_eq!(held(), given(&b), "a's ports are free again");
     let c = p.materialize("sluice/try/c/1", &rev, &settings).unwrap();
-    assert_ne!(block(&c), nb, "c was given the block b holds");
+    assert!(
+        given(&c).iter().all(|p| !given(&b).contains(p)),
+        "c was given a port b holds"
+    );
     p.release("sluice/try/b/1").unwrap();
     p.release("sluice/try/c/1").unwrap();
     assert!(held().is_empty());
 }
 
-/// 31: a block one of whose ports something else holds is passed over.
+/// 31, record 0016 as amended 2026-11-13: a port something else holds is
+/// passed over, with the run it would begin.
 #[test]
 fn a_block_with_a_port_in_use_is_passed_over() {
     let _ports = ports_lock();
     let (repo, rev) = scratch("places-busy");
-    let blocks = support::Scratch::new("places-busy-blocks");
-    let p = places(&repo).with_ports(blocks.path().to_path_buf());
+    let held_dir = support::Scratch::new("places-busy-held");
+    let p = places(&repo).with_ports(held_dir.path().to_path_buf());
     let from = ports(4);
     let _held = std::net::TcpListener::bind(("127.0.0.1", from + 1)).unwrap();
     let a = p
         .materialize(NAME, &rev, &ported(&["web", "api"], &from.to_string()))
         .unwrap();
-    // The first block holds the busy port, so a later block is given: which
-    // one depends on what else the host holds at that moment.
+    // The run from `from` holds the busy port, so a later run is given:
+    // which one depends on what else the host holds at that moment.
     let web = port(&a, "SLUICE_PORT_WEB");
-    assert_ne!(web, from, "the block with the busy port was given");
+    assert!(web > from + 1, "a run with the busy port was given: {web}");
+    assert_eq!(port(&a, "SLUICE_PORT_API"), web + 1);
+    p.release(NAME).unwrap();
+}
+
+/// 31, record 0016 as amended 2026-11-13: a worktree's place keeps the
+/// ports it was given at its first run, read from its record, however its
+/// branch's policy changes: a port listed before its name moves nothing.
+#[test]
+fn a_places_ports_are_read_from_its_record() {
+    let _ports = ports_lock();
+    let (repo, _) = scratch("places-ports-record");
+    let held_dir = support::Scratch::new("places-record-held");
+    let p = places(&repo).with_ports(held_dir.path().to_path_buf());
+    let session = repo.dir().with_extension("session");
+    let from = ports(6);
+    let first = p
+        .adopt(
+            session.to_str().unwrap(),
+            "bolt/x",
+            &ported(&["web", "api"], &from.to_string()),
+            "2026-11-13T09:00:00Z",
+        )
+        .unwrap();
+    let api = port(&first, "SLUICE_PORT_API");
+    // The policy now lists a port more, before both.
+    let next = p
+        .adopt(
+            session.to_str().unwrap(),
+            "bolt/x",
+            &ported(&["db", "web", "api"], &from.to_string()),
+            "2026-11-13T09:05:00Z",
+        )
+        .unwrap();
+    assert_eq!(port(&next, "SLUICE_PORT_API"), api);
+    assert_eq!(given(&next), given(&first));
+    assert!(!next.env.contains_key("SLUICE_PORT_DB"));
+    // The record names them, and the host holds them for it.
+    let record: serde_json::Value = serde_json::from_slice(
+        &std::fs::read(
+            repo.dir()
+                .join(".git/sluice/.places")
+                .read_dir()
+                .unwrap()
+                .map(|e| e.unwrap().path())
+                .find(|p| p.extension().is_some_and(|x| x == "json"))
+                .unwrap(),
+        )
+        .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(record["ports"]["SLUICE_PORT_API"], api.to_string());
+    assert_eq!(held_ports(held_dir.path()), given(&first));
+    p.release(&first.name).unwrap();
+    assert!(held_ports(held_dir.path()).is_empty());
+}
+
+/// 31, record 0016 as amended 2026-11-13: a candidate's place holding
+/// three ports, released, leaves none of the three held on the host, and
+/// the next place may take them.
+#[test]
+fn a_release_frees_the_ports_its_record_names() {
+    let _ports = ports_lock();
+    let (repo, rev) = scratch("places-release-ports");
+    let held_dir = support::Scratch::new("places-release-held");
+    let p = places(&repo).with_ports(held_dir.path().to_path_buf());
+    let from = ports(3);
+    let settings = ported(&["web", "api", "db"], &from.to_string());
+    let a = p.materialize(NAME, &rev, &settings).unwrap();
+    assert_eq!(given(&a).len(), 3);
+    assert_eq!(held_ports(held_dir.path()), given(&a));
+    p.release(NAME).unwrap();
     assert!(
-        web > from + 1 && (web - from).is_multiple_of(2),
-        "not a block's first port: {web}"
+        held_ports(held_dir.path()).is_empty(),
+        "a port is still held"
     );
+    let b = p.materialize(NAME, &rev, &settings).unwrap();
+    assert_eq!(given(&b), given(&a));
     p.release(NAME).unwrap();
 }
 
@@ -542,12 +634,12 @@ fn a_sessions_worktree_is_adopted_with_ports_it_keeps() {
             "2026-10-14T09:00:00Z",
         )
         .unwrap();
-    // Another block: a port something else holds is passed over,
-    // so which block is the host's to say.
+    // Other ports: a port something else holds is passed over, so which
+    // are given is the host's to say.
     let (aw, ad) = (port(&a, "SLUICE_PORT_WEB"), port(&a, "SLUICE_PORT_DB"));
     let (bw, bd) = (port(&b, "SLUICE_PORT_WEB"), port(&b, "SLUICE_PORT_DB"));
     assert_eq!(bd, bw + 1);
-    assert!(bw >= from && (bw - from).is_multiple_of(2), "{bw}");
+    assert!(bw >= from, "{bw}");
     assert!(![aw, ad].contains(&bw) && ![aw, ad].contains(&bd));
     assert_ne!(a.env["SLUICE_PLACE"], b.env["SLUICE_PLACE"]);
 
@@ -769,7 +861,7 @@ fn addresses(pairs: &[(&str, &str)]) -> BTreeMap<String, String> {
 /// its ports and a name for each, kept apart in `.previews/` where no
 /// session's or candidate's reader looks, given back as it is when asked
 /// again, and released with its checkout, its scratch directory and its
-/// block of ports; a second release is nothing.
+/// ports; a second release is nothing.
 #[test]
 fn a_preview_is_made_kept_apart_and_released() {
     let _ports = ports_lock();
@@ -866,17 +958,7 @@ fn a_preview_is_made_kept_apart_and_released() {
     assert!(!record.exists());
     assert!(p.previews().unwrap().is_empty());
     assert!(!p.release_preview(&name, None, 3).unwrap());
-    let held = std::fs::read_dir(blocks.path())
-        .unwrap()
-        .filter(|e| {
-            !e.as_ref()
-                .unwrap()
-                .file_name()
-                .to_string_lossy()
-                .starts_with('.')
-        })
-        .count();
-    assert_eq!(held, 0, "a block is still held");
+    assert!(held_ports(blocks.path()).is_empty(), "a port is still held");
 }
 
 /// 99: an address that names a port the policy does not list is refused
@@ -1328,20 +1410,9 @@ fn a_failed_preview_release_is_held_once_its_retries_are_spent() {
     assert!(p.previews().unwrap().is_empty());
 }
 
-/// The blocks of ports held in `dir`: the files naming their holders.
-fn held_blocks(dir: &std::path::Path) -> usize {
-    std::fs::read_dir(dir)
-        .map(|d| {
-            d.filter(|e| {
-                !e.as_ref()
-                    .unwrap()
-                    .file_name()
-                    .to_string_lossy()
-                    .starts_with('.')
-            })
-            .count()
-        })
-        .unwrap_or(0)
+/// The ports held in `dir`: the files naming their holders.
+fn held_count(dir: &std::path::Path) -> usize {
+    held_ports(dir).len()
 }
 
 /// Record 0121's containers for the preview `place`: one mounting a file
@@ -1378,7 +1449,7 @@ fn ending(repo: &Repo, blocks: &std::path::Path, engine: &support::Engine) -> (P
         .with_containers(Box::new(move |place| {
             noted
                 .borrow_mut()
-                .push((place.clone(), place.path.exists(), held_blocks(&held)));
+                .push((place.clone(), place.path.exists(), held_count(&held)));
             sluice::profiles::checks::end_containers(
                 &[sluice::profiles::checks::Endpoint::Unix(socket.clone())],
                 place,
@@ -1433,7 +1504,7 @@ fn a_released_preview_ends_its_containers_before_its_ports_go() {
     assert!(checkout, "its checkout went before its containers ended");
     assert_eq!(*held, 1, "its block went before its containers ended");
     left_behind(&repo, &place);
-    assert_eq!(held_blocks(blocks.path()), 0);
+    assert_eq!(held_count(blocks.path()), 0);
 }
 
 /// A preview of `rev` in `p`, holding a `web` port.
@@ -1494,7 +1565,7 @@ fn a_gone_previews_containers_end_after_its_stored_release() {
     assert_eq!(seen[0].2, 1, "its block went before its containers ended");
     left_behind(&repo, &place);
     assert!(p.previews().unwrap().is_empty());
-    assert_eq!(held_blocks(blocks.path()), 0);
+    assert_eq!(held_count(blocks.path()), 0);
 }
 
 /// 123, previews-1 clause 101, record 0121 (design D3): a preview freed
@@ -1525,7 +1596,7 @@ fn an_accepted_previews_containers_end_with_nothing_run() {
     assert!(!r.dir(&name).exists());
     left_behind(&repo, &place);
     assert!(p.previews().unwrap().is_empty());
-    assert_eq!(held_blocks(blocks.path()), 0);
+    assert_eq!(held_count(blocks.path()), 0);
 }
 
 /// 123, record 0121 (design D5): a container the engine will not remove
@@ -1564,7 +1635,7 @@ fn a_container_left_keeps_the_preview_and_its_ports() {
     assert!(kept.failed.contains(&refused), "{kept:?}");
     assert_eq!((kept.tries, kept.stopped), (1, false));
     assert!(place.path.exists(), "its checkout stays");
-    assert_eq!(held_blocks(blocks.path()), 1, "its block stays held");
+    assert_eq!(held_count(blocks.path()), 1, "its block stays held");
 
     std::fs::remove_dir_all(&place.path).unwrap();
     engine.refuse("publishes", 1);
@@ -1573,7 +1644,7 @@ fn a_container_left_keeps_the_preview_and_its_ports() {
     let listed = p.previews().unwrap();
     assert_eq!(listed.len(), 1, "the preview stays listed");
     assert!(listed[0].gone);
-    assert_eq!(held_blocks(blocks.path()), 1, "its block stays held");
+    assert_eq!(held_count(blocks.path()), 1, "its block stays held");
     assert!(place.tmp.exists(), "its scratch stays");
 
     let gone = p.release_gone(&name).unwrap();
@@ -1582,7 +1653,7 @@ fn a_container_left_keeps_the_preview_and_its_ports() {
     assert_eq!(std::fs::read_to_string(&marker).unwrap(), "ran\n");
     left_behind(&repo, &place);
     assert!(p.previews().unwrap().is_empty());
-    assert_eq!(held_blocks(blocks.path()), 0);
+    assert_eq!(held_count(blocks.path()), 0);
 }
 
 /// A run of the place `name` in `place` that ends at once, as the check
