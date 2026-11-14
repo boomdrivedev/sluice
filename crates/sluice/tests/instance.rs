@@ -266,6 +266,11 @@ mod bound {
         /// A session on `unit/<name>` off `branch`, with one commit of its
         /// own file, submitted without waiting.
         fn submit(&self, branch: &str, name: &str) {
+            self.submit_with(branch, name, &[]);
+        }
+
+        /// As [`Setup::submit`], the command given `env` too.
+        fn submit_with(&self, branch: &str, name: &str, env: &[(&str, &str)]) {
             let dir: PathBuf = self.sessions.path().join(name);
             self.repo.git(&[
                 "worktree",
@@ -286,6 +291,7 @@ mod bound {
             git(&["commit", "-q", "-m", name]);
             let out = self
                 .command(&dir)
+                .envs(env.iter().copied())
                 .args(["submit", branch, "--no-wait", "--json"])
                 .output()
                 .unwrap();
@@ -447,8 +453,13 @@ mod bound {
             config,
             state: Rc::new(Scratch::new(&format!("instance-{name}-state"))),
         };
-        s.submit("bolt/a", "ta");
-        s.submit("bolt/a", "tb");
+        // Both queued before anything runs: the host process the submits
+        // start passes only when asked, and is ended before the test's own
+        // command starts one that passes at its own tick (design D14).
+        let held = [("SLUICE_ROUND_SLEEP", "record")];
+        s.submit_with("bolt/a", "ta", &held);
+        s.submit_with("bolt/a", "tb", &held);
+        support::kill_host_process(&mut s.command(s.repo.dir()));
         (s, file)
     }
 
@@ -507,13 +518,14 @@ mod bound {
     }
 
     /// The settings-take-up spec's "A key that holds no private key" (135;
-    /// record 0107; rule core.54): settings that read but do not bind leave
-    /// the run on the bound of one it holds, so the second combination's
-    /// run starts only once the first has ended, with the cores the first
-    /// had; both land, and the refusal is said once, naming the file and
-    /// the key, with nothing taken up.
+    /// record 0107; rule core.54; design D19): settings that read but do
+    /// not bind leave sluice's host process on the bound of one it holds,
+    /// so the second combination's run starts only once the first has
+    /// ended, with the cores the first had; both land, and the refusal is
+    /// said once in its log, naming the file and the key, with nothing
+    /// taken up.
     #[test]
-    fn a_run_keeps_its_settings_when_the_new_ones_do_not_bind() {
+    fn the_host_process_keeps_its_settings_when_the_new_ones_do_not_bind() {
         use std::os::unix::fs::PermissionsExt;
         let seen = Scratch::new("instance-unbound-seen");
         let keys = Scratch::new("instance-unbound-key");
@@ -548,14 +560,15 @@ mod bound {
         // does not read: the status is read under the settings the run held.
         std::fs::write(&file, "[runs]\nmax = 1\n").unwrap();
         assert_eq!(states(&s, "bolt/a"), ["landed", "landed"], "{said}");
-        let refused: Vec<&str> = said
+        let log = host_log(&s);
+        let refused: Vec<&str> = log
             .lines()
-            .filter(|l| l.contains("is refused, so this sluice run keeps the settings it holds"))
+            .filter(|l| l.contains("is refused, so the host process keeps the settings it holds"))
             .collect();
-        assert_eq!(refused.len(), 1, "{said}");
-        assert!(refused[0].contains(&file.display().to_string()), "{said}");
-        assert!(refused[0].contains(&key.display().to_string()), "{said}");
-        assert!(!said.contains("took up"), "{said}");
+        assert_eq!(refused.len(), 1, "{log}");
+        assert!(refused[0].contains(&file.display().to_string()), "{log}");
+        assert!(refused[0].contains(&key.display().to_string()), "{log}");
+        assert!(!log.contains("took up"), "{log}");
     }
 
     /// The settings-take-up spec's "A kept run sends to the collector it
