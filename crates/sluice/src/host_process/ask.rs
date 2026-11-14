@@ -259,6 +259,34 @@ pub fn note(here: &Here<'_, '_>) {
     let _ = here.host.host_process().note(here);
 }
 
+/// 129 (design D16): a reading of the repository `here` binds current
+/// within the host process's tick, asked of it and started where none
+/// answers. One that does not come within the round's retry bound and a
+/// tick, or a host process that cannot be reached, is said on stderr, with
+/// when the host process last read the repository where it says, and the
+/// command reads the records as the host holds them all the same.
+pub fn read(here: &Here<'_, '_>) -> Option<Reading> {
+    match here.host.host_process().read(here) {
+        Ok(r) if r.current => Some(r),
+        Ok(r) => {
+            let when = match &r.ended {
+                Some(at) => format!("last read it at {at}"),
+                None => "has not read it yet".to_string(),
+            };
+            crate::telemetry::warn(&format!(
+                "sluice: warning: sluice's host process {when}; this reads the repository as the host holds it"
+            ));
+            Some(r)
+        }
+        Err(e) => {
+            crate::telemetry::warn(&format!(
+                "sluice: warning: sluice's host process could not be reached; this reads the repository as the host holds it: {e:#}"
+            ));
+            None
+        }
+    }
+}
+
 /// 135 (design D14): a command that moves no queue itself, `sluice
 /// status`, `sluice overview` or the home view, reaches the host process
 /// where one answers; where none answers, it reads whether anything is in

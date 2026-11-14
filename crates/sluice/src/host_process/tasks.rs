@@ -233,14 +233,15 @@ impl Tasks {
         if locked(&self.0.refused).contains_key(repository) {
             return;
         }
-        self.look_at(repository);
+        self.look_at(repository, false);
     }
 
-    /// The look at `repository`, where no task runs for it and none is
-    /// under way, its reading marked as it begins and ends (D16).
-    fn look_at(&self, repository: &Path) {
+    /// The look at `repository`, where none is under way and, unless
+    /// `beside` a task, no task runs for it, its reading marked as it
+    /// begins and ends (D16).
+    fn look_at(&self, repository: &Path, beside: bool) {
         if self.0.stopping.load(Ordering::SeqCst)
-            || self.holds(repository)
+            || (!beside && self.holds(repository))
             || !locked(&self.0.looking).insert(repository.to_path_buf())
         {
             return;
@@ -295,7 +296,9 @@ impl Tasks {
     /// is, it reads now, by its task's next pass where one runs and by the
     /// look otherwise, and answers when that reading ends, waiting `within`
     /// at most, then answering with the reading as it stands. Where passes
-    /// are taken only when asked, it answers at once from the last reading.
+    /// are taken only when asked, a reading that is not current is read by
+    /// the look, which runs no round, so a test's rounds stay those its
+    /// commands ask for (D14).
     pub fn read(&self, repository: &Path, tick: Duration, within: Duration) -> Reading {
         let asked = Instant::now();
         let marks = || {
@@ -305,16 +308,15 @@ impl Tasks {
                 .unwrap_or_default()
         };
         let now = marks();
-        if self.0.asked_only.load(Ordering::SeqCst) {
-            return now.answer(now.current(asked, tick));
-        }
         if now.current(asked, tick) {
             return now.answer(true);
         }
-        if self.holds(repository) {
+        if self.0.asked_only.load(Ordering::SeqCst) {
+            self.look_at(repository, true);
+        } else if self.holds(repository) {
             self.handle(repository).wake();
         } else {
-            self.look_at(repository);
+            self.look_at(repository, false);
         }
         let until = asked + within;
         loop {
@@ -992,12 +994,14 @@ mod tests {
         assert_eq!(passes.load(Ordering::SeqCst), 1);
         assert_eq!(looks.load(Ordering::SeqCst), 2);
 
-        // Under passes when asked, at once from the last reading, if none.
+        // Under passes when asked, a look reads, running no pass, though a
+        // task holds the repository.
         let asked = Tasks::new(body, in_play).passes_when_asked();
-        let began = Instant::now();
+        let _task = asked.handle(&repo).follow(FollowKind::Wait);
         let read = asked.read(&repo, tick, within);
-        assert!(!read.current && read.ended.is_none(), "{read:?}");
-        assert!(began.elapsed() < Duration::from_millis(50));
+        assert!(read.current && read.ended.is_some(), "{read:?}");
+        assert_eq!(passes.load(Ordering::SeqCst), 1, "no pass was run");
+        assert_eq!(looks.load(Ordering::SeqCst), 3);
     }
 
     /// `check` holds within ten seconds.

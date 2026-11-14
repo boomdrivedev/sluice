@@ -248,7 +248,10 @@ pub fn run(
     out: &mut dyn Write,
 ) -> Result<i32> {
     if !watch {
-        let (branches, doc) = document(s, host, clock, Follows::Asked(pulls))?;
+        // 129 (design D16): once the host process's reading is current, the
+        // records as the host holds them, asking no remote, and the pull
+        // requests it follows as the host last kept them.
+        let (branches, doc) = document_held(s, host, clock, Follows::Kept(pulls))?;
         if json {
             writeln!(out, "{}", serde_json::to_string_pretty(&doc)?)?;
         } else {

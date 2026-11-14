@@ -1434,6 +1434,27 @@ pub fn run(
         Some(Command::Hook { .. }) => s.guarding(),
         _ => s,
     };
+    // 129 (design D16): a one-shot read, a status in each form, a one-shot
+    // overview and the home view, asks sluice's host process for a reading
+    // of the repository current within its tick, starting it where none
+    // answers, and then reads every branch as the host holds it, fetching
+    // nothing of its own.
+    let one_shot = matches!(
+        &cli.command,
+        None | Some(Command::Status { .. }) | Some(Command::Overview { watch: false, .. })
+    );
+    let s = match one_shot {
+        true => {
+            host_process::ask::read(&host_process::Here {
+                s: &s,
+                host,
+                pulls,
+                clock,
+            });
+            s.holding()
+        }
+        false => s,
+    };
     let here = host_process::Here {
         s: &s,
         host,
@@ -1441,9 +1462,6 @@ pub fn run(
         clock,
     };
     let Some(command) = cli.command else {
-        // 135 (design D15): the host process, started where work is in play
-        // and none answers.
-        host_process::ask::reach_if_in_play(&here);
         return home::run(&s, host, &cli.worktree, cli.json, out);
     };
     // 135 (design D4): the repository, where it has sluice, listed for the
@@ -1453,14 +1471,6 @@ pub fn run(
         Command::Exec { .. } | Command::Preview { .. } | Command::Equip { .. }
     ) {
         host_process::ask::note(&here);
-    }
-    // 135 (design D15): a status or a one-shot overview reaches the host
-    // process, starting it where work is in play and none answers.
-    if matches!(
-        command,
-        Command::Status { .. } | Command::Overview { watch: false, .. }
-    ) {
-        host_process::ask::reach_if_in_play(&here);
     }
     // 135 (design D15): what changes a queue tells the host process,
     // starting it where none answers.
@@ -1901,10 +1911,14 @@ pub fn run(
                 // 137, design D5: the pull requests this host follows that
                 // another host takes in, as that host shows them; one that
                 // cannot be read is warned of, and the queue still shown.
-                let across = pulls.across(s.seams(), clock, &target).unwrap_or_else(|e| {
-                    telemetry::warn(&format!("sluice: warning: {e:#}"));
-                    None
-                });
+                // 129 (design D16): as the host last kept them; the host
+                // process's reading reads each one that falls due.
+                let across = pulls
+                    .kept_across(s.seams(), clock, &target)
+                    .unwrap_or_else(|e| {
+                        telemetry::warn(&format!("sluice: warning: {e:#}"));
+                        None
+                    });
                 // 51, D13: what the branch's readers are owed, shown after
                 // its queue.
                 let owed = s.owed_on_branch(&target)?;

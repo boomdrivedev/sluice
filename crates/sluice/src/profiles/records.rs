@@ -70,6 +70,9 @@ pub struct Records {
     /// 129: the remotes a tick has asked, whose branches are listed from
     /// what the ask fetched.
     asked: RefCell<std::collections::BTreeSet<String>>,
+    /// 129 (design D16): whether every remote is read as the host
+    /// process's last ask fetched it, and none is asked ([`State::hold`]).
+    held: Cell<bool>,
     /// 124: whether it is bound for branch protection, which verifies and
     /// signs no run.
     guarding: bool,
@@ -99,6 +102,7 @@ impl Records {
             routes: RefCell::default(),
             listed: RefCell::default(),
             asked: RefCell::default(),
+            held: Cell::new(false),
             guarding: false,
             lists: RefCell::default(),
             lists_read: Cell::new(0),
@@ -212,6 +216,9 @@ impl Records {
             RemoteRefs::new(&self.common, self.branches.pushed_refs(remote)?, signing)
                 .sharing_locks(self.locks.clone()),
         );
+        if self.held.get() {
+            r.hold();
+        }
         self.remotes.borrow_mut().insert(remote.into(), r.clone());
         Ok(r)
     }
@@ -585,6 +592,20 @@ impl State for Records {
         match self.route(branch)? {
             None => self.local.read_held(branch),
             Some(r) => r.read_held(branch),
+        }
+    }
+
+    /// Every remote that may hold a branch's state is read as asked, from
+    /// what the host process's last ask fetched, and the remotes opened
+    /// now or later fetch no signs of life of their own (129; design D16).
+    fn hold(&self) {
+        self.held.set(true);
+        let Ok(remotes) = self.signed_remotes() else {
+            return;
+        };
+        self.asked.borrow_mut().extend(remotes);
+        for r in self.remotes.borrow().values() {
+            r.hold();
         }
     }
 

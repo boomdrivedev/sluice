@@ -707,41 +707,49 @@ fn remote_calls(starts: &[String]) -> Vec<String> {
         .collect()
 }
 
-/// 129, 64: with `main` and `release` on origin, a submission queued on
-/// `main` and a commit pushed to origin's `release` by hand, a one-shot
-/// overview with no reader asks origin once, that one fetch bringing every
-/// ref the host reads from it: `release` at the revision pushed, and
-/// `main`'s queue, with no branch fetched on its own.
+/// 129, 64 (design D16): with `main` and `release` on origin and a
+/// submission queued on `main`, a one-shot overview beside the host
+/// process's current reading asks origin nothing: it reads every branch as
+/// the host holds it since that reading's one ask, `main`'s queue among
+/// them.
 #[test]
-fn an_overview_asks_origin_once_for_every_branch_and_its_queue() {
-    let (host, origin) = two_branches_landed("overview-once");
+fn a_one_shot_overview_beside_a_current_reading_asks_origin_nothing() {
+    let (host, _origin) = two_branches_landed("overview-current");
     host.submit("queued");
-    let other = Repo::clone_of(origin.path(), "overview-once-elsewhere");
-    other.git(&["checkout", "-q", "release"]);
-    other.write("by-hand.txt", "pushed by hand\n");
-    other.git(&["add", "-A"]);
-    other.git(&["commit", "-q", "-m", "by hand"]);
-    other.git(&["push", "-q", "origin", "HEAD:release"]);
-    let pushed = other.rev("HEAD");
+    // The host process reads the repository for a one-shot read.
+    let out = host.sluice(&["status", "main"]);
+    assert!(out.status.success(), "{}", text(&out));
 
     let before = host.git.count();
     let out = host.sluice(&["overview", "--json"]);
     assert!(out.status.success(), "{}", text(&out));
-    let starts = host.git.starts()[before..].to_vec();
-    let calls = remote_calls(&starts);
-    assert_eq!(calls.len(), 1, "{calls:?}");
-    assert_eq!(asks(&calls), 1, "{calls:?}");
-
+    let calls = remote_calls(&host.git.starts()[before..]);
+    assert!(calls.is_empty(), "{calls:?}");
     let v: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
-    let part = |name: &str| {
-        v["branches"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .find(|b| b["branch"] == name)
-            .cloned()
-            .unwrap_or_else(|| panic!("{name} in {v}"))
-    };
-    assert_eq!(part("release")["revision"], pushed.as_str(), "{v}");
-    assert_eq!(part("main")["depth"], 1, "{v}");
+    let main = v["branches"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|b| b["branch"] == "main")
+        .cloned()
+        .unwrap_or_else(|| panic!("main in {v}"));
+    assert_eq!(main["depth"], 1, "{v}");
+}
+
+/// 129 (design D16): a status beside the host process's current reading
+/// asks origin nothing, and says the queue as the host holds it.
+#[test]
+fn a_status_beside_a_current_reading_asks_origin_nothing() {
+    let (host, _origin) = two_branches_landed("status-current");
+    host.submit("queued");
+    let out = host.sluice(&["overview", "--json"]);
+    assert!(out.status.success(), "{}", text(&out));
+
+    let before = host.git.count();
+    let out = host.sluice(&["status", "main", "--json"]);
+    assert!(out.status.success(), "{}", text(&out));
+    let calls = remote_calls(&host.git.starts()[before..]);
+    assert!(calls.is_empty(), "{calls:?}");
+    let v: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert_eq!(v["submissions"].as_array().map(Vec::len), Some(1), "{v}");
 }

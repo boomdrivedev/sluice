@@ -278,6 +278,7 @@ impl<'a> Sluice<'a> {
     /// the host process's reading is current (129; design D16). A round
     /// refuses to run under it.
     pub fn holding(self) -> Self {
+        self.seams.state.hold();
         Sluice { held: true, ..self }
     }
 

@@ -1761,6 +1761,15 @@ pub trait State {
     /// that decides nothing reads. A round reads with [`State::read`].
     fn read_held(&self, branch: &str) -> Result<Snapshot>;
 
+    /// 129 (design D16): from now on, read every remote that keeps
+    /// branches' records as the host process's last ask fetched it, as
+    /// though this binding had made that ask, and ask none itself: the
+    /// branches with records and the hosts' signs of life listed from what
+    /// was fetched. A one-shot read's, once the host process's reading is
+    /// current; a round never runs under it. Records in the host's own
+    /// files need nothing.
+    fn hold(&self) {}
+
     /// 80: why the branch's last read could not reach the records it keeps
     /// elsewhere and read what was last fetched; `None` when the read was
     /// current.

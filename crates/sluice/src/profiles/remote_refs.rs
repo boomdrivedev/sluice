@@ -143,6 +143,9 @@ pub struct RemoteRefs {
     /// 129: a tick's ask fetched the hosts' signs of life since
     /// [`State::beats`] last answered: the next answers from it.
     asked: std::cell::Cell<bool>,
+    /// 129 (design D16): every answer reads what the host process's last
+    /// ask fetched, and none fetches ([`RemoteRefs::hold`]).
+    held: std::cell::Cell<bool>,
 }
 
 impl RemoteRefs {
@@ -161,7 +164,15 @@ impl RemoteRefs {
             stale: RefCell::default(),
             verified: RefCell::default(),
             asked: std::cell::Cell::new(false),
+            held: std::cell::Cell::new(false),
         }
+    }
+
+    /// 129 (design D16): from now on the hosts' signs of life are read as
+    /// the host process's last ask fetched them, with no fetch: a one-shot
+    /// read's.
+    pub fn hold(&self) {
+        self.held.set(true);
     }
 
     /// The same profile, its branches locked through `locks`, the lock the
@@ -840,7 +851,7 @@ impl State for RemoteRefs {
     /// 129: once a tick's ask fetched them, the next answer reads what it
     /// fetched, with no fetch of its own.
     fn beats(&self) -> Result<BTreeMap<String, (String, Vec<u8>)>> {
-        if !self.asked.replace(false) {
+        if !self.asked.replace(false) && !self.held.get() {
             let spec = format!(
                 "+refs/sluice/hosts/*:refs/sluice-fetched/{}/hosts/*",
                 self.remote()
