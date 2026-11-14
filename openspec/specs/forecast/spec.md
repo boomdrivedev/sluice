@@ -119,36 +119,84 @@ does not hold `<from>`, its revision SHALL be read as it is today (64).
 ### Requirement: A reader keeps its tick while it reads on time
 
 A forecast SHALL count the reader as keeping its tick only while the
-reader's process holds the reader's lock and either its last read ended
-no more than its tick ago, or it is reading now and its last read ended
-no more than a tick before this read began. Any other reader SHALL be
-read as none (64, 129).
+host process answers and either its last read of the repository ended no
+more than its tick ago, or it is reading now and its last read ended no
+more than a tick before this read began. Any other reader SHALL be read
+as none (64, 129).
 
 #### Scenario: A reader that has stalled
-- **WHEN** the reader's lock is held but its last read ended five ticks ago and it began no read since
-- **THEN** `sluice submit main --check` reads `main` and its records as a round would
+- **WHEN** the host process answers but its last read of the repository ended five ticks ago and it began no read since
+- **THEN** a forecast of `main` asks the host process for a reading and forms from it
 
 #### Scenario: A reader in a slow read
 - **WHEN** the reader's last read ended a second before its next began, and that next read has run for twenty seconds
 - **THEN** a forecast takes the branch from the last read and fetches nothing
 
-### Requirement: A forecast with no current reader reads as a round does
+### Requirement: A forecast with no current reader has the host process read
 
-Where no reader keeps its tick, where the reader's last read does not
-hold the branch, says it could not read it, or could not ask its remote
-for it, or where a revision the forecast forms from is not on the host,
-a forecast SHALL read the branch and its records as a round does (124)
-and form on what it read. Where a submission's work or a combination it
-forms from is still not on the host, it SHALL fetch them as a round does.
+Where no reader keeps its tick, or its last read lacks the branch or a
+revision the forecast forms from, a forecast SHALL ask the host process for a current reading, starting it where none
+answers, and form on every branch as the host holds it since. Where the
+host still lacks a revision it forms from, it SHALL ask for a reading
+afresh once, and say what is still missing as a read it could not make,
+exit 3. It SHALL fetch nothing itself (64, 129; record 0093 as amended
+2026-11-13).
 
 #### Scenario: No reader on the host
-- **WHEN** no watch or wait reads the repository on the host and `main` is on a remote
-- **THEN** `sluice submit main --check` fetches `main` and its records, and forms on what it fetched
+
+- **WHEN** no host process runs and `main` is on a remote
+- **THEN** `sluice submit main --check` starts the host process, forms on
+  `main` and its records as that process's first reading fetched them,
+  and fetches nothing itself
 
 #### Scenario: Another host's submission
-- **WHEN** `#9` was submitted to `main` from another host, its work is not on this host, and no reader keeps its tick
-- **THEN** `sluice submit main --check` fetches the work submitted to `main` and forecasts against `#9` rather than failing
+
+- **WHEN** `#9` was submitted to `main` from another host, its work is
+  not on this host, and no reader keeps its tick
+- **THEN** `sluice submit main --check` forecasts against `#9`, whose
+  work the host process's reading fetched, rather than failing
+
+#### Scenario: A reader whose read lacks the branch
+
+- **WHEN** a reader keeps its tick and its last read names no revision
+  of `main`, which is on a remote
+- **THEN** `sluice submit main --check` forms on `main` and its records
+  as the host holds them since the host process's reading, and fetches
+  nothing itself
+
+#### Scenario: Work still missing after the reading afresh
+
+- **WHEN** the host lacks the head of `#4`, queued on `main`, and the
+  host process's reading afresh does not bring it
+- **THEN** `sluice submit main --check` says it could not read what a
+  forecast of `main` forms from, naming the work queued on `main`, and
+  exits 3, having fetched nothing
 
 #### Scenario: The reader could not reach the remote
-- **WHEN** the reader's last read, within its tick, could not ask `main`'s remote and read `main`'s records as last fetched
-- **THEN** a forecast of `main` reads as a round does
+
+- **WHEN** the host process's reading, within its tick, could not ask
+  `main`'s remote and read `main`'s records as last fetched
+- **THEN** a forecast of `main` forms on what that reading holds and says
+  on stderr, in the remote's words, that it could not be asked
+
+### Requirement: A branch a current reading brings no revision of is no branch
+
+A forecast whose reading afresh is current, refused by no remote, and
+brings no revision of the branch, or of `--head`'s branch, to the host,
+at its own ref or a remote's, SHALL refuse that branch as no branch,
+exit 2, as a forecast refuses a branch that does not exist (64).
+
+#### Scenario: No such branch once the reading is current
+
+- **WHEN** the host process's reading afresh is current, and the host
+  holds no revision of `bolt/gone` at any ref
+- **THEN** `sluice submit main --check --head bolt/gone --json` prints an
+  error document whose message is `no branch bolt/gone to forecast`, and
+  exits 2
+
+#### Scenario: A remote refused the reading
+
+- **WHEN** the host process's reading afresh could not ask `main`'s
+  remote, and the host holds no revision of `bolt/y` at any ref
+- **THEN** `sluice submit main --check --head bolt/y` says it could not
+  read what a forecast of `main` forms from, naming `bolt/y`, and exits 3
