@@ -188,6 +188,8 @@ pub struct Room {
     session_waits: Vec<SessionWait>,
     turn: Turn,
     next: u64,
+    /// The runs counted at the last look, so a run that ended is found.
+    last: Option<usize>,
 }
 
 impl Room {
@@ -203,6 +205,7 @@ impl Room {
             session_waits: Vec::new(),
             turn: Turn::Queue,
             next: 1,
+            last: None,
         }
     }
 
@@ -507,9 +510,24 @@ impl Room {
     }
 
     /// The part `id` dropped unstarted, by a start that failed, a refused
-    /// write or a connection that closed: its room is free at once.
-    pub fn give_back(&mut self, id: u64) {
-        self.held.remove(&id);
+    /// write or a connection that closed: its room is free at once, and
+    /// the repository it is owed to is answered, where one waits (D13).
+    pub fn give_back(&mut self, id: u64) -> Option<PathBuf> {
+        self.held.remove(&id)?;
+        self.last = self.running().ok().map(|r| r.total());
+        self.owed(Instant::now()).ok().flatten()
+    }
+
+    /// The repository a run that ended since the last look is owed to, at
+    /// `now`, where a run ended and one waits (D13): the runs counted now
+    /// are fewer than at the last look.
+    pub fn freed(&mut self, now: Instant) -> Result<Option<PathBuf>> {
+        let total = self.running()?.total();
+        let was = self.last.replace(total);
+        match was {
+            Some(was) if total < was => self.owed(now),
+            _ => Ok(None),
+        }
     }
 
     /// The run started from part `id` ended, where no registry counts it.
@@ -539,18 +557,42 @@ impl Room {
     }
 }
 
-/// The room as every holder in one process shares it.
+/// What a freed part's repository is told: the host process's task of it
+/// passes at once (D13).
+pub type Owed = Arc<dyn Fn(&Path) + Send + Sync>;
+
+/// The room as every holder in one process shares it, with whom it tells
+/// of a freed part's repository.
 #[derive(Clone)]
-pub struct Shared(Arc<Mutex<Room>>);
+pub struct Shared {
+    room: Arc<Mutex<Room>>,
+    owed: Arc<Mutex<Option<Owed>>>,
+}
 
 impl Shared {
     pub fn new(room: Room) -> Shared {
-        Shared(Arc::new(Mutex::new(room)))
+        Shared {
+            room: Arc::new(Mutex::new(room)),
+            owed: Arc::default(),
+        }
     }
 
     /// The room, for one step; a holder that panicked leaves it as it was.
     pub fn lock(&self) -> MutexGuard<'_, Room> {
-        self.0.lock().unwrap_or_else(|e| e.into_inner())
+        self.room.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
+    /// Tell `owed` of each repository a part that frees is owed to (D13).
+    pub fn on_free(&self, owed: impl Fn(&Path) + Send + Sync + 'static) {
+        *self.owed.lock().unwrap_or_else(|e| e.into_inner()) = Some(Arc::new(owed));
+    }
+
+    /// Tell whom the room tells that a part `repository` is owed to frees.
+    pub fn tell(&self, repository: &Path) {
+        let owed = self.owed.lock().unwrap_or_else(|e| e.into_inner()).clone();
+        if let Some(owed) = owed {
+            owed(repository);
+        }
     }
 
     /// A part of `kind` for a run of `repository`, as the check seam's
@@ -617,7 +659,10 @@ impl Holding {
 impl Drop for Holding {
     fn drop(&mut self) {
         if !self.done {
-            self.room.lock().give_back(self.id);
+            let owed = self.room.lock().give_back(self.id);
+            if let Some(repository) = owed {
+                self.room.tell(&repository);
+            }
         }
     }
 }

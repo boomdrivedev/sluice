@@ -79,6 +79,8 @@ struct Inner {
     body: Body,
     in_play: InPlay,
     stopping: AtomicBool,
+    /// Passes are taken only when asked (D14): a freed part wakes nothing.
+    asked_only: AtomicBool,
     next: AtomicU64,
 }
 
@@ -100,8 +102,26 @@ impl Tasks {
             body,
             in_play,
             stopping: AtomicBool::new(false),
+            asked_only: AtomicBool::new(false),
             next: AtomicU64::new(1),
         }))
+    }
+
+    /// The same tasks, passing only when asked (D14).
+    pub fn passes_when_asked(self) -> Tasks {
+        self.0.asked_only.store(true, Ordering::SeqCst);
+        self
+    }
+
+    /// A part of the host's bound freed that `repository` is owed: its
+    /// task, started where none runs, passes at once, as a `serve` has it,
+    /// so the repository the part is owed to takes it within a moment;
+    /// under passes when asked, nothing passes by itself (D13, D14).
+    pub fn owed(&self, repository: &Path) {
+        if self.0.stopping.load(Ordering::SeqCst) || self.0.asked_only.load(Ordering::SeqCst) {
+            return;
+        }
+        self.handle(repository).wake();
     }
 
     /// `repository`'s task, started where none runs.
@@ -682,6 +702,62 @@ mod tests {
                         return;
                     }
                 }
+            }
+        }
+    }
+
+    /// D13, D14: a part of the host's bound that frees has the repository
+    /// it is owed to, one waiting with none under test, pass at once; under
+    /// passes when asked, nothing passes by itself.
+    #[test]
+    fn a_freed_part_wakes_the_repository_it_is_owed_to() {
+        use super::super::room::{Room, Shared};
+        use sluice_seams::RunKind;
+        let (busy, idle) = (
+            PathBuf::from("/host/busy.git"),
+            PathBuf::from("/host/idle.git"),
+        );
+        for asked_only in [false, true] {
+            let woken: Arc<Mutex<Vec<PathBuf>>> = Arc::default();
+            let counted = woken.clone();
+            let tasks = Tasks::new(
+                Arc::new(move |inbox: Inbox| loop {
+                    match inbox.next(Duration::from_millis(50)) {
+                        Some(Job::Wake) => locked(&counted).push(inbox.repository.clone()),
+                        Some(Job::Pass(reply)) => {
+                            let _ = reply.send(Ok(Report::default()));
+                        }
+                        Some(_) => {}
+                        None => {
+                            if inbox.end_if_idle().is_ok() {
+                                return;
+                            }
+                        }
+                    }
+                }),
+                Arc::new(|_: &Path| true),
+            );
+            let tasks = match asked_only {
+                true => tasks.passes_when_asked(),
+                false => tasks,
+            };
+            let room = Shared::new(Room::new(1, 0));
+            let told = tasks.clone();
+            room.on_free(move |r| told.owed(r));
+            let part = room.hold(RunKind::Queue, &busy).unwrap().expect("room");
+            assert!(
+                room.hold(RunKind::Queue, &idle).unwrap().is_none(),
+                "the idle repository waits"
+            );
+            drop(part);
+            if asked_only {
+                std::thread::sleep(Duration::from_millis(300));
+                assert!(locked(&woken).is_empty(), "{:?}", locked(&woken));
+            } else {
+                soon("the idle repository's task passes", || {
+                    locked(&woken).contains(&idle)
+                });
+                assert!(!locked(&woken).contains(&busy));
             }
         }
     }

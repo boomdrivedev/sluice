@@ -242,11 +242,19 @@ fn run_holding(paths: Paths, _lock: File) -> Result<i32> {
         instance.bound,
         instance.reserved,
     ));
+    let tasks = tasks::Tasks::new(
+        tasks::repository_body(room.clone(), asked_only(), named.clone()),
+        Arc::new(|r: &Path| index::in_play(r).unwrap_or(true)),
+    );
+    let tasks = match asked_only() {
+        true => tasks.passes_when_asked(),
+        false => tasks,
+    };
+    // D13: a freed part has the repository it is owed to pass at once.
+    let told = tasks.clone();
+    room.on_free(move |r| told.owed(r));
     let hosting = Arc::new(Hosting {
-        tasks: tasks::Tasks::new(
-            tasks::repository_body(room.clone(), asked_only(), named.clone()),
-            Arc::new(|r: &Path| index::in_play(r).unwrap_or(true)),
-        ),
+        tasks,
         paths,
         named,
         room,
@@ -326,6 +334,12 @@ fn serve(hosting: &Arc<Hosting>, listener: &UnixListener) -> Result<i32> {
         }
         if !hosting.stopping.load(Ordering::SeqCst) {
             hosting.tasks.tick();
+            // D13: a run that ended since the last look frees its part for
+            // the repository it is owed to.
+            let owed = hosting.room.lock().freed(Instant::now()).ok().flatten();
+            if let Some(r) = owed {
+                hosting.tasks.owed(&r);
+            }
             if scanned.elapsed() >= SCAN {
                 scanned = Instant::now();
                 scan(hosting);
