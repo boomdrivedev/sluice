@@ -13,7 +13,7 @@ Full reference: <https://agentplot.github.io/sluice/reference/commands/>.
 | `--priority N` | Higher goes first, ahead of lower-priority submissions not yet under test; the default is 0. |
 | `--subject <text>` | One line saying what lands: the title of the pull request the submit opens, or of one it opened before, and the name of its landing commit. With several worktrees, once for each, in their order, or not at all. |
 | `--worktree <path>` | Submit from another worktree than the current directory. Given more than once, every worktree's head as one act, in that order: see below. |
-| `--json` | One JSON document: the submission record when it finishes; `{id,branch,ahead}` with `--no-wait`, and `{id,branch,ahead,pull_request}` for a pull request sluice queued at once; `{"conflict":null}` or `{"conflict":{paths,with}}` with `--check`; `{pull_request,branch,state}` for a pull request still waiting for its conditions, with its `head` and `draft` under `--status`, and `taken_in_by` and `queue` where another host takes the branch's pull requests in; under `--status`, with `sends`, the revision a submit from the worktree would send now; `{branch,submissions}` for several worktrees. |
+| `--json` | One JSON document: the submission record when it finishes; `{id,branch,ahead}` with `--no-wait`, and `{id,branch,ahead,pull_request}` for a pull request sluice queued at once; `{"conflict":null}` or `{"conflict":{paths,with}}` with `--check`; `{pull_request,branch,state}` for a pull request still waiting for its conditions, with its `head` and `draft` under `--status`, and `taken_in_by`, `{host}` naming the host that keeps the branch, and `queue` where another host keeps the branch and takes its pull requests in; under `--status`, with `sends`, the revision a submit from the worktree would send now; `{branch,submissions}` for several worktrees. |
 | `--timeout 9m` | `wt submit` only: submit, then wait at most that long, exit `5` when it runs out; run again, follow the submission already made. See "Who moves the queue". |
 
 ## Refused: a required task kept out of CI
@@ -100,13 +100,18 @@ sluice submit main --worktree ../feature-a --worktree ../feature-b --no-wait --j
 
 A round is one pass of sluice's work on a branch: read the queue, start
 tests if there is room, read finished tests, blame a failure, land what
-passed. Any process may run one; a lock lets one run at a time.
+passed. sluice's own host process runs them, for every repository on the
+host: a submit, waiting or not, tells it of the submission, starting it
+where none runs, and it ends once no queue has work. Nothing is installed
+or kept running for it.
 
-- A waiting `sluice submit` / `wt submit` runs rounds while it waits.
+- A waiting `sluice submit` / `wt submit` follows the host process to the
+  outcome, and runs no round.
 - `sluice wait <id>` does the same for a submission made with
   `--no-wait`; `--timeout 9m` returns after that long, exit `5`, with the
   submission's record under `--json`, for a caller whose calls are capped.
-  It removes no worktree.
+  It removes no worktree. A round the host process could not run is said
+  once on stderr, and the wait goes on.
 - `wt submit <branch> --timeout 9m --json` does the same under worktrunk,
   from submit to landing: run in the background again while it exits `5`,
   it submits once, as `--no-wait` does, its answer on stderr, then follows
@@ -123,9 +128,9 @@ passed. Any process may run one; a lock lets one run at a time.
   `--timeout` with `--no-wait`, `--check` or `--status` exits `64` and
   submits nothing. A new commit, or a submission blamed, in conflict or
   withdrawn, is submitted again.
-- `sluice step <branch>`: one round, then exit.
-- `sluice run`: rounds for every branch until stopped. Needed for pull
-  requests opened by hand, which nobody waits on.
+- `sluice step <branch>`: one round, asked of the host process, then
+  exit. On a branch with pull requests, it takes the branch's open pull
+  requests in first, those opened by hand among them.
 
 ## Branches on GitHub
 

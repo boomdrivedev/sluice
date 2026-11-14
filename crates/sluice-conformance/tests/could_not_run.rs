@@ -629,7 +629,13 @@ fn session_exec_switched(
     let plan = s.session_plan(BRANCH).unwrap().expect("managed");
     let session = s.seams().driver.session(&place).unwrap();
     let started = s
-        .start_session(&plan, &place, &session.head, command)
+        .start_session(
+            &plan,
+            &place,
+            &session.head,
+            command,
+            sluice_conformance::shared::session_part(&s),
+        )
         .unwrap();
     h.w().nix_system(Some(to));
     let report = match s.seams().tests.progress(&started.run).unwrap() {

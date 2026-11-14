@@ -57,6 +57,7 @@ fn refused(host: &str, asked: &str, said: &str) -> Event {
         remote: "origin".into(),
         asked: asked.into(),
         said: said.into(),
+        intake: false,
     }
 }
 
@@ -232,6 +233,7 @@ fn the_end_is_logged_with_how_long_and_how_many_rounds() {
             since: began.clone(),
             stood: stood.num_seconds() as u64,
             rounds: 12,
+            intake: false,
         }
     );
     assert_eq!(kept(&h), None, "nothing is kept once the end is written");

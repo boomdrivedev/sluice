@@ -1,10 +1,9 @@
 //! `sluice overview`: every branch's queue at a glance, for a person, a
 //! pane or a status line (26, 49; ADR 0023). A reader only: it releases,
 //! counts and writes nothing (rules core.11, core.14), so `sluice
-//! previews`' own tidying is left to it. A watch writes only the reader's
-//! document in the host's state, when it is the reader, which it never is
-//! while `sluice run` lives on the host (135), and ends where the
-//! repository has no sluice (129; ADR 0056).
+//! previews`' own tidying is left to it. A watch writes nothing: it
+//! follows the reader's document sluice's host process writes (129, 135),
+//! and ends where the repository has no sluice (ADR 0056).
 
 use std::collections::BTreeSet;
 use std::io::Write;
@@ -19,8 +18,7 @@ use sluice_core::{Clock, Sluice};
 
 use crate::exec::Host;
 use crate::preview::preview_json;
-use crate::reader::{no_sluice, untimed, Drives, Reader};
-use crate::told::{self, Kind};
+use crate::reader::{no_sluice, untimed, Follow};
 use crate::{
     hashes, held_line, progress, sessions_json, telemetry, Across, Names, Pause, PullRequests,
     INTERRUPTED, STOPPED,
@@ -39,22 +37,10 @@ pub enum Follows<'a> {
     Kept(&'a dyn PullRequests),
 }
 
-/// Every branch's part, and the whole document as `--json` prints it:
-/// each remote that keeps branches' records asked once, first, and every
-/// branch read as the host holds it since (129), with the pull requests
-/// into it the host follows, read as `follows` says (137).
-pub fn document(
-    s: &Sluice<'_>,
-    host: &dyn Host,
-    clock: &dyn Clock,
-    follows: Follows<'_>,
-) -> Result<(Vec<BranchView>, serde_json::Value)> {
-    s.seams().state.refresh()?;
-    document_held(s, host, clock, follows)
-}
-
-/// As [`document`], asking no remote: every branch read as the host holds
-/// it since the last ask (129).
+/// Every branch's part, and the whole document as `--json` prints it,
+/// asking no remote: every branch read as the host holds it since the last
+/// ask (129), with the pull requests into it the host follows, read as
+/// `follows` says (137).
 fn document_held(
     s: &Sluice<'_>,
     host: &dyn Host,
@@ -100,6 +86,7 @@ fn document_held(
     }
     let previews: Vec<serde_json::Value> = s.previews()?.iter().map(preview_json).collect();
     let hosts = s.hosts()?;
+    let (room, process) = room_and_process(s, host, clock)?;
     let doc = serde_json::json!({
         "schema": OVERVIEW_SCHEMA,
         "host": host.name(),
@@ -109,9 +96,89 @@ fn document_held(
         "sessions": sessions,
         "previews": previews,
         "hosts": hosts,
-        "room": s.room(host.reserved())?,
+        "room": room,
+        "host_process": process,
     });
     Ok((branches, doc))
+}
+
+/// 71, 150 (record 0123; design D12, D13): the host's room as the overview
+/// gives it, the runs waiting by kind, whose turn the next contested run
+/// is and each repository's runs under test and waiting beside the count,
+/// and sluice's host process, `{version, pid, since}`, both read from the
+/// host process where one answers: where none does, nothing waits and the
+/// process is `null`.
+pub(crate) fn room_and_process(
+    s: &Sluice<'_>,
+    host: &dyn Host,
+    clock: &dyn Clock,
+) -> Result<(serde_json::Value, serde_json::Value)> {
+    let mut room = serde_json::to_value(s.room(host.reserved())?)?;
+    let here = crate::host_process::Here {
+        s,
+        host,
+        pulls: &(),
+        clock,
+    };
+    let answered = host.host_process().room(&here).unwrap_or(None);
+    Ok(match answered {
+        Some((named, view)) => {
+            room["waiting"] = serde_json::to_value(view.waiting)?;
+            room["turn"] = serde_json::to_value(view.turn)?;
+            room["repositories"] = serde_json::to_value(&view.repositories)?;
+            let process = serde_json::json!({
+                "version": named.version,
+                "pid": named.pid,
+                "since": named.since,
+            });
+            (room, process)
+        }
+        None => {
+            room["waiting"] = serde_json::json!({ "queue": 0, "sessions": 0 });
+            room["turn"] = "queue".into();
+            room["repositories"] = serde_json::json!({});
+            (room, serde_json::Value::Null)
+        }
+    })
+}
+
+/// The host's room on one line, as the overview, the home view and
+/// `sluice status` say it, from the room as the overview gives it; `None`
+/// while nothing runs or waits.
+pub(crate) fn room_line(room: &serde_json::Value) -> Option<String> {
+    let n = |v: &serde_json::Value| v.as_u64().unwrap_or(0);
+    let (queue, sessions) = (n(&room["queue"]), n(&room["sessions"]));
+    let waiting = &room["waiting"];
+    let (wq, ws) = (n(&waiting["queue"]), n(&waiting["sessions"]));
+    if queue + sessions + wq + ws == 0 {
+        return None;
+    }
+    let mut line = format!("host: {} of {} runs", queue + sessions, n(&room["bound"]));
+    if queue > 0 {
+        line.push_str(&format!(" · {queue} queue"));
+    }
+    match sessions {
+        0 => {}
+        1 => line.push_str(" · 1 agent"),
+        n => line.push_str(&format!(" · {n} agents")),
+    }
+    if wq + ws > 0 {
+        let mut waits = Vec::new();
+        if wq > 0 {
+            waits.push(format!(
+                "{wq} combination{}",
+                if wq == 1 { "" } else { "s" }
+            ));
+        }
+        if ws > 0 {
+            waits.push(format!("{ws} agent{}", if ws == 1 { "" } else { "s" }));
+        }
+        line.push_str(&format!(" · waiting: {}", waits.join(", ")));
+        if room["turn"] == "sessions" {
+            line.push_str(" · an agent's next");
+        }
+    }
+    Some(line)
 }
 
 /// 137, design D5: each branch's pull requests the host follows and
@@ -156,7 +223,9 @@ fn followed(
 }
 
 /// `tick` is how long `pause` pauses, which a watch that reads names in
-/// its documents (64, 129).
+/// its documents (64, 129). A one-shot overview prints the reader's
+/// document only where `documented`: the host process's reading was no
+/// look (design D16).
 #[allow(clippy::too_many_arguments)]
 pub fn run(
     s: &Sluice<'_>,
@@ -165,12 +234,22 @@ pub fn run(
     pulls: &dyn PullRequests,
     json: bool,
     watch: bool,
+    documented: bool,
     pause: &dyn Pause,
-    tick: Duration,
     out: &mut dyn Write,
 ) -> Result<i32> {
     if !watch {
-        let (branches, doc) = document(s, host, clock, Follows::Asked(pulls))?;
+        // 129 (design D16): once the host process's reading is current, the
+        // reader's document of that reading, the text rendered from it as
+        // the watch's is; where no reader keeps its tick, or the look made
+        // the reading, which writes no document, the records as the host
+        // holds them, asking no remote, and the pull requests it follows as
+        // the host last kept them.
+        let read = documented.then(|| reader_document(host)).flatten();
+        let (branches, doc) = match read {
+            Some(read) => read,
+            None => document_held(s, host, clock, Follows::Kept(pulls))?,
+        };
         if json {
             writeln!(out, "{}", serde_json::to_string_pretty(&doc)?)?;
         } else {
@@ -178,65 +257,62 @@ pub fn run(
         }
         return Ok(0);
     }
-    // 129: the first watch or wait of the repository on the host reads its
-    // queues and writes each document it prints; every other follows that
-    // document, reading nothing itself, until it finds the lock free
-    // (rule core.25). A watch of a newer sluice than the reader's takes
-    // its lease (129): the older reader lets go and follows, and the
-    // newer watch reads from its next tick. Where `sluice run` lives on the
-    // host, the place is its: the watch follows it, and one that read lets
-    // go (135).
+    // 129, 135: sluice's host process is the repository's reader on the
+    // host; the watch follows it, starting it where none answers, and its
+    // document, reading nothing itself and taking no lock or lease (rule
+    // core.25). A host process that stopped is reached again at the next
+    // tick, and the last document stands until the next is written.
     let (readers, repository) = (host.readers()?, host.repository()?);
-    let mut reader = Reader::take(&readers, &repository, host.version())?;
+    let follow = Follow::of(&readers, &repository, host.version());
+    let here = crate::host_process::Here {
+        s,
+        host,
+        pulls,
+        clock,
+    };
+    let mut follower = crate::host_process::ask::Follower::new(
+        &here,
+        crate::host_process::protocol::FollowKind::Watch,
+    );
     // Once at the start, then each time anything but the time it was read
     // changes: what reads the lines finds what happened by comparing
     // `recent`.
     let mut last: Option<serde_json::Value> = None;
-    // 129: what it last asked of whether the repository has sluice.
-    let mut asked: Option<Asked> = None;
+    // D9: its first read is of the host process's pass its follow asked
+    // for, never a document an earlier reader left.
+    let mut first = true;
     // 129: it ends only when stopped, when its output is closed, when its
     // repository is gone, or where the repository has no sluice; anything
     // else that fails is tried again at the next tick, which is its cadence
     // and no retry (rule core.29).
     loop {
-        let doc = match &mut reader {
-            Reader::Lead(lead) => {
-                // 129: what the last tick kept by revision and this one does
-                // not use is forgotten.
-                s.next_pass();
-                host.next_pass();
-                // A read whose start it could not mark leaves a forecast
-                // reading past this reader, which decides nothing (64).
-                let _ = lead.begin();
-                let doc = match read(s, host, clock, Follows::Kept(pulls), &mut asked) {
-                    // Ctrl-C reaches the git a read runs in the foreground:
-                    // a branch's read it ended is no refusal of the branch's
-                    // (26).
-                    _ if INTERRUPTED.load(Ordering::SeqCst) => return Ok(STOPPED),
-                    Ok(doc) => doc,
-                    Err(e) if host.repository_gone(&repository) => return Err(e),
-                    // The read it could not make is its document, in the
-                    // words it was refused with (133), as a failing
-                    // overview prints it.
-                    Err(e) => told::document(Kind::Internal, &format!("{e:#}"), &[]),
-                };
-                let doc = ticked(doc, tick);
-                // What it read is printed all the same; the reader's last
-                // document stands for a write that failed until one succeeds.
-                let _ = lead.write(&doc);
-                Some(doc)
-            }
-            Reader::Follow(follow) => follow.read(),
+        match std::mem::replace(&mut first, false) {
+            true => follower.first(&here, crate::host_process::read_for()),
+            false => follower.tick(&here),
         };
-        if let Some(doc) = doc {
+        if INTERRUPTED.load(Ordering::SeqCst) {
+            return Ok(STOPPED);
+        }
+        // 129: a repository gone ends the watch as a failing overview
+        // ends, with the host process's read's words where it wrote them.
+        if host.repository_gone(&repository) {
+            let said = follow
+                .read()
+                .and_then(|d| d["error"]["message"].as_str().map(str::to_string));
+            match said {
+                Some(words) => anyhow::bail!("{words}"),
+                None => anyhow::bail!("the repository at {repository} is gone"),
+            }
+        }
+        if let Some(doc) = follow.read() {
             let now = untimed(&doc);
             if last.as_ref() != Some(&now) {
                 writeln!(out, "{}", serde_json::to_string(&doc)?)?;
                 out.flush()?;
                 last = Some(now);
             }
-            // 129: the repository has no sluice, as the reader read it or
-            // as this watch did: the document saying so is the last line.
+            // 129: the repository has no sluice, as the host process read
+            // it: the document saying so is the last line.
             if no_sluice(&doc) {
                 return Ok(0);
             }
@@ -244,10 +320,24 @@ pub fn run(
         if !pause.pause() {
             return Ok(STOPPED);
         }
-        // A watch may take an older reader's lease; a lock it could not
-        // try leaves it as it was.
-        let _ = reader.step(true, Drives::probe(&readers, &repository));
     }
+}
+
+/// 129 (design D16): the reader's document of the repository while its
+/// reader keeps its tick, with every branch's part read back from it, as a
+/// one-shot overview and the home view print it; `None` where no reader
+/// keeps its tick, its document is a read it could not make, or a branch's
+/// part cannot be read back.
+pub(crate) fn reader_document(host: &dyn Host) -> Option<(Vec<BranchView>, serde_json::Value)> {
+    let (readers, repository) = (host.readers().ok()?, host.repository().ok()?);
+    let doc =
+        crate::reader::current(&readers, &repository, std::time::SystemTime::now()).ok()??;
+    let branches = doc["branches"]
+        .as_array()?
+        .iter()
+        .map(|b| serde_json::from_value::<BranchView>(b.clone()).ok())
+        .collect::<Option<Vec<_>>>()?;
+    Some((branches, doc))
 }
 
 /// `doc` as a reader writes it: naming its tick, the pause between its
@@ -265,27 +355,14 @@ pub(crate) struct Asked {
     holds: bool,
 }
 
-/// The reader's document of one tick: the overview, which says
-/// `"set_up": false` where the records list no branch and no branch the
-/// host holds, its own or a remote's as last fetched, has the policy (129).
-/// The policy is looked for again only once the tips the host holds, or
-/// the records' list of branches, changed since `asked`: a list with a
-/// branch in it forgets what was asked, so its emptying asks again. A
-/// check of the branches that fails is a read it could not make (133).
-fn read(
-    s: &Sluice<'_>,
-    host: &dyn Host,
-    clock: &dyn Clock,
-    follows: Follows<'_>,
-    asked: &mut Option<Asked>,
-) -> Result<serde_json::Value> {
-    s.seams().state.refresh()?;
-    read_held(s, host, clock, follows, asked)
-}
-
-/// As [`read`], asking no remote: every branch read as the host holds it
-/// since the last ask, as `sluice run` reads after its pass's own (129,
-/// 135).
+/// The reader's document of one pass, asking no remote: every branch
+/// read as the host holds it since the pass's own ask (129, 135). The
+/// overview says `"set_up": false` where the records list no branch and
+/// no branch the host holds, its own or a remote's as last fetched, has
+/// the policy. The policy is looked for again only once the tips the host
+/// holds, or the records' list of branches, changed since `asked`: a list
+/// with a branch in it forgets what was asked, so its emptying asks again.
+/// A check of the branches that fails is a read it could not make (133).
 pub(crate) fn read_held(
     s: &Sluice<'_>,
     host: &dyn Host,
@@ -443,16 +520,7 @@ fn write_overview(
             run["started"].as_str().unwrap_or("")
         )?;
     }
-    if let Some(r) = room.filter(|r| r.queue + r.sessions > 0) {
-        let mut line = format!("host: {} of {} runs", r.queue + r.sessions, r.bound);
-        if r.queue > 0 {
-            line.push_str(&format!(" · {} queue", r.queue));
-        }
-        match r.sessions {
-            0 => {}
-            1 => line.push_str(" · 1 agent"),
-            n => line.push_str(&format!(" · {n} agents")),
-        }
+    if let Some(line) = room_line(&doc["room"]) {
         writeln!(out, "{line}")?;
     }
     let held = sessions.iter().filter(|w| w.get("ports").is_some()).count();

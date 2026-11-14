@@ -60,18 +60,15 @@
 //! say what to run, and the place seam's profiles end a place's run
 //! through [`Runs::end`] before they remove the place (34).
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeMap;
 use std::fs::{File, OpenOptions};
 use std::io::ErrorKind;
 use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
-use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
 use anyhow::{bail, Context, Result};
-use nix::errno::Errno;
-use nix::unistd::Pid;
 use serde::{Deserialize, Serialize};
 use weir_bounded::end_group;
 
@@ -336,15 +333,11 @@ impl Runs {
             }
             std::thread::sleep(Duration::from_millis(10));
         }
-        // Reaped by this thread while the process lasts, as `sluice run`
-        // does; after a step exits, by whatever adopts it; after a `sluice
-        // run` starts afresh, by the run started afresh, which is handed
-        // it as not yet reaped (design D7).
-        let pid = child.id();
-        unreaped_set().insert(pid);
+        // Reaped by this thread while the process lasts; after it ends,
+        // by whatever adopts it: the supervisor outlives the host process
+        // that started it, a successor's among them (design D20).
         std::thread::spawn(move || {
             let _ = child.wait();
-            unreaped_set().remove(&pid);
         });
         Ok(())
     }
@@ -1076,52 +1069,6 @@ fn now() -> String {
     chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true)
 }
 
-/// The process ids of the run supervisors this process started, or was
-/// handed by the `sluice run` it started afresh from, and has not reaped
-/// (135; design D7 of `a-kept-run-hands-over-what-it-cannot-take-up`).
-static UNREAPED: Mutex<BTreeSet<u32>> = Mutex::new(BTreeSet::new());
-
-fn unreaped_set() -> std::sync::MutexGuard<'static, BTreeSet<u32>> {
-    UNREAPED.lock().unwrap_or_else(|e| e.into_inner())
-}
-
-/// The run supervisors this process started, or was handed, and has not
-/// reaped: what a `sluice run` that starts afresh hands to itself, so the
-/// run started afresh reaps them (135; record 0107; design D7).
-pub fn unreaped() -> Vec<u32> {
-    unreaped_set().iter().copied().collect()
-}
-
-/// Reap `pids`, the run supervisors a `sluice run` started and handed over
-/// as not yet reaped when it started afresh as this process: each on a
-/// thread of its own that waits for that process alone, never for any
-/// child, so no end another part of sluice waits on is taken. Each is
-/// named among [`unreaped`] until it is reaped, so a later hand-over
-/// carries it again; one that ended meanwhile is reaped at once (135;
-/// record 0107; design D7).
-pub fn reap_handed(pids: &[u32]) {
-    for &pid in pids {
-        let Ok(raw) = i32::try_from(pid) else {
-            continue;
-        };
-        unreaped_set().insert(pid);
-        std::thread::spawn(move || {
-            loop {
-                match nix::sys::wait::waitpid(Pid::from_raw(raw), None) {
-                    Err(Errno::EINTR) => continue,
-                    Ok(
-                        nix::sys::wait::WaitStatus::Exited(..)
-                        | nix::sys::wait::WaitStatus::Signaled(..),
-                    )
-                    | Err(_) => break,
-                    Ok(_) => continue,
-                }
-            }
-            unreaped_set().remove(&pid);
-        });
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::{dir_name, flat_name, write_atomic, Request, Runs};
@@ -1312,32 +1259,5 @@ mod tests {
         let unique: std::collections::BTreeSet<&String> = dirs.iter().collect();
         assert_eq!(unique.len(), names.len(), "{dirs:?}");
         assert_eq!(dir_name("sluice/try/main/39"), "sluice+2Ftry+2Fmain+2F39");
-    }
-
-    /// The settings-take-up spec's "A supervisor handed over": a child of
-    /// the process whose id is handed over as not yet reaped is reaped,
-    /// and no longer named among those not yet reaped (135; design D7).
-    #[test]
-    fn a_supervisor_handed_over_is_reaped() {
-        use nix::errno::Errno;
-        use nix::sys::wait::{waitpid, WaitPidFlag};
-        use nix::unistd::Pid;
-        use std::time::{Duration, Instant};
-        let child = std::process::Command::new("sh")
-            .args(["-c", "exit 0"])
-            .spawn()
-            .unwrap();
-        let pid = child.id();
-        std::mem::forget(child);
-        super::reap_handed(&[pid]);
-        let until = Instant::now() + Duration::from_secs(5);
-        while super::unreaped().contains(&pid) {
-            assert!(Instant::now() < until, "{pid} not reaped");
-            std::thread::sleep(Duration::from_millis(10));
-        }
-        assert_eq!(
-            waitpid(Pid::from_raw(pid as i32), Some(WaitPidFlag::WNOHANG)),
-            Err(Errno::ECHILD)
-        );
     }
 }

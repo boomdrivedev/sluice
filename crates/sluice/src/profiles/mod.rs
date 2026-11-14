@@ -31,6 +31,13 @@ use crate::identity::Identity;
 use crate::instance::Instance;
 use crate::retry;
 
+/// The variables a multiplexer's pane names its session by, as the
+/// driver profile reads them (51): what nothing started outside a pane
+/// carries, sluice's host process among it (135; design D3).
+pub fn session_variables() -> [&'static str; 2] {
+    [worktrunk::herdr::PANE, worktrunk::herdr::SOCKET]
+}
+
 /// The profiles the walkthrough's setup names, for the repository holding
 /// a directory.
 pub struct Bound {
@@ -41,6 +48,9 @@ pub struct Bound {
     pub state: records::Records,
     /// The pull request driver, which also takes pull requests in.
     pub pulls: Rc<github::pulls::Pulls>,
+    /// 135: sluice's host process, reached through its socket, or, in its
+    /// own repositories' tasks, read in place.
+    pub host_process: Box<dyn crate::host_process::HostProcess>,
 }
 
 /// The driver seam as an instance binds it: a pull request's place,
@@ -137,8 +147,9 @@ impl Bound {
             .forge
             .as_ref()
             .map_or(crate::instance::DISCOVERY, |f| f.discovery);
-        // 137: this host as its peers name it, and its lease, for the
-        // intake mark.
+        // 72, 137: this host as its peers name it, and its lease, for the
+        // branches it keeps on their remotes, whose pull requests it alone
+        // takes in (design D21).
         let peer = sluice_core::Peer {
             name: instance.peers.name.clone().unwrap_or_else(checks::hostname),
             lease: instance.peers.lease,
@@ -209,6 +220,7 @@ impl Bound {
             },
             state,
             pulls,
+            host_process: Box::new(crate::host_process::Socketed::default()),
         })
     }
 
@@ -430,6 +442,10 @@ fn operator_token() -> Option<String> {
 }
 
 impl crate::exec::Host for Bound {
+    fn host_process(&self) -> &dyn crate::host_process::HostProcess {
+        &*self.host_process
+    }
+
     fn reserved(&self) -> usize {
         self.tests.instance().reserved
     }

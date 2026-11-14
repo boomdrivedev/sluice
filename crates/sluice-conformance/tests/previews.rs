@@ -147,7 +147,8 @@ fn asking_again_gives_the_same_preview() {
         format!("http://localhost:{}/docs", made.ports["SLUICE_PORT_API"])
     );
     assert_eq!(s.preview_state(&made).unwrap(), PreviewState::Waiting);
-    s.start_preview(&plan, place).unwrap();
+    s.start_preview(&plan, place, sluice_conformance::shared::session_part(&s))
+        .unwrap();
     // A caller that crashed asks again (S32): the same preview, no run.
     let again = s.preview_of(&rev).unwrap().unwrap();
     assert_eq!(again.names, made.names);
@@ -167,7 +168,8 @@ fn a_preview_comes_up_or_fails_and_decides_nothing() {
     let plan = s.preview_plan(BRANCH, &rev).unwrap().unwrap();
     h.w().hold_runs(true);
     let (place, _) = s.make_preview(&plan).unwrap();
-    s.start_preview(&plan, place).unwrap();
+    s.start_preview(&plan, place, sluice_conformance::shared::session_part(&s))
+        .unwrap();
     let p = s.preview_of(&rev).unwrap().unwrap();
     assert_eq!(s.preview_state(&p).unwrap(), PreviewState::Starting);
     h.w().complete(&rev);
@@ -185,7 +187,8 @@ fn a_preview_comes_up_or_fails_and_decides_nothing() {
     h.w().preview_fails(true);
     let plan = s.preview_plan(BRANCH, &next).unwrap().unwrap();
     let (place, _) = s.make_preview(&plan).unwrap();
-    s.start_preview(&plan, place).unwrap();
+    s.start_preview(&plan, place, sluice_conformance::shared::session_part(&s))
+        .unwrap();
     let failed = s.preview_of(&next).unwrap().unwrap();
     assert!(matches!(
         s.preview_state(&failed).unwrap(),
@@ -227,7 +230,8 @@ fn a_round_never_releases_a_preview_that_is_up() {
     let r1 = h.tip();
     let plan = s.preview_plan(BRANCH, &r1).unwrap().unwrap();
     let (place, _) = s.make_preview(&plan).unwrap();
-    s.start_preview(&plan, place).unwrap();
+    s.start_preview(&plan, place, sluice_conformance::shared::session_part(&s))
+        .unwrap();
     for n in 0..2 {
         h.work(
             &format!("unit/{n}"),
@@ -259,7 +263,8 @@ fn a_preview_whose_checkout_is_gone_is_freed() {
         let rev = h.tip();
         let plan = s.preview_plan(BRANCH, &rev).unwrap().unwrap();
         let (place, made) = s.make_preview(&plan).unwrap();
-        s.start_preview(&plan, place).unwrap();
+        s.start_preview(&plan, place, sluice_conformance::shared::session_part(&s))
+            .unwrap();
         h.w().remove_preview_checkout(&made.name);
         if fails {
             h.w()
@@ -304,7 +309,8 @@ fn a_preview_whose_release_fails_is_tried_a_bounded_number_of_times() {
     h.w().preview_fails(true);
     let plan = s.preview_plan(BRANCH, &rev).unwrap().unwrap();
     let (place, made) = s.make_preview(&plan).unwrap();
-    s.start_preview(&plan, place).unwrap();
+    s.start_preview(&plan, place, sluice_conformance::shared::session_part(&s))
+        .unwrap();
     h.w()
         .place_release_fails(&made.name, Some(shared::RELEASE_FAILS));
     let mut dropped = Vec::new();

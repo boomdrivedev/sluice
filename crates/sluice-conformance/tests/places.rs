@@ -135,6 +135,79 @@ fn a_place_made_by_a_step_that_stopped_before_its_run_started_is_released() {
     assert!(h.w().live_places().is_empty());
 }
 
+/// satisfies: 71, 150, S75; rule core.49; record 0087
+///
+/// A round holds the room for the run it decides to start from its count
+/// to its start: through the landing the same round makes of work the
+/// branch already holds (122), whose outcome it pushes before it starts
+/// the run, an agent's ask for a session's room finds the host's one run
+/// held, and the run starts in it.
+#[test]
+fn a_run_decided_holds_its_room_until_it_starts() {
+    let h = Harness::bolt();
+    h.w().host_limit(1);
+    h.w().hold_runs(true);
+    let landed = h.work("unit/a", "agent-a", &[("a/one", Some("1"))]);
+    let one = h.submit("unit/a");
+    h.work("unit/b", "agent-b", &[("a/two", Some("2"))]);
+    let two = h.submit("unit/b");
+    // #1's work reaches the branch by hand before any round.
+    h.w().set_branch(BRANCH, &landed);
+    h.w().probe_holds(true);
+    h.step();
+    assert_eq!(h.sub(one).state, State::Landed);
+    assert!(h.sub(one).landed_elsewhere);
+    assert_eq!(
+        h.w().probed(),
+        [false],
+        "the agent's ask during the landing's outcome found no room"
+    );
+    assert_eq!(
+        h.w().started().len(),
+        1,
+        "#2's run started in the room held"
+    );
+    assert_eq!(h.w().holds(), [sluice_seams::RunKind::Queue]);
+    assert_eq!(h.w().parts_held(), 0, "the part went to the run");
+    assert_eq!(h.sub(two).state, State::Testing);
+}
+
+/// satisfies: 71; rule core.49; record 0087
+///
+/// A run the host holds no room for is not marked starting: the round
+/// that counts the host full makes no place and writes no start, and the
+/// run starts once a later round holds its room.
+#[test]
+fn a_run_no_room_was_held_for_is_not_marked_starting() {
+    let h = Harness::bolt();
+    h.w().host_limit(1);
+    h.w().other_runs(1);
+    h.work("unit/a", "agent-a", &[("a/lib", Some("a2"))]);
+    let one = h.submit("unit/a");
+    h.step();
+    let starting = |h: &Harness| {
+        h.events()
+            .into_iter()
+            .any(|e| matches!(e, Event::Testing { .. }))
+            || h.sluice().status(BRANCH).unwrap().testing > 0
+    };
+    assert!(!starting(&h), "no run marked starting");
+    assert!(h.w().made_places().is_empty());
+    assert!(h.w().started().is_empty());
+    assert_eq!(h.sub(one).state, State::Queued);
+    // Another repository's run took the last room between the count and
+    // the hold: still none.
+    h.w().other_runs(0);
+    h.w().refuse_next_hold();
+    h.step();
+    assert!(!starting(&h));
+    assert!(h.w().started().is_empty());
+    h.step();
+    assert_eq!(h.w().started().len(), 1);
+    h.settle();
+    assert_eq!(h.sub(one).state, State::Landed);
+}
+
 /// The bolt policy with `release_retries = 1`.
 fn one_retry() -> Harness {
     Harness::new(&policy(false, "fail", 4).replace(

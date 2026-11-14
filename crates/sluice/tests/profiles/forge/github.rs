@@ -227,6 +227,11 @@ impl GitHub {
         });
     }
 
+    /// Every trouble set is lifted: the fake answers as GitHub does.
+    pub fn calm(&self) {
+        self.troubles.lock().unwrap().clear();
+    }
+
     /// How many calls of `method` to a path starting `path` the fake saw.
     pub fn calls(&self, method: &str, path: &str) -> usize {
         self.fake

@@ -9,11 +9,19 @@
 //! ```text
 //! $XDG_STATE_HOME/sluice/running/     (default ~/.local/state)
 //!   .lock                   held only across counting and admitting one run
-//!   <run dir, flat>.json    one admitted run: its kind, repository, place,
+//!   <name>.json             one admitted run: its kind, repository, place,
 //!                           run directory, starter and when it was admitted
-//!   <run dir, flat>.hold    locked by the process that admitted the run,
+//!   <name>.hold             locked by the process that admitted the run,
 //!                           until its supervisor holds the run directory
 //! ```
+//!
+//! A run's room is admitted before its run directory is known, as a round
+//! holds a combination's part from the count that chose it to its start
+//! (71; rule core.49; record 0087): its entry is named for the admission
+//! and names, until the run begins, a run directory under the registry
+//! that never exists, and is written again with the run's own once it
+//! begins. An older sluice names its entries by their run directories;
+//! the names only keep entries apart.
 //!
 //! An entry counts while its hold is locked or a supervisor holds its run
 //! directory (`crate::runs`). One that is neither, a run that ended or a
@@ -40,7 +48,7 @@ use anyhow::{bail, Context, Result};
 use serde::{Deserialize, Serialize};
 use sluice_seams::Running;
 
-use crate::runs::{flat_name, supervised};
+use crate::runs::supervised;
 
 /// What a running check is run for.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -83,6 +91,7 @@ pub struct HostCount {
 pub struct Admission {
     dir: PathBuf,
     name: String,
+    entry: Entry,
     hold: Option<File>,
 }
 
@@ -104,14 +113,20 @@ impl HostCount {
 
     /// Admit `entry` while fewer than `limit` checks run on the host, both
     /// kinds counted, under the host's lock; `None` at the limit. Every
-    /// entry that counts for nothing is removed on the way.
+    /// entry that counts for nothing is removed on the way. An entry given
+    /// no run directory, a run's room held before its run begins, names one
+    /// under the registry that never exists until [`Admission::begin`].
     pub fn admit(&self, entry: &Entry, limit: usize) -> Result<Option<Admission>> {
         let _lock = self.lock()?;
-        let name = flat_name(&entry.run_dir.to_string_lossy());
+        let name = admission_name();
+        let mut entry = entry.clone();
+        if entry.run_dir.as_os_str().is_empty() {
+            entry.run_dir = self.dir.join(format!("{name}.unstarted"));
+        }
         let mut live = 0;
         for (n, e) in self.recorded()? {
             if self.live(&n, &e)? {
-                if n == name {
+                if e.run_dir == entry.run_dir {
                     bail!("the run in {} is admitted already", e.run_dir.display());
                 }
                 live += 1;
@@ -122,6 +137,7 @@ impl HostCount {
         if live >= limit {
             return Ok(None);
         }
+        let entry = &entry;
         // The hold first: an entry is never seen without it.
         let path = self.dir.join(format!("{name}.hold"));
         let hold = File::create(&path).with_context(|| format!("creating {}", path.display()))?;
@@ -142,6 +158,7 @@ impl HostCount {
         Ok(Some(Admission {
             dir: self.dir.clone(),
             name,
+            entry: entry.clone(),
             hold: Some(hold),
         }))
     }
@@ -156,6 +173,18 @@ impl HostCount {
                     Kind::Queue => out.queue += 1,
                     Kind::Session => out.sessions += 1,
                 }
+            }
+        }
+        Ok(out)
+    }
+
+    /// Each repository's checks running on the host, both kinds counted:
+    /// its runs under test (record 0123; D13).
+    pub fn under_test(&self) -> Result<std::collections::BTreeMap<PathBuf, usize>> {
+        let mut out = std::collections::BTreeMap::new();
+        for (name, e) in self.recorded()? {
+            if self.live(&name, &e)? {
+                *out.entry(e.repository).or_default() += 1;
             }
         }
         Ok(out)
@@ -210,11 +239,41 @@ impl HostCount {
 }
 
 impl Admission {
+    /// What kind of run the room was admitted for.
+    pub fn kind(&self) -> Kind {
+        self.entry.kind
+    }
+
+    /// The run begins in `run_dir`, in the place `place`: its entry names
+    /// them from now, written whole, while its hold keeps it counted.
+    pub fn begin(&mut self, place: &str, run_dir: &Path) -> Result<()> {
+        self.entry.place = place.to_string();
+        self.entry.run_dir = run_dir.to_path_buf();
+        let _lock = lock(&self.dir)?;
+        let tmp = self.dir.join(format!(".{}.tmp", self.name));
+        let path = self.dir.join(format!("{}.json", self.name));
+        std::fs::write(&tmp, serde_json::to_vec_pretty(&self.entry)?)
+            .with_context(|| format!("writing {}", tmp.display()))?;
+        std::fs::rename(&tmp, &path).with_context(|| format!("writing {}", path.display()))
+    }
+
     /// The run's supervisor holds its run directory, which keeps the
     /// entry counted from now: let the hold go.
     pub fn started(mut self) {
         self.hold = None;
     }
+}
+
+/// A name for an admission no other on the host takes: this process's,
+/// its count of admissions and the time.
+fn admission_name() -> String {
+    static N: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let n = N.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+    let at = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_nanos())
+        .unwrap_or(0);
+    format!("run-{}-{n}-{at}", std::process::id())
 }
 
 impl Drop for Admission {
@@ -315,6 +374,16 @@ mod tests {
         }
     }
 
+    /// The registry's entries, by the run directory each names.
+    fn named(count: &HostCount) -> Vec<PathBuf> {
+        count
+            .recorded()
+            .unwrap()
+            .into_iter()
+            .map(|(_, e)| e.run_dir)
+            .collect()
+    }
+
     /// Hold `dir`'s lock as its supervisor would, until dropped.
     fn supervise(dir: &Path) -> File {
         let lock = File::create(dir.join("lock")).unwrap();
@@ -348,12 +417,85 @@ mod tests {
 
         drop(second);
         assert_eq!(count.running().unwrap().sessions, 0, "its start failed");
-        assert!(!count
-            .dir()
-            .join(format!("{}.json", flat_name(&b.to_string_lossy())))
-            .exists());
+        assert!(!named(&count).contains(&b));
         let third = count.admit(&entry(Kind::Queue, &c), 2).unwrap();
         assert!(third.is_some());
+    }
+
+    /// 71 (record 0087; design D12): the host process's room counts an
+    /// older sluice's admission through the registry, and its own parts
+    /// are counted by an older sluice's.
+    #[test]
+    fn a_room_counts_an_older_sluices_admission() {
+        use crate::host_process::room::{Asked, Asker, Room};
+        let s = Scratch::new("older");
+        let older = s.run_dir("older");
+        let repository = s.0.join("repo");
+        let now = std::time::Instant::now();
+        let mut room = Room::over(s.count(), 1, 0);
+        let admitted = s
+            .count()
+            .admit(&entry(Kind::Session, &older), 1)
+            .unwrap()
+            .expect("the older sluice's exec is admitted");
+        let asker = Asker::Queue(repository.clone());
+        assert!(matches!(
+            room.ask(&asker, &repository, now).unwrap(),
+            Asked::Refused(_)
+        ));
+        drop(admitted);
+        let Asked::Held(id) = room.ask(&asker, &repository, now).unwrap() else {
+            panic!("the room is free once the older run's start failed");
+        };
+        assert!(
+            s.count()
+                .admit(&entry(Kind::Session, &older), 1)
+                .unwrap()
+                .is_none(),
+            "the room's part counts for the older sluice"
+        );
+        room.give_back(id);
+        assert!(s
+            .count()
+            .admit(&entry(Kind::Session, &older), 1)
+            .unwrap()
+            .is_some());
+    }
+
+    /// 71, 135 (design D6, D12): a room made afresh, as a host process
+    /// that starts after another stopped, counts the runs whose supervisors
+    /// still hold them, and a run begun from a part names its directory.
+    #[test]
+    fn a_new_room_counts_the_runs_still_supervised() {
+        use crate::host_process::room::{Asked, Asker, Room};
+        let s = Scratch::new("afresh");
+        let dir = s.run_dir("outlived");
+        let repository = s.0.join("repo");
+        let asker = Asker::Queue(repository.clone());
+        let now = std::time::Instant::now();
+        let supervisor = {
+            let mut room = Room::over(s.count(), 1, 0);
+            let Asked::Held(id) = room.ask(&asker, &repository, now).unwrap() else {
+                panic!("an empty host has room");
+            };
+            room.begin(id, "sluice/try/main/1", &dir).unwrap();
+            assert_eq!(named(&s.count()), std::slice::from_ref(&dir));
+            let supervisor = supervise(&dir);
+            room.started(id);
+            supervisor
+            // The process that held the room stops.
+        };
+        let mut room = Room::over(s.count(), 1, 0);
+        assert_eq!(room.running().unwrap().queue, 1);
+        assert!(matches!(
+            room.ask(&asker, &repository, now).unwrap(),
+            Asked::Refused(_)
+        ));
+        drop(supervisor);
+        assert!(matches!(
+            room.ask(&asker, &repository, now).unwrap(),
+            Asked::Held(_)
+        ));
     }
 
     /// The variable naming the one test a run of this binary is for.
@@ -407,16 +549,22 @@ mod tests {
             // Its supervisor is killed.
             drop(supervisor);
         }
-        let name = flat_name(&dead.to_string_lossy());
-        assert!(count.dir().join(format!("{name}.json")).exists());
+        assert_eq!(named(&count), std::slice::from_ref(&dead));
         assert_eq!(count.running().unwrap(), Running::default());
         let admitted = count.admit(&entry(Kind::Queue, &next), 1).unwrap();
         assert!(
             admitted.is_some(),
             "the dead entry holds no part of the bound"
         );
-        assert!(!count.dir().join(format!("{name}.json")).exists());
-        assert!(!count.dir().join(format!("{name}.hold")).exists());
+        assert_eq!(named(&count), std::slice::from_ref(&next));
+        let holds = std::fs::read_dir(count.dir())
+            .unwrap()
+            .filter(|e| {
+                let name = e.as_ref().unwrap().file_name();
+                name.to_string_lossy().ends_with(".hold")
+            })
+            .count();
+        assert_eq!(holds, 1, "the dead entry's hold went with it");
     }
 
     /// The spec's "Two rounds race for one free run": starters admitting

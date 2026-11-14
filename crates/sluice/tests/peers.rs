@@ -60,10 +60,14 @@ impl Host {
         }
     }
 
+    /// The binary in `dir`, this setup's host. The host process its
+    /// commands start passes only when asked, so the rounds that run are
+    /// the ones the test's commands ask for (design D14).
     fn command(&self, dir: &Path) -> Command {
         let mut c = Command::new(env!("CARGO_BIN_EXE_sluice"));
         support::isolated(&mut c)
             .current_dir(dir)
+            .env("SLUICE_ROUND_SLEEP", "record")
             .env("XDG_CONFIG_HOME", self.config.path())
             .env("XDG_STATE_HOME", self.state.path())
             .env_remove("SLUICE_AGENT")
@@ -114,6 +118,34 @@ impl Host {
         assert!(out.status.success(), "{}", text(&out));
         let v: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
         v["id"].as_u64().unwrap()
+    }
+
+    /// Until every host process its commands started has ended, as one
+    /// does once nothing is in play and nothing follows it, at most ten
+    /// seconds: its log names each start's pid ending (135; design D6).
+    fn host_process_ended(&self) {
+        let log = self.state.path().join("sluice/host/log");
+        let deadline = Instant::now() + Duration::from_secs(10);
+        loop {
+            let text = std::fs::read_to_string(&log).unwrap_or_default();
+            let started: Vec<&str> = text
+                .lines()
+                .filter_map(|l| l.split(" started, pid ").nth(1))
+                .filter_map(|rest| rest.split(';').next())
+                .collect();
+            let ended = |pid: &&str| {
+                text.lines()
+                    .any(|l| l.ends_with(&format!("sluice host {pid} ends")))
+            };
+            if started.iter().all(ended) {
+                return;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "a host process never ended: {text}"
+            );
+            std::thread::sleep(Duration::from_millis(100));
+        }
     }
 
     fn state_of(&self, id: u64) -> String {
@@ -540,12 +572,15 @@ fn asks(starts: &[String]) -> usize {
 }
 
 /// reader-tick, "Two branches' records on one remote": with nothing
-/// queued, each pass of `sluice run` after its first starts git once, for
-/// one fetch from origin (129).
+/// queued, each pass of the host process after its first starts git once,
+/// for one fetch from origin (129). Each `sluice run` starts a host process
+/// of its own, the last one having ended, so the two runs read alike at
+/// its start and differ by their passes alone (135).
 #[test]
 fn each_pass_asks_origin_once_for_both_branches() {
     let (host, _origin) = two_branches_landed("ticks-two");
     let run = |rounds: &str| -> Vec<String> {
+        host.host_process_ended();
         let before = host.git.count();
         let out = host
             .command(host.repo.dir())
@@ -672,41 +707,117 @@ fn remote_calls(starts: &[String]) -> Vec<String> {
         .collect()
 }
 
-/// 129, 64: with `main` and `release` on origin, a submission queued on
-/// `main` and a commit pushed to origin's `release` by hand, a one-shot
-/// overview with no reader asks origin once, that one fetch bringing every
-/// ref the host reads from it: `release` at the revision pushed, and
-/// `main`'s queue, with no branch fetched on its own.
+/// 129, 64 (design D16): with `main` and `release` on origin and a
+/// submission queued on `main`, a one-shot overview beside the host
+/// process's current reading asks origin nothing: it reads every branch as
+/// the host holds it since that reading's one ask, `main`'s queue among
+/// them.
 #[test]
-fn an_overview_asks_origin_once_for_every_branch_and_its_queue() {
-    let (host, origin) = two_branches_landed("overview-once");
+fn a_one_shot_overview_beside_a_current_reading_asks_origin_nothing() {
+    let (host, _origin) = two_branches_landed("overview-current");
     host.submit("queued");
-    let other = Repo::clone_of(origin.path(), "overview-once-elsewhere");
-    other.git(&["checkout", "-q", "release"]);
-    other.write("by-hand.txt", "pushed by hand\n");
-    other.git(&["add", "-A"]);
-    other.git(&["commit", "-q", "-m", "by hand"]);
-    other.git(&["push", "-q", "origin", "HEAD:release"]);
-    let pushed = other.rev("HEAD");
+    // The host process reads the repository for a one-shot read.
+    let out = host.sluice(&["status", "main"]);
+    assert!(out.status.success(), "{}", text(&out));
 
     let before = host.git.count();
     let out = host.sluice(&["overview", "--json"]);
     assert!(out.status.success(), "{}", text(&out));
-    let starts = host.git.starts()[before..].to_vec();
-    let calls = remote_calls(&starts);
-    assert_eq!(calls.len(), 1, "{calls:?}");
-    assert_eq!(asks(&calls), 1, "{calls:?}");
-
+    let calls = remote_calls(&host.git.starts()[before..]);
+    assert!(calls.is_empty(), "{calls:?}");
     let v: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
-    let part = |name: &str| {
-        v["branches"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .find(|b| b["branch"] == name)
-            .cloned()
-            .unwrap_or_else(|| panic!("{name} in {v}"))
-    };
-    assert_eq!(part("release")["revision"], pushed.as_str(), "{v}");
-    assert_eq!(part("main")["depth"], 1, "{v}");
+    let main = v["branches"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|b| b["branch"] == "main")
+        .cloned()
+        .unwrap_or_else(|| panic!("main in {v}"));
+    assert_eq!(main["depth"], 1, "{v}");
+}
+
+/// 129 (design D16): a status beside the host process's current reading
+/// asks origin nothing, and says the queue as the host holds it.
+#[test]
+fn a_status_beside_a_current_reading_asks_origin_nothing() {
+    let (host, _origin) = two_branches_landed("status-current");
+    host.submit("queued");
+    let out = host.sluice(&["overview", "--json"]);
+    assert!(out.status.success(), "{}", text(&out));
+
+    let before = host.git.count();
+    let out = host.sluice(&["status", "main", "--json"]);
+    assert!(out.status.success(), "{}", text(&out));
+    let calls = remote_calls(&host.git.starts()[before..]);
+    assert!(calls.is_empty(), "{calls:?}");
+    let v: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert_eq!(v["submissions"].as_array().map(Vec::len), Some(1), "{v}");
+}
+
+/// 129, 69 (design D17): with `main`'s records on origin holding several
+/// signed run records, a host process started afresh and passing the
+/// repository ten times, and `sluice status <n>` run three times, each
+/// record was verified once, by the host process, and no command read one
+/// itself.
+#[test]
+fn a_signed_record_is_verified_once() {
+    let (host, origin) = two_branches_landed("verified-once");
+    let mut landed = Vec::new();
+    for n in ["m2", "m3"] {
+        let id = host.submit_to(n, "main");
+        let deadline = Instant::now() + Duration::from_secs(60);
+        while host.state_of(id) != "landed" {
+            let out = host.sluice(&["step", "main"]);
+            assert!(out.status.success(), "{}", text(&out));
+            assert!(Instant::now() < deadline, "#{id}: {}", host.state_of(id));
+            std::thread::sleep(Duration::from_millis(200));
+        }
+        landed.push(id);
+    }
+    let listed = support::git_command()
+        .args(["--git-dir", origin.path().to_str().unwrap()])
+        .args(["ls-tree", "-r", "--name-only", "refs/sluice/runs/a"])
+        .output()
+        .unwrap();
+    let records = String::from_utf8_lossy(&listed.stdout).lines().count();
+    assert!(records >= 4, "{}", String::from_utf8_lossy(&listed.stderr));
+
+    // A host process started afresh, kept by a follow, so one index reads
+    // what every command after asks.
+    host.host_process_ended();
+    let out = host.sluice(&["overview", "--json"]);
+    assert!(out.status.success(), "{}", text(&out));
+    let doc: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    let repository = doc["repository"].as_str().unwrap().to_string();
+    let client = sluice::host_process::client::Client::new(
+        Path::new(env!("CARGO_BIN_EXE_sluice")),
+        support::env_of(&host.command(host.repo.dir())),
+    )
+    .unwrap();
+    let _kept = client
+        .follow(
+            Path::new(&repository),
+            sluice::host_process::protocol::FollowKind::Wait,
+        )
+        .unwrap();
+
+    let out = host.sluice(&["run", "--rounds", "10"]);
+    assert!(out.status.success(), "{}", text(&out));
+    for _ in 0..3 {
+        let out = host.sluice(&["status", &landed[1].to_string(), "--json"]);
+        assert!(out.status.success(), "{}", text(&out));
+        let said = text(&out);
+        assert!(!said.contains("reads them itself"), "{said}");
+        let v: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+        assert_eq!(v["state"], "landed", "{v}");
+        assert!(v["checks"].as_array().is_some_and(|c| !c.is_empty()), "{v}");
+    }
+    let log = std::fs::read_to_string(client.paths().log()).unwrap();
+    let verified: usize = log
+        .lines()
+        .filter_map(|l| l.split(": verified ").nth(1))
+        .filter_map(|rest| rest.split(' ').next())
+        .map(|n| n.parse::<usize>().unwrap())
+        .sum();
+    assert_eq!(verified, records, "{log}");
 }

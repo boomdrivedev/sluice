@@ -11,7 +11,7 @@ use std::time::{Duration, Instant};
 use sluice::instance::{HostCache, Instance};
 use sluice::profiles::checks::{docker_host, Checks, Endpoint, EngineTls};
 use sluice_seams::{
-    AtBound, Equip, EquipStep, Limits, Network, Outcome, Place, Progress, Refusals, RunHandle,
+    Equip, EquipStep, Limits, Network, Outcome, Place, Progress, Refusals, RunHandle, RunKind,
     RunReport, RunRequest, Setting, Settings, Source, Tests, Through,
 };
 use support::{Repo, Scratch};
@@ -78,7 +78,7 @@ fn finish(c: &Checks, req: &RunRequest) -> RunReport {
 
 /// `req` started and run to its end: its handle and its report.
 fn ran(c: &Checks, req: &RunRequest) -> (RunHandle, RunReport) {
-    let run = c.start(req).unwrap();
+    let run = support::start(c, req).unwrap();
     let until = Instant::now() + Duration::from_secs(60);
     loop {
         match c.progress(&run).unwrap() {
@@ -301,8 +301,7 @@ fn a_cache_holding_the_checkout_is_refused() {
         );
         let err = format!(
             "{:#}",
-            c.start(&request(&repo, name, command("touch ran")))
-                .unwrap_err()
+            support::start(&c, &request(&repo, name, command("touch ran"))).unwrap_err()
         );
         assert!(
             err.contains(&format!("dir {} {how} this run's checkout", dir.display())),
@@ -346,7 +345,7 @@ fn a_command_runs_with_the_repositorys_toolchain() {
     // A toolchain that fails refuses the run.
     let mut tests = command("true");
     tests.insert("toolchain".into(), Setting::List(vec!["false".into()]));
-    assert!(c.start(&request(&repo, "p2", tests)).is_err());
+    assert!(support::start(&c, &request(&repo, "p2", tests)).is_err());
 }
 
 /// 83, 84: a limit the open executor cannot hold refuses the run before
@@ -358,7 +357,7 @@ fn the_open_executor_refuses_what_it_cannot_hold() {
     let refused = |limits: Limits, word: &str| {
         let mut req = request(&repo, "p1", command("touch ran"));
         req.limits = limits;
-        let err = c.start(&req).unwrap_err();
+        let err = support::start(&c, &req).unwrap_err();
         assert!(format!("{err:#}").contains(word), "{err:#}");
         assert!(!repo.dir().join("ran").exists());
         assert!(!c.runs().dir("p1").exists());
@@ -413,9 +412,10 @@ fn the_bound_is_the_instances() {
     assert_eq!(checks(&repo).bound().unwrap(), 2);
 }
 
-/// 71, S60: the bound is the host's, shared by every repository on it. A
-/// start from a second repository's checkout while the host's one run goes
-/// is refused before anything of it runs, and starts once that run ends.
+/// 71, S60 (rule core.49; record 0087): the bound is the host's, shared
+/// by every repository on it. A second repository's hold while the host's
+/// one run goes is refused before anything of its run runs, and holds
+/// once that run ends.
 #[test]
 fn a_second_repositorys_start_waits_for_the_hosts_bound() {
     let host = Scratch::new("checks-host-running");
@@ -442,13 +442,13 @@ fn a_second_repositorys_start_waits_for_the_hosts_bound() {
     let (first, second) = (at(&a), at(&b));
     let go = a.dir().join(".git/go");
     let holds = format!("while [ ! -e '{}' ]; do sleep 0.05; done", go.display());
-    let going = first
-        .start(&request(&a, "sluice/try/main/1", command(&holds)))
-        .unwrap();
+    let going = support::start(&first, &request(&a, "sluice/try/main/1", command(&holds))).unwrap();
 
     let req = request(&b, "sluice/try/main/1", command("touch ran"));
-    let err = second.start(&req).unwrap_err();
-    assert!(err.downcast_ref::<AtBound>().is_some(), "{err:#}");
+    assert!(
+        second.hold(RunKind::Queue).unwrap().is_none(),
+        "the host's one run is the first repository's"
+    );
     let dir = second.runs().dir("sluice/try/main/1");
     assert!(!dir.join("request.json").exists(), "nothing of it ran");
     assert!(!b.dir().join("ran").exists());
@@ -460,7 +460,19 @@ fn a_second_repositorys_start_waits_for_the_hosts_bound() {
         assert!(Instant::now() < until, "the first run never ended");
         std::thread::sleep(Duration::from_millis(50));
     }
-    assert_eq!(finish(&second, &req).tasks[0].outcome, Outcome::Pass);
+    let part = second.hold(RunKind::Queue).unwrap().expect("the run ended");
+    let run = second.start(&req, part).unwrap();
+    let until = Instant::now() + Duration::from_secs(60);
+    let report = loop {
+        match second.progress(&run).unwrap() {
+            Progress::Finished(r) => break r,
+            Progress::Lost => panic!("lost"),
+            Progress::Running => {}
+        }
+        assert!(Instant::now() < until, "the run never finished");
+        std::thread::sleep(Duration::from_millis(50));
+    };
+    assert_eq!(report.tasks[0].outcome, Outcome::Pass);
     assert!(b.dir().join("ran").exists());
 }
 
@@ -469,9 +481,9 @@ fn a_second_repositorys_start_waits_for_the_hosts_bound() {
 fn an_unknown_runner_is_refused() {
     let repo = Repo::new("checks-runner");
     let c = checks(&repo);
-    assert!(c.start(&request(&repo, "p1", Settings::new())).is_err());
+    assert!(support::start(&c, &request(&repo, "p1", Settings::new())).is_err());
     let tests = Settings::from([("runner".into(), Setting::Text("make".into()))]);
-    assert!(c.start(&request(&repo, "p2", tests)).is_err());
+    assert!(support::start(&c, &request(&repo, "p2", tests)).is_err());
 }
 
 /// 83, 84: on macOS the sandbox holds a run to writing its place and
@@ -657,12 +669,8 @@ fn two_sandbox_runs_at_once_report_only_their_own_refusals() {
         outside.display()
     );
     let stays = "sleep 1; touch \"$SLUICE_TMP/in\"; sleep 1; exit 1";
-    let one = c
-        .start(&sandboxed(request(&repo, "p1", command(&escape)), None))
-        .unwrap();
-    let two = c
-        .start(&sandboxed(request(&repo, "p2", command(stays)), None))
-        .unwrap();
+    let one = support::start(&c, &sandboxed(request(&repo, "p1", command(&escape)), None)).unwrap();
+    let two = support::start(&c, &sandboxed(request(&repo, "p2", command(stays)), None)).unwrap();
     for run in [&one, &two] {
         let until = Instant::now() + Duration::from_secs(60);
         while !matches!(c.progress(run).unwrap(), Progress::Finished(_)) {
@@ -1328,6 +1336,9 @@ fn sluice_in(dir: &std::path::Path, state: &Scratch, args: &[&str]) -> std::proc
     )))
     .args(args)
     .current_dir(dir)
+    // The host process its commands start passes only when asked, so the
+    // test's own steps decide its rounds (135; design D14).
+    .env("SLUICE_ROUND_SLEEP", "record")
     .env("XDG_CONFIG_HOME", state.path().join("config"))
     .env("XDG_STATE_HOME", state.path().join("state"))
     .env_remove("SLUICE_AGENT")
@@ -1850,7 +1861,7 @@ fn a_run_whose_working_copy_could_not_be_equipped_could_not_start() {
         &format!("echo '{NO_TOOLCHAIN}' >&2; exit 1"),
     );
     let c = checks(&w.repo);
-    let err = c.start(&moon_request(&w, "p1")).unwrap_err();
+    let err = support::start(&c, &moon_request(&w, "p1")).unwrap_err();
     assert_eq!(
         format!("{err:#}"),
         format!("moon setup: exited 1: {NO_TOOLCHAIN}")

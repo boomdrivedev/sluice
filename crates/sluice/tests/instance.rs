@@ -266,6 +266,11 @@ mod bound {
         /// A session on `unit/<name>` off `branch`, with one commit of its
         /// own file, submitted without waiting.
         fn submit(&self, branch: &str, name: &str) {
+            self.submit_with(branch, name, &[]);
+        }
+
+        /// As [`Setup::submit`], the command given `env` too.
+        fn submit_with(&self, branch: &str, name: &str, env: &[(&str, &str)]) {
             let dir: PathBuf = self.sessions.path().join(name);
             self.repo.git(&[
                 "worktree",
@@ -286,6 +291,7 @@ mod bound {
             git(&["commit", "-q", "-m", name]);
             let out = self
                 .command(&dir)
+                .envs(env.iter().copied())
                 .args(["submit", branch, "--no-wait", "--json"])
                 .output()
                 .unwrap();
@@ -447,21 +453,37 @@ mod bound {
             config,
             state: Rc::new(Scratch::new(&format!("instance-{name}-state"))),
         };
-        s.submit("bolt/a", "ta");
-        s.submit("bolt/a", "tb");
+        // Both queued before anything runs: the host process the submits
+        // start passes only when asked, and is ended before the test's own
+        // command starts one that passes at its own tick (design D14).
+        let held = [("SLUICE_ROUND_SLEEP", "record")];
+        s.submit_with("bolt/a", "ta", &held);
+        s.submit_with("bolt/a", "tb", &held);
+        support::kill_host_process(&mut s.command(s.repo.dir()));
         (s, file)
     }
 
-    /// The settings-take-up spec's "The bound grows while a run is kept
-    /// running", "The first run keeps its cores" and "The run says what it
-    /// took up" (135; record 0107; rule core.54): the bound written from
-    /// one to two while the first combination's run goes is taken up before
-    /// the next pass, whose run starts beside the first with half the
-    /// cores, while the first keeps all of them; both land, and the take-up
-    /// is said once. Each run holds for up to four passes, so the second
-    /// starts beside the first even on a loaded host.
+    /// What sluice's host process said in `s`'s state, its log and the
+    /// log of the process before it.
+    fn host_log(s: &Setup) -> String {
+        let host = s.state.path().join("sluice/host");
+        ["log.1", "log"]
+            .iter()
+            .map(|f| std::fs::read_to_string(host.join(f)).unwrap_or_default())
+            .collect()
+    }
+
+    /// The settings-take-up spec's "The bound grows while the host process
+    /// runs", "The first run keeps its cores" and "The host process says
+    /// what it took up" (135; record 0107; rule core.54; design D19): the
+    /// bound written from one to two while the first combination's run
+    /// goes is taken up by sluice's host process between its passes, and
+    /// its next pass's run starts beside the first with half the cores,
+    /// while the first keeps all of them; both land, and the take-up is
+    /// said once in its log. Each run holds for up to twelve seconds, so
+    /// the second starts beside the first even on a loaded host.
     #[test]
-    fn a_run_takes_up_a_changed_bound_at_its_next_pass() {
+    fn the_host_process_takes_up_a_changed_bound_at_its_next_pass() {
         let seen = Scratch::new("instance-take-up-seen");
         let (s, file) = two_queued("take-up", |file| {
             check_writing(seen.path(), file, &["[runs]", "max = 2"], 60)
@@ -476,32 +498,34 @@ mod bound {
         assert!(out.status.success(), "{said}");
 
         let processors = std::thread::available_parallelism().map_or(1, |n| n.get());
+        let log = host_log(&s);
         assert_eq!(
             starts(seen.path()),
             [(1, processors), (2, (processors / 2).max(1))],
-            "{said}"
+            "{said}{log}"
         );
-        assert_eq!(states(&s, "bolt/a"), ["landed", "landed"], "{said}");
+        assert_eq!(states(&s, "bolt/a"), ["landed", "landed"], "{said}{log}");
         let took = format!(
             "sluice: took up the host's settings in {}: [runs] changed",
             file.display()
         );
-        assert_eq!(said.matches(&took).count(), 1, "{said}");
+        assert_eq!(log.matches(&took).count(), 1, "{log}");
         assert_eq!(
-            said.matches("took up the host's settings in").count(),
+            log.matches("took up the host's settings in").count(),
             1,
-            "{said}"
+            "{log}"
         );
     }
 
     /// The settings-take-up spec's "A key that holds no private key" (135;
-    /// record 0107; rule core.54): settings that read but do not bind leave
-    /// the run on the bound of one it holds, so the second combination's
-    /// run starts only once the first has ended, with the cores the first
-    /// had; both land, and the refusal is said once, naming the file and
-    /// the key, with nothing taken up.
+    /// record 0107; rule core.54; design D19): settings that read but do
+    /// not bind leave sluice's host process on the bound of one it holds,
+    /// so the second combination's run starts only once the first has
+    /// ended, with the cores the first had; both land, and the refusal is
+    /// said once in its log, naming the file and the key, with nothing
+    /// taken up.
     #[test]
-    fn a_run_keeps_its_settings_when_the_new_ones_do_not_bind() {
+    fn the_host_process_keeps_its_settings_when_the_new_ones_do_not_bind() {
         use std::os::unix::fs::PermissionsExt;
         let seen = Scratch::new("instance-unbound-seen");
         let keys = Scratch::new("instance-unbound-key");
@@ -536,26 +560,37 @@ mod bound {
         // does not read: the status is read under the settings the run held.
         std::fs::write(&file, "[runs]\nmax = 1\n").unwrap();
         assert_eq!(states(&s, "bolt/a"), ["landed", "landed"], "{said}");
-        let refused: Vec<&str> = said
+        let log = host_log(&s);
+        let refused: Vec<&str> = log
             .lines()
-            .filter(|l| l.contains("is refused, so this sluice run keeps the settings it holds"))
+            .filter(|l| l.contains("is refused, so the host process keeps the settings it holds"))
             .collect();
-        assert_eq!(refused.len(), 1, "{said}");
-        assert!(refused[0].contains(&file.display().to_string()), "{said}");
-        assert!(refused[0].contains(&key.display().to_string()), "{said}");
-        assert!(!said.contains("took up"), "{said}");
+        assert_eq!(refused.len(), 1, "{log}");
+        assert!(refused[0].contains(&file.display().to_string()), "{log}");
+        assert!(refused[0].contains(&key.display().to_string()), "{log}");
+        assert!(!log.contains("took up"), "{log}");
     }
 
-    /// The settings-take-up spec's "A kept run sends to the collector it
-    /// is changed to" (135; 151; record 0107; rules core.53, core.54;
-    /// design D1 to D7): `[telemetry]` changed to another collector while
-    /// the first combination's run goes is taken up by the run starting
-    /// itself afresh, which says so once; the first collector is sent what
-    /// the run held before it, traces and metrics, and the second the
-    /// traces of the run started afresh; each run starts once with every
-    /// core, and both land.
+    /// The pids of the host processes `log` names as started.
+    fn started(log: &str) -> std::collections::BTreeSet<String> {
+        log.lines()
+            .filter_map(|l| l.split(" started, pid ").nth(1))
+            .filter_map(|rest| rest.split(';').next())
+            .map(|pid| pid.trim().to_string())
+            .collect()
+    }
+
+    /// The settings-take-up spec's "The host process sends to the collector
+    /// it is changed to" (135; 151; record 0107 as amended 2026-11-13;
+    /// rules core.53, core.54; design D20): `[telemetry]` changed to
+    /// another collector while the first combination's run goes is handed
+    /// by sluice's host process to a fresh one it starts, which reads the
+    /// file itself: the first collector is sent what the first process
+    /// held, traces and metrics, and the second the traces of its
+    /// successor; each run starts once with every core, both land, and a
+    /// host process of another pid answers.
     #[test]
-    fn a_run_takes_a_changed_telemetry_table_up_by_starting_afresh() {
+    fn the_host_process_hands_a_changed_telemetry_table_to_a_fresh_one() {
         use std::collections::BTreeSet;
         let ok = |_: &support::http::Request| (200, Vec::new(), String::new());
         let first = support::http::Fake::start(ok);
@@ -590,42 +625,48 @@ mod bound {
         let out = run.args(["run", "--rounds", "12"]).output().unwrap();
         let said = text(&out);
         assert!(out.status.success(), "{said}");
+        let log = host_log(&s);
 
         // Read before any other command sends to the second collector.
         let paths = |c: &support::http::Fake| -> BTreeSet<String> {
             c.requests().into_iter().map(|r| r.path).collect()
         };
         let (to_first, to_second) = (paths(&first), paths(&second));
-        assert!(to_first.contains("/v1/traces"), "{to_first:?}\n{said}");
-        assert!(to_first.contains("/v1/metrics"), "{to_first:?}\n{said}");
-        assert!(to_second.contains("/v1/traces"), "{to_second:?}\n{said}");
+        assert!(to_first.contains("/v1/traces"), "{to_first:?}\n{log}");
+        assert!(to_first.contains("/v1/metrics"), "{to_first:?}\n{log}");
+        assert!(to_second.contains("/v1/traces"), "{to_second:?}\n{log}");
 
         let processors = std::thread::available_parallelism().map_or(1, |n| n.get());
         assert_eq!(
             starts(seen.path()),
             [(1, processors), (1, processors)],
-            "{said}"
+            "{said}{log}"
         );
-        assert_eq!(states(&s, "bolt/a"), ["landed", "landed"], "{said}");
-        let took = format!(
-            "sluice: took up the host's settings in {}: [telemetry] changed, in this sluice run \
-             started afresh",
+        assert_eq!(states(&s, "bolt/a"), ["landed", "landed"], "{said}{log}");
+        let handed = format!(
+            "sluice: {} changed [telemetry], which the host process takes up by handing its \
+             repositories to a fresh one",
             file.display()
         );
-        assert_eq!(said.matches(&took).count(), 1, "{said}");
-        assert!(!said.contains("could not start afresh"), "{said}");
+        assert_eq!(log.matches(&handed).count(), 1, "{log}");
+        assert!(
+            started(&log).len() >= 2,
+            "a host process of another pid: {log}"
+        );
+        assert!(!log.contains("did not start"), "{log}");
     }
 
-    /// The settings-take-up spec's "Settings it would start afresh for that
-    /// do not bind" (135; record 0107; rule core.54; design D5): a change
-    /// of `[runs]`, `[forge]` and `[telemetry]` whose key holds no private
-    /// key leaves the run on all it holds, the bound of one among it, so
-    /// the second combination's run starts only once the first has ended,
-    /// with the cores the first had; both land, and the run says once the
-    /// file, the tables, that its settings do not bind and the key, with
-    /// nothing taken up and nothing started afresh.
+    /// The settings-take-up spec's "Settings it would hand over for that
+    /// do not bind" (135; record 0107 as amended 2026-11-13; rule core.54;
+    /// design D20): a change of `[runs]`, `[forge]` and `[telemetry]` whose
+    /// key holds no private key leaves sluice's host process on all it
+    /// holds, the bound of one among it, so the second combination's run
+    /// starts only once the first has ended, with the cores the first had;
+    /// both land, the same host process runs throughout, and its log says
+    /// once the file, the tables, that its settings do not bind and the
+    /// key, with nothing taken up and nothing handed over.
     #[test]
-    fn a_run_keeps_its_settings_when_a_change_it_starts_afresh_for_does_not_bind() {
+    fn the_host_process_keeps_its_settings_when_a_change_it_hands_over_for_does_not_bind() {
         use std::os::unix::fs::PermissionsExt;
         let seen = Scratch::new("instance-unbound-afresh-seen");
         let keys = Scratch::new("instance-unbound-afresh-key");
@@ -671,21 +712,25 @@ mod bound {
         // does not read: the status is read under the settings the run held.
         std::fs::write(&file, "[runs]\nmax = 1\n").unwrap();
         assert_eq!(states(&s, "bolt/a"), ["landed", "landed"], "{said}");
-        let refused: Vec<&str> = said
+        let log = host_log(&s);
+        let refused: Vec<&str> = log
             .lines()
-            .filter(|l| l.contains("which this sluice run takes up only by starting afresh"))
+            .filter(|l| l.contains("which the host process takes up only by handing over"))
             .collect();
-        assert_eq!(refused.len(), 1, "{said}");
+        assert_eq!(refused.len(), 1, "{log}");
         let words = format!(
-            "sluice: warning: {} changed [runs], [forge], [telemetry], which this sluice run \
-             takes up only by starting afresh, and its settings do not bind, so it keeps the \
+            "sluice: warning: {} changed [runs], [forge], [telemetry], which the host process \
+             takes up only by handing over, and its settings do not bind, so it keeps the \
              settings it holds until the file changes: ",
             file.display()
         );
-        assert!(refused[0].starts_with(&words), "{said}");
-        assert!(refused[0].contains(&key.display().to_string()), "{said}");
-        assert!(!said.contains("is refused"), "{said}");
-        assert!(!said.contains("took up"), "{said}");
+        assert!(refused[0].contains(&words), "{log}");
+        assert!(refused[0].contains(&key.display().to_string()), "{log}");
+        assert!(!log.contains("is refused"), "{log}");
+        assert!(!log.contains("took up"), "{log}");
+        assert!(!log.contains("handing its repositories"), "{log}");
+        let own = std::fs::read_to_string(s.state.path().join("sluice/host/log")).unwrap();
+        assert_eq!(started(&own).len(), 1, "one host process throughout: {own}");
     }
 
     /// 71: on a host that gives sluice all its cores, `[runs] cores = 2`
@@ -707,7 +752,11 @@ mod bound {
             config: Rc::new(host_config(2)),
             state: Rc::new(Scratch::new("instance-cores-state")),
         };
-        s.submit("bolt/a", "ca");
+        // The host process the submit starts passes only when asked, so
+        // it starts no run on the settings it read (design D14), and is
+        // ended: the run starts one that reads them as stated below.
+        s.submit_with("bolt/a", "ca", &[("SLUICE_ROUND_SLEEP", "record")]);
+        support::kill_host_process(&mut s.command(s.repo.dir()));
         // Stated once the submission is in, so a host that refuses them
         // still has a combination that would run.
         std::fs::write(

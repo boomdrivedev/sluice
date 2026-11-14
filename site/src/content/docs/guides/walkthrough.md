@@ -263,23 +263,23 @@ would conflict: plugin/lib/plan.py with #12 (agent-1, touches)
 
 ## 6. What keeps the queue moving
 
-`sluice submit` keeps the queue moving itself while it waits: every few
-seconds it runs one round of sluice's work and checks whether its own
-submission is decided. A round is: read the queue, start tests if there
-is room, read finished tests, blame a failure, land what passed, write
-the queue back, exit. Any number of waiting agents can do this at once; a
-lock lets only one round run at a time.
+`sluice submit` queues its head and tells sluice's own process on the
+host, starting it if none is running. That process keeps the queue
+moving: every few seconds it runs one round of sluice's work for each
+branch with work, in every repository on the host, and ends once none
+has any. A round is: read the queue, start tests if there is room, read
+finished tests, blame a failure, land what passed, write the queue back.
+A waiting submit, or `sluice wait`, only follows it: ten agents waiting
+on one branch are ten readers of one queue, not ten rounds.
 
-Two commands do the same thing without submitting anything:
+Nothing needs to be kept running. One command asks for a round by hand:
 
 ```sh
 sluice step feature/concurrent-units   # one round, for one branch, then exit
-sluice run                          # rounds for every branch with a queue, until stopped
 ```
 
-`sluice step` is for a tool that already has a loop of its own.
-`sluice run` is for anyone who wants the queue to move when no agent is
-waiting.
+`sluice step` is for a tool that already has a loop of its own; the
+round it asks for is the one sluice's process runs.
 
 ## 7. Where sluice keeps its state
 

@@ -129,10 +129,7 @@ fn sluice(f: &Fakes, pulls: &dyn PullRequests, args: &[&str]) -> i32 {
     run(
         cli,
         f.seams(),
-        &support::FakeHost {
-            world: f.world.clone(),
-            reserved: 0,
-        },
+        &support::FakeHost::new(f.world.clone(), 0),
         &(),
         pulls,
         &f.clock,
@@ -158,13 +155,7 @@ impl PullRequests for Unreadable {
         Ok(Vec::new())
     }
 
-    fn intake(
-        &self,
-        _: Seams<'_>,
-        _: &dyn Clock,
-        _: &str,
-        _: sluice::Taker,
-    ) -> anyhow::Result<bool> {
+    fn intake(&self, _: Seams<'_>, _: &dyn Clock, _: &str) -> anyhow::Result<sluice::Intake> {
         anyhow::bail!("the forge refused ghp_0123456789abcdefghijABCDEFGHIJ012345")
     }
 
@@ -329,9 +320,14 @@ fn a_summary_says_where_the_output_is_kept_and_a_warning_is_sent_whole() {
         .filter(|r| r.severity_number() == Some(Severity::Warn))
         .collect();
     assert_eq!(warnings.len(), 1, "{records:?}");
+    // Design D10, D26: a step says each cause its round's intake met, as
+    // what it asked and the words it was refused with.
     assert_eq!(
         body(warnings[0]),
-        "sluice: warning: the forge refused [redacted]"
+        format!(
+            "sluice: warning: taking in {BRANCH}'s pull requests: {BRANCH}'s pull requests: \
+             the forge refused [redacted]"
+        )
     );
     telemetry.finish();
 }
@@ -537,7 +533,9 @@ fn a_run_s_environment() -> (String, String) {
         system: None,
     };
     let started = tracing::info_span!("sluice.start");
-    let handle = started.in_scope(|| checks.start(&request)).unwrap();
+    let handle = started
+        .in_scope(|| support::start(&checks, &request))
+        .unwrap();
     drop(started);
     let until = Instant::now() + Duration::from_secs(60);
     let report = loop {

@@ -115,10 +115,16 @@ impl Refusal {
     /// a `read-refused` for each cause not logged, and a `read-again` once
     /// it ended.
     pub fn unwritten(&self, host: &str) -> Vec<(String, Event)> {
+        self.unwritten_as(host, false)
+    }
+
+    /// [`Refusal::unwritten`], each line marked `intake` where this is a
+    /// refusal of the branch's intake (design D27).
+    pub fn unwritten_as(&self, host: &str, intake: bool) -> Vec<(String, Event)> {
         let mut lines: Vec<(String, Event)> = self
             .earlier
             .iter()
-            .flat_map(|r| r.unwritten(host))
+            .flat_map(|r| r.unwritten_as(host, intake))
             .collect();
         let mut causes: Vec<&Cause> = self.causes.iter().filter(|c| !c.logged).collect();
         causes.sort_by(|a, b| a.at.cmp(&b.at));
@@ -130,6 +136,7 @@ impl Refusal {
                     remote: self.remote.clone(),
                     asked: c.asked.clone(),
                     said: c.said.clone(),
+                    intake,
                 },
             )
         }));
@@ -142,6 +149,7 @@ impl Refusal {
                     since: self.since.clone(),
                     stood: self.stood().unwrap_or(0),
                     rounds: self.rounds,
+                    intake,
                 },
             ));
         }
@@ -258,6 +266,7 @@ mod tests {
                     since: "2026-10-26T09:16:40Z".into(),
                     stood: 1800,
                     rounds: 12,
+                    intake: false,
                 }
             )]
         );

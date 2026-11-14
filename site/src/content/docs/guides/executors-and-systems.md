@@ -87,15 +87,16 @@ said that of.
 
 Agents' hosts sign as `sessions` here. Their results land work on the
 feature branches, where reviewers trust them, and never on `main`, whose gate
-trusts only the box. A host signs with its own key, and `sluice run` on
-it claims only runs of branches that trust its signer.
+trusts only the box. A host signs with its own key, and sluice on it
+claims only runs of branches that trust its signer.
 
 ## A box kept warm
 
-A standing executor is a host you keep running with `sluice run`, under
-whatever keeps services running there. Its build cache stays warm
-between runs, so it is the cheapest place for a check. Its config says
-what it signs as, how many runs it holds, and which systems it runs:
+A standing executor is a host whose sluice is moving its queues: its own
+process starts when any command of sluice's there finds work, or when
+whatever wakes the host runs one. Its build cache stays warm between
+runs, so it is the cheapest place for a check. Its config says what it
+signs as, how many runs it holds, and which systems it runs:
 
 ```toml
 [signing]
@@ -107,11 +108,11 @@ max = 4
 systems = ["linux-x64"]
 ```
 
-`sluice run` serves every branch with records, those on the remote
-included. On a branch another host keeps, it claims open runs it may
-take, runs them, signs what they found and adds it to
-`refs/sluice/runs/box`. It refuses to start when `[runs] systems` names
-a system it isn't.
+sluice's process on the box serves every branch with records in the
+repositories it holds, those on the remote included. On a branch another
+host keeps, it claims open runs it may take, runs them, signs what they
+found and adds it to `refs/sluice/runs/box`. Where `[runs] systems` names
+a system the box isn't, it claims no run there, and says so in its log.
 
 Before it claims anything after coming back, a host releases the
 checkouts it left behind. A run whose claim lapsed while it was away

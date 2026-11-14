@@ -47,3 +47,18 @@ agentplot-design's, drawn from clauses 31 and 32 and this record's own guarantee
 - **Fixed when the place is made.** A place's ports are recorded with the place when it is made, and every later reading of them, its runs', its release's and a status's, reads that record and never reckons them again from a policy. A policy's change takes effect for places made after it.
 - Keeping a block numbering with one size for the whole host was the other path: every repository on the host would have to list ports within that size, and a policy listing more would be refused or overlap.
 - Rule core.10 is amended to match.
+
+## Amendment, 2026-11-13: what the build of a place's ports chose
+
+Status: accepted on 2026-11-13 as the choices of the change `one-sluice-process-runs-each-hosts-queues`, its design D18 and its code stage, each within the amendment above and cheap to change.
+
+Deciders: the design and the code stage of the change `one-sluice-process-runs-each-hosts-queues`.
+
+Sources: the statement's clauses 31 and 32; rule core.10; the change's design D18; `crates/sluice/src/profiles/places.rs` (`hold_ports`, `free_ports`, `Made::ports`).
+
+### Decisions
+
+1. **Each port is held by the port.** The host holds a live place's ports at `$XDG_STATE_HOME/sluice/ports/held/<port>`, one file for each port, naming the record of the place that holds it, under `ports/.lock` as blocks were; a port whose file names a record that is gone is free again. A new place walks from `ports_from` and takes the first run of as many ports as its policy names in which no port is held by a live place and each is free, starting the walk again past the first port it finds held or busy. *Not taken:* one file for each place listing its ports, which a new place would read whole to learn what is free; a file of every held port, rewritten whole at each hold.
+2. **The record is written before its holds.** A place's record is written first, so a hold names a record that exists and a stop between leaves a record the release reads; then each port is held; then the record is written again with `ports`, each `SLUICE_PORT_<NAME>` and its port, a candidate's place among them, which kept only its block's number before. Every reading of the place's ports, its runs', its release's, a gone place's stored release, a preview's names and a status, reads that record. *Not taken:* holding the ports first, which leaves a hold naming no record a stop part way would leave for good.
+3. **An older sluice's blocks are read by nothing.** Its `ports/<n>` files stay under the same lock until removed by hand; a place it made, whose record names a `block`, is read with the field passed over, its ports read from its record's `ports` where it has them. The check that each port is free still passes by a port an older place's stack listens on. *Not taken:* reading an older place's block through its policy, a map from one shape to the other (principle 12).
+4. **The release notes say to release worktrees' places first.** A worktree's place an older sluice made holds its ports by its block, which this build reads nothing of, so a host releases its worktrees' places with `sluice release` before installing the release that carries this. *Not taken:* sweeping older blocks into holds at the first start, which would write a hold for a place this sluice did not make.

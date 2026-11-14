@@ -6,6 +6,7 @@ use std::time::Duration;
 use sluice_conformance::{policy, Crash, Harness, Rig, BRANCH};
 use sluice_core::records::{Event, State};
 use sluice_core::{Peer, Sluice, Step};
+use sluice_seams::RunKind;
 
 /// The bolt policy with its records on `origin`, trusting the signer
 /// `box` this host signs as.
@@ -775,6 +776,40 @@ fn s19_a_pools_jobs_land_the_work_with_no_box() {
         }
     }
     assert_eq!(h.sub(one).state, State::Landed);
+}
+
+/// satisfies: 71, 88; records 0119, 0123; the run-bound spec's "A
+/// repository on a pool": with the host's one run another repository's,
+/// this repository's combination is launched on its pool with no part of
+/// the host's bound held, and counts in no repository's runs: the other
+/// repository's next run waits only for its own to end.
+#[test]
+fn a_pools_launch_holds_no_part() {
+    let h = with_pool();
+    h.w().hold_runs(true);
+    h.work("unit/a", "agent-a", &[("a/lib", Some("a2"))]);
+    h.submit("unit/a");
+    let lead = as_signer(&h, "lead", None);
+    h.w().host_limit(1);
+    h.w().other_runs(1);
+    lead.step(BRANCH).unwrap();
+    assert_eq!(
+        h.w().launches().len(),
+        2,
+        "each system launched on the pool"
+    );
+    assert!(h.w().holds().is_empty(), "no part was held for a launch");
+    assert_eq!(h.w().parts_held(), 0);
+    let tests = &h.sluice().seams().tests;
+    assert_eq!(
+        tests.running().unwrap().queue,
+        1,
+        "only the other repository's run counts"
+    );
+    assert!(tests.hold(RunKind::Queue).unwrap().is_none());
+    // The other repository's run ends: its next takes the host's run.
+    h.w().other_runs(0);
+    assert!(tests.hold(RunKind::Queue).unwrap().is_some());
 }
 
 /// Each claim in the branch's log, with the forge's words when its

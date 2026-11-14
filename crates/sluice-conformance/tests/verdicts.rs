@@ -287,8 +287,8 @@ fn a_report_holding_none_of_the_required_checks_is_no_pass() {
 }
 
 /// Two bolt branches, each with two submissions, under a bound of two;
-/// how many runs are live after `serves` steps both branches.
-fn live_runs_serving(serves: sluice_core::Serves) -> usize {
+/// how many runs are live after rounds of both branches.
+fn live_runs_of_two_branches() -> usize {
     let h = Harness::bolt();
     let other = "bolt/y";
     h.w().init(
@@ -322,7 +322,7 @@ fn live_runs_serving(serves: sluice_core::Serves) -> usize {
             .unwrap()
             .unwrap();
     }
-    let s = h.sluice().serving(serves);
+    let s = h.sluice();
     for _ in 0..3 {
         s.step(BRANCH).unwrap();
         s.step(other).unwrap();
@@ -333,37 +333,30 @@ fn live_runs_serving(serves: sluice_core::Serves) -> usize {
 /// satisfies: 71
 #[test]
 fn every_instance_on_the_host_shares_its_bound() {
-    // One instance serving every branch: two runs across both.
-    assert_eq!(live_runs_serving(sluice_core::Serves::Every), 2);
-    // Instances that each serve the branch they step share the host's
-    // bound all the same: two runs across both.
-    assert_eq!(live_runs_serving(sluice_core::Serves::Stepped), 2);
+    // Rounds of either branch hold each run's part of the host's bound
+    // (rule core.49): two runs across both.
+    assert_eq!(live_runs_of_two_branches(), 2);
 }
 
 /// satisfies: 71; session-runs-1 89
 #[test]
-fn session_runs_hold_the_bound_under_either_instance() {
-    for serves in [sluice_core::Serves::Stepped, sluice_core::Serves::Every] {
-        let h = Harness::bolt();
-        h.w().host_limit(2);
-        h.w().session_run("/work/a", true);
-        h.w().session_run("/work/b", true);
-        h.work("unit/a", "agent-a", &[("a/lib", Some("a2"))]);
-        let one = h.submit("unit/a");
-        let s = h.sluice().serving(serves);
-        s.step(BRANCH).unwrap();
-        s.step(BRANCH).unwrap();
-        assert!(
-            h.w().started().is_empty(),
-            "{serves:?}: started into a full bound"
-        );
-        // A session run whose process is gone holds nothing.
-        h.w().kill_session("/work/a");
-        s.step(BRANCH).unwrap();
-        assert_eq!(h.w().started().len(), 1, "{serves:?}");
-        h.settle();
-        assert_eq!(h.sub(one).state, State::Landed);
-    }
+fn session_runs_hold_the_bound() {
+    let h = Harness::bolt();
+    h.w().host_limit(2);
+    h.w().session_run("/work/a", true);
+    h.w().session_run("/work/b", true);
+    h.work("unit/a", "agent-a", &[("a/lib", Some("a2"))]);
+    let one = h.submit("unit/a");
+    let s = h.sluice();
+    s.step(BRANCH).unwrap();
+    s.step(BRANCH).unwrap();
+    assert!(h.w().started().is_empty(), "started into a full bound");
+    // A session run whose process is gone holds nothing.
+    h.w().kill_session("/work/a");
+    s.step(BRANCH).unwrap();
+    assert_eq!(h.w().started().len(), 1);
+    h.settle();
+    assert_eq!(h.sub(one).state, State::Landed);
 }
 
 /// satisfies: 71; session-runs-1 89, 91
@@ -847,4 +840,71 @@ fn a_fail_under_another_grant_is_never_weighed_against_a_pass() {
         (a[0].0, a[0].1.as_deref(), a[1].0, a[1].1.as_deref()),
         (Outcome::Fail, Some("g1"), Outcome::Pass, Some("g2"))
     );
+}
+
+/// satisfies: 69, 109, 15, 38; design D17: a result belongs to its key
+/// and its system, not to a branch. A bolt's passes, recorded under their
+/// keys, still count for `main`'s gate once the bolt landed and was
+/// removed: `main`'s combination, whose tree gives each check the same
+/// key, replays them with nothing run, and the results log still holds
+/// the bolt's runs.
+#[test]
+fn a_removed_branchs_results_still_count() {
+    let h = Harness::bolt();
+    let main_policy = format!(
+        "{}\n[branches.main]\nrequired = [\"#gate\"]\nparallel = 4\nbatch = false\n\
+         flaky = \"fail\"\ntimeout = \"20m\"\ntrust = [\"open\", \"sandbox\", \"container\"]\n",
+        policy(false, "fail", 4)
+    );
+    h.w().init(
+        "main",
+        &[
+            (".config/sluice.toml", &main_policy),
+            ("a/lib", "a1"),
+            ("b/lib", "b1"),
+            ("c/lib", "c1"),
+        ],
+    );
+    h.work("unit/a", "agent-a", &[("a/lib", Some("a2"))]);
+    let one = h.submit("unit/a");
+    h.settle();
+    assert_eq!(h.sub(one).state, State::Landed);
+    let ran = h.w().observed().len();
+    let bolts: Vec<ResultLine> = results(&h)
+        .into_iter()
+        .filter(|l| l.branch == BRANCH && l.kind == ResultKind::Ran)
+        .collect();
+    assert!(!bolts.is_empty());
+
+    // The bolt lands onto main, and is removed.
+    let before = h.w().tip("main");
+    let head = h.w().work(&before, &[("a/lib", Some("a2"))]);
+    h.w().delete_branch(BRANCH);
+    h.w().session("unit/m", "agent-m", &head);
+    let s = h.sluice();
+    let two = s
+        .submit(&sluice_core::SubmitRequest {
+            head: sluice_core::SubmitHead::Worktree("unit/m".into()),
+            branch: "main".into(),
+            after: vec![],
+            priority: 0,
+            subject: None,
+        })
+        .unwrap()
+        .unwrap()
+        .id;
+    for _ in 0..6 {
+        s.step("main").unwrap();
+    }
+    assert_ne!(h.w().tip("main"), before, "#{two} landed on main");
+    // Nothing ran again: main's gate counted the bolt's passes (15, 38).
+    assert_eq!(h.w().observed().len(), ran);
+    let r = results(&h);
+    let replays: Vec<&ResultLine> = r.iter().filter(|l| l.branch == "main").collect();
+    assert!(!replays.is_empty());
+    assert!(replays.iter().all(|l| l.kind == ResultKind::Replayed));
+    // The bolt's runs stay in the log (69, 109).
+    for b in &bolts {
+        assert!(r.contains(b), "{b:?} is gone from the results log");
+    }
 }

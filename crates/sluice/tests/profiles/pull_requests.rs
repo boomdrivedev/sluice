@@ -47,6 +47,61 @@ struct OnGitHub {
     state: Scratch,
     gh: github::GitHub,
     _files: Scratch,
+    /// The `[signing]` table of host `b`, whose signer the policy names
+    /// beside this host's `a` (C.6; design D28).
+    b_signing: String,
+}
+
+/// `policy` naming signers `a` and `b` by `keys`, and each branch's own
+/// table trusting both, so every branch with a remote keeps its records
+/// there (C.6; 78; design D28). A policy that names signers already is
+/// left as it is.
+fn signed(policy: &str, keys: &[ssh_key::PrivateKey; 2]) -> String {
+    if policy.contains("[signers.") {
+        return policy.to_string();
+    }
+    let line =
+        |p: &str, k: &ssh_key::PrivateKey| format!("{p} {}", k.public_key().to_openssh().unwrap());
+    let signers = format!(
+        "[signers.a]\nssh = \"{}\"\n\n[signers.b]\nssh = \"{}\"\n\n",
+        line("a", &keys[0]),
+        line("b", &keys[1])
+    );
+    let lines: Vec<&str> = policy.lines().collect();
+    let mut out = String::new();
+    let mut named = false;
+    for (i, l) in lines.iter().enumerate() {
+        let table = l.starts_with("[branches.") && !l.ends_with(".pull_requests]");
+        if l.starts_with("[branches.") && !named {
+            out.push_str(&signers);
+            named = true;
+        }
+        out.push_str(l);
+        out.push('\n');
+        if table {
+            let own = lines[i + 1..]
+                .iter()
+                .take_while(|n| !n.starts_with('['))
+                .any(|n| n.starts_with("trust"));
+            if !own {
+                out.push_str("trust = [\"a\", \"b\"]\n");
+            }
+        }
+    }
+    out
+}
+
+/// The `[signing]` table of signer `name`, its key `key` written to `dir`.
+fn signing(name: &str, key: &ssh_key::PrivateKey, dir: &Path) -> String {
+    let path = dir.join(format!("{name}.signing"));
+    key.write_openssh_file(&path, ssh_key::LineEnding::LF)
+        .unwrap();
+    use std::os::unix::fs::PermissionsExt;
+    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).unwrap();
+    format!(
+        "[signing]\nsigner = \"{name}\"\nkey = {:?}\n",
+        path.display().to_string()
+    )
 }
 
 impl OnGitHub {
@@ -101,9 +156,43 @@ impl OnGitHub {
     }
 
     /// `main` on GitHub under `policy`, its tree holding `files` beside it.
+    /// The policy names signers `a` and `b`, with keys made for the
+    /// fixture, and this host signs as `a`, so every branch with a remote
+    /// keeps its records there and this host keeps `main` (C.6; 137;
+    /// design D28).
     fn with(name: &str, policy: &str, files: &[(&str, &str)]) -> OnGitHub {
+        OnGitHub::kept_as(name, policy, files, true)
+    }
+
+    /// `main` on GitHub taking pull requests under a policy that names no
+    /// signers, so its records are each host's own and main is refused
+    /// alone (137; design D22).
+    fn unkept(name: &str, extra: &str) -> OnGitHub {
+        OnGitHub::kept_as(
+            name,
+            &format!(
+                "[tests]\nrunner = \"command\"\ncommand = \"sh check.sh\"\n\n\
+                 [branches.main]\nremote = \"origin\"\ntimeout = \"1m\"\n\n\
+                 [branches.main.pull_requests]\n{extra}"
+            ),
+            &[("check.sh", CHECK)],
+            false,
+        )
+    }
+
+    /// [`OnGitHub::with`], the policy naming signers where `signers` says.
+    fn kept_as(name: &str, policy: &str, files: &[(&str, &str)], signers: bool) -> OnGitHub {
+        use ssh_key::{Algorithm, PrivateKey};
+        let keys = [
+            PrivateKey::random(&mut rand_core::OsRng, Algorithm::Ed25519).unwrap(),
+            PrivateKey::random(&mut rand_core::OsRng, Algorithm::Ed25519).unwrap(),
+        ];
         let repo = Repo::new(name);
-        repo.write(".config/sluice.toml", policy);
+        let policy = match signers {
+            true => signed(policy, &keys),
+            false => policy.to_string(),
+        };
+        repo.write(".config/sluice.toml", &policy);
         for (path, content) in files {
             repo.write(path, content);
         }
@@ -128,12 +217,14 @@ impl OnGitHub {
         std::fs::write(
             dir.join("config.toml"),
             format!(
-                "[runs]\nmax = 2\n\n[forge]\napp_id = {}\nkey = {:?}\n",
+                "{}\n[runs]\nmax = 2\n\n[forge]\napp_id = {}\nkey = {:?}\n",
+                signing("a", &keys[0], &dir),
                 github::APP,
                 key.display().to_string()
             ),
         )
         .unwrap();
+        let b_signing = signing("b", &keys[1], &dir);
         let files = Scratch::new(&format!("{name}-github"));
         let gh = github::GitHub::start(&github::file(files.path()), Some(bare.path()));
         OnGitHub {
@@ -143,9 +234,13 @@ impl OnGitHub {
             state: Scratch::new(&format!("{name}-state")),
             gh,
             _files: files,
+            b_signing,
         }
     }
 
+    /// `program` in `dir`, this setup's host. The host process its
+    /// commands start passes only when asked, so the rounds that run are
+    /// the ones the test's commands ask for (design D14).
     fn command(&self, program: &str, dir: &Path) -> Command {
         let bin = Path::new(env!("CARGO_BIN_EXE_sluice")).parent().unwrap();
         let path = format!("{}:{}", bin.display(), std::env::var("PATH").unwrap());
@@ -153,6 +248,7 @@ impl OnGitHub {
         support::isolated(&mut c)
             .current_dir(dir)
             .env("PATH", path)
+            .env("SLUICE_ROUND_SLEEP", "record")
             .env("XDG_CONFIG_HOME", self.config.path())
             .env("XDG_STATE_HOME", self.state.path())
             .env("SLUICE_FORGE_API", self.gh.url())
@@ -203,11 +299,15 @@ impl OnGitHub {
         }
     }
 
-    /// This host's log of `main`, a document a line.
+    /// `main`'s log, a document a line, as its records on the remote hold
+    /// it (C.6).
     fn log(&self) -> Vec<Value> {
-        let path = self.repo.dir().join(".git/sluice/main/log.jsonl");
-        std::fs::read_to_string(path)
-            .unwrap_or_default()
+        let out = Command::new("git")
+            .args(["--git-dir", self.bare.path().to_str().unwrap()])
+            .args(["show", "refs/sluice/state/main:log.jsonl"])
+            .output()
+            .unwrap();
+        String::from_utf8_lossy(&out.stdout)
             .lines()
             .map(|l| serde_json::from_str(l).unwrap())
             .collect()
@@ -677,6 +777,58 @@ fn closed_while_queued() {
     g.gh.forge.close(n).unwrap();
     g.step();
     assert_eq!(g.of(n)[0]["state"], "withdrawn", "{:?}", g.subs());
+}
+
+/// obsolete-combinations, "Closed while under test" (24, 67; design D24):
+/// the host keeps main and is testing a pull request's combination, with a
+/// check that goes on until it is ended, and the request is closed; the
+/// round whose intake withdraws it drops its combination before reading
+/// any run, so main's records hold no combination with it, and its run is
+/// ended.
+#[test]
+fn a_request_closed_under_test_drops_its_combination() {
+    let g = OnGitHub::new("pr-closed-under-test", "");
+    g.named("a", "");
+    let pid = g.repo.dir().join(".git/closed.pid");
+    let hang = format!("{}\n", pid.display());
+    let (n, _) = g.by_hand("unit/closing", &[("hang", Some(&hang))], false);
+    g.step();
+    let id = g.of(n)[0]["id"].clone();
+    let until = Instant::now() + Duration::from_secs(60);
+    while !pid.exists() {
+        assert!(Instant::now() < until, "the check never started");
+        std::thread::sleep(Duration::from_millis(100));
+    }
+    let process = std::fs::read_to_string(&pid).unwrap().trim().to_string();
+    let holding = |g: &OnGitHub| -> usize {
+        let out = Command::new("git")
+            .args(["--git-dir", g.bare.path().to_str().unwrap()])
+            .args(["show", "refs/sluice/state/main:branch.json"])
+            .output()
+            .unwrap();
+        let doc: Value = serde_json::from_slice(&out.stdout).unwrap_or(Value::Null);
+        doc["candidates"].as_array().map_or(0, |c| {
+            c.iter()
+                .filter(|c| c["submissions"].as_array().is_some_and(|s| s.contains(&id)))
+                .count()
+        })
+    };
+    assert_eq!(holding(&g), 1, "under test");
+    g.gh.forge.close(n).unwrap();
+    g.step();
+    assert_eq!(g.of(n)[0]["state"], "withdrawn", "{:?}", g.subs());
+    assert_eq!(holding(&g), 0, "its combination dropped");
+    let until = Instant::now() + Duration::from_secs(10);
+    while Command::new("kill")
+        .args(["-0", &process])
+        .stderr(Stdio::null())
+        .status()
+        .unwrap()
+        .success()
+    {
+        assert!(Instant::now() < until, "its run goes on");
+        std::thread::sleep(Duration::from_millis(100));
+    }
 }
 
 /// Another queue of `main` lands `head`: a merge commit onto main on
@@ -1163,9 +1315,12 @@ fn held_when_github_refuses_the_draft() {
     let new = g.push_from(&w, &[("fix.txt", "a fix\n")]);
     for _ in 0..3 {
         let out = g.round();
+        // 128 (design D26): a step says each cause its intake met, by
+        // what it asked.
         assert!(
             out.contains(&format!(
-                "#{n} waits for the next submit, and GitHub would not mark it a draft"
+                "taking in main's pull requests: pull/{n}: it waits for the next submit, and \
+                 GitHub would not mark it a draft"
             )) && out.contains("Resource not accessible by integration"),
             "{out}"
         );
@@ -1255,6 +1410,120 @@ fn output_posted_as_asked_and_scrubbed() {
     let r = g.report(n).unwrap();
     assert!(r.contains("it broke"), "{r}");
     assert!(r.contains("[redacted]") && !r.contains("ghp_"), "{r}");
+}
+
+impl OnGitHub {
+    /// What sluice's host process said in this host's state: its log and
+    /// the log of the process before it.
+    fn host_log(&self) -> String {
+        let host = self.state.path().join("sluice/host");
+        ["log.1", "log"]
+            .iter()
+            .map(|f| std::fs::read_to_string(host.join(f)).unwrap_or_default())
+            .collect()
+    }
+}
+
+/// 133, rule core.28 (design D27): GitHub serves no head for a pull
+/// request; the host process's passes say the cause once in its log, and
+/// main's log holds its `read-refused` once, marked `intake`; a host
+/// process started afresh says nothing of it again.
+#[test]
+fn a_standing_intake_failure_is_said_once_for_each_cause_and_host() {
+    let g = OnGitHub::new("pr-intake-once", "");
+    g.named("a", "");
+    let (n, _) = g.by_hand("unit/headless", &[("h.txt", Some("h\n"))], false);
+    g.no_head(n);
+    g.on_main();
+    let line = format!("sluice: warning: taking in main's pull requests: pull/{n}: ");
+    let logged = |g: &OnGitHub| -> usize {
+        g.log()
+            .into_iter()
+            .filter(|l| l["event"] == "read-refused" && l["intake"] == true)
+            .filter(|l| l["asked"] == format!("pull/{n}").as_str())
+            .count()
+    };
+    let mut said = String::new();
+    for _ in 0..2 {
+        g.discovery_passes();
+        let out = g.skipping(g.repo.dir(), &["run", "--rounds", "3"]);
+        assert!(out.status.success(), "{}", text(&out));
+        said.push_str(&text(&out));
+    }
+    assert_eq!(
+        g.host_log().matches(&line).count(),
+        1,
+        "{}\n{said}\n{:?}",
+        g.host_log(),
+        g.log()
+    );
+    assert_eq!(logged(&g), 1);
+    support::kill_host_process(&mut g.command(env!("CARGO_BIN_EXE_sluice"), g.repo.dir()));
+    g.discovery_passes();
+    let out = g.skipping(g.repo.dir(), &["run", "--rounds", "2"]);
+    assert!(out.status.success(), "{}", text(&out));
+    assert_eq!(g.host_log().matches(&line).count(), 1, "{}", g.host_log());
+    assert_eq!(logged(&g), 1);
+}
+
+/// 133 (design D27): while this host's passes cannot take in one of
+/// main's pull requests, `sluice status main` says so above the queue, and
+/// `--json` carries it as `intake_refused`; once a pass asks GitHub and
+/// meets nothing, it says nothing of it.
+#[test]
+fn status_shows_this_hosts_standing_intake_refusal() {
+    let g = OnGitHub::new("pr-intake-status", "");
+    g.named("a", "");
+    let (n, _) = g.by_hand("unit/headless", &[("h.txt", Some("h\n"))], false);
+    g.no_head(n);
+    g.on_main();
+    for _ in 0..2 {
+        g.discovery_passes();
+        let out = g.skipping(g.repo.dir(), &["run", "--rounds", "1"]);
+        assert!(out.status.success(), "{}", text(&out));
+    }
+    let words = g.status_words();
+    let line = "this host could not take in main's pull requests since ";
+    assert!(words.contains(line), "{words}");
+    assert!(
+        words.contains(&format!(": pull/{n}: pull/{n} has no head")),
+        "{words}"
+    );
+    let doc = g.status_document();
+    let refused = &doc["intake_refused"];
+    assert_eq!(refused["remote"], "origin", "{doc}");
+    assert_eq!(refused["asked"], format!("pull/{n}").as_str(), "{doc}");
+    assert!(refused["since"].is_string(), "{doc}");
+    assert!(refused["rounds"].as_u64().is_some_and(|r| r >= 2), "{doc}");
+    // Closed, it is asked for no more, and the next pass meets nothing.
+    g.gh.forge.close(n).unwrap();
+    g.discovery_passes();
+    let out = g.skipping(g.repo.dir(), &["run", "--rounds", "1"]);
+    assert!(out.status.success(), "{}", text(&out));
+    let doc = g.status_document();
+    assert!(doc.get("intake_refused").is_none(), "{doc}");
+    assert!(!g.status_words().contains(line));
+}
+
+/// 128 (design D26): GitHub serves no head for a pull request; `sluice
+/// step` says on stderr what its intake met, `sluice: warning: taking in
+/// main's pull requests: pull/<n>: ...`, every step, its own intake
+/// printing nothing beside it.
+#[test]
+fn a_step_prints_what_its_intake_met() {
+    let g = OnGitHub::new("pr-step-warnings", "");
+    let (n, _) = g.by_hand("unit/headless", &[("h.txt", Some("h\n"))], false);
+    g.no_head(n);
+    let line = format!("sluice: warning: taking in main's pull requests: pull/{n}: ");
+    for _ in 0..2 {
+        g.discovery_passes();
+        let out = g.sluice(&["step", "main"]);
+        assert!(out.status.success(), "{}", text(&out));
+        let err = String::from_utf8_lossy(&out.stderr);
+        let said: Vec<&str> = err.lines().filter(|l| l.starts_with(&line)).collect();
+        assert_eq!(said.len(), 1, "{err}");
+        assert!(said[0].contains(&format!("pull/{n} has no head")), "{err}");
+    }
 }
 
 /// S63 (128): GitHub serves no head for one of two pull requests opened by
@@ -1347,8 +1616,9 @@ fn a_failed_list_ends_intake_and_the_queue_still_lands() {
     loop {
         let said = g.round();
         assert!(
-            said.contains("sluice: warning: taking in main's pull requests: tried ")
-                && said.contains(": GET /repos/o/r/pulls?state=open&base=main")
+            said.contains(
+                "sluice: warning: taking in main's pull requests: main's pull requests: tried "
+            ) && said.contains(": GET /repos/o/r/pulls?state=open&base=main")
                 && said.contains("500 Server Error")
                 && !said.contains(&format!("pull/{n}: ")),
             "{said}"
@@ -1369,11 +1639,11 @@ fn a_failed_list_ends_intake_and_the_queue_still_lands() {
     );
 }
 
-/// deneb, 2026-11-05: GitHub renamed the repository, and its old address,
-/// which the remote still names, finds no installation of the app. A
-/// running driver says so with what to do once, never every pass: its
-/// intake on stderr, `main`'s round on stdout, and the refused read once
-/// in `main`'s log, in GitHub's words (133; rules core.28, core.29).
+/// 133, rule core.28 (design D27): GitHub no longer finds the app's
+/// installation on the repository, as when it was renamed; the host
+/// process's passes say the round's refusal once, with what to do, and
+/// once main's records can be written again its log holds the intake's
+/// cause once, marked `intake`, beside the round's own `read-refused`.
 #[test]
 fn a_repository_github_no_longer_finds_is_said_once_with_what_to_do() {
     let g = OnGitHub::new("pr-renamed", "");
@@ -1386,35 +1656,47 @@ fn a_repository_github_no_longer_finds_is_said_once_with_what_to_do() {
         usize::MAX,
         github::Trouble::Status(404),
     );
+    // A host process started afresh, which holds no token bought before.
+    support::kill_host_process(&mut g.command(env!("CARGO_BIN_EXE_sluice"), g.repo.dir()));
     g.discovery_passes();
+    g.on_main();
     let out = g.skipping(g.repo.dir(), &["run", "--rounds", "3"]);
     let stdout = String::from_utf8_lossy(&out.stdout);
-    let stderr = String::from_utf8_lossy(&out.stderr);
     let said = "GET /repos/o/r/installation: 404 Not Found";
     let todo = format!(
         "GitHub finds no installation of app {} on o/r: if the repository was renamed or \
          transferred, point the remote that names it at its new address",
         github::APP
     );
-    let intake = "sluice: warning: taking in main's pull requests: ";
-    assert_eq!(stderr.matches(intake).count(), 1, "{}", text(&out));
-    let warned = &stderr[stderr.find(intake).unwrap()..];
-    assert!(
-        warned.contains(&format!("{said}\n{todo}")),
-        "{}",
-        text(&out)
-    );
     let passed = "main could not be read, passed by: ";
-    assert_eq!(stdout.matches(passed).count(), 1, "{}", text(&out));
+    assert_eq!(
+        stdout.matches(passed).count(),
+        1,
+        "{}\n{}\n{:?}",
+        text(&out),
+        g.host_log(),
+        g.log()
+    );
     assert_eq!(stdout.matches(&todo).count(), 1, "{}", text(&out));
+    // Main's records are on its remote, which cannot be written while
+    // GitHub gives no token: both refusals are kept on the host until it
+    // can be, and then written once each.
+    g.gh.calm();
+    g.discovery_passes();
+    let out = g.skipping(g.repo.dir(), &["run", "--rounds", "2"]);
+    assert!(out.status.success(), "{}", text(&out));
     let refused: Vec<Value> = g
         .log()
         .into_iter()
         .filter(|l| l["event"] == "read-refused")
         .collect();
-    assert_eq!(refused.len(), 1, "{refused:?}");
-    assert_eq!(refused[0]["asked"], "refs/heads/main");
-    assert_eq!(refused[0]["said"], said);
+    let (theirs, ours): (Vec<&Value>, Vec<&Value>) =
+        refused.iter().partition(|l| l["intake"] == true);
+    assert_eq!(theirs.len(), 1, "{refused:?}");
+    assert_eq!(theirs[0]["asked"], "main's pull requests", "{refused:?}");
+    let words = theirs[0]["said"].as_str().unwrap();
+    assert!(words.contains(said) && words.contains(&todo), "{words}");
+    assert_eq!(ours.len(), 1, "{refused:?}");
 }
 
 // ---------------------------------------------------------------------------
@@ -2360,13 +2642,19 @@ fn submit_refuses_a_gate_requiring_a_task_kept_out_of_ci() {
         ],
     );
     let w = g.session("kept", &[("k.txt", "k\n")]);
+    // The policy as written, its signers before `main`'s table (D28).
+    let policy = std::fs::read_to_string(g.repo.dir().join(".config/sluice.toml")).unwrap();
+    let line = 1 + policy
+        .lines()
+        .position(|l| l.starts_with("required = "))
+        .expect("main's required checks");
     let out = g.wt_submit(&w, &["--no-wait"]);
     assert_eq!(out.status.code(), Some(2), "{}", text(&out));
     assert!(
-        text(&out).contains(
-            "refused: main requires app:integration (.config/sluice.toml line 6), which the \
-             task runner in this worktree keeps out of CI"
-        ),
+        text(&out).contains(&format!(
+            "refused: main requires app:integration (.config/sluice.toml line {line}), which \
+             the task runner in this worktree keeps out of CI"
+        )),
         "{}",
         text(&out)
     );
@@ -4514,21 +4802,28 @@ fn a_waiting_submit_waits_out_the_pause() {
     );
     assert_eq!(stderr.matches(&said).count(), 1, "{stderr}");
     assert!(!String::from_utf8_lossy(&out.stdout).contains("allowance"));
-    assert!(!g.pull_from("unit/paused").open, "landed");
+    // 135 (design D9): the host process landed what the submit opened
+    // once the pause was waited out; it asks GitHub nothing while the
+    // pause stands, so the request reads merged at its next call.
+    let n = g.pull_from("unit/paused").number;
+    assert_eq!(g.of(n)[0]["state"], "landed", "{:?}", g.subs());
 }
 
 /// The forge-allowance spec's "A wait whose timeout comes first": `sluice
-/// wait --timeout 5m` beside a pause twenty minutes long exits `5` with
-/// the submission as it stands, having made no call to GitHub.
+/// wait main --timeout 5m`, following the pull request its worktree's
+/// submit opened, beside a pause twenty minutes long exits `5` with the
+/// request as it stands, having made no call to GitHub. A wait runs no
+/// intake and follows the host process (135; design D9): the request it
+/// reads of GitHub is where it meets the pause.
 #[test]
 fn a_wait_whose_timeout_comes_first_calls_nothing() {
     let g = OnGitHub::new("pr-spent-wait", "");
-    let (n, _) = g.by_hand("unit/slow", &[("slow", Some("x\n"))], false);
-    g.step();
-    let id = g.of(n)[0]["id"].as_u64().expect("taken in").to_string();
+    let w = g.session("slow", &[("slow", "x\n")]);
+    let out = g.wt_submit(&w, &["--no-wait"]);
+    assert_eq!(out.status.code(), Some(0), "{}", text(&out));
     g.spent_for(20);
     let before = g.repo_calls();
-    let out = g.sluice(&["wait", &id, "--timeout", "5m"]);
+    let out = g.skipping(&w, &["wait", "main", "--timeout", "5m"]);
     assert_eq!(out.status.code(), Some(sluice::WAITING), "{}", text(&out));
     assert_eq!(g.repo_calls(), before, "no call to GitHub: {}", text(&out));
 }
@@ -4711,8 +5006,10 @@ fn nothing_moved_asks_once_a_minute() {
 
 /// reader-tick, "A branch that takes pull requests between discoveries":
 /// none open and the host's interval a minute, six passes of `sluice run`
-/// within it start git exactly as often as one, and ask GitHub nothing
-/// after the first (129, 136).
+/// within it start git in the run exactly as often as one, and ask GitHub
+/// nothing after the first (129, 136). The passes are the host process's,
+/// which the run follows (135): its starts are counted apart, whichever
+/// command started it.
 #[test]
 fn passes_between_discoveries_start_no_git_and_ask_github_nothing() {
     let g = OnGitHub::new("pr-idle-ticks", "");
@@ -4722,26 +5019,37 @@ fn passes_between_discoveries_start_no_git_and_ask_github_nothing() {
     let run = |rounds: &str| -> (Vec<String>, Vec<(String, String)>) {
         g.discovery_passes();
         let (starts, calls) = (git.count(), g.gh.fake.requests().len());
-        let out = git
+        let child = git
             .on(&mut g.command(env!("CARGO_BIN_EXE_sluice"), g.repo.dir()))
             .env("SLUICE_ROUND_SLEEP", "record")
             .args(["run", "--rounds", rounds])
-            .output()
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
             .unwrap();
+        let pid = child.id();
+        let out = child.wait_with_output().unwrap();
         assert!(out.status.success(), "{}", text(&out));
         let asked = g.gh.fake.requests()[calls..]
             .iter()
             .map(|r| (r.method.clone(), r.path.clone()))
             .collect();
-        (git.starts()[starts..].to_vec(), asked)
+        let own = git.parented()[starts..]
+            .iter()
+            .filter(|(parent, _)| *parent == pid)
+            .map(|(_, args)| args.clone())
+            .collect();
+        (own, asked)
     };
-    // The driver's first start pushes the host's intake mark, which its
-    // next start, within a third of the lease, renews never (137).
     run("1");
     let lists = g.lists();
     let (one, asked_one) = run("1");
     let (six, asked_six) = run("6");
+    // Six of the host process's passes start no git in the run beyond
+    // what one does (129, 135).
+    let fetches = |s: &[String]| s.iter().filter(|a| a.contains(" fetch ")).count();
     assert_eq!(six.len(), one.len(), "one: {one:?}; six: {six:?}");
+    assert_eq!(fetches(&six), fetches(&one), "{six:?}");
     assert_eq!(g.lists(), lists + 2, "asked at each run's first pass alone");
     for call in &asked_six {
         assert!(
@@ -5007,24 +5315,38 @@ struct Other<'a> {
 }
 
 impl OnGitHub {
-    /// Lines put first in this host's config: its `[peers]` table, or its
-    /// `[signing]`, ahead of the `[forge]` table later lines are added to.
-    fn config_first(&self, lines: &str) {
+    /// This host is called `name` among its peers, with `lines` more in
+    /// its `[peers]` table, in place of a `[peers]` table it has.
+    fn named(&self, name: &str, lines: &str) {
         let path = self.config.path().join("sluice/config.toml");
         let text = std::fs::read_to_string(&path).unwrap();
-        std::fs::write(&path, format!("{lines}\n{text}")).unwrap();
-    }
-
-    /// This host is called `name` among its peers, with `lines` more in
-    /// its `[peers]` table.
-    fn named(&self, name: &str, lines: &str) {
-        self.config_first(&format!("[peers]\nname = \"{name}\"\n{lines}"));
+        let text = match text.find("[peers]\n") {
+            Some(at) => {
+                let rest = &text[at + "[peers]\n".len()..];
+                let end = rest
+                    .find("\n[")
+                    .map_or(text.len(), |e| at + "[peers]\n".len() + e + 1);
+                format!("{}{}", &text[..at], &text[end..])
+            }
+            None => text,
+        };
+        std::fs::write(
+            &path,
+            format!("[peers]\nname = \"{name}\"\n{lines}\n{text}"),
+        )
+        .unwrap();
     }
 
     /// Another host, called `name` among its peers with `lines` more in its
     /// `[peers]` table, and `config` first in its config, over the same
-    /// remote and GitHub.
+    /// remote and GitHub. Host `b` signs as the policy's signer `b` where
+    /// `config` names no `[signing]` (design D28).
     fn other(&self, name: &str, lines: &str, config: &str) -> Other<'_> {
+        let config = match (name, config.contains("[signing]")) {
+            ("b", false) => format!("{}\n{config}", self.b_signing),
+            _ => config.to_string(),
+        };
+        let config = config.as_str();
         let repo = Repo::clone_of(self.bare.path(), &format!("{name}-host"));
         repo.git(&["remote", "set-url", "origin", "https://github.com/o/r.git"]);
         repo.git(&[
@@ -5051,75 +5373,10 @@ impl OnGitHub {
             state: Scratch::new(&format!("{name}-host-state")),
         }
     }
-
-    /// Record each push of an intake mark to the remote, its new value or
-    /// zeros for a removal, in `intake.log` beside it.
-    fn record_marks(&self) {
-        let log = self.bare.path().join("intake.log");
-        let hook = self.bare.path().join("hooks/post-receive");
-        std::fs::create_dir_all(hook.parent().unwrap()).unwrap();
-        std::fs::write(
-            &hook,
-            format!(
-                "#!/bin/sh\nwhile read old new ref; do\n  case \"$ref\" in\n    \
-                 refs/sluice/intake/*) echo \"$new\" >> {:?};;\n  esac\ndone\n",
-                log.display().to_string()
-            ),
-        )
-        .unwrap();
-        use std::os::unix::fs::PermissionsExt;
-        std::fs::set_permissions(&hook, std::fs::Permissions::from_mode(0o755)).unwrap();
-    }
-
-    /// Each intake mark pushed to the remote since [`OnGitHub::record_marks`],
-    /// what it says, or `null` for a removal.
-    fn marks_pushed(&self) -> Vec<Value> {
-        let log = std::fs::read_to_string(self.bare.path().join("intake.log")).unwrap_or_default();
-        log.lines()
-            .map(|oid| match oid.trim_matches('0') {
-                "" => Value::Null,
-                _ => self.said(oid),
-            })
-            .collect()
-    }
-
-    /// What the mark commit `oid` on the remote says.
-    fn said(&self, oid: &str) -> Value {
-        let out = support::git_command()
-            .arg("--git-dir")
-            .arg(self.bare.path())
-            .args(["log", "-1", "--format=%B", oid])
-            .output()
-            .unwrap();
-        serde_json::from_slice(String::from_utf8_lossy(&out.stdout).trim().as_bytes()).unwrap()
-    }
-
-    /// main's intake mark on the remote: its commit and what it says.
-    fn mark(&self) -> Option<(String, Value)> {
-        let oid = github::rev(self.bare.path(), "refs/sluice/intake/main")?;
-        let said = self.said(&oid);
-        Some((oid, said))
-    }
-
-    /// Push a mark naming `host` and `holder` to the remote, as another
-    /// host would, where none stands; its commit.
-    fn push_mark(&self, host: &str, holder: &str) -> String {
-        let tree = self
-            .repo
-            .git(&["hash-object", "-t", "tree", "-w", "/dev/null"]);
-        let said = format!("{{\"host\":\"{host}\",\"holder\":\"{holder}\",\"sluice\":\"0.0.0\"}}");
-        let commit = self.repo.git(&["commit-tree", &tree, "-m", &said]);
-        self.repo.git(&[
-            "push",
-            "-q",
-            "origin",
-            &format!("{commit}:refs/sluice/intake/main"),
-        ]);
-        commit
-    }
 }
 
 impl Other<'_> {
+    /// As [`OnGitHub::command`], on this host.
     fn command(&self, program: &str, dir: &Path) -> Command {
         let bin = Path::new(env!("CARGO_BIN_EXE_sluice")).parent().unwrap();
         let path = format!("{}:{}", bin.display(), std::env::var("PATH").unwrap());
@@ -5127,6 +5384,7 @@ impl Other<'_> {
         support::isolated(&mut c)
             .current_dir(dir)
             .env("PATH", path)
+            .env("SLUICE_ROUND_SLEEP", "record")
             .env("XDG_CONFIG_HOME", self.config.path())
             .env("XDG_STATE_HOME", self.state.path())
             .env("SLUICE_FORGE_API", self.g.gh.url())
@@ -5191,50 +5449,43 @@ impl Other<'_> {
             .filter(|s| s["from"]["worktree"] == place.as_str())
             .collect()
     }
-
-    /// A worktree on the remote's branch `name`, as its session would have.
-    fn worktree_of(&self, name: &str) -> PathBuf {
-        let dir = self
-            .repo
-            .dir()
-            .with_extension(format!("s-{}", name.replace('/', "-")));
-        let _ = std::fs::remove_dir_all(&dir);
-        self.repo.git(&[
-            "fetch",
-            "-q",
-            "origin",
-            &format!("{name}:refs/remotes/origin/{name}"),
-        ]);
-        self.repo.git(&[
-            "worktree",
-            "add",
-            "-q",
-            "-b",
-            name,
-            dir.to_str().unwrap(),
-            &format!("origin/{name}"),
-        ]);
-        dir
-    }
 }
 
-/// request-intake-host, "Records on each host": host A's `sluice run`
-/// holds main's intake mark, and host B's `sluice run` asks GitHub nothing
-/// about main's open pull requests and takes nothing in.
+/// pull-request-intake, "Records each host keeps" (137, 56, S64; design
+/// D22): main takes pull requests and the policy names no signers, so main
+/// is refused alone, in the refusal's words: a submit to it exits 2 with
+/// nothing pushed and nothing opened, a step and a status say it, and
+/// GitHub is asked nothing of main's pull requests. Main has no records
+/// here, so the overview lists nothing of it.
 #[test]
-fn records_on_each_host_one_host_asks() {
-    let g = OnGitHub::new("intake-each", "");
-    g.named("a", "");
-    let (n, _) = g.by_hand("unit/each", &[("e.txt", Some("e\n"))], false);
-    g.on_main();
-    let out = g.skipping(g.repo.dir(), &["run", "--rounds", "1"]);
-    assert!(out.status.success(), "{}", text(&out));
-    assert_eq!(g.mark().unwrap().1["host"], "a");
-    let b = g.other("b", "", "");
-    let lists = g.lists();
-    let said = b.run("5");
-    assert_eq!(g.lists(), lists, "{said}");
-    assert!(b.of(n).is_empty(), "{said}");
+fn pull_requests_need_records_on_the_remote() {
+    let g = OnGitHub::unkept("intake-unkept", "");
+    let words = "main takes pull requests, which only the host that keeps it on origin takes \
+                 in, and its state is each host's own: name [signers] in .config/sluice.toml so \
+                 its state is kept on origin (137)";
+    g.by_hand("unit/each", &[("e.txt", Some("e\n"))], false);
+    let w = g.session("refused", &[("r.txt", "r\n")]);
+    let out = g
+        .command(env!("CARGO_BIN_EXE_sluice"), &w)
+        .args(["submit", "main", "--no-wait"])
+        .output()
+        .unwrap();
+    assert_eq!(out.status.code(), Some(sluice::CONFLICT), "{}", text(&out));
+    assert!(text(&out).contains(words), "{}", text(&out));
+    assert!(
+        g.gh.forge.by_ref("unit/refused").unwrap().is_none(),
+        "nothing opened"
+    );
+    assert_eq!(
+        github::rev(g.bare.path(), "refs/heads/unit/refused"),
+        None,
+        "nothing pushed"
+    );
+    let said = g.sluice(&["step", "main"]);
+    assert!(text(&said).contains(words), "{}", text(&said));
+    let status = g.sluice(&["status", "main"]);
+    assert!(text(&status).contains(words), "{}", text(&status));
+    assert_eq!(g.lists(), 0, "GitHub was asked nothing of main's list");
 }
 
 /// request-intake-host, "Records on the remote": another host keeps main,
@@ -5243,430 +5494,293 @@ fn records_on_each_host_one_host_asks() {
 /// no round of main.
 #[test]
 fn records_on_the_remote_only_the_lead_asks() {
-    use ssh_key::{Algorithm, LineEnding, PrivateKey};
-    let keys = [
-        PrivateKey::random(&mut rand_core::OsRng, Algorithm::Ed25519).unwrap(),
-        PrivateKey::random(&mut rand_core::OsRng, Algorithm::Ed25519).unwrap(),
-    ];
-    let line = |p: &str, k: &PrivateKey| format!("{p} {}", k.public_key().to_openssh().unwrap());
-    let g = OnGitHub::with(
-        "intake-signed",
-        &format!(
-            "[tests]\nrunner = \"command\"\ncommand = \"sh check.sh\"\n\n\
-             [signers.a]\nssh = \"{}\"\n\n[signers.b]\nssh = \"{}\"\n\n\
-             [branches.main]\nremote = \"origin\"\ntimeout = \"1m\"\ntrust = [\"a\", \"b\"]\n\n\
-             [branches.main.pull_requests]\n",
-            line("a", &keys[0]),
-            line("b", &keys[1])
-        ),
-        &[("check.sh", CHECK)],
-    );
-    let signing = |name: &str, key: &PrivateKey, dir: &Path| {
-        let path = dir.join(format!("{name}.signing"));
-        key.write_openssh_file(&path, LineEnding::LF).unwrap();
-        use std::os::unix::fs::PermissionsExt;
-        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).unwrap();
-        format!(
-            "[signing]\nsigner = \"{name}\"\nkey = {:?}\n",
-            path.display().to_string()
-        )
-    };
-    g.config_first(&signing("a", &keys[0], g.config.path()));
+    let g = OnGitHub::new("intake-signed", "");
     g.named("a", "");
     // Slow, so the submission is still under test when B waits on it.
     let (n, _) = g.by_hand("unit/signed", &[("slow", Some("s\n"))], false);
     g.step();
     let id = g.of(n)[0]["id"].as_u64().unwrap().to_string();
-    let keys_dir = Scratch::new("intake-signed-b-key");
-    let b = g.other("b", "", &signing("b", &keys[1], keys_dir.path()));
+    let b = g.other("b", "", "");
     let lists = g.lists();
     let out = b.skipping(b.repo.dir(), &["wait", &id, "--timeout", "30s"]);
     assert_eq!(out.status.code(), Some(sluice::WAITING), "{}", text(&out));
     assert_eq!(g.lists(), lists, "{}", text(&out));
 }
 
-/// request-intake-host, "A live driver keeps it": host A's `sluice run`
-/// holds the mark, and host B's `sluice run` passing main within the lease
-/// leaves it A's.
+/// request-intake-host, "The host that keeps it takes them in": main's
+/// records name no host, and host A's pass keeps main and takes its pull
+/// requests in (137; design D21).
 #[test]
-fn a_live_driver_keeps_the_mark() {
-    let g = OnGitHub::new("intake-kept", "");
-    g.named("a", "");
-    g.on_main();
-    let out = g.skipping(g.repo.dir(), &["run", "--rounds", "1"]);
-    assert!(out.status.success(), "{}", text(&out));
-    let (held, said) = g.mark().unwrap();
-    assert_eq!(
-        said,
-        serde_json::json!({"host": "a", "holder": "driver", "sluice": said["sluice"]})
-    );
-    let b = g.other("b", "", "");
-    let out = b.run("20");
-    assert_eq!(g.mark().unwrap().0, held, "{out}");
-}
-
-/// request-intake-host, "Two takers at once": waits on hosts A and B,
-/// where no `sluice run` lives, each push the mark leased on its absence;
-/// one host holds it at a time, and the other takes nothing in.
-#[test]
-fn two_takers_at_once_one_holds() {
-    let g = OnGitHub::new("intake-two", "reviews = 1");
-    g.named("a", "");
-    g.record_marks();
-    let (n, _) = g.by_hand("unit/two", &[("t.txt", Some("t\n"))], false);
-    let b = g.other("b", "", "");
-    let wa = g.repo.dir().with_extension("s-two");
-    g.repo
-        .git(&["worktree", "add", "-q", wa.to_str().unwrap(), "unit/two"]);
-    let wb = b.worktree_of("unit/two");
-    let wait = |c: &mut Command| {
-        c.args(["wait", "main", "--timeout", "4s"])
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .spawn()
-            .unwrap()
-    };
-    let pa = wait(&mut g.command(env!("CARGO_BIN_EXE_sluice"), &wa));
-    let pb = wait(&mut b.command(env!("CARGO_BIN_EXE_sluice"), &wb));
-    let (oa, ob) = (
-        pa.wait_with_output().unwrap(),
-        pb.wait_with_output().unwrap(),
-    );
-    let shown = format!("{}\n{}", text(&oa), text(&ob));
-    // One host holds it at a time: a push by another host only once the
-    // holder let it go. The wait that ends first drops it, and the other,
-    // still waiting, may then push its own where none stands.
-    let pushed = g.marks_pushed();
-    assert!(pushed.iter().any(|m| !m.is_null()), "{shown}");
-    let mut holder: Option<&str> = None;
-    for m in &pushed {
-        if m.is_null() {
-            holder = None;
-            continue;
-        }
-        let host = m["host"].as_str().unwrap();
-        assert!(
-            holder.is_none_or(|h| h == host),
-            "one host held it at a time: {pushed:?}\n{shown}"
-        );
-        assert_eq!(m["holder"], "wait", "{pushed:?}");
-        holder = Some(host);
-    }
-    // Waiting on a review, nothing is submitted; the one that held it read
-    // the request, and the other asked nothing of the list but its own
-    // finding of its request.
-    assert!(g.of(n).is_empty() && b.of(n).is_empty());
-    assert_eq!(g.mark(), None, "let go when each wait ended: {shown}");
-}
-
-/// request-intake-host, "A driver shows itself": main has no mark, and
-/// host A's `sluice run` pushes one naming A and a driver, and takes main's
-/// pull requests in.
-#[test]
-fn a_driver_shows_itself() {
-    let g = OnGitHub::new("intake-driver", "");
+fn the_host_that_keeps_main_takes_its_requests_in() {
+    let g = OnGitHub::new("intake-keeper", "");
     g.named("a", "");
     let (n, _) = g.by_hand("unit/shown", &[("s.txt", Some("s\n"))], false);
     g.on_main();
     let out = g.skipping(g.repo.dir(), &["run", "--rounds", "1"]);
     assert!(out.status.success(), "{}", text(&out));
-    let (_, said) = g.mark().unwrap();
-    assert_eq!(
-        (&said["host"], &said["holder"]),
-        (&"a".into(), &"driver".into())
-    );
+    assert_eq!(g.lead().as_deref(), Some("a"), "{}", text(&out));
     assert_eq!(g.of(n).len(), 1, "{}", text(&out));
 }
 
-/// request-intake-host, "Two drivers see each other": host A's `sluice
-/// run` holds the mark, and host B's, starting, pushes none and takes
-/// nothing in.
+/// request-intake-host, "An older mark": a mark an older sluice left on
+/// the remote names host C, and the host that keeps main takes `#12` in
+/// all the same, reading nothing of the mark and fetching it nowhere
+/// (design D23).
 #[test]
-fn two_drivers_see_each_other() {
-    let g = OnGitHub::new("intake-drivers", "");
+fn an_older_mark_is_read_by_nothing() {
+    let g = OnGitHub::new("intake-older-mark", "");
     g.named("a", "");
-    g.on_main();
-    let out = g.skipping(g.repo.dir(), &["run", "--rounds", "1"]);
-    assert!(out.status.success(), "{}", text(&out));
-    g.record_marks();
-    let (n, _) = g.by_hand("unit/drivers", &[("d.txt", Some("d\n"))], false);
-    let b = g.other("b", "", "");
-    let said = b.run("3");
-    assert!(g.marks_pushed().is_empty(), "{said}");
-    assert!(b.of(n).is_empty(), "{said}");
-}
-
-/// request-intake-host, "A wait shows itself": main has no mark, and a
-/// wait on host B, where no `sluice run` lives, pushes the mark naming B
-/// and a wait and takes main's pull requests in; "A wait lets go": once it
-/// ends, the mark is gone.
-#[test]
-fn a_wait_shows_itself_and_lets_go() {
-    let g = OnGitHub::new("intake-wait", "");
-    g.named("a", "");
-    g.record_marks();
-    let (n, _) = g.by_hand("unit/waits", &[("w.txt", Some("w\n"))], false);
-    let b = g.other("b", "", "");
-    let w = b.worktree_of("unit/waits");
-    let out = b.skipping(&w, &["wait", "main", "--timeout", "1m"]);
-    let pushed = g.marks_pushed();
-    assert!(
-        matches!(pushed.first(), Some(m) if m["host"] == "b" && m["holder"] == "wait"),
-        "{pushed:?}\n{}",
-        text(&out)
-    );
-    assert!(!b.of(n).is_empty(), "{}", text(&out));
-    assert_eq!(pushed.last(), Some(&Value::Null), "let go: {pushed:?}");
-    assert_eq!(g.mark(), None);
-}
-
-/// request-intake-host, "Waits and steps alone keep no mark": host A
-/// reaches main by a wait and steps alone; once the wait ends no mark
-/// stands, and its steps take main's pull requests in and push none.
-#[test]
-fn waits_and_steps_alone_keep_no_mark() {
-    let g = OnGitHub::new("intake-alone", "");
-    g.named("a", "");
-    let w = g.session("alone", &[("a.txt", "a\n")]);
-    let out = g.wt_submit(&w, &["--no-wait"]);
-    assert_eq!(out.status.code(), Some(0), "{}", text(&out));
-    let out = g.skipping(&w, &["wait", "main", "--timeout", "30s"]);
-    assert!(out.status.code().is_some(), "{}", text(&out));
-    assert_eq!(g.mark(), None, "{}", text(&out));
-    g.record_marks();
-    let (n, _) = g.by_hand("unit/stepped", &[("s.txt", Some("s\n"))], false);
+    let tree = g
+        .repo
+        .git(&["hash-object", "-t", "tree", "-w", "/dev/null"]);
+    let said = "{\"host\":\"c\",\"holder\":\"driver\",\"sluice\":\"0.90.0\"}";
+    let commit = g.repo.git(&["commit-tree", &tree, "-m", said]);
+    g.repo.git(&[
+        "push",
+        "-q",
+        "origin",
+        &format!("{commit}:refs/sluice/intake/main"),
+    ]);
+    let (n, _) = g.by_hand("unit/older", &[("o.txt", Some("o\n"))], false);
     g.step();
-    assert_eq!(g.of(n).len(), 1);
-    assert!(g.marks_pushed().is_empty());
-    assert_eq!(g.mark(), None);
+    assert_eq!(g.lead().as_deref(), Some("a"));
+    assert_eq!(g.of(n).len(), 1, "taken in");
+    assert_eq!(g.of(n)[0]["from"]["worktree"], format!("pull/{n}"));
+    let fetched = g
+        .repo
+        .git(&["for-each-ref", "refs/sluice-fetched/origin/intake/"]);
+    assert_eq!(fetched, "", "the mark is fetched nowhere");
+    assert_eq!(
+        github::rev(g.bare.path(), "refs/sluice/intake/main").as_deref(),
+        Some(commit.as_str()),
+        "nor deleted"
+    );
 }
 
-/// request-intake-host, "A driver takes from a wait": a wait on host A
-/// holds the mark, and host B's `sluice run` replaces it at once; A's next
-/// pass takes nothing in.
+impl OnGitHub {
+    /// Rewrite the JSON file `path` of main's records on the remote by `f`,
+    /// as an older sluice wrote it, with a commit on
+    /// `refs/sluice/state/main` over the last, its version one more.
+    fn rewrite_on_remote(&self, path: &str, f: impl FnOnce(Value) -> Value) {
+        let bare = self.bare.path();
+        let git = |args: &[&str], input: Option<&str>, index: Option<&Path>| -> String {
+            let mut c = Command::new("git");
+            c.args(["--git-dir", bare.to_str().unwrap()])
+                .args(args)
+                .env("GIT_AUTHOR_NAME", "sluice")
+                .env("GIT_AUTHOR_EMAIL", "sluice@localhost")
+                .env("GIT_COMMITTER_NAME", "sluice")
+                .env("GIT_COMMITTER_EMAIL", "sluice@localhost")
+                .stdin(Stdio::piped())
+                .stdout(Stdio::piped())
+                .stderr(Stdio::piped());
+            if let Some(i) = index {
+                c.env("GIT_INDEX_FILE", i);
+            }
+            let mut child = c.spawn().unwrap();
+            if let Some(text) = input {
+                use std::io::Write as _;
+                child
+                    .stdin
+                    .take()
+                    .unwrap()
+                    .write_all(text.as_bytes())
+                    .unwrap();
+            }
+            drop(child.stdin.take());
+            let out = child.wait_with_output().unwrap();
+            assert!(out.status.success(), "git {args:?}: {}", text(&out));
+            String::from_utf8_lossy(&out.stdout).trim().to_string()
+        };
+        let state = "refs/sluice/state/main";
+        let old = git(&["rev-parse", state], None, None);
+        let doc: Value =
+            serde_json::from_str(&git(&["show", &format!("{old}:{path}")], None, None)).unwrap();
+        let blob = git(
+            &["hash-object", "-w", "--stdin"],
+            Some(&serde_json::to_string_pretty(&f(doc)).unwrap()),
+            None,
+        );
+        let version: u64 = git(&["show", &format!("{old}:version")], None, None)
+            .parse()
+            .unwrap();
+        let next = git(
+            &["hash-object", "-w", "--stdin"],
+            Some(&format!("{}\n", version + 1)),
+            None,
+        );
+        let scratch = Scratch::new("rewrite-index");
+        let index = scratch.path().join("index");
+        git(&["read-tree", &old], None, Some(&index));
+        for (p, b) in [(path, &blob), ("version", &next)] {
+            git(
+                &["update-index", "--cacheinfo", &format!("100644,{b},{p}")],
+                None,
+                Some(&index),
+            );
+        }
+        let tree = git(&["write-tree"], None, Some(&index));
+        let commit = git(
+            &["commit-tree", &tree, "-p", &old, "-m", "an older sluice"],
+            None,
+            None,
+        );
+        git(&["update-ref", state, &commit, &old], None, None);
+    }
+
+    /// Host A, called `a`, keeps main and took pull request `<name>` in;
+    /// main's records on the remote are then rewritten as an older sluice
+    /// left them when its hand-over to `b` withdrew that submission: its
+    /// record withdrawn in the hand-over's words, naming `b`, and its
+    /// combination gone. The request's number and head, and the
+    /// submission's id.
+    fn handed_over_before(&self, name: &str) -> (u64, String, u64) {
+        self.named("a", "");
+        let (n, head) = self.by_hand(name, &[("slow", Some("o\n"))], false);
+        self.step();
+        let id = self.of(n)[0]["id"].as_u64().expect("taken in");
+        self.rewrite_on_remote(&format!("submissions/{id}.json"), |mut sub| {
+            sub["state"] = "withdrawn".into();
+            sub["withdrawn"] = serde_json::json!({
+                "by": "b takes main's pull requests in",
+                "at": "2026-11-06T12:00:00Z",
+                "handed_over_to": "b",
+            });
+            sub
+        });
+        self.rewrite_on_remote("branch.json", |mut doc| {
+            doc["candidates"] = serde_json::json!([]);
+            doc
+        });
+        (n, head, id)
+    }
+}
+
+/// request-intake-host, "An older hand-over" (120; record 0088 as amended;
+/// design D24): main's records on the remote hold a submission an older
+/// sluice withdrew in a hand-over to host B; the host that keeps main reads
+/// it as holding no request and takes the pull request in again at its
+/// head, with no draft made.
 #[test]
-fn a_driver_takes_from_a_wait() {
+fn an_older_hand_over_carried_onto_the_remote_is_taken_in_again() {
+    let g = OnGitHub::new("intake-older-hand-over", "");
+    let (n, head, id) = g.handed_over_before("unit/older");
+    g.discovery_passes();
+    let said = g.round();
+    let subs = g.of(n);
+    assert_eq!(subs.len(), 2, "{said}{subs:?}");
+    assert_eq!(subs[0]["id"], id, "{subs:?}");
+    assert_eq!(subs[1]["head"], head.as_str(), "{subs:?}");
+    assert_ne!(subs[1]["state"], "withdrawn", "{subs:?}");
+    assert!(!g.pull_from("unit/older").draft, "no draft made");
+}
+
+/// request-intake-host, "A wait on an older hand-over" (120; core.48;
+/// record 0100; design D24): `sluice wait <id>` on a submission an older
+/// sluice withdrew in a hand-over follows its pull request rather than
+/// ending withdrawn.
+#[test]
+fn a_wait_on_an_older_hand_over_follows_its_pull_request() {
+    let g = OnGitHub::new("wait-older-hand-over", "");
+    let (n, _, id) = g.handed_over_before("unit/followed");
+    let out = g.skipping(
+        g.repo.dir(),
+        &["wait", &id.to_string(), "--timeout", "2s", "--json"],
+    );
+    assert_ne!(out.status.code(), Some(sluice::WITHDRAWN), "{}", text(&out));
+    let doc: Value =
+        serde_json::from_slice(&out.stdout).unwrap_or_else(|e| panic!("{e}: {}", text(&out)));
+    // The request taken in again at its head carries its work.
+    let carrier = doc["carried_by"]["id"]
+        .as_u64()
+        .unwrap_or_else(|| panic!("{doc}"));
+    assert!(carrier > id, "{doc}");
+    assert_eq!(g.of(n).last().unwrap()["id"], carrier, "{doc}");
+}
+
+/// request-intake-host, "Two hosts beside the keeper" (120, 137; design
+/// D24): host A keeps main and takes `#1` in; hosts B and C each pass main
+/// ten times while its combination is tested, and it lands as the one
+/// submission A took in, main's records holding no other of it.
+#[test]
+fn a_request_keeps_one_number_while_other_hosts_pass() {
+    let g = OnGitHub::new("intake-one-number", "");
+    g.named("a", "");
+    let (n, head) = g.by_hand("unit/one", &[("slow", Some("o\n"))], false);
+    g.step();
+    assert_eq!(g.lead().as_deref(), Some("a"));
+    let id = g.of(n)[0]["id"].clone();
+    let b = g.other("b", "", "");
+    let c = g.other("c", "", "");
+    for host in [&b, &c] {
+        host.discovery_passes();
+        host.run("10");
+    }
+    let until = Instant::now() + Duration::from_secs(60);
+    while g.of(n)[0]["state"] != "landed" {
+        assert!(Instant::now() < until, "never landed: {:?}", g.of(n));
+        std::thread::sleep(Duration::from_millis(500));
+        g.round();
+    }
+    let subs = g.of(n);
+    assert_eq!(subs.len(), 1, "one submission of it: {subs:?}");
+    assert_eq!(
+        (&subs[0]["id"], &subs[0]["head"]),
+        (&id, &head.as_str().into())
+    );
+    assert_eq!(g.lead().as_deref(), Some("a"));
+}
+
+/// request-intake-host, "Another host keeps it": host B's pass keeps
+/// main, and host A's step takes nothing in and asks GitHub nothing of
+/// main's open pull requests (137; design D21).
+#[test]
+fn another_host_keeps_main_and_this_hosts_step_takes_nothing_in() {
     let g = OnGitHub::new("intake-take", "");
     g.named("a", "");
-    g.push_mark("a", "wait");
     let b = g.other("b", "", "");
     b.run("1");
-    let (_, said) = g.mark().unwrap();
-    assert_eq!(
-        (&said["host"], &said["holder"]),
-        (&"b".into(), &"driver".into())
-    );
+    assert_eq!(g.lead().as_deref(), Some("b"));
     let (n, _) = g.by_hand("unit/taken", &[("t.txt", Some("t\n"))], false);
     let lists = g.lists();
     g.step();
     assert!(g.of(n).is_empty());
     assert_eq!(g.lists(), lists, "A asked GitHub nothing of main's list");
+    assert_eq!(g.lead().as_deref(), Some("b"));
 }
 
-/// request-intake-host, "A host that stopped": the host that held the mark
-/// stopped, and host B, having seen it unchanged for its lease, takes it
-/// and takes main's pull requests in.
+/// request-intake-host, "A host that stopped": host A kept main and took
+/// a pull request in, then stopped; host B, having seen main's records
+/// unchanged for its lease with work in them, keeps main from then on and
+/// takes its pull requests in (72, 73, 137; design D21).
 #[test]
-fn a_host_that_stopped_loses_the_mark() {
+fn a_host_that_stopped_passes_main_on_after_its_lease() {
     let g = OnGitHub::new("intake-lapsed", "");
     g.named("a", "");
-    let stopped = g.push_mark("a", "driver");
-    let (n, _) = g.by_hand("unit/lapsed", &[("l.txt", Some("l\n"))], false);
+    let (n, _) = g.by_hand("unit/lapsed", &[("slow", Some("l\n"))], false);
+    g.step();
+    assert_eq!(g.lead().as_deref(), Some("a"));
+    assert_eq!(g.of(n).len(), 1, "A took it in");
     let b = g.other("b", "lease = \"30s\"\nalive = \"10s\"", "");
     let said = b.run("3");
-    assert_eq!(g.mark().unwrap().0, stopped, "within the lease: {said}");
-    assert!(b.of(n).is_empty());
-    let said = b.run("12");
-    let (_, mark) = g.mark().unwrap();
-    assert_eq!(mark["host"], "b", "{said}");
-    assert!(!b.of(n).is_empty(), "{said}");
+    assert_eq!(g.lead().as_deref(), Some("a"), "within the lease: {said}");
+    let said = b.run("20");
+    assert_eq!(g.lead().as_deref(), Some("b"), "{said}");
+    let (m, _) = g.by_hand("unit/after", &[("a.txt", Some("a\n"))], false);
+    b.discovery_passes();
+    let said = b.run("1");
+    assert_eq!(b.of(m).len(), 1, "B takes main's pull requests in: {said}");
 }
 
-/// Host A, called `a`, testing `pull/<n>` with a check that goes on until
-/// it is ended, when host B's `sluice run` takes main's mark and the
-/// request in: the request's number, its submission's id on A, the run's
-/// process, and the place and combination A's log says it is tested in.
-fn handed_mid_test(g: &OnGitHub) -> (u64, u64, String, String, String) {
-    let (n, id, process, place, combination, _) = handing_mid_test(g);
-    (n, id, process, place, combination)
-}
-
-/// [`handed_mid_test`], with host B.
-fn handing_mid_test(g: &OnGitHub) -> (u64, u64, String, String, String, Other<'_>) {
-    g.named("a", "");
-    let pid = g.repo.dir().join(".git/hang.pid");
-    let hang = format!("{}\n", pid.display());
-    let (n, _) = g.by_hand("unit/handed", &[("hang", Some(&hang))], false);
-    g.step();
-    let id = g.of(n)[0]["id"].as_u64().expect("taken in");
-    let until = Instant::now() + Duration::from_secs(60);
-    while !pid.exists() {
-        assert!(Instant::now() < until, "the check never started");
-        std::thread::sleep(Duration::from_millis(100));
-    }
-    let process = std::fs::read_to_string(&pid).unwrap().trim().to_string();
-    assert!(alive(&process));
-    let testing = g
-        .log()
-        .into_iter()
-        .find(|l| l["event"] == "testing" && l["submissions"][0] == id)
-        .expect("A tests it");
-    let place = testing["place"].as_str().unwrap().to_string();
-    let combination = testing["combination"].as_str().unwrap().to_string();
-    let b = g.other("b", "", "");
-    b.run("1");
-    assert_eq!(g.mark().unwrap().1["host"], "b");
-    assert!(!b.of(n).is_empty(), "B takes it in");
-    (n, id, process, place, combination, b)
-}
-
-/// Whether the process `pid` is there.
-fn alive(pid: &str) -> bool {
-    Command::new("kill")
-        .args(["-0", pid])
-        .stderr(Stdio::null())
-        .status()
-        .unwrap()
-        .success()
-}
-
-/// Host A's pass after B took main's mark ended A's run of `pull/<n>` and
-/// released its checkout, and read nothing of the run (the
-/// obsolete-combinations spec).
-fn ended_by_the_hand_over(g: &OnGitHub, process: &str, place: &str, combination: &str) {
-    let until = Instant::now() + Duration::from_secs(10);
-    while alive(process) {
-        assert!(Instant::now() < until, "A's run goes on");
-        std::thread::sleep(Duration::from_millis(100));
-    }
-    let log = g.log();
-    assert!(
-        log.iter()
-            .any(|l| l["event"] == "released" && l["place"] == place),
-        "{log:?}"
-    );
-    assert!(
-        !log.iter()
-            .any(|l| l["event"] == "result" && l["combination"] == combination),
-        "{log:?}"
-    );
-}
-
-/// request-intake-host, "Handed over" and "Handed over mid-test by a
-/// driver": host A has `pull/<n>` under test in its records and host B's
-/// `sluice run` takes main's mark; A's next pass withdraws it naming B,
-/// ends its run and releases its checkout, reading no result of it, and B
-/// takes it in.
+/// pull-request-intake, "A refused main" (137, 56, S64; design D22): main
+/// is refused for taking pull requests on records each host keeps, and a
+/// worktree's submission to `bolt/x`, which takes none, lands as before.
 #[test]
-fn handed_over() {
-    let g = OnGitHub::new("intake-handed", "");
-    let (n, _, process, place, combination) = handed_mid_test(&g);
-    let posts = g.posts();
-    g.step();
-    let a = g.of(n);
-    assert_eq!(a[0]["state"], "withdrawn", "{a:?}");
-    assert_eq!(a[0]["withdrawn"]["by"], "b takes main's pull requests in");
-    assert_eq!(a[0]["withdrawn"]["handed_over_to"], "b");
-    assert_eq!(g.posts(), posts, "A posts nothing");
-    ended_by_the_hand_over(&g, &process, &place, &combination);
-}
-
-/// request-intake-host, "Handed over mid-test by a wait": host A, with no
-/// driver, is testing `pull/<n>` when B takes main's mark; a wait on A
-/// withdraws it, ends its run and releases its checkout, and runs no round
-/// for `main`, which would read main moved since A last read it. The
-/// request carries the submission's work on B, so the wait follows the
-/// request and is never told it was withdrawn (122, 137). Out of time, it
-/// prints its own submission's record, naming the request it follows as it
-/// stands (record 0100 D2, D3). Its time is up as it starts, as on a host
-/// so busy that its start takes its whole limit: its first pass is the one
-/// that withdraws (1).
-#[test]
-fn handed_over_by_a_wait() {
-    let g = OnGitHub::new("intake-handed-wait", "");
-    let (n, id, process, place, combination) = handed_mid_test(&g);
-    let moved = g
-        .repo
-        .branch("elsewhere", "main", &[("e.txt", Some("e\n"))]);
+fn a_refused_main_leaves_a_bolt_landing() {
+    let g = OnGitHub::unkept("intake-bolt", BOLTS);
+    g.repo.git(&["branch", "bolt/x", "main"]);
     g.repo
-        .git(&["push", "-q", "origin", &format!("{moved}:refs/heads/main")]);
-    let posts = g.posts();
-    let out = g.sluice(&["wait", &id.to_string(), "--timeout", "0s", "--json"]);
-    assert_eq!(out.status.code(), Some(sluice::WAITING), "{}", text(&out));
-    let doc: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
-    assert_eq!(doc["id"], id, "{doc}");
-    assert_eq!(
-        doc["carried_by"],
-        serde_json::json!({ "pull_request": n, "state": "open" }),
-        "{doc}"
-    );
-    let a = g.of(n);
-    assert_eq!(a[0]["withdrawn"]["by"], "b takes main's pull requests in");
-    assert_eq!(a[0]["withdrawn"]["handed_over_to"], "b");
-    assert_eq!(g.posts(), posts, "A posts nothing");
-    ended_by_the_hand_over(&g, &process, &place, &combination);
-    let log = g.log();
-    assert!(!log.iter().any(|l| l["event"] == "moved"), "{log:?}");
-}
-
-/// request-intake-host, "A landing is not handed over": host A's
-/// `pull/<n>` submission is landing when B takes the mark; A's landing
-/// finishes, and nothing of it is withdrawn.
-#[test]
-fn a_landing_is_not_handed_over() {
-    let g = OnGitHub::new("intake-landing", "");
-    g.named("a", "");
-    // The remote refuses main's pushes while `refuse` exists beside it, so
-    // A's landing is left for its next step to settle (122).
-    let refuse = g.bare.path().join("refuse");
-    let hook = g.bare.path().join("hooks/pre-receive");
-    std::fs::create_dir_all(hook.parent().unwrap()).unwrap();
-    std::fs::write(
-        &hook,
-        format!(
-            "#!/bin/sh\nwhile read old new ref; do\n  \
-             if [ \"$ref\" = refs/heads/main ] && [ -e {:?} ]; then exit 1; fi\ndone\n",
-            refuse.display().to_string()
-        ),
-    )
-    .unwrap();
-    use std::os::unix::fs::PermissionsExt;
-    std::fs::set_permissions(&hook, std::fs::Permissions::from_mode(0o755)).unwrap();
-    let (n, _) = g.by_hand("unit/landing", &[("l.txt", Some("l\n"))], false);
-    std::fs::write(&refuse, "").unwrap();
-    let until = Instant::now() + Duration::from_secs(60);
-    let step = || {
-        g.discovery_passes();
-        g.sluice(&["step", "main"])
-    };
-    while !g.of(n).first().is_some_and(|s| s["state"] == "landing") {
-        assert!(Instant::now() < until, "never landing: {:?}", g.of(n));
-        step();
-        std::thread::sleep(Duration::from_millis(200));
-    }
-    let b = g.other("b", "", "");
-    b.run("1");
-    assert_eq!(g.mark().unwrap().1["host"], "b");
-    std::fs::remove_file(&refuse).unwrap();
-    while !g.of(n).first().is_some_and(|s| s["state"] == "landed") {
-        assert!(Instant::now() < until, "never landed: {:?}", g.of(n));
-        step();
-        std::thread::sleep(Duration::from_millis(200));
-    }
-    let a = g.of(n);
-    assert_eq!(a[0]["state"], "landed", "{a:?}");
-}
-
-/// request-intake-host, "A worktree's submission stays": host A, without
-/// the mark, has a submission to `bolt/x` from one of its worktrees, and
-/// its rounds advance it as before.
-#[test]
-fn a_worktrees_submission_stays() {
-    let g = OnGitHub::with_bolt("intake-bolt");
-    g.named("a", "");
-    let b = g.other("b", "", "");
-    b.run("1");
-    assert_eq!(g.mark().unwrap().1["host"], "b");
+        .git(&["push", "-q", "origin", "bolt/x:refs/heads/bolt/x"]);
     let w = g.session("bolted", &[("b.txt", "b\n")]);
     let out = g
         .command(env!("CARGO_BIN_EXE_sluice"), &w)
@@ -5674,7 +5788,6 @@ fn a_worktrees_submission_stays() {
         .output()
         .unwrap();
     assert!(out.status.success(), "{}", text(&out));
-    g.step();
     let until = Instant::now() + Duration::from_secs(60);
     loop {
         let out = g.sluice(&["step", "bolt/x"]);
@@ -5718,6 +5831,18 @@ fn a_wait_across_hosts_reads_at_its_pace() {
 }
 
 impl OnGitHub {
+    /// The host main's records on the remote name as keeping it (72, 137;
+    /// design D25); `None` where none does.
+    fn lead(&self) -> Option<String> {
+        let out = Command::new("git")
+            .args(["--git-dir", self.bare.path().to_str().unwrap()])
+            .args(["show", "refs/sluice/state/main:branch.json"])
+            .output()
+            .unwrap();
+        let doc: Value = serde_json::from_slice(&out.stdout).ok()?;
+        doc["lead"].as_str().map(str::to_string)
+    }
+
     /// The pull requests into `main` this host follows, by number, as its
     /// forge state keeps them (137); `null` where it keeps none.
     fn follows(&self) -> Value {
@@ -5729,8 +5854,8 @@ impl OnGitHub {
     }
 }
 
-/// request-intake-host, "Submitted here, taken in there": host B's `sluice
-/// run` holds main's intake mark, and `wt submit main --no-wait` on host A
+/// request-intake-host, "Submitted here, taken in there": host B keeps
+/// main, and `wt submit main --no-wait` on host A
 /// opens a pull request; A's follows name it at its head, and A's next
 /// round asks GitHub nothing of main's open pull requests.
 #[test]
@@ -5739,7 +5864,7 @@ fn submitted_here_taken_in_there() {
     g.named("a", "");
     let b = g.other("b", "", "");
     b.run("1");
-    assert_eq!(g.mark().unwrap().1["host"], "b");
+    assert_eq!(g.lead().as_deref(), Some("b"));
     let w = g.session("there", &[("t.txt", "t\n")]);
     let out = g.wt_submit(&w, &["--no-wait"]);
     assert_eq!(out.status.code(), Some(0), "{}", text(&out));
@@ -5755,24 +5880,8 @@ fn submitted_here_taken_in_there() {
     );
     g.step();
     assert_eq!(g.lists(), lists, "A's round asks nothing of the list");
-    assert!(g.of(pull.number).is_empty(), "A took nothing in");
+    took_nothing_in(&g, &b, pull.number);
     assert!(g.follows()[pull.number.to_string()].is_object());
-}
-
-/// request-intake-host, "Handed over": host A has `pull/<n>` in its queue
-/// and host B's `sluice run` takes main's mark; A's next pass withdraws its
-/// submission, and A's follows name the request at the head it withdrew.
-#[test]
-fn handed_over_is_followed() {
-    let g = OnGitHub::new("follows-handed", "");
-    let (n, _, process, place, combination) = handed_mid_test(&g);
-    assert!(g.follows()[n.to_string()].is_null(), "taken in here");
-    g.step();
-    let a = g.of(n);
-    assert_eq!(a[0]["state"], "withdrawn", "{a:?}");
-    let follows = g.follows();
-    assert_eq!(follows[n.to_string()]["head"], a[0]["head"], "{follows}");
-    ended_by_the_hand_over(&g, &process, &place, &combination);
 }
 
 /// request-intake-host, "Merged": host A follows the pull request its
@@ -5923,13 +6032,17 @@ fn landed_on_another_host() {
     // where it read the request between the two (this change's sluice
     // exec main, cli:tools, 2026-11-05): either reports it landed.
     assert!(text(&out).contains("passed · landed"), "{}", text(&out));
-    assert!(g.of(n).is_empty(), "A took nothing in");
+    took_nothing_in(&g, &b, n);
 }
 
-/// request-intake-host, "Blamed on another host": B's round blames the
-/// pull request, sluice's check on its head concludes as a failure naming
-/// the blamed check, and A's wait exits as a failed submission does,
-/// naming what the check names.
+/// request-intake-host, "Blamed on another host": B's round blames a pull
+/// request a person opened from A's worktree's branch, which no submit
+/// holds, so sluice's check on its head concludes as a failure naming the
+/// blamed check, and A's wait exits as a failed submission does, naming
+/// what the check names. A submit's request B blames is held in the pass
+/// that blamed it, its check saying it waits for the next submit, which a
+/// wait reads by its draft mark (`held_then_marked_ready_waits_to_be_taken_in`;
+/// 120, 137; design D5).
 #[test]
 fn blamed_on_another_host() {
     let g = OnGitHub::new("intake-blamed", "");
@@ -5937,26 +6050,31 @@ fn blamed_on_another_host() {
     let b = g.other("b", "", "");
     b.run("1");
     let w = g.session("blamed", &[("broken", "b\n")]);
-    let out = g.wt_submit(&w, &["--no-wait"]);
-    assert_eq!(out.status.code(), Some(0), "{}", text(&out));
-    let pull = g.pull_from("unit/blamed");
+    g.repo
+        .git(&["push", "-q", "origin", "unit/blamed:refs/heads/unit/blamed"]);
+    let head = github::rev(g.bare.path(), "refs/heads/unit/blamed").unwrap();
+    let n =
+        g.gh.forge
+            .open_by("person", "main", "unit/blamed", &head, false, None)
+            .unwrap();
     let until = Instant::now() + Duration::from_secs(60);
-    while !b
-        .of(pull.number)
-        .first()
-        .is_some_and(|s| s["state"] == "failed")
-    {
+    let blamed = || {
+        b.of(n).first().is_some_and(|s| s["state"] == "failed")
+            && g.posted(&head).is_some_and(|p| p.1.starts_with("failed: "))
+    };
+    while !blamed() {
         assert!(
             Instant::now() < until,
-            "B never blamed it: {:?}",
-            b.of(pull.number)
+            "B never blamed it: {:?}, {:?}",
+            b.of(n),
+            g.posted(&head)
         );
         b.discovery_passes();
-        b.run("2");
+        b.run("1");
     }
     let out = g.skipping(&w, &["wait", "main", "--timeout", "1m"]);
     assert_eq!(out.status.code(), Some(sluice::FAILED), "{}", text(&out));
-    let said = g.posted(&pull.head).unwrap().1;
+    let said = g.posted(&head).unwrap().1;
     assert!(said.starts_with("failed: "), "{said}");
     assert!(text(&out).contains(&said), "{}", text(&out));
 }
@@ -6025,7 +6143,7 @@ fn a_run_github_keeps_completed_reads_by_its_block() {
     assert_eq!(out.status.code(), Some(sluice::WAITING), "{}", text(&out));
     assert!(text(&out).contains(&testing), "{}", text(&out));
     assert!(g.follows()[n.to_string()].is_object(), "{}", g.follows());
-    assert!(g.of(n).is_empty(), "A took nothing in");
+    took_nothing_in(&g, &b, n);
 }
 
 /// request-intake-host, "An older sluice's check": host B's older sluice
@@ -6060,7 +6178,7 @@ fn an_older_sluices_check_reads_by_its_words() {
 // ---------------------------------------------------------------------------
 
 impl OnGitHub {
-    /// Host B's `sluice run` holds main's intake mark, and this host, called
+    /// Host B keeps main, its pass having run first, and this host, called
     /// `a`, opened a pull request from its session `name` by `wt submit
     /// --no-wait`: the session's worktree, and the pull request.
     fn opened_here_held_by_b(
@@ -6129,7 +6247,7 @@ fn out_of_time_queued_on_the_other_host() {
     assert_eq!(doc["pull_request"], pull.number, "{doc}");
     assert_eq!(
         doc["taken_in_by"],
-        serde_json::json!({ "host": "b", "holder": "driver" }),
+        serde_json::json!({ "host": "b" }),
         "{doc}"
     );
     assert_eq!(doc["queue"]["submission"], 1406, "{doc}");
@@ -6165,7 +6283,7 @@ fn the_status_a_submit_reads_across_hosts() {
     );
     assert_eq!(
         doc["taken_in_by"],
-        serde_json::json!({ "host": "b", "holder": "driver" }),
+        serde_json::json!({ "host": "b" }),
         "{doc}"
     );
     assert_eq!(
@@ -6181,7 +6299,7 @@ fn the_status_a_submit_reads_across_hosts() {
 /// submission-wait, "Its words": `sluice wait main` on host A follows its
 /// pull request while host B holds it as submission 1406, with `discovery`
 /// at ten seconds, so each pass reads it again. It says once that the
-/// request is submission 1406 on `b`, taken in by `b`'s `sluice run`, and
+/// request is submission 1406 on `b`, taken in by `b`, and
 /// not again over the reads that find the same; once B holds it as 1407,
 /// it says so, once. The check's own first line, which says the same, is
 /// not said beside it.
@@ -6212,7 +6330,7 @@ fn a_waits_words_across_hosts() {
             std::thread::sleep(Duration::from_millis(200));
         }
     };
-    let first = format!("#{n} is submission 1406 on b, taken in by b's sluice run");
+    let first = format!("#{n} is submission 1406 on b, taken in by b");
     said_once(&first);
     // Two passes more, each reading the request and its check again.
     std::thread::sleep(Duration::from_secs(7));
@@ -6227,7 +6345,7 @@ fn a_waits_words_across_hosts() {
             &queued_on_b(1407),
         )
         .unwrap();
-    let next = format!("#{n} is submission 1407 on b, taken in by b's sluice run");
+    let next = format!("#{n} is submission 1407 on b, taken in by b");
     said_once(&next);
     let _ = wait.kill();
     let _ = wait.wait();
@@ -6238,17 +6356,16 @@ fn a_waits_words_across_hosts() {
     assert!(shown.contains("queued: next on main"), "{shown}");
 }
 
-/// submission-wait, "Not yet taken in": a wait on host B holds main's
-/// mark, and B's check on the head of host A's pull request says it needs
-/// one review; A's `sluice wait main --timeout 2s --json` exits 5, its
-/// queue not taken in and waiting for the review, and its mark held by a
-/// wait on B. Without `--json`, it says once that the request waits to be
-/// taken in by a wait on B.
+/// submission-wait, "Not yet taken in": host B keeps main, and B's check on
+/// the head of host A's pull request says it needs one review; A's `sluice
+/// wait main --timeout 2s --json` exits 5, its queue not taken in and
+/// waiting for the review, taken in by B. Without `--json`, it says once
+/// that the request waits to be taken in by B.
 #[test]
 fn not_yet_taken_in_across_hosts() {
     let g = OnGitHub::new("wait-there-untaken", "reviews = 1");
     g.named("a", "");
-    g.push_mark("b", "wait");
+    g.other("b", "", "").run("1");
     let w = g.session("untaken", &[("u.txt", "u\n")]);
     let out = g.wt_submit(&w, &["--no-wait"]);
     assert_eq!(out.status.code(), Some(0), "{}", text(&out));
@@ -6280,12 +6397,12 @@ fn not_yet_taken_in_across_hosts() {
     );
     assert_eq!(
         doc["taken_in_by"],
-        serde_json::json!({ "host": "b", "holder": "wait" }),
+        serde_json::json!({ "host": "b" }),
         "{doc}"
     );
     let out = g.skipping(&w, &["wait", "main", "--timeout", "2s"]);
     assert_eq!(out.status.code(), Some(sluice::WAITING), "{}", text(&out));
-    let line = format!("#{} waits to be taken in by a wait on b", pull.number);
+    let line = format!("#{} waits to be taken in by b", pull.number);
     assert_eq!(text(&out).matches(&line).count(), 1, "{}", text(&out));
 }
 
@@ -6350,7 +6467,7 @@ fn queued_on_the_other_host() {
     let doc = g.status_document();
     assert_eq!(
         doc["taken_in_by"],
-        serde_json::json!({ "host": "b", "holder": "driver" }),
+        serde_json::json!({ "host": "b" }),
         "{doc}"
     );
     let row = row_of(&doc, n);
@@ -6371,10 +6488,7 @@ fn queued_on_the_other_host() {
     );
     assert!(row["read_at"].is_string(), "{doc}");
     let said = g.status_words();
-    assert!(
-        said.contains("pull requests b takes in, by its sluice run:"),
-        "{said}"
-    );
+    assert!(said.contains("pull requests b takes in:"), "{said}");
     let line = format!(
         "#{n} {} · submission 1406 there · queued behind #10",
         pull.title
@@ -6383,15 +6497,15 @@ fn queued_on_the_other_host() {
     assert!(g.of(n).is_empty(), "A took nothing in");
 }
 
-/// request-intake-host, "Waiting for a review there": a wait on host B
-/// holds main's mark, and B's check on host A's pull request says it needs
-/// one review. `sluice status main` on A names B and a wait, and says the
-/// request waits to be taken in, needing 1 review.
+/// request-intake-host, "Waiting for a review there": host B keeps main,
+/// and B's check on host A's pull request says it needs one review.
+/// `sluice status main` on A names B, and says the request waits to be
+/// taken in, needing 1 review.
 #[test]
 fn waiting_for_a_review_there() {
     let g = OnGitHub::new("status-there-review", "reviews = 1");
     g.named("a", "");
-    g.push_mark("b", "wait");
+    g.other("b", "", "").run("1");
     let w = g.session("review", &[("r.txt", "r\n")]);
     let out = g.wt_submit(&w, &["--no-wait"]);
     assert_eq!(out.status.code(), Some(0), "{}", text(&out));
@@ -6413,10 +6527,7 @@ fn waiting_for_a_review_there() {
         ),
     );
     let said = g.status_words();
-    assert!(
-        said.contains("pull requests b takes in, by a wait on b:"),
-        "{said}"
-    );
+    assert!(said.contains("pull requests b takes in:"), "{said}");
     let line = format!(
         "#{n} {} · waiting to be taken in by b: needs 1 review",
         pull.title
@@ -6425,7 +6536,7 @@ fn waiting_for_a_review_there() {
     let doc = g.status_document();
     assert_eq!(
         doc["taken_in_by"],
-        serde_json::json!({ "host": "b", "holder": "wait" }),
+        serde_json::json!({ "host": "b" }),
         "{doc}"
     );
     let row = row_of(&doc, n);
@@ -6459,13 +6570,13 @@ fn no_check_on_its_head_yet() {
     assert!(said.contains(&line), "{said}");
 }
 
-/// request-intake-host, "The mark and the check name different hosts":
-/// host C's `sluice run` holds main's mark, while sluice's check on host
-/// A's pull request, posted by host B, still names submission 1406 there.
-/// `sluice status main --json` on A gives `taken_in_by` naming C and the
-/// request's queue naming B and 1406, and its words say both.
+/// request-intake-host, "The keeper and the check name different hosts":
+/// host C keeps main, while sluice's check on host A's pull request,
+/// posted by host B, still names submission 1406 there. `sluice status
+/// main --json` on A gives `taken_in_by` naming C and the request's queue
+/// naming B and 1406, and its words say both (design D25).
 #[test]
-fn the_mark_and_the_check_name_different_hosts() {
+fn the_keeper_and_the_check_name_different_hosts() {
     let g = OnGitHub::new("status-there-two-hosts", "");
     g.named("a", "");
     g.other("c", "", "").run("1");
@@ -6478,7 +6589,7 @@ fn the_mark_and_the_check_name_different_hosts() {
     let doc = g.status_document();
     assert_eq!(
         doc["taken_in_by"],
-        serde_json::json!({ "host": "c", "holder": "driver" }),
+        serde_json::json!({ "host": "c" }),
         "{doc}"
     );
     let row = row_of(&doc, n);
@@ -6488,10 +6599,7 @@ fn the_mark_and_the_check_name_different_hosts() {
         "{doc}"
     );
     let said = g.status_words();
-    assert!(
-        said.contains("pull requests c takes in, by its sluice run:"),
-        "{said}"
-    );
+    assert!(said.contains("pull requests c takes in:"), "{said}");
     let line = format!(
         "#{n} {} · submission 1406 on b · queued: next on main",
         pull.title
@@ -6554,7 +6662,7 @@ fn a_one_shot_overview_lists_requests_taken_in_elsewhere() {
     let main = main_of(&doc);
     assert_eq!(
         main["taken_in_by"],
-        serde_json::json!({ "host": "b", "holder": "driver" }),
+        serde_json::json!({ "host": "b" }),
         "{doc}"
     );
     let row = row_of(main, n);
@@ -6583,7 +6691,7 @@ fn a_one_shot_overview_lists_requests_taken_in_elsewhere() {
         .skip_while(|l| !l.starts_with("main "))
         .collect();
     let rows = format!(
-        "\n  pull requests b takes in, by its sluice run:\n    \
+        "\n  pull requests b takes in:\n    \
          #{n} {} · submission 1406 there · queued: next on main",
         pull.title
     );
@@ -6595,8 +6703,9 @@ fn a_one_shot_overview_lists_requests_taken_in_elsewhere() {
 /// --watch` is host A's reader while A follows its pull request, which
 /// host B holds, and nothing else on A runs. Its documents carry the
 /// request's row as A last kept it, and carry it again once what A keeps
-/// of it moves; and A reads neither the request nor its check from GitHub
-/// meanwhile, though the kept row is due to be read again (core.31).
+/// of it moves; the watch reads nothing from GitHub itself, and the host
+/// process's reading reads the row that fell due at the host's one pace,
+/// no more than four times a minute (core.31; design D25).
 #[test]
 fn a_watch_reads_no_followed_request_itself() {
     let g = OnGitHub::new("overview-watch-there", "");
@@ -6663,8 +6772,8 @@ fn a_watch_reads_no_followed_request_itself() {
     std::thread::sleep(Duration::from_secs(3));
     let _ = watch.kill();
     let out = watch.wait_with_output().unwrap();
-    assert_eq!(g.pull_reads(n), pulls, "{}", text(&out));
-    assert_eq!(g.posted_reads(&pull.head), checks, "{}", text(&out));
+    assert!(g.pull_reads(n) - pulls <= 4, "{}", text(&out));
+    assert!(g.posted_reads(&pull.head) - checks <= 4, "{}", text(&out));
     assert!(g.of(n).is_empty(), "A took nothing in");
 }
 
@@ -6675,6 +6784,24 @@ fn a_watch_reads_no_followed_request_itself() {
 /// and failed, as GitHub kept switchboard-kit #268's (record 0096). Host
 /// B, the worktree, and the pull request as it was opened; a second later
 /// than B's leaving, so a ready mark made next reads as since it (120).
+/// 137 (design D21, D25): A took nothing of `#n` in. main's records are
+/// on its remote, so A's status shows the submissions of `#n` B took in,
+/// as A's host process last fetched them; every one it shows is one B's
+/// status shows, and none is A's own. A submission is told by what made
+/// it, its number, branch, head, submitter and time, never by how it
+/// stands: A's reading is current within its tick (129), so it may show
+/// one a write of B's older than B's own status does, `landing` where B's
+/// shows it `landed`.
+fn took_nothing_in(g: &OnGitHub, b: &Other<'_>, n: u64) {
+    let made = |s: &Value| ["id", "branch", "head", "from", "submitted"].map(|k| s.get(k).cloned());
+    let (mine, theirs) = (g.of(n), b.of(n));
+    let theirs_made: Vec<_> = theirs.iter().map(made).collect();
+    assert!(
+        mine.iter().all(|s| theirs_made.contains(&made(s))),
+        "A took #{n} in: {mine:?} beside B's {theirs:?}"
+    );
+}
+
 fn held_on_b<'g>(
     g: &'g OnGitHub,
     name: &str,
@@ -6766,7 +6893,7 @@ fn held_then_marked_ready_waits_to_be_taken_in() {
     assert_eq!(doc["pull_request"], pull.number, "{doc}");
     assert_eq!(doc["state"], "waiting to be taken in by b", "{doc}");
     assert_eq!(b.of(pull.number).len(), 1, "B has not taken it in again");
-    assert!(g.of(pull.number).is_empty(), "A took nothing in");
+    took_nothing_in(&g, &b, pull.number);
 }
 
 /// request-intake-host, "Taken in again while GitHub keeps the check
@@ -6848,7 +6975,7 @@ fn taken_in_again_while_github_keeps_the_check_failed() {
     assert_eq!(subs.len(), 2, "{subs:?}");
     assert_eq!(subs[1]["head"], pull.head.as_str());
     assert_eq!(subs[1]["state"], "landed", "{subs:?}");
-    assert!(g.of(n).is_empty(), "A took nothing in");
+    took_nothing_in(&g, &b, n);
 }
 
 /// pull-request-submit, "Sent back on another host": B blamed `#n` and
@@ -6860,7 +6987,7 @@ fn taken_in_again_while_github_keeps_the_check_failed() {
 #[test]
 fn status_of_a_request_another_host_sent_back() {
     let g = OnGitHub::new("intake-status-sent-back", "");
-    let (_b, w, pull) = held_on_b(&g, "statused", &[("broken", "b\n")]);
+    let (b, w, pull) = held_on_b(&g, "statused", &[("broken", "b\n")]);
     let out = g.wt_submit(&w, &["--status", "--json"]);
     assert_eq!(out.status.code(), Some(0), "{}", text(&out));
     let doc: Value =
@@ -6891,7 +7018,7 @@ fn status_of_a_request_another_host_sent_back() {
         "{}",
         text(&out)
     );
-    assert!(g.of(pull.number).is_empty(), "A took nothing in");
+    took_nothing_in(&g, &b, pull.number);
 }
 
 /// worktrunk-submit, "Sent back as a draft on another host", then "Run
@@ -6913,7 +7040,7 @@ fn run_again_marks_ready_a_draft_another_host_sent_back() {
     // (record 0095 D5).
     let waiting = serde_json::json!({
         "pull_request": n, "branch": "main", "state": "waiting to be taken in by b",
-        "taken_in_by": { "host": "b", "holder": "driver" },
+        "taken_in_by": { "host": "b" },
         "queue": {
             "host": "b", "taken_in": true, "submission": b.of(n)[0]["id"],
             "state": "failed", "ahead": [], "waits_for": ["the next submit"],
@@ -6959,7 +7086,7 @@ fn run_again_marks_ready_a_draft_another_host_sent_back() {
         pushed
     );
     assert!(!g.pull_from("unit/redrafted").draft);
-    assert!(g.of(n).is_empty(), "A took nothing in");
+    took_nothing_in(&g, &b, n);
 
     let until = Instant::now() + Duration::from_secs(60);
     while b.of(n).len() < 2 {
@@ -7055,7 +7182,7 @@ fn a_submit_marks_ready_a_request_another_host_sent_back_not_a_draft() {
     );
     let ready = g.pull_from("unit/review");
     assert!(!ready.draft && ready.head == head, "{ready:?}");
-    assert!(g.of(n).is_empty(), "A took nothing in");
+    took_nothing_in(&g, &b, n);
     while b.of(n).len() < 2 {
         assert!(
             Instant::now() < until,
@@ -7122,7 +7249,7 @@ fn a_submit_leaves_a_request_queued_on_another_host() {
         text(&out)
     );
     assert!(!g.pull_from("unit/queued").draft);
-    assert!(g.of(n).is_empty(), "A took nothing in");
+    took_nothing_in(&g, &b, n);
     // B's next pass reads no draft mark, so withdraws nothing (C.5): its
     // one submission of `#n` goes on.
     b.discovery_passes();
@@ -7133,515 +7260,13 @@ fn a_submit_leaves_a_request_queued_on_another_host() {
     assert_ne!(subs[0]["state"], "withdrawn", "{subs:?}");
 }
 
-/// request-intake-host, "A wait lets go", stopped by Ctrl-C: a wait on
-/// host B, where no `sluice run` lives, holds main's mark, and once Ctrl-C
-/// stops it the mark is gone from the remote.
-#[test]
-fn a_wait_stopped_by_ctrl_c_lets_go() {
-    let g = OnGitHub::new("intake-ctrl-c", "reviews = 1");
-    g.named("a", "");
-    g.by_hand("unit/stopped", &[("s.txt", Some("s\n"))], false);
-    let b = g.other("b", "", "");
-    let w = b.worktree_of("unit/stopped");
-    let wait = b
-        .command(env!("CARGO_BIN_EXE_sluice"), &w)
-        .args(["wait", "main", "--timeout", "2m"])
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .unwrap();
-    let until = Instant::now() + Duration::from_secs(60);
-    while g.mark().is_none() {
-        assert!(Instant::now() < until, "never held");
-        std::thread::sleep(Duration::from_millis(100));
-    }
-    assert_eq!(g.mark().unwrap().1["host"], "b");
-    let sent = Command::new("kill")
-        .args(["-INT", &wait.id().to_string()])
-        .status()
-        .unwrap();
-    assert!(sent.success());
-    let out = wait.wait_with_output().unwrap();
-    assert_eq!(out.status.code(), Some(sluice::STOPPED), "{}", text(&out));
-    assert_eq!(g.mark(), None, "{}", text(&out));
-}
-
-impl OnGitHub {
-    /// Host A, called `a`: its `sluice run` pushes main's intake mark and
-    /// takes `pull/<n>` in, testing it with a check that goes on until it
-    /// is ended. The request's number, its submission's id, and the run's
-    /// process.
-    fn testing_under_its_mark(&self, name: &str) -> (u64, u64, String) {
-        self.named("a", "");
-        let pid = self.repo.dir().join(".git/hang.pid");
-        let hang = format!("{}\n", pid.display());
-        let (n, _) = self.by_hand(name, &[("hang", Some(&hang))], false);
-        self.on_main();
-        let out = self.skipping(self.repo.dir(), &["run", "--rounds", "1"]);
-        assert!(out.status.success(), "{}", text(&out));
-        assert_eq!(self.mark().unwrap().1["host"], "a", "{}", text(&out));
-        let id = self.of(n)[0]["id"].as_u64().expect("taken in");
-        let until = Instant::now() + Duration::from_secs(60);
-        while !pid.exists() {
-            assert!(Instant::now() < until, "the check never started");
-            std::thread::sleep(Duration::from_millis(100));
-        }
-        let process = std::fs::read_to_string(&pid).unwrap().trim().to_string();
-        (n, id, process)
-    }
-
-    /// This host last pushed main's intake mark longer ago than a third of
-    /// its lease, and its next pass is due: that pass renews it (137).
-    fn renewal_due(&self) {
-        let path = self.state.path().join("sluice/forge/intake/o/r/main.json");
-        let mut v: Value = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
-        v["renewed"] = "2000-01-01T00:00:00Z".into();
-        std::fs::write(&path, v.to_string()).unwrap();
-        self.discovery_passes();
-    }
-
-    /// The next fetch here that brings main's intake mark has another
-    /// process of this host move the mark on the remote before this pass
-    /// pushes it: `"drop"` lets it go, as a wait of the host does when it
-    /// ends, and `"renew"` pushes a mark of this host's driver's over it.
-    /// The mark this repository last read is forgotten, so that the fetch
-    /// brings it again.
-    fn moved_under_the_next_push(&self, how: &str) {
-        let armed = self.repo.dir().join(".git/armed");
-        std::fs::write(&armed, "").unwrap();
-        let bare = format!("{:?}", self.bare.path().display().to_string());
-        let act = match how {
-            "drop" => format!("git --git-dir={bare} update-ref -d refs/sluice/intake/main"),
-            _ => format!(
-                "t=$(git --git-dir={bare} mktree </dev/null)\n      \
-                 c=$(git -c user.name=s -c user.email=s@s --git-dir={bare} commit-tree \"$t\" \
-                 -m '{{\"host\":\"a\",\"holder\":\"driver\",\"sluice\":\"0.0.0\"}}')\n      \
-                 git --git-dir={bare} update-ref refs/sluice/intake/main \"$c\""
-            ),
-        };
-        let hook = self.repo.dir().join(".git/hooks/reference-transaction");
-        std::fs::create_dir_all(hook.parent().unwrap()).unwrap();
-        std::fs::write(
-            &hook,
-            format!(
-                "#!/bin/sh\n[ \"$1\" = committed ] || exit 0\n\
-                 while read old new ref; do\n  \
-                 if [ \"$ref\" = refs/sluice-fetched/origin/intake/main ] && \
-                 [ \"$new\" != 0000000000000000000000000000000000000000 ] && [ -e {armed:?} ]; then\n    \
-                 rm -f {armed:?}\n      {act}\n  fi\ndone\nexit 0\n",
-                armed = armed.display().to_string()
-            ),
-        )
-        .unwrap();
-        use std::os::unix::fs::PermissionsExt;
-        std::fs::set_permissions(&hook, std::fs::Permissions::from_mode(0o755)).unwrap();
-        self.repo
-            .git(&["update-ref", "-d", "refs/sluice-fetched/origin/intake/main"]);
-    }
-}
-
-/// Whether `log` says submission `id` was withdrawn.
-fn withdrawn_in(log: &[Value], id: u64) -> bool {
-    log.iter()
-        .any(|l| l["event"] == "withdrawn" && l["id"] == id)
-}
-
-/// End the check process `pid` where it still runs.
-fn end(pid: &str) {
-    let _ = Command::new("kill")
-        .args(["-9", pid])
-        .stderr(Stdio::null())
-        .status();
-}
-
-/// request-intake-host, "A mark let go under a renewal": host A's `sluice
-/// run` holds main's mark and is testing `pull/<n>`; another process of A
-/// lets the mark go between the pass's fetch and its renewal, so the
-/// renewal is refused at its lease and the remote holds no mark. A pushes
-/// it again leased on its absence, holds it, and withdraws nothing: no
-/// host but A takes main's pull requests in (137; rule core.33; the
-/// chuck-herdr-alpha hand-over to "another host" of 2026-11-06).
-#[test]
-fn a_mark_let_go_under_a_renewal_is_pushed_again() {
-    let g = OnGitHub::new("intake-again", "");
-    let (n, id, process) = g.testing_under_its_mark("unit/again");
-    g.renewal_due();
-    g.moved_under_the_next_push("drop");
-    let out = g.skipping(g.repo.dir(), &["run", "--rounds", "1"]);
-    end(&process);
-    assert!(out.status.success(), "{}", text(&out));
-    assert!(
-        !g.repo.dir().join(".git/armed").exists(),
-        "the mark was let go under the renewal"
-    );
-    let log = g.log();
-    assert!(!withdrawn_in(&log, id), "{log:?}\n{}", text(&out));
-    assert_ne!(g.of(n)[0]["state"], "withdrawn");
-    let (_, mark) = g.mark().expect("pushed again");
-    assert_eq!(
-        (&mark["host"], &mark["holder"]),
-        (&"a".into(), &"driver".into())
-    );
-}
-
-/// request-intake-host, "A mark this host moved under a renewal": host A's
-/// `sluice run` holds main's mark and is testing `pull/<n>`; another
-/// process of A pushes A's own mark over it between the pass's fetch and
-/// its renewal, so the renewal is refused at its lease. The mark names A:
-/// A holds it, and hands nothing over to itself (137; rule core.33).
-#[test]
-fn a_mark_this_host_moved_under_a_renewal_stays_its_own() {
-    let g = OnGitHub::new("intake-own", "");
-    let (n, id, process) = g.testing_under_its_mark("unit/own");
-    g.renewal_due();
-    g.moved_under_the_next_push("renew");
-    let out = g.skipping(g.repo.dir(), &["run", "--rounds", "1"]);
-    end(&process);
-    assert!(out.status.success(), "{}", text(&out));
-    assert!(!g.repo.dir().join(".git/armed").exists());
-    let log = g.log();
-    assert!(!withdrawn_in(&log, id), "{log:?}\n{}", text(&out));
-    assert_ne!(g.of(n)[0]["state"], "withdrawn");
-    assert_eq!(g.mark().unwrap().1["host"], "a");
-}
-
-/// request-intake-host, "A host's waits hold its mark together": two waits
-/// on host B, where no `sluice run` lives, read main's pull requests; the
-/// first pushed the mark. When the first ends the mark stays, since the
-/// second still holds it; when the second ends, though it never pushed
-/// the mark, it lets it go (137).
-#[test]
-fn a_hosts_waits_hold_its_mark_together() {
-    let g = OnGitHub::new("intake-together", "reviews = 1");
-    g.named("a", "");
-    g.record_marks();
-    g.by_hand("unit/together", &[("t.txt", Some("t\n"))], false);
-    let b = g.other("b", "", "");
-    let w = b.worktree_of("unit/together");
-    let wait = |timeout: &str| {
-        b.command(env!("CARGO_BIN_EXE_sluice"), &w)
-            .args(["wait", "main", "--timeout", timeout])
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .spawn()
-            .unwrap()
-    };
-    let first = wait("10s");
-    let until = Instant::now() + Duration::from_secs(60);
-    while g.mark().is_none() {
-        assert!(Instant::now() < until, "never held");
-        std::thread::sleep(Duration::from_millis(100));
-    }
-    assert_eq!(g.mark().unwrap().1["host"], "b");
-    let second = wait("2m");
-    let waits = b.state.path().join("sluice/forge/intake/o/r/main.waits");
-    let holds = || {
-        std::fs::read_dir(&waits)
-            .into_iter()
-            .flatten()
-            .flatten()
-            .filter(|e| e.path().extension().is_some_and(|x| x == "hold"))
-            .count()
-    };
-    while holds() < 2 {
-        assert!(Instant::now() < until, "the second wait never held it");
-        std::thread::sleep(Duration::from_millis(100));
-    }
-    let out = first.wait_with_output().unwrap();
-    assert_eq!(out.status.code(), Some(sluice::WAITING), "{}", text(&out));
-    assert_eq!(
-        g.mark().map(|m| m.1["host"].clone()),
-        Some("b".into()),
-        "the second wait holds it still: {}",
-        text(&out)
-    );
-    assert!(
-        !g.marks_pushed().contains(&Value::Null),
-        "{:?}",
-        g.marks_pushed()
-    );
-    let sent = Command::new("kill")
-        .args(["-INT", &second.id().to_string()])
-        .status()
-        .unwrap();
-    assert!(sent.success());
-    let out = second.wait_with_output().unwrap();
-    assert_eq!(out.status.code(), Some(sluice::STOPPED), "{}", text(&out));
-    assert_eq!(
-        g.mark(),
-        None,
-        "the host's last wait let it go: {}",
-        text(&out)
-    );
-    assert_eq!(holds(), 0);
-}
-
-/// request-intake-host, "A request that landed elsewhere is not handed
-/// over": host A is testing `pull/<n>` when host B's `sluice run` takes
-/// main's mark and the request in, and lands it. A's next pass finds B
-/// holding the mark and main holding the request's head: A withdraws
-/// nothing, and its round lands its submission as the commit that landed
-/// the work (122, 137; rule core.48).
-#[test]
-fn a_request_that_landed_elsewhere_is_not_handed_over() {
-    let g = OnGitHub::new("intake-landed-over", "");
-    let (n, id, process, _, _, b) = handing_mid_test(&g);
-    let until = Instant::now() + Duration::from_secs(60);
-    while !b.of(n).first().is_some_and(|s| s["state"] == "landed") {
-        assert!(Instant::now() < until, "B never landed it: {:?}", b.of(n));
-        b.discovery_passes();
-        b.run("2");
-    }
-    g.step();
-    end(&process);
-    let log = g.log();
-    assert!(!withdrawn_in(&log, id), "{log:?}");
-    let a = g.of(n);
-    assert_eq!(a[0]["state"], "landed", "{a:?}");
-    assert_eq!(a[0]["landed_elsewhere"], true, "{a:?}");
-}
+impl OnGitHub {}
 
 // ---------------------------------------------------------------------------
 // request-intake-host: a withdrawal for a hand-over holds no request, which
 // the holder of the mark takes in again at the head it holds, the host that
 // withdrew it included (120, 137; record 0088 as amended; rule core.33)
 // ---------------------------------------------------------------------------
-
-/// A pull request a submit opened on host A, handed over to host B.
-struct HandedOver {
-    /// The request's number.
-    n: u64,
-    /// A's submission of it, withdrawn for the hand-over.
-    id: u64,
-    /// Its head.
-    head: String,
-    /// The session's worktree it was submitted from.
-    worktree: PathBuf,
-    /// How many ready marks GitHub's timeline held of it at the hand-over.
-    readied: usize,
-}
-
-/// Host A, called `a`, has the pull request the session's submit opened
-/// from `unit/<name>` under test with a check that goes on until it is
-/// ended, when another host's `sluice run` takes main's mark: `b`'s, as
-/// that run would push it. A's next pass hands the request over to B,
-/// naming B in its withdrawal's record and log line, and ends the check.
-fn handed_over_mid_test(g: &OnGitHub, name: &str) -> HandedOver {
-    g.named("a", "");
-    let pid = g.repo.dir().join(format!(".git/{name}.pid"));
-    let worktree = g.session(name, &[("hang", &format!("{}\n", pid.display()))]);
-    let out = g.wt_submit(&worktree, &["--no-wait"]);
-    assert_eq!(out.status.code(), Some(0), "{}", text(&out));
-    let pull = g.pull_from(&format!("unit/{name}"));
-    let n = pull.number;
-    g.step();
-    let id = g.of(n)[0]["id"].as_u64().expect("taken in");
-    let until = Instant::now() + Duration::from_secs(60);
-    while !pid.exists() {
-        assert!(Instant::now() < until, "the check never started");
-        std::thread::sleep(Duration::from_millis(100));
-    }
-    let process = std::fs::read_to_string(&pid).unwrap().trim().to_string();
-    g.push_mark("b", "driver");
-    g.step();
-    let a = g.of(n);
-    assert_eq!(a[0]["state"], "withdrawn", "{a:?}");
-    assert_eq!(a[0]["withdrawn"]["by"], "b takes main's pull requests in");
-    assert_eq!(a[0]["withdrawn"]["handed_over_to"], "b", "{a:?}");
-    let line = g
-        .log()
-        .into_iter()
-        .find(|l| l["event"] == "withdrawn" && l["id"] == id)
-        .expect("the log says it");
-    assert_eq!(line["handed_over_to"], "b", "{line}");
-    let until = Instant::now() + Duration::from_secs(10);
-    while alive(&process) {
-        assert!(Instant::now() < until, "A's run goes on");
-        std::thread::sleep(Duration::from_millis(100));
-    }
-    HandedOver {
-        n,
-        id,
-        head: pull.head,
-        worktree,
-        readied: readied(g, n),
-    }
-}
-
-/// How many ready marks GitHub's timeline holds of pull request `n`: a
-/// draft sluice makes and takes back leaves one more.
-fn readied(g: &OnGitHub, n: u64) -> usize {
-    g.gh.forge.readied(&github::repo(), n).unwrap().len()
-}
-
-/// main's intake mark comes back to host A, its `sluice run` returning
-/// once the host that held it stopped: the mark names A's driver.
-fn mark_comes_back(g: &OnGitHub) {
-    github::delete_ref(g.bare.path(), "refs/sluice/intake/main");
-    g.push_mark("a", "driver");
-}
-
-/// request-intake-host, "The mark comes back": host A handed the pull
-/// request a session's submit opened over to B, and main's mark comes back
-/// to A. A takes it in again at the head it holds, as its conditions hold,
-/// and lands it; nothing marks it a draft, and it waits for no act of its
-/// submitter's (120, 137; agentplot/sluice pull 171, whose #345 deneb
-/// withdrew at the hand-over of 2026-10-30 and took in again as #347).
-#[test]
-fn the_mark_comes_back_and_its_request_is_taken_in_again() {
-    let g = OnGitHub::new("intake-comes-back", "");
-    let h = handed_over_mid_test(&g, "back");
-    mark_comes_back(&g);
-    g.step();
-    let a = g.of(h.n);
-    assert_eq!(a.len(), 2, "{a:?}");
-    assert_eq!(a[1]["head"], h.head.as_str(), "{a:?}");
-    assert_ne!(a[1]["state"], "withdrawn", "{a:?}");
-    assert!(a[1]["id"].as_u64().unwrap() > h.id);
-    assert!(!g.pull_from("unit/back").draft);
-    assert_eq!(readied(&g, h.n), h.readied, "never a draft and back");
-    g.step_until("landed", |g| g.of(h.n)[1]["state"] == "landed");
-    assert!(!g.pull_from("unit/back").draft);
-    assert_eq!(readied(&g, h.n), h.readied);
-}
-
-/// request-intake-host, "An older hand-over comes back": as "The mark
-/// comes back", with A's withdrawal written as sluice 0.60.0 to 0.70.2
-/// wrote one, naming no host in its record, in its words alone. It reads
-/// as that sluice read it: the request is taken in again, never a draft
-/// (120; record 0088 as amended, design D2).
-#[test]
-fn an_older_hand_overs_request_is_taken_in_again() {
-    let g = OnGitHub::new("intake-older-back", "");
-    let h = handed_over_mid_test(&g, "older");
-    assert!(written_as_before(&g, h.id) > 0, "its record was found");
-    let a = g.of(h.n);
-    assert_eq!(a[0]["withdrawn"]["handed_over_to"], Value::Null, "{a:?}");
-    mark_comes_back(&g);
-    g.step();
-    let a = g.of(h.n);
-    assert_eq!(a.len(), 2, "{a:?}");
-    assert_eq!(a[1]["head"], h.head.as_str(), "{a:?}");
-    assert_ne!(a[1]["state"], "withdrawn", "{a:?}");
-    assert!(!g.pull_from("unit/older").draft);
-    assert_eq!(readied(&g, h.n), h.readied);
-}
-
-/// Rewrite host A's records of submission `id`'s withdrawal as a sluice
-/// before record 0088's amendment wrote them, the host it handed over to
-/// named nowhere: its record, wherever it is kept, and its log line. How
-/// many records named it.
-fn written_as_before(g: &OnGitHub, id: u64) -> usize {
-    let dir = g.repo.dir().join(".git/sluice/main");
-    let mut named = 0;
-    for path in [
-        dir.join(format!("submissions/{id}.json")),
-        dir.join(format!(".finished/{id}.json")),
-    ] {
-        let Ok(bytes) = std::fs::read(&path) else {
-            continue;
-        };
-        let mut v: Value = serde_json::from_slice(&bytes).unwrap();
-        if v["withdrawn"]
-            .as_object_mut()
-            .and_then(|w| w.remove("handed_over_to"))
-            .is_some()
-        {
-            named += 1;
-        }
-        std::fs::write(&path, serde_json::to_vec_pretty(&v).unwrap()).unwrap();
-    }
-    let log = dir.join("log.jsonl");
-    let lines: Vec<String> = std::fs::read_to_string(&log)
-        .unwrap()
-        .lines()
-        .map(|l| {
-            let mut v: Value = serde_json::from_str(l).unwrap();
-            if v["event"] == "withdrawn" && v["id"] == id {
-                v.as_object_mut().unwrap().remove("handed_over_to");
-            }
-            v.to_string()
-        })
-        .collect();
-    std::fs::write(&log, lines.join("\n") + "\n").unwrap();
-    named
-}
-
-/// request-intake-host, "A submit after a hand-over": host A handed the
-/// pull request a session's submit opened over to B, and its agent submits
-/// again from its worktree, with no new commits. The withdrawal is no
-/// leaving, so the submit marks it no draft and ready again, as it does
-/// after a blame (120: nothing marks it a draft for a hand-over).
-#[test]
-fn a_submit_after_a_hand_over_marks_no_draft() {
-    let g = OnGitHub::new("intake-resubmit", "");
-    let h = handed_over_mid_test(&g, "again");
-    let out = g.wt_submit(&h.worktree, &["--no-wait"]);
-    assert_eq!(out.status.code(), Some(0), "{}", text(&out));
-    assert!(
-        !text(&out).contains("marked ready for review"),
-        "{}",
-        text(&out)
-    );
-    assert!(!g.pull_from("unit/again").draft);
-    assert_eq!(readied(&g, h.n), h.readied, "never a draft and back");
-}
-
-/// request-intake-host, "A wait on a hand-over says where it went": host A
-/// handed the pull request a session's submit opened over to B; a wait on
-/// A's submission follows its pull request, saying it was handed over to
-/// B, and is never told it was withdrawn, and A's status of it says so
-/// (122, 137; rule core.48).
-#[test]
-fn a_wait_on_a_hand_over_says_where_it_went() {
-    let g = OnGitHub::new("intake-wait-says", "");
-    let h = handed_over_mid_test(&g, "said");
-    let id = h.id.to_string();
-    let out = g.sluice(&["wait", &id, "--timeout", "2s"]);
-    assert_eq!(out.status.code(), Some(sluice::WAITING), "{}", text(&out));
-    let said = String::from_utf8_lossy(&out.stdout);
-    assert!(
-        said.contains(&format!(
-            "#{id} handed over to b: its pull request #{} carries its work, so this wait \
-             follows it",
-            h.n
-        )),
-        "{said}"
-    );
-    let out = g.sluice(&["status", &id]);
-    assert!(out.status.success(), "{}", text(&out));
-    assert!(text(&out).contains("handed over to b"), "{}", text(&out));
-}
-
-/// request-intake-host, "A request closed is still withdrawn": host A
-/// handed the pull request a session's submit opened over to B, main's
-/// mark came back and A took it in again; a person closes it. It is
-/// withdrawn, and opened again it waits for its submitter's act as a
-/// draft, as any request closed does where its submission was (120, C.5).
-#[test]
-fn a_request_closed_after_it_came_back_is_still_held() {
-    let g = OnGitHub::new("intake-closed-back", "");
-    let h = handed_over_mid_test(&g, "closed");
-    mark_comes_back(&g);
-    g.step();
-    assert_eq!(g.of(h.n).len(), 2);
-    g.gh.forge.close(h.n).unwrap();
-    g.step();
-    let a = g.of(h.n);
-    assert_eq!(a[1]["state"], "withdrawn", "{a:?}");
-    assert_eq!(a[1]["withdrawn"]["handed_over_to"], Value::Null, "{a:?}");
-    g.gh.forge
-        .change(|held| {
-            let p = held.pulls.iter_mut().find(|p| p.number == h.n).unwrap();
-            p.open = true;
-            p.updated_at = Some(chrono::Utc::now());
-            Ok(())
-        })
-        .unwrap();
-    let a = g.of_after(h.n, 2);
-    assert_eq!(a.len(), 2, "never taken in again: {a:?}");
-    assert!(g.pull_from("unit/closed").draft);
-}
 
 // ---------------------------------------------------------------------------
 // forge-reads: one query reads a branch's open pull requests whole, and a

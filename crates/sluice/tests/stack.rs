@@ -231,6 +231,18 @@ impl Drop for Fixture {
     }
 }
 
+/// The ports a host whose ports folder is `ports` holds for live places,
+/// each `held/<port>` (31, 32; record 0016 as amended 2026-11-13).
+fn held_ports(ports: &Path) -> Vec<String> {
+    match std::fs::read_dir(ports.join("held")) {
+        Ok(d) => d
+            .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+            .filter(|n| !n.starts_with('.'))
+            .collect(),
+        Err(_) => Vec::new(),
+    }
+}
+
 fn stacks(executor: &str) {
     let id = format!("{}-{executor}", std::process::id());
     let _fixture = Fixture(id.clone());
@@ -301,15 +313,10 @@ fn stacks(executor: &str) {
     // 66: the hung candidate was ended by its time limit.
     assert_eq!(s.states("hang/c"), ["failed"], "{}", text(&out));
     // 32, 34: nothing any of them started is left: no container, no
-    // server; and every block of ports is free again.
+    // server; and every port is free again.
     assert_eq!(leftovers(&id), (String::new(), String::new()));
-    let blocks = s.state.path().join("sluice/ports");
-    let held: Vec<String> = std::fs::read_dir(&blocks)
-        .unwrap()
-        .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
-        .filter(|n| !n.starts_with('.'))
-        .collect();
-    assert!(held.is_empty(), "blocks of ports still held: {held:?}");
+    let held = held_ports(&s.state.path().join("sluice/ports"));
+    assert!(held.is_empty(), "ports still held: {held:?}");
 }
 
 #[test]
@@ -375,10 +382,10 @@ fn a_sessions_stack_stays_between_runs_and_goes_on_release() {
     let head = Rev::new(repo.rev("unit/a"));
     let common = repo.dir().join(".git");
     let program = PathBuf::from(env!("CARGO_BIN_EXE_sluice"));
-    let blocks = Scratch::new("stack-session-blocks");
+    let ports = Scratch::new("stack-session-ports");
     let running = Scratch::new("stack-session-running");
     let places = Places::new(&common, Runs::new(&common, program.clone()))
-        .with_blocks(blocks.path().to_path_buf())
+        .with_ports(ports.path().to_path_buf())
         .with_scratch_root(support::test_user_scratch());
     let checks = Checks::new(
         &common,
@@ -415,8 +422,9 @@ fn a_sessions_stack_stays_between_runs_and_goes_on_release() {
                 "2026-10-14T09:00:00Z",
             )
             .unwrap();
-        let handle = checks
-            .start(&RunRequest {
+        let handle = support::start(
+            &checks,
+            &RunRequest {
                 place: place.clone(),
                 revision: head.clone(),
                 required: vec!["sh check.sh".into()],
@@ -430,8 +438,9 @@ fn a_sessions_stack_stays_between_runs_and_goes_on_release() {
                 command: None,
                 replay: false,
                 system: None,
-            })
-            .unwrap();
+            },
+        )
+        .unwrap();
         let until = std::time::Instant::now() + std::time::Duration::from_secs(200);
         let report = loop {
             match checks.progress(&handle).unwrap() {
@@ -456,17 +465,16 @@ fn a_sessions_stack_stays_between_runs_and_goes_on_release() {
     };
 
     let first = run(1);
-    // 31, 90: the port is its block's, from `ports_from`, 41400, on; the
-    // block is the first whose port nothing on the host already holds, a
-    // run of this test in another tree's among them.
-    let held: Vec<u32> = std::fs::read_dir(blocks.path())
-        .unwrap()
-        .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
-        .filter(|n| !n.starts_with('.'))
+    // 31, 90: the port is held by the port, the lowest from `ports_from`,
+    // 41400, that no live place holds and is free, a run of this test in
+    // another tree's among them (record 0016 as amended 2026-11-13).
+    let held: Vec<u32> = held_ports(ports.path())
+        .iter()
         .map(|n| n.parse().unwrap())
         .collect();
-    assert_eq!(held.len(), 1, "blocks of ports held: {held:?}");
-    assert_eq!(first.env["SLUICE_PORT_WEB"], (41400 + held[0]).to_string());
+    assert_eq!(held.len(), 1, "ports held: {held:?}");
+    assert!(held[0] >= 41400, "ports held: {held:?}");
+    assert_eq!(first.env["SLUICE_PORT_WEB"], held[0].to_string());
     // 94: the run ended and its container did not.
     assert!(!leftovers(&id).0.is_empty(), "the stack went with the run");
     let second = run(2);
@@ -481,12 +489,8 @@ fn a_sessions_stack_stays_between_runs_and_goes_on_release() {
     // standing.
     places.release(&first.name).unwrap();
     assert_eq!(leftovers(&id).0, "", "the release left a container");
-    let held: Vec<String> = std::fs::read_dir(blocks.path())
-        .unwrap()
-        .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
-        .filter(|n| !n.starts_with('.'))
-        .collect();
-    assert!(held.is_empty(), "blocks of ports still held: {held:?}");
+    let held = held_ports(ports.path());
+    assert!(held.is_empty(), "ports still held: {held:?}");
     assert!(wt.join("check.sh").exists());
     assert!(repo
         .git(&["worktree", "list"])
@@ -594,10 +598,6 @@ fn a_previews_stack_stays_up_until_it_is_released() {
     assert!(out.status.success(), "{}", text(&out));
     assert_eq!(leftovers(&id).0, "", "the release left a container");
     assert!(!checkout.exists());
-    let held: Vec<String> = std::fs::read_dir(setup.state.path().join("sluice/ports"))
-        .unwrap()
-        .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
-        .filter(|n| !n.starts_with('.'))
-        .collect();
-    assert!(held.is_empty(), "blocks of ports still held: {held:?}");
+    let held = held_ports(&setup.state.path().join("sluice/ports"));
+    assert!(held.is_empty(), "ports still held: {held:?}");
 }

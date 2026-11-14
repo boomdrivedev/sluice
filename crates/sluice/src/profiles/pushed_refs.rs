@@ -32,7 +32,6 @@ use std::rc::Rc;
 use std::time::{Duration, Instant};
 
 use anyhow::{bail, Context, Result};
-use serde::{Deserialize, Serialize};
 use sluice_seams::{Branch, Formed, HostCopy, LandingCommit, Moved, ReadRefused, Rev};
 use weir_bounded::span;
 
@@ -504,132 +503,17 @@ impl PushedRefs {
         format!("refs/remotes/{}/{branch}", self.remote)
     }
 
-    /// Fetch `branch` into its remote-tracking ref, and in the same fetch
-    /// its intake mark, which may be absent, into [`PushedRefs::intake_mark`]'s
-    /// ref, a mark gone from the remote gone here too (137); `None` when
-    /// the remote has no such branch, a [`ReadRefused`] when it cannot be
-    /// read.
+    /// Fetch `branch` into its remote-tracking ref; `None` when the remote
+    /// has no such branch, a [`ReadRefused`] when it cannot be read. An
+    /// intake mark an older sluice left on the remote is fetched by nothing
+    /// (design D23).
     fn fetch(&self, branch: &str) -> Result<Option<Rev>> {
         let src = format!("refs/heads/{branch}");
         let spec = format!("+{src}:{}", self.tracking(branch));
-        // A pattern, so that a remote with no mark answers the fetch all
-        // the same; it brings any mark whose branch's name begins with
-        // this one's, which nothing reads.
-        let mark = format!("+{}*:{}*", intake_ref(branch), self.fetched_mark(branch));
-        if !self.fetch_specs(&src, &[&spec, &mark], &["--prune"])? {
+        if !self.fetch_specs(&src, &[&spec], &[])? {
             return Ok(None);
         }
         self.local.read_ref(&self.tracking(branch))
-    }
-
-    /// Where `branch`'s intake mark is fetched to here.
-    fn fetched_mark(&self, branch: &str) -> String {
-        format!("refs/sluice-fetched/{}/intake/{branch}", self.remote)
-    }
-
-    /// 137: `branch`'s intake mark as the branch's last fetch brought it,
-    /// with no fetch of its own: its commit and what it says; `None` when
-    /// the remote held none. A mark whose message is not one sluice wrote
-    /// reads as a driver's of a host named by its commit, which no wait's
-    /// rule takes at once.
-    pub fn intake_mark(&self, branch: &str) -> Result<Option<(Rev, Mark)>> {
-        let Some(rev) = self.intake_mark_at(branch)? else {
-            return Ok(None);
-        };
-        let out = git(
-            self.local.git_dir(),
-            &["log", "-1", "--format=%B", rev.as_str()],
-        )?;
-        let said = String::from_utf8_lossy(&out.stdout);
-        let mark = serde_json::from_str::<Mark>(said.trim()).unwrap_or_else(|_| Mark {
-            host: format!("the writer of {}", rev.short()),
-            holder: Holder::Driver,
-            sluice: String::new(),
-        });
-        Ok(Some((rev, mark)))
-    }
-
-    /// 137: the commit of `branch`'s intake mark as the branch's last fetch
-    /// brought it, read with no process (129); `None` when the remote held
-    /// none.
-    pub fn intake_mark_at(&self, branch: &str) -> Result<Option<Rev>> {
-        self.local.read_ref(&self.fetched_mark(branch))
-    }
-
-    /// 137: push `mark` as `branch`'s intake mark, leased on the remote's
-    /// holding `from`, or none when `from` is `None` (rule core.5), under
-    /// the retry policy (rule core.29): a new root commit with an empty
-    /// tree, whose message is `mark` as one JSON line. The mark pushed,
-    /// read here as the next [`PushedRefs::intake_mark`]; `None` when the
-    /// remote's mark was not `from`, another host's take, which is never
-    /// pushed again blind.
-    pub fn put_intake_mark(
-        &self,
-        branch: &str,
-        from: Option<&Rev>,
-        mark: &Mark,
-    ) -> Result<Option<Rev>> {
-        let tree = git_ok(self.local.git_dir(), &["mktree"])?;
-        let message = serde_json::to_string(mark)?;
-        let out = command(
-            self.local.git_dir(),
-            &["commit-tree", tree.trim(), "-m", &message],
-        )
-        .env("GIT_AUTHOR_NAME", "sluice")
-        .env("GIT_AUTHOR_EMAIL", "sluice@localhost")
-        .env("GIT_COMMITTER_NAME", "sluice")
-        .env("GIT_COMMITTER_EMAIL", "sluice@localhost")
-        .output()
-        .context("running git commit-tree")?;
-        if !out.status.success() {
-            bail!(
-                "git commit-tree: {}",
-                String::from_utf8_lossy(&out.stderr).trim()
-            );
-        }
-        let commit = Rev(String::from_utf8_lossy(&out.stdout).trim().to_string());
-        match self.leased_ref(&intake_ref(branch), from, Some(&commit))? {
-            false => Ok(None),
-            true => {
-                self.local.write_ref(&self.fetched_mark(branch), &commit)?;
-                Ok(Some(commit))
-            }
-        }
-    }
-
-    /// 137: remove `branch`'s intake mark, leased on the remote's holding
-    /// `from`. `false` when it held another, which is left.
-    pub fn drop_intake_mark(&self, branch: &str, from: &Rev) -> Result<bool> {
-        let dropped = self.leased_ref(&intake_ref(branch), Some(from), None)?;
-        if dropped {
-            self.local.delete_ref(&self.fetched_mark(branch))?;
-        }
-        Ok(dropped)
-    }
-
-    /// Set the remote's ref `name` to `to`, or remove it when `to` is
-    /// `None`, leased on its holding `from`, or nothing when `from` is
-    /// `None`, through [`PushedRefs::push`]. `false` when the remote
-    /// refused it at its lease.
-    fn leased_ref(&self, name: &str, from: Option<&Rev>, to: Option<&Rev>) -> Result<bool> {
-        let lease = format!("--force-with-lease={name}:{}", from.map_or("", Rev::as_str));
-        let refspec = format!("{}:{name}", to.map_or("", Rev::as_str));
-        let pushed = self.push(
-            &["push", "--porcelain", "--no-verify", &lease],
-            &refspec,
-            name,
-            to.map(Rev::as_str),
-        )?;
-        if let Pushed::Refused(out) = &pushed {
-            let report = String::from_utf8_lossy(&out.stdout);
-            if report.lines().any(at_the_lease) {
-                return Ok(false);
-            }
-        }
-        match pushed.why() {
-            None => Ok(true),
-            Some(why) => bail!("pushing {name} to {} failed: {why}", self.remote),
-        }
     }
 
     /// Fetch the remote's ref `src` into the local ref `dst`, which it
@@ -670,42 +554,6 @@ impl PushedRefs {
         Ok(())
     }
 }
-
-/// Whether a line of `git push --porcelain` says the remote's ref was not
-/// what the push was leased on: git's own refusal, from the ref the remote
-/// advertised, or the remote's, from the ref it found under its lock when
-/// another push moved it meanwhile.
-fn at_the_lease(line: &str) -> bool {
-    line.starts_with('!')
-        && (line.contains("[rejected]")
-            || line.contains("[remote rejected]")
-                && [
-                    "failed to update ref",
-                    "cannot lock ref",
-                    "incorrect old value",
-                ]
-                .iter()
-                .any(|w| line.contains(w)))
-}
-
-/// 137: the remote's ref of `branch`'s intake mark.
-pub fn intake_ref(branch: &str) -> String {
-    format!("refs/sluice/intake/{branch}")
-}
-
-/// 137: what a branch's intake mark says: the host that holds it, as its
-/// peers name it, whether its holder is the host's `sluice run` or a wait,
-/// and the sluice that wrote it.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub struct Mark {
-    pub host: String,
-    pub holder: Holder,
-    pub sluice: String,
-}
-
-/// Which process of its host holds an intake mark, as the core names it
-/// for status and a wait (design D2).
-pub use crate::Holder;
 
 /// A git call to the remote under the retry policy: its last try's output,
 /// what each credential the remote refused was, and how the last try stood
@@ -899,29 +747,6 @@ pub(crate) fn refusal(out: &Output) -> String {
         .filter(|s| !s.is_empty())
         .collect::<Vec<_>>()
         .join("; ")
-}
-
-/// The git command for the remote: the host's own configuration and
-/// credentials, and nothing read from stdin. sluice runs unattended, so a
-/// credential git cannot find is an error, never a prompt: no terminal
-/// prompt, no askpass program, and a credential manager told not to ask.
-pub(crate) fn git(git_dir: &Path, args: &[&str]) -> Result<Output> {
-    command(git_dir, args)
-        .output()
-        .with_context(|| format!("running git {}", args.join(" ")))
-}
-
-/// [`git`] that succeeded: what it printed.
-fn git_ok(git_dir: &Path, args: &[&str]) -> Result<String> {
-    let out = git(git_dir, args)?;
-    if !out.status.success() {
-        bail!(
-            "git {}: {}",
-            args.join(" "),
-            String::from_utf8_lossy(&out.stderr).trim()
-        );
-    }
-    Ok(String::from_utf8_lossy(&out.stdout).into_owned())
 }
 
 pub(crate) fn command(git_dir: &Path, args: &[&str]) -> Command {

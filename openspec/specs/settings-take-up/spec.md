@@ -10,95 +10,19 @@ once, and leaves a run already started on what it started with.
 
 ## Requirements
 
-### Requirement: A kept sluice run takes up changed host settings before its next pass
-
-A `sluice run` that is running when the host's settings file changes
-SHALL take up the settings the file then holds before its next pass,
-whether or not it drives the repository, between passes and never
-within one, so every round of a pass and the reader's document it
-writes act under one set of settings. Nothing on the host SHALL need to
-restart it for a change to count (135; record 0107; rule core.54).
-
-#### Scenario: The bound grows while a run is kept running
-
-- **WHEN** the host's settings say `[runs] max = 1`, `sluice run` is
-  running with two submissions queued on `bolt/a`, whose policy tests
-  four at once, and the file is changed to `max = 2` while the first
-  combination's run is going
-- **THEN** the second combination's run starts while the first is still
-  going, and is given the cores sluice may use divided by two, and both
-  submissions land
-  (`a_run_takes_up_a_changed_bound_at_its_next_pass` in
-  `crates/sluice/tests/instance.rs`)
-
-#### Scenario: A file written after the run started
-
-- **WHEN** the run started with no settings file, and so with every
-  default, and a file naming `[runs] max = 3` is then written
-- **THEN** the next look finds it changed and reads it, and the settings
-  it gives have a bound of three
-  (`a_changed_file_is_read_once_and_the_same_settings_change_nothing` in
-  `crates/sluice/src/host_settings.rs`)
-
-#### Scenario: The same settings written again
-
-- **WHEN** the file is written again with the settings the run holds,
-  as an apply of the host's configuration that changed another tool's
-  file does
-- **THEN** the next look finds nothing to take up
-  (`a_changed_file_is_read_once_and_the_same_settings_change_nothing` in
-  `crates/sluice/src/host_settings.rs`)
-
-### Requirement: A take-up says which tables changed
-
-For each change it takes up, `sluice run` SHALL say once on stderr the
-file and the tables whose settings changed, in the order the
-configuration reference gives them: `[runs]`, `[forge]`, `[signing]`,
-`[peers]`, `[deliveries]`, `[telemetry]`, `[[caches]]`. It SHALL never
-say it took up a change that names no table. Settings equal to those it
-holds SHALL be taken up silently, with nothing bound afresh.
-
-#### Scenario: The run says what it took up
-
-- **WHEN** the bound grows from one to two while `sluice run` is kept
-  running
-- **THEN** stderr says exactly once `sluice: took up the host's settings
-  in <path>: [runs] changed`
-  (`a_run_takes_up_a_changed_bound_at_its_next_pass` in
-  `crates/sluice/tests/instance.rs`)
-
-#### Scenario: Which tables changed
-
-- **WHEN** the settings taken up differ from those held in `[runs]
-  max` and `[forge] discovery` alone
-- **THEN** the tables named are `[runs]` and `[forge]`, in that order
-  (`the_tables_a_change_moves_are_named` in
-  `crates/sluice/src/instance.rs`)
-
-#### Scenario: A changed telemetry table is named
-
-- **WHEN** the settings taken up differ from those held in
-  `[telemetry] collector` and `[[caches]]`, or in `[telemetry] logs`
-  alone
-- **THEN** the tables named are `[telemetry]` and `[[caches]]`, in that
-  order, or `[telemetry]` alone
-  (`a_changed_telemetry_table_is_named_and_taken_up_afresh` in
-  `crates/sluice/src/instance.rs`)
-
 ### Requirement: A look at a file that stands reads nothing
 
-Between passes, `sluice run` SHALL tell whether the settings file
-changed from the file's sign alone, with no process started and no git
-read (rule core.31). It SHALL read the file only once the sign differs
-from the one taken as its settings were last read. A read during which
-the sign moved SHALL count as no read, and the file SHALL be read again
-at the next look.
+Between passes, the host process and a kept `sluice run` SHALL tell
+whether the settings file changed from the file's sign alone, with no
+process started and no git read (rule core.31). Each SHALL read the file
+only once the sign differs from the one taken as its settings were last
+read. A read during which the sign moved SHALL count as no read, and the
+file SHALL be read again at the next look.
 
 #### Scenario: An unchanged file made unreadable
 
-- **WHEN** the run holds the file's settings, and the file's
-  permissions are then taken away with its contents, time and size
-  unchanged
+- **WHEN** the settings held are the file's, and the file's permissions
+  are then taken away with its contents, time and size unchanged
 - **THEN** the next look finds nothing changed, and nothing is said
   (`a_look_at_a_file_that_stands_reads_nothing` in
   `crates/sluice/src/host_settings.rs`)
@@ -120,20 +44,20 @@ into a store whose files all share one time is seen.
   (`a_link_moved_to_a_file_of_the_same_size_and_time_is_a_change` in
   `crates/sluice/src/host_settings.rs`)
 
-### Requirement: A file that does not read leaves the run on what it holds
+### Requirement: A file that does not read leaves the host process on what it holds
 
 Where the changed settings file is gone, cannot be read, or holds
-settings sluice refuses, `sluice run` SHALL keep the settings it holds,
-and SHALL say on stderr, once for that change, the file and why. A gone
-file SHALL be read as one that does not read, never as sluice's
-defaults. The run SHALL read the file again once it changes again, and
-SHALL never end for it (record 0107; rule core.54).
+settings sluice refuses, the host process SHALL keep the settings it
+holds, and SHALL say in its log, once for that change, the file and why.
+A gone file SHALL be read as one that does not read, never as sluice's
+defaults. It SHALL read the file again once it changes again, and SHALL
+never end for it (record 0107; rule core.54).
 
 #### Scenario: A file sluice refuses, and then mends
 
-- **WHEN** the run holds a bound of two, and the file is changed to
-  `[runs] max = "two"`, then looked at again with no change, and then
-  changed to `max = 3`
+- **WHEN** a bound of two is held, and the file is changed to `[runs]
+  max = "two"`, then looked at again with no change, and then changed to
+  `max = 3`
 - **THEN** the first look says the file is refused, naming it and why,
   and keeps a bound of two; the second finds nothing changed and says
   nothing; and the third gives a bound of three
@@ -142,38 +66,39 @@ SHALL never end for it (record 0107; rule core.54).
 
 #### Scenario: A gone file
 
-- **WHEN** the file the run took `[runs] max = 3` up from is removed
+- **WHEN** the file `[runs] max = 3` was taken up from is removed
 - **THEN** the next look says the file is gone and that an empty file
   gives sluice's defaults, and keeps a bound of three
   (`a_file_that_does_not_read_leaves_the_settings_held_and_is_said_once`
   in `crates/sluice/src/host_settings.rs`)
 
-### Requirement: Settings that do not bind leave the run on what it holds
+### Requirement: Settings that do not bind leave the host process on what it holds
 
 Where the changed file reads but its settings cannot be bound, such as
 a key that does not parse or systems a branch's policy gives otherwise,
-`sluice run` SHALL keep the settings and the binding it holds, and SHALL
-say on stderr, once for that change, the file and why (rule core.54).
+the host process SHALL keep the settings and the binding it holds, and
+SHALL say in its log, once for that change, the file and why (rule
+core.54).
 
 #### Scenario: A key that holds no private key
 
-- **WHEN** the host's settings say `[runs] max = 1`, `sluice run` is
-  running with two submissions queued, and the file is changed to
-  `max = 2` with a `[forge]` table whose key, mode `0600`, holds no
-  private key
+- **WHEN** the host's settings say `[runs] max = 1`, the host process
+  runs with two submissions queued, and the file is changed to `max = 2`
+  with a `[forge]` table whose key, mode `0600`, holds no private key
 - **THEN** the second combination's run starts only once the first has
   ended, given the cores the first was, and both submissions land
-- **AND** stderr says once that the file is refused and the run keeps the
-  settings it holds, naming the file and the key
-  (`a_run_keeps_its_settings_when_the_new_ones_do_not_bind` in
-  `crates/sluice/tests/instance.rs`)
+- **AND** the host process's log says once that the file is refused and
+  it keeps the settings it holds, naming the file and the key
+  (`the_host_process_keeps_its_settings_when_the_new_ones_do_not_bind`
+  in `crates/sluice/tests/instance.rs`)
 
 ### Requirement: A run keeps the settings it started under
 
-A run that started before `sluice run` took up changed settings SHALL
-go on with the cores, caches and grant it was started with. No run SHALL
-be stopped or started again because the settings changed, and its
-result SHALL count as it would have (rule core.54).
+A run that started before the host process took up changed settings,
+or handed its repositories over, SHALL go on with the cores, caches and
+grant it was started with. No run SHALL be stopped or started again
+because the settings changed, and its result SHALL count as it would
+have (rule core.54).
 
 #### Scenario: The first run keeps its cores
 
@@ -181,67 +106,33 @@ result SHALL count as it would have (rule core.54).
   run is going
 - **THEN** that run was given all the cores sluice may use, keeps them
   to its end, is not started again, and its submission lands
-  (`a_run_takes_up_a_changed_bound_at_its_next_pass` in
+  (`the_host_process_takes_up_a_changed_bound_at_its_next_pass` in
   `crates/sluice/tests/instance.rs`)
 
-### Requirement: The driver stays the driver across a take-up
+### Requirement: The host process keeps its repositories across a take-up
 
-A `sluice run` that takes up changed settings SHALL stay its
-repository's driver and reader on the host, and SHALL carry to the next
-pass what it carries between passes: the passes counted toward
-`--rounds`, the holds and refusals it has already said, and whether it
-said that another `sluice run` drives the repository.
+The host process SHALL take up changed settings with every repository
+it holds kept: each task SHALL keep its reader's lock, its followers and
+the parts its rounds hold, and SHALL bind afresh at the start of its
+next pass, reading each policy once more.
 
 #### Scenario: A pass under a new binding
 
-- **WHEN** a `sluice run` has driven one pass of `main` with #1 queued,
-  and its next passes run under a binding made afresh
-- **THEN** the repository's driver is held throughout, and #1 lands
-  (`a_run_keeps_driving_across_a_new_binding` in
-  `crates/sluice/tests/cli.rs`)
-
-### Requirement: A change no binding takes up in place starts the run afresh
-
-Where the tables a change moves include one no binding takes up in
-place, `[telemetry]` alone of today's, `sluice run` SHALL take the
-change up between two passes by starting itself afresh in its own
-process (135; record 0107; rule core.54). Before it does, it SHALL
-bind the new settings and check the host's systems under them, as any
-take-up does, and send what its telemetry holds to where it was
-sending. Every other change SHALL be taken up in place, as before.
-
-#### Scenario: Which tables start the run afresh
-
-- **WHEN** a change moves `[telemetry]`, alone or with other tables, or
-  moves `[runs]` and `[forge]` alone
-- **THEN** the first starts the run afresh and the second is taken up
-  in place
-  (`a_changed_telemetry_table_is_named_and_taken_up_afresh` in
-  `crates/sluice/src/instance.rs`)
-
-#### Scenario: A kept run sends to the collector it is changed to
-
-- **WHEN** the host's settings say `[runs] max = 1` and `[telemetry]`
-  with `send = true` and one collector, `sluice run` is running with
-  two submissions queued on `bolt/a`, and the file is changed to name
-  another collector while the first combination's run is going
-- **THEN** the first collector is sent traces and metrics, the second
-  collector is sent traces, and both submissions land
-- **AND** stderr says exactly once `sluice: took up the host's settings
-  in <path>: [telemetry] changed, in this sluice run started afresh`
-- **AND** each combination's run started once, given every core sluice
-  may use
-  (`a_run_takes_a_changed_telemetry_table_up_by_starting_afresh` in
-  `crates/sluice/tests/instance.rs`)
+- **WHEN** the host process has passed `main` once with #1 queued, a
+  watch follows it, and its next passes run under a binding made afresh
+- **THEN** the reader's lock is held throughout, the watch prints on, and
+  #1 lands
+  (`the_host_process_keeps_its_repositories_across_a_new_binding` in
+  `crates/sluice/tests/host_process.rs`)
 
 ### Requirement: The run started afresh is the run as it was started
 
-The process a `sluice run` starts afresh SHALL be the same process,
+The process a kept `sluice run` starts afresh SHALL be the same process,
 keeping its id, its output and whatever runs it. It SHALL run the
 executable the run started as, resolved through every link as the run
-started, with the command line the run was given, the folder it ran
-in, and the environment it started with before telemetry took anything
-out of it (151; rule core.53).
+started, with the command line the run was given, the folder it ran in,
+and the environment it started with before telemetry took anything out
+of it (151; rule core.53).
 
 #### Scenario: The hand-over's command
 
@@ -251,38 +142,10 @@ out of it (151; rule core.53).
 - **THEN** the command it starts afresh is `/x/sluice` with `run
   --rounds 12`. Its environment is cleared and set to exactly the one
   it started with, the variable among it, and the hand-over's document.
-  That document, holding settings, tables, passes, a driver's
-  descriptor, supervisors and what was said, reads back as it was
-  written
+  That document, holding settings, tables, the passes followed and what
+  was said, reads back as it was written
   (`the_run_started_afresh_is_the_one_that_started` in
   `crates/sluice/src/hand_over.rs`)
-
-### Requirement: The driver stays the driver across a hand-over
-
-A `sluice run` that hands over SHALL hold its repository's driver's
-lock without a moment's let-go, so no wait on the host runs rounds and
-no other `sluice run` takes the repository (135; rule core.31). The run
-started afresh SHALL count the passes already driven toward `--rounds`.
-It SHALL not say again a hold, a refusal, or that another `sluice run`
-drives the repository, where the run said it before.
-
-#### Scenario: A driver's lock handed over
-
-- **WHEN** a driver's lock is handed over as a descriptor open across a
-  start, and taken up again from it
-- **THEN** the handed descriptor is not closed on a start, and the lock
-  taken up from it is; a probe finds the driver live throughout; and
-  once the lock taken up is dropped, a new driver takes it
-  (`a_driver_handed_its_lock_holds_it` in `crates/sluice/src/reader.rs`)
-
-#### Scenario: A run handed over counts its passes
-
-- **WHEN** a `sluice run --rounds 3` over `main` drives one pass, hands
-  over what it carries, and drives on from what it handed over
-- **THEN** it ends after two passes more, and between every two passes
-  a probe finds the repository's driver live
-  (`a_run_handed_over_keeps_driving_and_counts_its_passes` in
-  `crates/sluice/tests/cli.rs`)
 
 ### Requirement: The run started afresh starts on the settings handed over
 
@@ -303,20 +166,137 @@ over, said once (rule core.54).
   (`a_run_handed_over_holds_what_it_was_handed_and_reads_the_file_once`
   in `crates/sluice/src/host_settings.rs`)
 
-### Requirement: A hand-over that cannot start leaves the run as it was
+### Requirement: The host process takes up changed host settings before its next pass
 
-Where the run's settings do not bind, or its process cannot start
-afresh, `sluice run` SHALL keep the settings, the binding and the
-telemetry it holds. It SHALL say on stderr once for that change the
-file, the tables, and why. It SHALL read the file again once it changes
-again, and SHALL never end for it (rule core.54).
+The host process, running when the host's settings file changes, SHALL
+take up the settings the file then holds between its passes and never
+within one: each repository's next pass, and the room's next admission,
+act under the new settings, and no pass acts under two. Nothing on the
+host SHALL need to restart it for a change to count (135; record 0107;
+rule core.54).
+
+#### Scenario: The bound grows while the host process runs
+
+- **WHEN** the host's settings say `[runs] max = 1`, the host process
+  runs with two submissions queued on `bolt/a`, whose policy tests four
+  at once, and the file is changed to `max = 2` while the first
+  combination's run is going
+- **THEN** the second combination's run starts while the first is still
+  going, and is given the cores sluice may use divided by two, and both
+  submissions land
+  (`the_host_process_takes_up_a_changed_bound_at_its_next_pass` in
+  `crates/sluice/tests/instance.rs`)
+
+#### Scenario: A file written after the host process started
+
+- **WHEN** the host process started with no settings file, and so with
+  every default, and a file naming `[runs] max = 3` is then written
+- **THEN** the next look finds it changed and reads it, and the settings
+  it gives have a bound of three
+  (`a_changed_file_is_read_once_and_the_same_settings_change_nothing` in
+  `crates/sluice/src/host_settings.rs`)
+
+#### Scenario: The same settings written again
+
+- **WHEN** the file is written again with the settings held, as an apply
+  of the host's configuration that changed another tool's file does
+- **THEN** the next look finds nothing to take up
+  (`a_changed_file_is_read_once_and_the_same_settings_change_nothing` in
+  `crates/sluice/src/host_settings.rs`)
+
+### Requirement: The host process says which tables a take-up changed
+
+For each change it takes up, the host process SHALL say once in its log
+the file and the tables whose settings changed, in the order the
+configuration reference gives them: `[runs]`, `[forge]`, `[signing]`,
+`[peers]`, `[deliveries]`, `[telemetry]`, `[[caches]]`. It SHALL never
+say it took up a change that names no table. Settings equal to those it
+holds SHALL be taken up silently, with nothing bound afresh.
+
+#### Scenario: The host process says what it took up
+
+- **WHEN** the bound grows from one to two while the host process runs
+- **THEN** its log says exactly once `sluice: took up the host's
+  settings in <path>: [runs] changed`
+  (`the_host_process_takes_up_a_changed_bound_at_its_next_pass` in
+  `crates/sluice/tests/instance.rs`)
+
+#### Scenario: Which tables changed
+
+- **WHEN** the settings taken up differ from those held in `[runs]
+  max` and `[forge] discovery` alone
+- **THEN** the tables named are `[runs]` and `[forge]`, in that order
+  (`the_tables_a_change_moves_are_named` in
+  `crates/sluice/src/instance.rs`)
+
+#### Scenario: A changed telemetry table is named
+
+- **WHEN** the settings taken up differ from those held in
+  `[telemetry] collector` and `[[caches]]`, or in `[telemetry] logs`
+  alone
+- **THEN** the tables named are `[telemetry]` and `[[caches]]`, in that
+  order, or `[telemetry]` alone
+  (`a_changed_telemetry_table_is_named_and_taken_up_afresh` in
+  `crates/sluice/src/instance.rs`)
+
+### Requirement: A change no binding takes up in place goes to a fresh host process
+
+Where the tables a change moves include one no binding takes up in
+place, `[telemetry]` alone of today's, the host process SHALL bind the
+new settings and check the host's systems under them, send what its
+telemetry holds, let each task finish its pass, and start a fresh host
+process of its own, which reads the file itself. Nothing SHALL pass
+between the two but what the records and the host's state hold (135;
+record 0107 as amended 2026-11-13; rule core.54).
+
+#### Scenario: Which tables hand over
+
+- **WHEN** a change moves `[telemetry]`, alone or with other tables, or
+  moves `[runs]` and `[forge]` alone
+- **THEN** the first hands over and the second is taken up in place
+  (`a_changed_telemetry_table_is_named_and_taken_up_afresh` in
+  `crates/sluice/src/instance.rs`)
+
+#### Scenario: The host process sends to the collector it is changed to
+
+- **WHEN** the host's settings say `[runs] max = 1` and `[telemetry]`
+  with `send = true` and one collector, the host process runs with two
+  submissions queued on `bolt/a`, and the file is changed to name another
+  collector while the first combination's run is going
+- **THEN** the first collector is sent traces and metrics, the second is
+  sent traces, both submissions land, and a host process of another pid
+  answers
+- **AND** each combination's run started once, given every core sluice
+  may use
+  (`the_host_process_hands_a_changed_telemetry_table_to_a_fresh_one` in
+  `crates/sluice/tests/instance.rs`)
+
+### Requirement: A kept sluice run counts its passes across a hand-over
+
+A kept `sluice run`, which follows the host process, that starts itself
+afresh SHALL count the passes it already followed toward `--rounds`, and
+SHALL not say again what it said before.
+
+#### Scenario: A run handed over counts its passes
+
+- **WHEN** a `sluice run --rounds 3` over `main` follows one pass, hands
+  over what it carries, and follows on from what it handed over
+- **THEN** it ends after two passes more
+  (`a_run_handed_over_keeps_following_and_counts_its_passes` in
+  `crates/sluice/tests/cli.rs`)
+
+### Requirement: A kept sluice run whose start afresh fails keeps what it holds
+
+Where a kept `sluice run`'s settings do not bind, or its process cannot
+start afresh, it SHALL keep the settings and the telemetry it holds. It
+SHALL say on stderr once for that change the file, the tables, and why.
+It SHALL read the file again once it changes again, and SHALL never end
+for it (rule core.54).
 
 #### Scenario: An executable that cannot start
 
 - **WHEN** a hand-over's command names an executable that is not there
-- **THEN** starting it answers the system's words, naming the
-  executable, and the driver's descriptor it would have handed over is
-  closed
+- **THEN** starting it answers the system's words, naming the executable
   (`a_hand_over_that_cannot_start_says_why` in
   `crates/sluice/src/hand_over.rs`)
 
@@ -329,33 +309,54 @@ again, and SHALL never end for it (rule core.54).
   (`a_hand_over_that_cannot_start_leaves_the_process_as_it_was` in
   `crates/sluice/src/hand_over.rs`)
 
-#### Scenario: Settings it would start afresh for that do not bind
+### Requirement: Work in play never waits for a command across the host process's hand-over
 
-- **WHEN** the host's settings say `[runs] max = 1`, `sluice run` is
-  running with two submissions queued on `bolt/a`, and the file is
-  changed in `[runs]`, `[forge]` and `[telemetry]`, with a `[forge]` key
-  that holds no private key, while the first combination's run is going
+The host process SHALL start its successor itself, holding the host's
+start lock from before it lets its own lock go until a host process of
+another pid answers, so a command that meets neither waits on the start
+lock and reaches the successor, and work in play never waits for another
+command to start a host process (135; record 0107 as amended
+2026-11-13).
+
+#### Scenario: A submit during the hand-over
+
+- **WHEN** the host process is handing over for a changed `[telemetry]`
+  and a submit runs on the host meanwhile
+- **THEN** the submit reaches the successor, exactly one host process
+  runs once the hand-over ends, and the submission lands with no other
+  command run
+  (`a_submit_during_a_hand_over_reaches_the_successor` in
+  `crates/sluice/tests/host_process.rs`)
+
+### Requirement: A successor that does not start leaves the host process as it was
+
+Where the host process's settings for a change it hands over for do not
+bind, or no successor answers within a start's ten seconds, it SHALL
+keep its repositories, the settings, binding and telemetry it holds, go
+on passing, and say once in its log the file, the tables and why. It
+SHALL read the file again once it changes again, and SHALL never end for
+it (rule core.54).
+
+#### Scenario: Settings it would hand over for that do not bind
+
+- **WHEN** the host's settings say `[runs] max = 1`, the host process
+  runs with two submissions queued on `bolt/a`, and the file is changed
+  in `[runs]`, `[forge]` and `[telemetry]`, with a `[forge]` key that
+  holds no private key, while the first combination's run is going
 - **THEN** the second combination's run starts only once the first has
-  ended, with the cores the first had, and both submissions land
-- **AND** stderr says exactly once `sluice: warning: <path> changed
-  [runs], [forge], [telemetry], which this sluice run takes up only by
-  starting afresh, and its settings do not bind, so it keeps the
-  settings it holds until the file changes: <why>`, naming the key, and
-  nothing is taken up
-  (`a_run_keeps_its_settings_when_a_change_it_starts_afresh_for_does_not_bind`
+  ended, both submissions land, and the same host process runs throughout
+- **AND** its log says exactly once `sluice: warning: <path> changed
+  [runs], [forge], [telemetry], which the host process takes up only by
+  handing over, and its settings do not bind, so it keeps the settings it
+  holds until the file changes: <why>`, naming the key
+  (`the_host_process_keeps_its_settings_when_a_change_it_hands_over_for_does_not_bind`
   in `crates/sluice/tests/instance.rs`)
 
-### Requirement: Runs started before a hand-over are reaped
+#### Scenario: A successor that does not answer
 
-The run started afresh SHALL reap every run supervisor the run started
-before handing over and had not reaped. It SHALL keep reaping them
-across any later hand-over, so no supervisor is left unreaped under a
-kept `sluice run`.
-
-#### Scenario: A supervisor handed over
-
-- **WHEN** a child of the process ends, its id handed over as a
-  supervisor not yet reaped
-- **THEN** it is reaped, and no longer named among the supervisors not
-  yet reaped
-  (`a_supervisor_handed_over_is_reaped` in `crates/sluice/src/runs.rs`)
+- **WHEN** the host process hands over and the successor it starts exits
+  at once
+- **THEN** it takes its lock back, its socket answers with its own pid,
+  and its log says once that its successor did not start
+  (`a_successor_that_does_not_start_leaves_the_host_process_as_it_was`
+  in `crates/sluice/tests/host_process.rs`)

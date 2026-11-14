@@ -115,8 +115,10 @@ impl Setup {
         serde_json::from_slice(&out.stdout).unwrap_or_else(|_| panic!("{}", text(&out)))
     }
 
+    /// The ports the host holds for live places, each `held/<port>` (31,
+    /// 32; record 0016 as amended 2026-11-13).
     fn held(&self) -> Vec<String> {
-        match std::fs::read_dir(self.state.path().join("sluice/ports")) {
+        match std::fs::read_dir(self.state.path().join("sluice/ports/held")) {
             Ok(d) => d
                 .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
                 .filter(|n| !n.starts_with('.'))

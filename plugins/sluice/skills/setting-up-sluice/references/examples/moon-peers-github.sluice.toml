@@ -1,6 +1,6 @@
 # .config/sluice.toml: many hosts as peers, with no server. The queue for
-# every branch with a remote lives on origin under refs/sluice/; boxes
-# the operator keeps running take main's runs, one per system, and the
+# every branch with a remote lives on origin under refs/sluice/; the
+# operator's standing executors take main's runs, one per system, and the
 # session hosts take the feature branches'. main must pass cli:build on three
 # systems.
 

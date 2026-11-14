@@ -29,7 +29,7 @@ pub mod verdict_view;
 
 use anyhow::{anyhow, bail, Context, Result};
 use chrono::{DateTime, SecondsFormat, Utc};
-use sluice_seams::{Branch, Checkout, Driver, Rev, State, Tests, Written};
+use sluice_seams::{Branch, Checkout, Driver, ReadRefused, Rev, State, Tests, Written};
 
 use crate::line::Line;
 use crate::policy::{Policy, Rules, POLICY_PATH};
@@ -76,23 +76,45 @@ pub struct Seams<'a> {
     pub state: &'a dyn State,
 }
 
-/// The branches an instance serves, whose runs count against its bound
-/// (71).
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum Serves {
-    /// The branch it steps: a waiting submit's rounds, or `sluice step`.
-    Stepped,
-    /// Every branch with records: `sluice run`.
-    Every,
+/// 64, 129 (design D16): what a forecast read as the host holds the
+/// repository could not form from, since the host process's reading did not
+/// bring it to the host. A forecast asks a reading afresh once; where that
+/// reading is current and still brings no revision of a branch, the branch
+/// is no branch, refused as one (64); anything else still lacking is said
+/// as a read it could not make.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Unheld {
+    /// The branch named: the host holds no revision of it.
+    Branch(String),
+    /// The work queued on the branch named, or a combination formed on it.
+    Work(String),
 }
+
+impl std::fmt::Display for Unheld {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let what = match self {
+            Unheld::Branch(b) => format!("a revision of {b}"),
+            Unheld::Work(b) => format!("the work queued on {b} or a combination formed on it"),
+        };
+        write!(
+            f,
+            "the host process's reading did not bring {what} to this host"
+        )
+    }
+}
+
+impl std::error::Error for Unheld {}
 
 pub struct Sluice<'a> {
     seams: Seams<'a>,
     clock: &'a dyn Clock,
-    serves: Serves,
     peer: Peer,
     /// 124: whether it reads the policy only as far as guarding needs.
     guarding: bool,
+    /// 129 (design D16): whether it reads every branch as the host holds
+    /// it since the host process's last ask, asking no remote: a one-shot
+    /// read's. A round never reads held.
+    held: bool,
     /// 129: each policy read, by the revision it was read at.
     policies: Keeping<'a>,
 }
@@ -209,9 +231,9 @@ impl<'a> Sluice<'a> {
         Sluice {
             seams,
             clock,
-            serves: Serves::Stepped,
             peer: Peer::default(),
             guarding: false,
+            held: false,
             policies: Keeping::Own(Policies::default()),
         }
     }
@@ -238,11 +260,6 @@ impl<'a> Sluice<'a> {
         Sluice { peer, ..self }
     }
 
-    /// The same sluice, serving `serves` (71).
-    pub fn serving(self, serves: Serves) -> Self {
-        Sluice { serves, ..self }
-    }
-
     /// The same sluice, for branch protection: it reads the policy only as
     /// far as guarding needs, [`Policy::guarding`] (124).
     pub fn guarding(self) -> Self {
@@ -262,7 +279,43 @@ impl<'a> Sluice<'a> {
     }
 
     fn read_line(&self, branch: &str) -> Result<Line> {
-        Line::load(branch, self.seams.state.read(branch)?)
+        Line::load(branch, self.state_read(branch)?)
+    }
+
+    /// The branch's live records: as the host holds them since the last
+    /// ask where this sluice reads held, and read afresh otherwise (129;
+    /// design D16).
+    fn state_read(&self, branch: &str) -> Result<sluice_seams::Snapshot> {
+        match self.held {
+            true => self.seams.state.read_held(branch),
+            false => self.seams.state.read(branch),
+        }
+    }
+
+    /// The branch's revision: as the host holds it, with no fetch, where
+    /// this sluice reads held, and read as a round reads it otherwise (129;
+    /// design D16).
+    pub fn branch_read(&self, branch: &str) -> Result<Option<Rev>> {
+        match self.held {
+            true => self.seams.branch.held(branch),
+            false => self.seams.branch.read(branch),
+        }
+    }
+
+    /// Whether it reads every branch as the host holds it (129; design
+    /// D16).
+    pub fn is_held(&self) -> bool {
+        self.held
+    }
+
+    /// The same sluice, reading every branch as the host holds it since the
+    /// host process's last ask, asking no remote: a one-shot read's, once
+    /// the host process's reading is current (129; design D16). A round
+    /// refuses to run under it, and its binding asks no remote from here
+    /// on.
+    pub fn holding(self) -> Self {
+        self.seams.state.hold();
+        Sluice { held: true, ..self }
     }
 
     /// Write `line`'s changes. 133: the lines of this host's refusal of
@@ -294,10 +347,21 @@ impl<'a> Sluice<'a> {
             }),
         };
         let refusal = self.refusal(&line.branch)?;
-        let carried = refusal
+        // 133 (design D27): this host's refusal of the branch's intake, its
+        // lines marked so, written beside the round's.
+        let intake = self.intake_refusal(&line.branch)?;
+        let carried: Vec<(String, crate::records::Event)> = refusal
             .as_ref()
             .map(|r| r.unwritten(&self.peer.name))
-            .unwrap_or_default();
+            .unwrap_or_default()
+            .into_iter()
+            .chain(
+                intake
+                    .as_ref()
+                    .map(|r| r.unwritten_as(&self.peer.name, true))
+                    .unwrap_or_default(),
+            )
+            .collect();
         let changes = if carried.is_empty() && ending.is_none() {
             own
         } else {
@@ -317,14 +381,22 @@ impl<'a> Sluice<'a> {
             .seams
             .state
             .write(&line.branch, line.version, changes)?;
-        if let (Written::Written(_), Some(r)) = (written, refusal) {
-            if !carried.is_empty() {
-                // The write stands whatever this does: a line not marked is
-                // written again by the next write, which decides nothing.
+        if let Written::Written(_) = written {
+            // The write stands whatever this does: a line not marked is
+            // written again by the next write, which decides nothing.
+            if let Some(r) = refusal.filter(|_| !carried.is_empty()) {
                 if let Err(e) = self.keep_refusal(&line.branch, r.written().as_ref()) {
                     tracing::warn!(
                         sluice.branch = line.branch,
                         "noting the refusal's lines as written failed: {e:#}"
+                    );
+                }
+            }
+            if let Some(r) = intake.filter(|_| !carried.is_empty()) {
+                if let Err(e) = self.keep_intake_refusal(&line.branch, r.written().as_ref()) {
+                    tracing::warn!(
+                        sluice.branch = line.branch,
+                        "noting the intake refusal's lines as written failed: {e:#}"
                     );
                 }
             }
@@ -360,6 +432,116 @@ impl<'a> Sluice<'a> {
     fn keep_refusal(&self, branch: &str, refusal: Option<&Refusal>) -> Result<()> {
         let bytes = refusal.map(Refusal::to_bytes);
         self.seams.state.keep_refusal(branch, bytes.as_deref())
+    }
+
+    /// The remote `branch`'s table names, read from its policy at its
+    /// revision as the host holds it, whatever the table refuses (core.27).
+    pub fn remote_of(&self, branch: &str) -> Result<Option<String>> {
+        let Some(rev) = self.seams.branch.held(branch)? else {
+            return Ok(None);
+        };
+        match self.policy_at(&rev)? {
+            Some(policy) => policy.remote_of(branch),
+            None => Ok(None),
+        }
+    }
+
+    /// 133 (design D27): this host's refusal of `branch`'s intake, as the
+    /// records seam keeps it beside its refusal of the remote.
+    pub fn intake_refusal(&self, branch: &str) -> Result<Option<Refusal>> {
+        self.seams
+            .state
+            .intake_refusal(branch)?
+            .map(|b| Refusal::parse(&b))
+            .transpose()
+    }
+
+    /// Keep `refusal` as this host's refusal of `branch`'s intake, or, with
+    /// `None`, remove it.
+    fn keep_intake_refusal(&self, branch: &str, refusal: Option<&Refusal>) -> Result<()> {
+        let bytes = refusal.map(Refusal::to_bytes);
+        self.seams
+            .state
+            .keep_intake_refusal(branch, bytes.as_deref())
+    }
+
+    /// 133, rule core.28 (design D27): an intake pass of `branch` met
+    /// `causes`, each a read of the forge it could not make: counted in this
+    /// host's refusal of the branch's intake, each cause no pass of the
+    /// refusal met before added, and a `read-refused` line marked `intake`
+    /// written for each, in a write of its own where the branch's lock is
+    /// free, or the next write of the branch's log otherwise. The causes
+    /// whose lines this note wrote, which a pass says in the host process's
+    /// log; none it met before, and none a restarted process, a step or a
+    /// submit meets again.
+    pub fn note_intake_refused(
+        &self,
+        branch: &str,
+        causes: &[ReadRefused],
+    ) -> Result<Vec<ReadRefused>> {
+        let Some(first) = causes.first() else {
+            return Ok(Vec::new());
+        };
+        let now = self.now();
+        let standing = self.intake_refusal(branch)?.filter(|r| r.ended.is_none());
+        let rounds = standing.as_ref().map_or(0, |r| r.rounds);
+        let mut r = Refusal::refused(self.intake_refusal(branch)?, first, &now);
+        for c in &causes[1..] {
+            r = Refusal::refused(Some(r), c, &now);
+        }
+        r.rounds = rounds + 1;
+        let unlogged = |r: &Refusal| -> Vec<(String, String)> {
+            r.causes
+                .iter()
+                .filter(|c| !c.logged)
+                .map(|c| (c.asked.clone(), c.said.clone()))
+                .collect()
+        };
+        let before = unlogged(&r);
+        self.keep_intake_refusal(branch, Some(&r))?;
+        // A write that fails leaves the lines for the next write (73).
+        if let Err(e) = self.write_intake_lines(branch) {
+            tracing::warn!(
+                sluice.branch = branch,
+                "writing the intake refusal's lines failed: {e:#}"
+            );
+        }
+        let after = self
+            .intake_refusal(branch)?
+            .map(|r| unlogged(&r))
+            .unwrap_or_default();
+        Ok(causes
+            .iter()
+            .filter(|c| {
+                let key = (c.asked.clone(), c.said.clone());
+                before.contains(&key) && !after.contains(&key)
+            })
+            .cloned()
+            .collect())
+    }
+
+    /// 133 (design D27): an intake pass of `branch` met no failure: this
+    /// host's refusal of its intake, where one stands, ends, its
+    /// `read-again` line marked `intake` written as the refusal's are.
+    pub fn note_intake_read(&self, branch: &str) -> Result<()> {
+        let Some(mut r) = self.intake_refusal(branch)? else {
+            return Ok(());
+        };
+        if r.ended.is_none() {
+            r.read_again(&self.now());
+            self.keep_intake_refusal(branch, Some(&r))?;
+        }
+        self.write_intake_lines(branch)
+    }
+
+    /// The lines of this host's refusals of `branch` not yet in its log, in
+    /// a write holding nothing else, where the branch's lock is free;
+    /// otherwise the next write carries them (rule core.14).
+    fn write_intake_lines(&self, branch: &str) -> Result<()> {
+        let Some(_lock) = self.seams.state.lock(branch)? else {
+            return Ok(());
+        };
+        self.write_refusal_lines(branch)
     }
 
     /// Read, change and write a branch's records, reading again when the
@@ -435,34 +617,21 @@ impl<'a> Sluice<'a> {
         })
     }
 
-    /// 69: the results log as `branch`'s gate reads it, its signed runs
-    /// verified with the signers `branch`'s own policy names (78; rule
-    /// core.22), less every result set aside (could-not-run-1 116); the
-    /// lines themselves stay (rule core.7).
-    fn results(&self, branch: &str) -> Result<Vec<ResultLine>> {
-        let all: Vec<ResultLine> = parse_lines(&self.seams.state.results(branch)?)?;
+    /// 69 (design D17): the results `ask` names, as `branch`'s gate reads
+    /// them, its signed runs verified with the signers `branch`'s own
+    /// policy names (78; rule core.22), less every result set aside
+    /// (could-not-run-1 116); the lines themselves stay (rule core.7). An
+    /// ask for nothing reads nothing.
+    fn results_for(&self, branch: &str, ask: &sluice_seams::ResultAsk) -> Result<Vec<ResultLine>> {
+        if ask.is_empty() {
+            return Ok(Vec::new());
+        }
+        let all: Vec<ResultLine> = parse_lines(&self.seams.state.results_for(branch, ask)?)?;
         let aside: Vec<SetAside> = parse_lines(&self.seams.state.set_asides()?)?;
         Ok(all
             .into_iter()
             .filter(|r| !aside.iter().any(|a| r.set_aside_by(a)))
             .collect())
-    }
-
-    /// Every result any gate could count: each branch with records' results,
-    /// joined, a line two branches read kept once. A branch whose results
-    /// cannot be read is passed by into the unread list with its words
-    /// (26; rule core.11).
-    fn every_result(&self) -> Result<(Vec<ResultLine>, Vec<Unread>)> {
-        let mut seen = std::collections::BTreeSet::new();
-        let mut all = Vec::new();
-        let mut unread = Vec::new();
-        for b in self.seams.state.branches()? {
-            match self.results(&b) {
-                Ok(lines) => all.extend(lines.into_iter().filter(|r| seen.insert(to_line(r)))),
-                Err(e) => unread.push(Unread::of(&b, &e)),
-            }
-        }
-        Ok((all, unread))
     }
 
     /// Could-not-run-1 116: set aside the one result of `task` recorded at
@@ -480,7 +649,20 @@ impl<'a> Sluice<'a> {
         if reason.trim().is_empty() {
             bail!("a result is set aside with why: give a reason");
         }
-        let (every, unread) = self.every_result()?;
+        // Design D17: each branch with records asked for `task`'s results
+        // alone, a line two branches read kept once. A branch whose
+        // results cannot be read is passed by into the unread list with
+        // its words (26; rule core.11).
+        let ask = sluice_seams::ResultAsk::default().task(task);
+        let mut seen = std::collections::BTreeSet::new();
+        let mut every = Vec::new();
+        let mut unread = Vec::new();
+        for b in self.seams.state.branches()? {
+            match self.results_for(&b, &ask) {
+                Ok(lines) => every.extend(lines.into_iter().filter(|r| seen.insert(to_line(r)))),
+                Err(e) => unread.push(Unread::of(&b, &e)),
+            }
+        }
         let found: Vec<ResultLine> = every
             .into_iter()
             .filter(|r| r.task == task && r.at == at)
@@ -688,5 +870,106 @@ mod tests {
             assert!(s.policy_at(&at).unwrap().is_some());
         }
         assert_eq!(f.world.file_reads(), reads + 1);
+    }
+}
+
+#[cfg(test)]
+mod intake_refusals {
+    use chrono::{DateTime, TimeZone, Utc};
+    use sluice_fakes::Fakes;
+
+    use super::*;
+    use crate::records::Event;
+
+    struct Noon;
+
+    impl Clock for Noon {
+        fn now(&self) -> DateTime<Utc> {
+            Utc.with_ymd_and_hms(2026, 11, 13, 12, 0, 0).unwrap()
+        }
+    }
+
+    fn cause(asked: &str, said: &str) -> ReadRefused {
+        ReadRefused {
+            remote: "origin".into(),
+            asked: asked.into(),
+            said: said.into(),
+            note: None,
+        }
+    }
+
+    /// The branch's `read-refused` and `read-again` lines: whether each is
+    /// of its intake, its event and what it asked.
+    fn lines(s: &Sluice<'_>) -> Vec<(bool, &'static str, String)> {
+        let snapshot = s.seams.state.read("main").unwrap();
+        Line::read_log(&snapshot)
+            .unwrap()
+            .into_iter()
+            .filter_map(|l| match l.event {
+                Event::ReadRefused { intake, asked, .. } => Some((intake, "read-refused", asked)),
+                Event::ReadAgain { intake, .. } => Some((intake, "read-again", String::new())),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// 133, rule core.28 (design D27): an intake pass's causes are kept in
+    /// this host's refusal of the branch's intake, apart from the round's
+    /// refusal of its remote, and logged once for each cause, marked
+    /// `intake`: a pass that meets them again logs nothing and says
+    /// nothing, a new cause is logged alone, and a pass that meets none
+    /// ends the refusal with a `read-again` so marked.
+    #[test]
+    fn an_intake_refusal_is_logged_once_per_cause_apart_from_the_rounds() {
+        let f = Fakes::new();
+        f.world
+            .init("main", &[(crate::policy::POLICY_PATH, "[branches.main]\n")]);
+        let seams = Seams {
+            checkout: &f.checkout,
+            tests: &f.tests,
+            branch: &f.branch,
+            driver: &f.driver,
+            state: &f.state,
+        };
+        let s = Sluice::new(seams, &Noon);
+        let listed = cause("main's pull requests", "GitHub said 401 Bad credentials");
+        let headless = cause("pull/12", "pull/12 has no head");
+        let noted = s
+            .note_intake_refused("main", &[listed.clone(), headless.clone()])
+            .unwrap();
+        assert_eq!(noted, [listed.clone(), headless.clone()]);
+        let two = vec![
+            (true, "read-refused", "main's pull requests".to_string()),
+            (true, "read-refused", "pull/12".to_string()),
+        ];
+        assert_eq!(lines(&s), two);
+        // Met again: nothing logged, nothing to say.
+        let noted = s
+            .note_intake_refused("main", &[listed.clone(), headless.clone()])
+            .unwrap();
+        assert!(noted.is_empty(), "{noted:?}");
+        assert_eq!(lines(&s), two);
+        // A new cause alone.
+        let other = cause("pull/13", "GitHub said 502");
+        let noted = s
+            .note_intake_refused("main", &[listed.clone(), other.clone()])
+            .unwrap();
+        assert_eq!(noted, [other]);
+        assert_eq!(lines(&s).len(), 3);
+        let kept = s.intake_refusal("main").unwrap().unwrap();
+        assert_eq!(kept.rounds, 3);
+        // The round's own refusal of the remote is apart.
+        assert_eq!(s.refusal("main").unwrap(), None);
+        // A pass that met none ends it.
+        s.note_intake_read("main").unwrap();
+        let all = lines(&s);
+        assert_eq!(
+            all.last(),
+            Some(&(true, "read-again", String::new())),
+            "{all:?}"
+        );
+        assert_eq!(s.intake_refusal("main").unwrap(), None);
+        s.note_intake_read("main").unwrap();
+        assert_eq!(lines(&s).len(), 4, "ended once");
     }
 }

@@ -11,6 +11,7 @@ pub mod exec;
 pub mod hand_over;
 pub mod home;
 pub mod host_count;
+pub mod host_process;
 pub mod host_settings;
 pub mod identity;
 pub mod instance;
@@ -31,20 +32,17 @@ pub mod words;
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::io::Write;
-use std::os::fd::OwnedFd;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 use anyhow::Result;
 use clap::{Parser, Subcommand};
-use overview::Follows;
-use reader::{Driver, Drives, Reader};
 use sluice_core::overview::{in_queue, BranchView, CandidateView, Held};
 use sluice_core::records::{Beside, BranchHold, CopyBehind, Event, FailedTask, State, Submission};
 use sluice_core::{
     Accepted, AmendRefusal, Clock, Collect, CopyDiffers, Forecast, Forecasted, GroupRequest,
-    Lookup, Owed, Requester, Seams, Serves, Several, Sluice, Status, Step, SubmitHead,
-    SubmitRefusal, SubmitRequest, Unread, WithdrawRefusal, Withdrew,
+    Lookup, Owed, Requester, Seams, Several, Sluice, Status, SubmitHead, SubmitRefusal,
+    SubmitRequest, Unread, WithdrawRefusal, Withdrew,
 };
 use sluice_seams::{Decided, Outcome, Rev, SessionPlace, Submitter};
 use told::Kind;
@@ -381,10 +379,12 @@ pub enum Command {
         #[arg(long)]
         json: bool,
     },
-    /// Rounds for every branch with a queue, until stopped.
-    #[command(after_help = "Examples:\n  $ sluice run\n  $ sluice run --rounds 1")]
+    /// Follow the host process's passes of the repository, printing each,
+    /// until stopped. Nothing needs it: sluice starts its own host
+    /// process, which moves every queue on the host (135).
+    #[command(hide = true)]
     Run {
-        /// Stop after this many rounds; a run whose last round passed a
+        /// Stop after this many passes; a run whose last pass passed a
         /// branch by exits 3, naming it.
         #[arg(long)]
         rounds: Option<usize>,
@@ -575,6 +575,11 @@ pub enum Command {
     /// Run one check run's command to its end; started by a step.
     #[command(hide = true)]
     Supervise { dir: std::path::PathBuf },
+    /// Run as this user's sluice host process, which moves every
+    /// repository's queues on the host; started by the commands that need
+    /// it (135).
+    #[command(hide = true)]
+    Host,
     /// Install the hook that refuses updates to protected branches by
     /// anything but sluice; `submit`, `step` and `run` install it too.
     #[command(after_help = "Examples:\n  $ sluice protect\n  $ sluice protect --remove")]
@@ -694,42 +699,21 @@ pub struct Ahead {
     pub pull_request: Option<u64>,
 }
 
-/// 137: which process of its host holds a branch's intake mark.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-#[serde(rename_all = "lowercase")]
-pub enum Holder {
-    /// The host's `sluice run`, the holder of its driver's lock.
-    Driver,
-    /// A `sluice wait` or a waiting submit.
-    Wait,
-}
-
-/// 137, design D2: the host a branch's intake mark names, as this host's
-/// last fetch brought it, and whether that host's `sluice run` or a wait
-/// holds it.
+/// 72, 137 (design D25): the host that keeps a branch on its remote, the
+/// lead its records name, which takes its pull requests in.
 #[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct TakenInBy {
     pub host: String,
-    pub holder: Holder,
 }
 
-impl TakenInBy {
-    /// Its holder in words: `b's sluice run`, or `a wait on b`.
-    pub fn said(&self) -> String {
-        match self.holder {
-            Holder::Driver => format!("{}'s sluice run", self.host),
-            Holder::Wait => format!("a wait on {}", self.host),
-        }
-    }
-}
-
-/// 137, design D5: the pull requests into a branch this host follows and
-/// its queue does not hold at their heads, each as the host that takes
-/// them in shows it, for `sluice status <branch>`.
+/// 137 (design D25): the pull requests into a branch on its remote that
+/// this host follows and does not keep, its queue holding none at its
+/// head, each as the host that keeps the branch shows it, for `sluice
+/// status <branch>`.
 #[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct Across {
-    /// The host the branch's intake mark names and its holder, as this
-    /// host's last fetch brought it; `None` where no mark stands.
+    /// The host the branch's records name as keeping it; `None` where none
+    /// does yet.
     pub taken_in_by: Option<TakenInBy>,
     pub pull_requests: Vec<AcrossRow>,
 }
@@ -762,25 +746,19 @@ pub const ACROSS_LANDED: &str = "landed";
 pub const ACROSS_CLOSED: &str = "closed without landing";
 
 impl Across {
-    /// Design D5: the heading of the rows in words: the host that takes
-    /// `branch`'s pull requests in and its holder, or that no host holds
-    /// the mark.
+    /// Design D25: the heading of the rows in words: the host that keeps
+    /// `branch` and takes its pull requests in, or that none keeps it yet.
     pub fn heading(&self, branch: &str) -> String {
         match &self.taken_in_by {
-            Some(by) if by.holder == Holder::Driver => {
-                format!("pull requests {} takes in, by its sluice run:", by.host)
-            }
-            Some(by) => format!("pull requests {} takes in, by {}:", by.host, by.said()),
-            None => {
-                format!("pull requests this host follows; no host holds {branch}'s intake mark:")
-            }
+            Some(by) => format!("pull requests {} takes in:", by.host),
+            None => format!("pull requests this host follows; no host keeps {branch} yet:"),
         }
     }
 
-    /// Design D2, D5: one row in words: its number and title (26), then
-    /// the submission the check names on the host that posted it and
-    /// where it stands there, or that it waits to be taken in by the mark's
-    /// host and on what.
+    /// Design D25: one row in words: its number and title (26), then the
+    /// submission the check names on the host that posted it and where it
+    /// stands there, or that it waits to be taken in by the host that keeps
+    /// the branch and on what.
     pub fn line(&self, row: &AcrossRow) -> String {
         let mark = self.taken_in_by.as_ref().map(|by| by.host.as_str());
         let held = row
@@ -813,10 +791,10 @@ pub enum Followed {
     Open {
         title: String,
         lines: Vec<String>,
-        /// 137, design D2: where another host takes its branch's pull
-        /// requests in, the host the intake mark names and its holder, as
-        /// this host's last fetch brought it; `None` where no mark stands,
-        /// and on the host that takes them in.
+        /// 137, design D25: where another host keeps its branch and takes
+        /// its pull requests in, that host, as the branch's records name
+        /// it; `None` where none keeps it yet, and on the host that keeps
+        /// it.
         taken_in_by: Option<TakenInBy>,
         /// 137, design D2: where another host takes its branch's pull
         /// requests in, the queue sluice's check on its current head
@@ -864,29 +842,34 @@ pub enum Followed {
     Closed,
 }
 
-/// 137: which process takes a branch's pull requests in, for its intake
-/// mark: `sluice run`, the host's driver, which pushes the mark when it
-/// starts; a wait on a host where no driver lives, which pushes it where
-/// none stands and lets it go when it ends; or a step, a submit that does
-/// not wait, or a wait's first pass beside a live driver, which pushes
-/// none.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum Taker {
-    Driver,
-    Wait,
-    Step,
+/// 128 (design D26): one cause an intake pass met: what it asked,
+/// `<branch>'s pull requests` or `pull/<n>`, and the words it was refused
+/// with.
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct IntakeCause {
+    pub asked: String,
+    pub said: String,
 }
 
-/// 137: lets go of the intake marks a wait holds when the wait ends, at
-/// every exit, Ctrl-C's among them.
-struct LetGo<'a>(Option<&'a dyn PullRequests>);
-
-impl Drop for LetGo<'_> {
-    fn drop(&mut self) {
-        if let Some(pulls) = self.0 {
-            pulls.let_go();
-        }
+impl IntakeCause {
+    /// The cause in a warning's words: `taking in <branch>'s pull
+    /// requests: <asked>: <said>`.
+    pub fn line(&self, branch: &str) -> String {
+        format!(
+            "taking in {branch}'s pull requests: {}: {}",
+            self.asked, self.said
+        )
     }
+}
+
+/// What one intake pass did (design D26): whether the branch takes pull
+/// requests, whether the pass asked the forge for them, and each cause it
+/// met.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct Intake {
+    pub takes: bool,
+    pub asked: bool,
+    pub causes: Vec<IntakeCause>,
 }
 
 /// A branch whose work arrives as pull requests on its remote (C.5 pull
@@ -899,25 +882,29 @@ pub trait PullRequests {
     fn branches(&self, seams: Seams<'_>) -> Result<Vec<String>>;
 
     /// Before a round of `branch`: submit each pull request ready, withdraw
-    /// each changed, and post each one's state, where this host takes the
-    /// branch's pull requests in as `taker` (137). `false` for a branch
-    /// that takes no pull requests.
-    fn intake(
-        &self,
-        seams: Seams<'_>,
-        clock: &dyn Clock,
-        branch: &str,
-        taker: Taker,
-    ) -> Result<bool>;
+    /// each changed, and post each one's state, where this host keeps the
+    /// branch on its remote (137; design D21). Whether the branch takes
+    /// pull requests, and each cause the pass met, printing none of them
+    /// (128; design D26).
+    fn intake(&self, seams: Seams<'_>, clock: &dyn Clock, branch: &str) -> Result<Intake>;
 
-    /// 137: the host that takes `branch`'s pull requests in, as this
-    /// process's last intake found it, where that is another host.
-    fn elsewhere(&self, _branch: &str) -> Option<String> {
-        None
+    /// After a round of `branch` that stepped: each pull request a submit
+    /// opened whose submission that round sent back is marked a draft and
+    /// shown held for the next submit, before any follower reads the pass,
+    /// with nothing asked of the forge: the requests as this pass's intake
+    /// read them, and what the host keeps of them (120, 136; rule core.32;
+    /// design D5). Each cause it met, printing none of them (128; design
+    /// D26).
+    fn settle(&self, _seams: Seams<'_>, _clock: &dyn Clock, _branch: &str) -> Result<Intake> {
+        Ok(Intake::default())
     }
 
-    /// 137: let go of the intake marks this process holds as a wait.
-    fn let_go(&self) {}
+    /// 137 (design D25): whether another host keeps `branch` on its remote
+    /// and takes its pull requests in, as this process last found it, by
+    /// its intake or by following a request into it.
+    fn elsewhere(&self, _branch: &str) -> bool {
+        false
+    }
 
     /// Open the pull request from `head`'s branch into `branch`, or update
     /// the one open, and mark it ready; `subject`, the submitter's line
@@ -1020,8 +1007,8 @@ impl PullRequests for () {
         Ok(Vec::new())
     }
 
-    fn intake(&self, _: Seams<'_>, _: &dyn Clock, _: &str, _: Taker) -> Result<bool> {
-        Ok(false)
+    fn intake(&self, _: Seams<'_>, _: &dyn Clock, _: &str) -> Result<Intake> {
+        Ok(Intake::default())
     }
 
     fn open(
@@ -1055,35 +1042,28 @@ impl PullRequests for () {
 /// was said on stderr as the wait began.
 fn intake(
     pulls: &dyn PullRequests,
-    seams: Seams<'_>,
+    s: &Sluice<'_>,
     clock: &dyn Clock,
     branch: &str,
-    taker: Taker,
     json: bool,
     out: &mut dyn Write,
-) -> Option<anyhow::Error> {
+) -> Intaken {
     thread_local! {
         /// The end of the last pause a round said it passed by.
         static SAID: std::cell::Cell<Option<chrono::DateTime<chrono::Utc>>> =
             const { std::cell::Cell::new(None) };
-        /// Each branch's intake failure as last said, while it stands.
-        static FAILED: std::cell::RefCell<BTreeMap<String, String>> =
-            std::cell::RefCell::default();
     }
-    let e = match pulls.intake(seams, clock, branch, taker) {
-        Ok(_) => {
-            FAILED.with_borrow_mut(|f| f.remove(branch));
-            return None;
-        }
+    let e = match pulls.intake(s.seams(), clock, branch) {
+        Ok(i) => return Intaken::noted(s, branch, i.asked, i.causes),
         Err(e) => e,
     };
+    // 128 (design D26): a pass that failed whole met one cause, its list.
     let Some(limited) = retry::limited(&e) else {
-        let words = format!("sluice: warning: {e:#}");
-        let said = FAILED.with_borrow_mut(|f| f.insert(branch.to_string(), words.clone()));
-        if said.as_ref() != Some(&words) {
-            telemetry::warn(&words);
-        }
-        return None;
+        let causes = vec![IntakeCause {
+            asked: format!("{branch}'s pull requests"),
+            said: format!("{e:#}"),
+        }];
+        return Intaken::noted(s, branch, true, causes);
     };
     let waited = e.downcast_ref::<retry::Spent>().is_some();
     if !waited && SAID.get() != Some(limited.until) {
@@ -1093,7 +1073,99 @@ fn intake(
             telemetry::warn(&format!("sluice: {line}"));
         }
     }
-    Some(e)
+    Intaken {
+        causes: Vec::new(),
+        logged: Vec::new(),
+        limited: Some(e),
+    }
+}
+
+/// After a round of `branch` that stepped, what it sent back of a pull
+/// request shown on it, a submit's request marked a draft, with nothing
+/// asked of the forge (120, 136; design D5): each cause it met noted as an
+/// intake's are, ending none. A spent allowance is said by the next
+/// intake, which meets it first.
+fn settle(pulls: &dyn PullRequests, s: &Sluice<'_>, clock: &dyn Clock, branch: &str) -> Intaken {
+    match pulls.settle(s.seams(), clock, branch) {
+        Ok(i) => Intaken::noted(s, branch, false, i.causes),
+        Err(e) if retry::limited(&e).is_some() => Intaken {
+            causes: Vec::new(),
+            logged: Vec::new(),
+            limited: Some(e),
+        },
+        Err(e) => {
+            let causes = vec![IntakeCause {
+                asked: format!("{branch}'s pull requests"),
+                said: format!("{e:#}"),
+            }];
+            Intaken::noted(s, branch, false, causes)
+        }
+    }
+}
+
+/// What [`intake`] met (design D26, D27): each cause, which a step and a
+/// submit say; those whose lines its note wrote to the branch's log, which
+/// a pass says in the host process's log; and a spent allowance, said once
+/// for its pause.
+struct Intaken {
+    causes: Vec<IntakeCause>,
+    logged: Vec<IntakeCause>,
+    limited: Option<anyhow::Error>,
+}
+
+impl Intaken {
+    /// 133, rule core.28 (design D27): `causes`, an intake pass's of
+    /// `branch`, noted in this host's refusal of its intake, each logged
+    /// once; a pass that `asked` the forge and met none ends the refusal,
+    /// and one that asked nothing leaves it as it stands. A note that fails
+    /// is warned of, and logs nothing.
+    fn noted(s: &Sluice<'_>, branch: &str, asked: bool, causes: Vec<IntakeCause>) -> Intaken {
+        let remote = s.remote_of(branch).ok().flatten().unwrap_or_default();
+        let noted = match (causes.is_empty(), asked) {
+            (true, false) => Ok(Vec::new()),
+            (true, true) => s.note_intake_read(branch).map(|_| Vec::new()),
+            (false, _) => {
+                let read: Vec<sluice_seams::ReadRefused> = causes
+                    .iter()
+                    .map(|c| sluice_seams::ReadRefused {
+                        remote: remote.clone(),
+                        asked: c.asked.clone(),
+                        said: c.said.clone(),
+                        note: None,
+                    })
+                    .collect();
+                s.note_intake_refused(branch, &read)
+            }
+        };
+        let logged = match noted {
+            Ok(logged) => logged
+                .into_iter()
+                .map(|r| IntakeCause {
+                    asked: r.asked,
+                    said: r.said,
+                })
+                .collect(),
+            Err(e) => {
+                telemetry::warn(&format!(
+                    "sluice: warning: keeping {branch}'s intake refusal: {e:#}"
+                ));
+                Vec::new()
+            }
+        };
+        Intaken {
+            causes,
+            logged,
+            limited: None,
+        }
+    }
+
+    /// Each cause, said on stderr as a warning: a submit's own first
+    /// intake's (design D26).
+    fn say(&self, branch: &str) {
+        for c in &self.causes {
+            telemetry::warn(&format!("sluice: warning: {}", c.line(branch)));
+        }
+    }
 }
 
 #[derive(Subcommand, Debug)]
@@ -1200,6 +1272,17 @@ impl Skipped {
     }
 }
 
+impl Skipped {
+    /// Its time set to `at`, a command's that asked for a pass (design
+    /// D14): each pass of a test's host process is at the time of the
+    /// command that asked for it, however many ask, and a command started
+    /// later starts from its own time.
+    pub fn set(&self, at: chrono::DateTime<chrono::Utc>) {
+        self.moved
+            .set((at - self.start).to_std().unwrap_or_default());
+    }
+}
+
 impl Pause for Skipped {
     fn pause(&self) -> bool {
         self.moved.set(self.moved.get() + self.every);
@@ -1299,280 +1382,117 @@ impl Cli {
     }
 }
 
-/// What `sluice run` carries from one pass to the next, whatever binding
-/// each pass runs under (135; design D3): the passes counted toward its
-/// `--rounds`, the repository's driver's lock and its reader (129),
-/// what its document last asked, whether it said that another run drives
-/// the repository, the holds and the refusals it said, the policies it
-/// read by revision (129; rule core.31), and whether the host's systems
-/// were checked (87).
-pub struct Driving {
+/// What a kept `sluice run`, a follower of sluice's host process, carries
+/// from one pass to the next (135; design D11): the passes it followed
+/// toward its `--rounds`, and whether it said that nothing needs it. It
+/// holds nothing its settings decide but its own telemetry.
+pub struct Following {
     rounds: Option<usize>,
-    /// The tick the reader's document names (64).
+    /// How long it waits for the host process's next pass.
     tick: Duration,
     n: usize,
-    checked: bool,
-    /// Where the host's readers keep their files, and the repository as
-    /// they name it.
-    place: Option<(std::path::PathBuf, String)>,
-    driver: Option<Driver>,
-    /// 135: the driver's lock handed over by the `sluice run` this one
-    /// started afresh from, adopted at the first pass before the lock
-    /// would be taken (design D4, D6).
-    handed: Option<OwnedFd>,
-    reader: Option<Reader>,
-    /// 129: what its document last asked of whether the repository has
-    /// sluice.
-    asked: Option<overview::Asked>,
-    said_beside: bool,
-    /// 121: each branch's hold as last said, so it is said once.
-    said: BTreeMap<String, Option<(Rev, Rev)>>,
-    /// 26, 121: the words each branch passed by was last said with.
-    passed: BTreeMap<String, String>,
-    /// 129: each policy read, by revision, kept across passes and
-    /// bindings, since a policy at a revision is that revision's bytes.
-    policies: sluice_core::Policies,
+    told: bool,
 }
 
-impl Driving {
-    /// A `sluice run` that has driven no pass yet, ending after `rounds`
-    /// passes where it names a bound.
-    pub fn new(rounds: Option<usize>) -> Driving {
-        Driving {
+impl Following {
+    /// A `sluice run` that has followed no pass yet, ending after
+    /// `rounds` passes where it names a bound.
+    pub fn new(rounds: Option<usize>) -> Following {
+        Following {
             rounds,
             tick: tick(Some(&Command::Run { rounds })),
             n: 0,
-            checked: false,
-            place: None,
-            driver: None,
-            handed: None,
-            reader: None,
-            asked: None,
-            said_beside: false,
-            said: BTreeMap::new(),
-            passed: BTreeMap::new(),
-            policies: sluice_core::Policies::default(),
+            told: false,
         }
     }
 
-    /// What this run hands to itself started afresh (135; record 0107;
-    /// design D4, D6): the passes counted, a duplicate of the driver's
-    /// lock left open across the start, and what it said. The driver is
-    /// kept, so a hand-over that cannot start still drives.
-    pub fn hand_over(&self) -> Result<Carried> {
-        Ok(Carried {
-            passes: self.n,
-            driver: self.driver.as_ref().map(Driver::hand_over).transpose()?,
-            said: self.said.clone(),
-            passed: self.passed.clone(),
-            said_beside: self.said_beside,
-        })
-    }
-
-    /// A `sluice run` started afresh from one that handed it `carried`,
-    /// ending once `rounds` passes, those already driven among them, where
-    /// it names a bound. Its first pass adopts the driver's lock carried
-    /// before it would take the lock, and it says again nothing the run
-    /// said (135; record 0107; design D4, D6).
-    pub fn handed(rounds: Option<usize>, carried: Carried) -> Driving {
-        Driving {
-            n: carried.passes,
-            handed: carried.driver,
-            said: carried.said,
-            passed: carried.passed,
-            said_beside: carried.said_beside,
-            ..Driving::new(rounds)
+    /// A `sluice run` started afresh from one that handed it `doc`, ending
+    /// once `rounds` passes, those already followed among them, where it
+    /// names a bound; it says again nothing the run said (135; record
+    /// 0107; design D11).
+    pub fn handed(rounds: Option<usize>, doc: &hand_over::HandOver) -> Following {
+        Following {
+            n: doc.passes,
+            told: doc.told,
+            ..Following::new(rounds)
         }
     }
-}
 
-/// What a `sluice run` hands to itself started afresh, as [`Driving`]
-/// keeps it (135; record 0107; design D4, D6): the passes counted toward
-/// its `--rounds`, the driver's lock as a descriptor open across the
-/// start, where it held it, and the holds, the refusals and whether it
-/// said another run drives the repository, so none is said again.
-#[derive(Debug, Default)]
-pub struct Carried {
-    pub passes: usize,
-    pub driver: Option<OwnedFd>,
-    pub said: BTreeMap<String, Option<(Rev, Rev)>>,
-    pub passed: BTreeMap<String, String>,
-    pub said_beside: bool,
+    /// The passes followed toward `--rounds`.
+    pub fn passes(&self) -> usize {
+        self.n
+    }
+
+    /// Whether it said that nothing needs it.
+    pub fn told(&self) -> bool {
+        self.told
+    }
+
+    /// Its start, where it was not handed over: the host's systems checked
+    /// (87), and said once that nothing needs `sluice run` (design D11).
+    pub fn start(&mut self, s: &Sluice<'_>) -> Result<()> {
+        s.check_host_systems()?;
+        if !self.told {
+            telemetry::warn(
+                "sluice: sluice starts its own host process; nothing needs `sluice run`",
+            );
+            self.told = true;
+        }
+        Ok(())
+    }
+
+    /// One pass followed: the host process's next pass's report, asked of
+    /// it where passes are taken only when asked, its lines printed as a
+    /// pass of `sluice run` printed them (135; design D11). A follower
+    /// that could not reach the process, or was told no pass within its
+    /// tick, pauses and reaches it again at its next.
+    pub fn next<'a>(
+        &mut self,
+        here: &host_process::Here<'a, '_>,
+        follower: &mut host_process::ask::Follower<'a>,
+        pause: &dyn Pause,
+        out: &mut dyn Write,
+    ) -> Result<Driven> {
+        let Some(report) = follower.next(here, self.tick) else {
+            if INTERRUPTED.load(Ordering::SeqCst) || !pause.pause() {
+                return Ok(Driven::Ended(STOPPED));
+            }
+            return Ok(Driven::Next);
+        };
+        for line in &report.lines {
+            writeln!(out, "{line}")?;
+        }
+        out.flush()?;
+        self.n += 1;
+        if self.rounds.is_some_and(|r| self.n >= r) {
+            // 26: one line per branch, as `main` writes a failed step's,
+            // said whether or not stdout said it this pass.
+            for (branch, words) in &report.failed {
+                telemetry::error(&format!("sluice: {branch}: {words}"));
+            }
+            return Ok(Driven::Ended(if report.failed.is_empty() {
+                0
+            } else {
+                INTERNAL
+            }));
+        }
+        // Where passes are taken only when asked, the next is asked after
+        // the follower's own pause.
+        if here.host.host_process().asked_only() && !pause.pause() {
+            return Ok(Driven::Ended(STOPPED));
+        }
+        Ok(Driven::Next)
+    }
 }
 
 /// What a pass of `sluice run` ended with.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Driven {
-    /// It paused, and the next pass is due.
+    /// The next pass is due.
     Next,
     /// The run ends with this exit: its `--rounds` reached, or its pause
     /// stopped.
     Ended(i32),
-}
-
-/// One pass of `sluice run` over the repository the seams bind, and the
-/// pause after it (135; design D3): the host's systems checked before the
-/// first pass `driving` runs (87), then the repository's driver's lock
-/// taken or kept, every branch's round run and the reader's document
-/// written (129). Its caller may bind the repository afresh between two
-/// calls, and the next pass runs wholly under the new binding (rule
-/// core.54).
-pub fn drive(
-    driving: &mut Driving,
-    seams: Seams<'_>,
-    host: &dyn exec::Host,
-    pulls: &dyn PullRequests,
-    clock: &dyn Clock,
-    pause: &dyn Pause,
-    out: &mut dyn Write,
-) -> Result<Driven> {
-    let s = Sluice::new(seams, clock)
-        .as_peer(host.peer())
-        .serving(Serves::Every)
-        .keeping(&driving.policies);
-    if !driving.checked {
-        s.check_host_systems()?;
-        driving.checked = true;
-    }
-    // 135: the repository's one driver on the host, and so its reader
-    // (129): a run that finds another live drives nothing, and looks again
-    // at each pass.
-    let (readers, repository) = match &driving.place {
-        Some(place) => place.clone(),
-        None => {
-            let place = (host.readers()?, host.repository()?);
-            driving.place = Some(place.clone());
-            place
-        }
-    };
-    // 26: the branches this pass passed by, with their words; a
-    // bounded run whose last pass passed one by ends as a step
-    // of that branch would.
-    let mut failed: BTreeMap<String, String> = BTreeMap::new();
-    // 135: a run started afresh holds the lock it was handed, with no
-    // moment let go, where it is this repository's (design D4, D6).
-    if let Some(fd) = driving.handed.take() {
-        driving.driver = Driver::adopt(fd, &readers, &repository)?;
-    }
-    if driving.driver.is_none() {
-        driving.driver = Driver::take(&readers, &repository)?;
-    }
-    if driving.driver.is_some() {
-        // Its part in reading: it drives, so the place is its,
-        // whatever lease a newer watch holds, and it takes none. A
-        // lock it could not try leaves it following, as a watch.
-        match &mut driving.reader {
-            Some(r) => {
-                let _ = r.step(false, Drives::Itself);
-            }
-            None => {
-                driving.reader = Some(Reader::take_given(
-                    &readers,
-                    &repository,
-                    host.version(),
-                    Drives::Itself,
-                )?)
-            }
-        }
-        // 129: what the last pass read by revision and this one
-        // does not use is forgotten.
-        s.next_pass();
-        host.next_pass();
-        // A read whose start it could not mark leaves a forecast
-        // reading past this reader, which decides nothing (64).
-        if let Some(Reader::Lead(lead)) = &driving.reader {
-            let _ = lead.begin();
-        }
-        // 129: each remote that keeps branches' records asked
-        // once, first; a refusal is its branches' alone, read as
-        // last fetched.
-        if let Err(e) = seams.state.refresh() {
-            telemetry::warn(&format!("sluice: warning: {e:#}"));
-        }
-        // 97, previews-1 101: every pass, whether or not a branch
-        // has a queue.
-        exec::tell_abandoned(out, false, &s.release_abandoned()?)?;
-        preview::tell_dropped(out, false, &s.release_unusable_previews()?)?;
-        let mut branches = seams.state.branches()?;
-        match pulls.branches(seams) {
-            Ok(b) => branches.extend(b),
-            Err(e) => telemetry::warn(&format!("sluice: warning: {e:#}")),
-        }
-        branches.sort();
-        branches.dedup();
-        for branch in branches {
-            intake(pulls, seams, clock, &branch, Taker::Driver, false, out);
-            // 26, rule core.14: a branch whose records' read or
-            // round fails is that branch's alone; the pass goes
-            // on to every other branch. 129: one with nothing in
-            // play costs the pass its records' read alone.
-            let ran = s.in_play(&branch).and_then(|in_play| match in_play {
-                false => Ok(None),
-                true => s.round(&branch).map(Some),
-            });
-            let round = match ran {
-                Ok(round) => {
-                    driving.passed.remove(&branch);
-                    round
-                }
-                // Ctrl-C reaching the git a branch's read runs is no
-                // refusal of that branch's.
-                Err(_) if INTERRUPTED.load(Ordering::SeqCst) => None,
-                Err(e) => {
-                    let words = format!("{e:#}");
-                    tell_passed(out, &branch, &words, &mut driving.passed)?;
-                    failed.insert(branch.clone(), words);
-                    None
-                }
-            };
-            if let Some(round) = round {
-                exec::tell_abandoned(out, false, &round.released)?;
-                preview::tell_dropped(out, false, &round.previews)?;
-                exec::tell_releases(out, false, &round.releases)?;
-                if matches!(round.step, Step::Stepped | Step::Held) {
-                    let said = driving.said.entry(branch.clone()).or_default();
-                    tell_hold(out, &branch, round.held.as_ref(), said)?;
-                }
-            }
-        }
-        // 129: the reader's document every watch and wait on the
-        // host follows, each pass, queue or none, read as the
-        // pass's own ask left the records and naming its tick
-        // (64); a read it could not make is its document, in the
-        // words it was refused with (133), and the pass goes on.
-        // Ctrl-C reaching the git a read runs is no failure of the
-        // queues'.
-        if let Some(Reader::Lead(lead)) = &mut driving.reader {
-            let doc =
-                overview::read_held(&s, host, clock, Follows::Kept(pulls), &mut driving.asked)
-                    .unwrap_or_else(|e| told::document(Kind::Internal, &format!("{e:#}"), &[]));
-            let doc = overview::ticked(doc, driving.tick);
-            if !INTERRUPTED.load(Ordering::SeqCst) {
-                // The last document stands for a write that failed
-                // until one succeeds.
-                let _ = lead.write(&doc);
-            }
-        }
-    } else if !driving.said_beside {
-        telemetry::warn(
-            "sluice: another sluice run drives this repository on this host; \
-             this one runs nothing while it does",
-        );
-        driving.said_beside = true;
-    }
-    driving.n += 1;
-    if driving.rounds.is_some_and(|r| driving.n >= r) {
-        // 26: one line per branch, as `main` writes a failed step's, said
-        // whether or not stdout said it this pass.
-        for (branch, words) in &failed {
-            telemetry::error(&format!("sluice: {branch}: {words}"));
-        }
-        return Ok(Driven::Ended(if failed.is_empty() { 0 } else { INTERNAL }));
-    }
-    if !pause.pause() {
-        return Ok(Driven::Ended(STOPPED));
-    }
-    Ok(Driven::Next)
 }
 
 /// Run one command; returns its exit code.
@@ -1587,15 +1507,64 @@ pub fn run(
     out: &mut dyn Write,
 ) -> Result<i32> {
     let s = Sluice::new(seams, clock).as_peer(host.peer());
-    let tick = tick(cli.command.as_ref());
     // 124: the hook reads the policy only as far as guarding needs.
     let s = match &cli.command {
         Some(Command::Hook { .. }) => s.guarding(),
         _ => s,
     };
-    let Some(command) = cli.command else {
-        return home::run(&s, host, &cli.worktree, cli.json, out);
+    // 129 (design D16): a one-shot read, a status in each form, a one-shot
+    // overview, the home view and a forecast, asks sluice's host process
+    // for a reading of the repository current within its tick, starting it
+    // where none answers, and then reads every branch as the host holds it,
+    // fetching nothing of its own: a forecast beside a reader that keeps
+    // its tick is answered at once, and forms from that reader's document
+    // where it holds what the forecast forms from.
+    let one_shot = matches!(
+        &cli.command,
+        None | Some(Command::Status { .. })
+            | Some(Command::Overview { watch: false, .. })
+            | Some(Command::Submit { check: true, .. })
+    );
+    let (s, reading) = match one_shot {
+        true => {
+            let reading = host_process::ask::read(
+                &host_process::Here {
+                    s: &s,
+                    host,
+                    pulls,
+                    clock,
+                },
+                false,
+            );
+            (s.holding(), reading)
+        }
+        false => (s, None),
     };
+    // 129 (design D16): a one-shot overview and the home view print the
+    // reader's document only where the reading the host process answered
+    // with is no look, which writes none, so neither prints a document an
+    // earlier pass wrote beside records the look read since.
+    let documented = !reading.as_ref().is_some_and(|r| r.looked);
+    let here = host_process::Here {
+        s: &s,
+        host,
+        pulls,
+        clock,
+    };
+    let Some(command) = cli.command else {
+        return home::run(&s, host, &cli.worktree, cli.json, documented, out);
+    };
+    // 135 (design D4): the repository, where it has sluice, listed for the
+    // host process to find again.
+    if matches!(
+        command,
+        Command::Exec { .. } | Command::Preview { .. } | Command::Equip { .. }
+    ) {
+        host_process::ask::note(&here);
+    }
+    // 135 (design D15): what changes a queue tells the host process,
+    // starting it where none answers.
+    let serve = || host_process::ask::serve(&here);
     match command {
         Command::Submit {
             branch,
@@ -1671,6 +1640,16 @@ pub fn run(
                 writeln!(out, "sluice submit: {why}")?;
                 return Ok(USAGE);
             }
+            // 137 (design D22): a branch that takes pull requests on records
+            // each host keeps is refused, before anything is pushed or
+            // opened.
+            if let Err(e) = takes_pulls(&s, &branch) {
+                if let Some(refused) = no_intake(&e) {
+                    let text = format!("refused: {refused}");
+                    told::tell(out, json, Kind::Refused, &text, &[])?;
+                    return Ok(CONFLICT);
+                }
+            }
             if worktree.len() > 1 {
                 let req = GroupRequest {
                     branch,
@@ -1685,15 +1664,14 @@ pub fn run(
                     );
                 }
                 return submit_group(
-                    &s, host, pushers, pulls, clock, req, no_wait, json, pause, tick, out,
+                    &s, host, pushers, pulls, clock, req, no_wait, json, pause, out,
                 );
             }
             let worktree = worktree.into_iter().next().unwrap_or_else(|| ".".into());
             let subject = subject.into_iter().next();
             if check {
                 return forecast(
-                    &s,
-                    host,
+                    &here,
                     pushers,
                     &worktree,
                     head.as_deref(),
@@ -1713,8 +1691,7 @@ pub fn run(
                     };
                     let named = SubmitHead::Branch(named);
                     return submit_pull(
-                        &s, host, pulls, clock, &named, &branch, mode, json, confirms, pause, tick,
-                        out,
+                        &s, host, pulls, clock, &named, &branch, mode, json, confirms, pause, out,
                     );
                 }
                 return submit(
@@ -1734,7 +1711,6 @@ pub fn run(
                     json,
                     confirms,
                     pause,
-                    tick,
                     out,
                 );
             }
@@ -1749,8 +1725,7 @@ pub fn run(
                 };
                 let worktree = SubmitHead::Worktree(worktree);
                 return submit_pull(
-                    &s, host, pulls, clock, &worktree, &branch, mode, json, confirms, pause, tick,
-                    out,
+                    &s, host, pulls, clock, &worktree, &branch, mode, json, confirms, pause, out,
                 );
             }
             if status {
@@ -1773,7 +1748,6 @@ pub fn run(
                 json,
                 confirms,
                 pause,
-                tick,
                 out,
             )
         }
@@ -1814,7 +1788,7 @@ pub fn run(
                     let worktree = SubmitHead::Worktree(worktree);
                     return submit_pull(
                         &s, host, pulls, clock, &worktree, &target, mode, json, confirms, pause,
-                        tick, out,
+                        out,
                     );
                 }
                 Err(_) => match last_submitted(&s, &worktree, &target)? {
@@ -1827,7 +1801,11 @@ pub fn run(
                     }
                 },
             };
-            let intake = takes_pulls(&s, &sub.branch)?.then_some(pulls);
+            // A policy the wait cannot read is the host process's rounds'
+            // to say (133): the wait follows its submission all the same.
+            let intake = takes_pulls(&s, &sub.branch)
+                .unwrap_or(false)
+                .then_some(pulls);
             let waiting = Waiting {
                 host,
                 clock,
@@ -1836,7 +1814,6 @@ pub fn run(
                 deadline,
                 json,
                 pause,
-                tick,
                 copy: None,
                 worktree: Some(&worktree),
                 confirms,
@@ -1857,52 +1834,40 @@ pub fn run(
             json,
         } => confirm(&s, &keys, who.is_some(), &worktree, json, out),
         Command::Step { branch, json } => {
-            intake(pulls, seams, clock, &branch, Taker::Step, json, out);
-            let round = s.round(&branch)?;
-            exec::tell_abandoned(out, json, &round.released)?;
-            preview::tell_dropped(out, json, &round.previews)?;
-            exec::tell_releases(out, json, &round.releases)?;
-            if json {
-                let outcome = match round.step {
-                    Step::Stepped => "stepped",
-                    Step::Busy => "busy",
-                    Step::Led => "led",
-                    Step::Contended => "contended",
-                    Step::Held => "held",
-                };
-                let mut doc = serde_json::json!({
-                    "branch": branch,
-                    "outcome": outcome,
-                    "released": exec::abandoned_json(&round.released),
-                    "previews_released": preview::dropped_json(&round.previews),
-                    "releases": exec::releases_json(&round.releases),
-                });
-                if let Some(hold) = &round.held {
-                    doc["held"] = held_json(hold);
+            // Rule core.14 (design D10): the host process's round of the
+            // branch, between its passes, printed as a step prints it.
+            let stepped = host.host_process().step(&here, &branch)?;
+            // 128; design D26: every warning its round's intake met, each
+            // step, on stderr.
+            let warnings = stepped["warnings"].as_array().cloned().unwrap_or_default();
+            for w in warnings.iter().filter_map(|w| w.as_str()) {
+                telemetry::warn(&format!("sluice: warning: {w}"));
+            }
+            let said = stepped["said"].as_array().cloned().unwrap_or_default();
+            for line in said.iter().filter_map(|l| l.as_str()) {
+                if json {
+                    eprintln!("{line}");
+                } else {
+                    writeln!(out, "{line}")?;
                 }
-                writeln!(out, "{doc}")?;
-                return Ok(0);
             }
-            if let Some(hold) = &round.held {
-                writeln!(out, "{}", held_line(&branch, hold))?;
-                return Ok(0);
+            if json {
+                writeln!(out, "{}", stepped["document"])?;
+            } else {
+                writeln!(out, "{}", stepped["line"].as_str().unwrap_or_default())?;
             }
-            let word = match round.step {
-                Step::Stepped => "stepped",
-                Step::Busy => "busy: another round holds the lock",
-                Step::Led => "led: another host keeps the branch, and its lease has not passed",
-                Step::Contended => "contended: the records moved; nothing done",
-                Step::Held => "held",
-            };
-            writeln!(out, "{branch}: {word}")?;
             Ok(0)
         }
         Command::Run { rounds } => {
-            let mut driving = Driving::new(rounds);
+            // 135 (design D11): kept so a host's unit that runs it keeps
+            // working, as a follower of the host process, which moves every
+            // repository on the host; it runs no round itself.
+            let mut following = Following::new(rounds);
+            following.start(&s)?;
+            let mut follower =
+                host_process::ask::Follower::new(&here, host_process::protocol::FollowKind::Run);
             loop {
-                if let Driven::Ended(code) =
-                    drive(&mut driving, seams, host, pulls, clock, pause, out)?
-                {
+                if let Driven::Ended(code) = following.next(&here, &mut follower, pause, out)? {
                     return Ok(code);
                 }
             }
@@ -1924,17 +1889,24 @@ pub fn run(
         } => {
             let places = s.session_places()?;
             let held = s.held()?;
+            // 71, 150 (design D12): the host's room, as the overview has it.
+            let (room, process) = overview::room_and_process(&s, host, clock)?;
             if json {
                 writeln!(
                     out,
                     "{}",
                     serde_json::to_string_pretty(&serde_json::json!({
                         "worktrees": sessions_json(&places, &held),
+                        "room": room,
+                        "host_process": process,
                     }))?
                 )?;
             } else {
                 write_worktrees(&places, out)?;
                 write_held(&held, out)?;
+                if let Some(line) = overview::room_line(&room) {
+                    writeln!(out, "{line}")?;
+                }
             }
             Ok(0)
         }
@@ -1968,6 +1940,7 @@ pub fn run(
                     if let Some(d) = s.delivery_of(&sub)? {
                         doc["delivery"] = d.to_json();
                     }
+                    with_checks(&s, &sub, &mut doc);
                     writeln!(out, "{}", serde_json::to_string_pretty(&doc)?)?;
                     Ok(0)
                 }
@@ -2038,10 +2011,14 @@ pub fn run(
                 // 137, design D5: the pull requests this host follows that
                 // another host takes in, as that host shows them; one that
                 // cannot be read is warned of, and the queue still shown.
-                let across = pulls.across(s.seams(), clock, &target).unwrap_or_else(|e| {
-                    telemetry::warn(&format!("sluice: warning: {e:#}"));
-                    None
-                });
+                // 129 (design D16): as the host last kept them; the host
+                // process's reading reads each one that falls due.
+                let across = pulls
+                    .kept_across(s.seams(), clock, &target)
+                    .unwrap_or_else(|e| {
+                        telemetry::warn(&format!("sluice: warning: {e:#}"));
+                        None
+                    });
                 // 51, D13: what the branch's readers are owed, shown after
                 // its queue.
                 let owed = s.owed_on_branch(&target)?;
@@ -2092,7 +2069,7 @@ pub fn run(
             }
         },
         Command::Overview { json, watch } => {
-            overview::run(&s, host, clock, pulls, json, watch, pause, tick, out)
+            overview::run(&s, host, clock, pulls, json, watch, documented, pause, out)
         }
         Command::Amend {
             id,
@@ -2106,6 +2083,7 @@ pub fn run(
             None => s.amend(id, &requester(&by), after, priority)?,
         } {
             Ok(()) if json => {
+                serve();
                 // Record 0114: another branch may take the number between
                 // the amend and this read, which then finds none.
                 let doc = match state(&s, id, branch.as_deref())? {
@@ -2118,6 +2096,7 @@ pub fn run(
                 Ok(0)
             }
             Ok(()) => {
+                serve();
                 writeln!(out, "amended #{id}")?;
                 Ok(0)
             }
@@ -2188,6 +2167,7 @@ pub fn run(
             None => s.withdraw(id, &requester(&by))?,
         } {
             Ok(withdrew) => {
+                serve();
                 let already = withdrew == Withdrew::Already;
                 if json {
                     let mut doc = serde_json::json!({ "id": id, "state": "withdrawn" });
@@ -2251,6 +2231,7 @@ pub fn run(
             );
             match s.set_aside(&task, &at, hash.as_deref(), &reason, &by) {
                 Ok(aside) => {
+                    serve();
                     if json {
                         writeln!(out, "{}", serde_json::to_string(&aside)?)?;
                     } else {
@@ -2330,13 +2311,21 @@ pub fn run(
             accept_failure,
             json,
             ..
-        } if name.starts_with(CHECKOUT) => release_checkout(&s, &name, accept_failure, json, out),
+        } if name.starts_with(CHECKOUT) => {
+            let code = release_checkout(&s, &name, accept_failure, json, out);
+            serve();
+            code
+        }
         Command::Release {
             name: Some(name),
             accept_failure,
             json,
             ..
-        } => preview::release(&s, host, &name, accept_failure, json, out),
+        } => {
+            let code = preview::release(&s, host, &name, accept_failure, json, out);
+            serve();
+            code
+        }
         Command::Release {
             name: None,
             worktree,
@@ -2344,6 +2333,7 @@ pub fn run(
             json,
         } => {
             let released = exec::release(&s, host, &worktree, accept_failure, json, out)?;
+            serve();
             if json {
                 let mut doc = serde_json::json!({
                     "worktree": released.worktree,
@@ -2367,6 +2357,7 @@ pub fn run(
             runs::supervise(&dir)?;
             Ok(0)
         }
+        Command::Host => host_process::run(telemetry::Choices::default()),
         Command::Protect { remove, json } => {
             let dir = std::env::current_dir()?;
             if remove {
@@ -2417,7 +2408,21 @@ pub fn run(
             }
             Ok(0)
         }
-        Command::Branch { command } => branch::run(&s, command, out),
+        Command::Branch { command } => {
+            // D15: a branch made, accepted or removed changes what the
+            // host process reads of the repository.
+            let changes = matches!(
+                command,
+                BranchCommand::Create { .. }
+                    | BranchCommand::Accept { .. }
+                    | BranchCommand::Delete { .. }
+            );
+            let code = branch::run(&s, command, out)?;
+            if changes && code == 0 {
+                serve();
+            }
+            Ok(code)
+        }
         Command::Forge {
             command: ForgeCommand::Check { branch, json },
         } => profiles::forge_check(
@@ -2655,11 +2660,16 @@ fn refusal_next(r: &SubmitRefusal, branch: &str) -> Vec<String> {
 /// 64, 124, 129: `sluice submit --check`: formed on the branch and its
 /// queue as the host's live reader last read them, asking the remote
 /// nothing, where that reader keeps its tick and its read holds all the
-/// forecast forms from; otherwise read as a round reads them.
+/// forecast forms from. Otherwise the forecast forms on every branch as the
+/// host holds it since the host process's reading, fetching nothing; where
+/// the host lacks what it forms from, it asks a reading afresh once. A
+/// branch that current reading still brings no revision of is no branch,
+/// refused as one (exit 2); anything else still lacking, or a branch
+/// lacking where the reading was not current or a remote refused it, is a
+/// read it could not make, exit 3 (design D16).
 #[allow(clippy::too_many_arguments)]
 fn forecast(
-    s: &Sluice<'_>,
-    host: &dyn exec::Host,
+    here: &host_process::Here<'_, '_>,
     pushers: &dyn Pushers,
     worktree: &str,
     from: Option<&str>,
@@ -2668,12 +2678,41 @@ fn forecast(
     json: bool,
     out: &mut dyn Write,
 ) -> Result<i32> {
-    let got = match forecast_read(s, host, worktree, from, branch, after)? {
-        Some(got) => got,
-        None => match from {
-            Some(from) => s.forecast_branch(from, branch, after)?,
-            None => s.forecast(worktree, branch, after)?,
-        },
+    let (s, host) = (here.s, here.host);
+    let formed = || -> Result<Result<Forecasted, SubmitRefusal>> {
+        Ok(
+            match forecast_read(s, host, worktree, from, branch, after)? {
+                Some(got) => got,
+                None => match from {
+                    Some(from) => s.forecast_branch(from, branch, after)?,
+                    None => s.forecast(worktree, branch, after)?,
+                },
+            },
+        )
+    };
+    let got = match formed() {
+        Err(e) if e.downcast_ref::<sluice_core::Unheld>().is_some() => {
+            let reading = host_process::ask::read(here, true);
+            let whole = reading.is_some_and(|r| r.current && r.refused.is_none());
+            match formed() {
+                Err(e) => match e.downcast_ref::<sluice_core::Unheld>() {
+                    // 64: once a reading is current, a branch the host holds
+                    // no revision of, at its own ref or a remote's, is none.
+                    Some(sluice_core::Unheld::Branch(name)) if whole => match name == branch {
+                        true => Err(SubmitRefusal::NoBranch),
+                        false => Err(SubmitRefusal::NoHead(name.clone())),
+                    },
+                    Some(unheld) => {
+                        return Err(anyhow::anyhow!(
+                            "could not read what a forecast of {branch} forms from: {unheld}"
+                        ))
+                    }
+                    None => return Err(e),
+                },
+                got => got?,
+            }
+        }
+        got => got?,
     };
     let f = match got {
         Ok(f) => f,
@@ -2731,7 +2770,10 @@ fn forecast_read(
     if let Some(head) = branch_in(&doc, from).and_then(|v| v.revision) {
         return s.forecast_read(&view, &head, from, after);
     }
-    let Some(head) = s.seams().branch.read(from)? else {
+    let Some(head) = s.branch_read(from)? else {
+        if s.is_held() {
+            return Err(sluice_core::Unheld::Branch(from.into()).into());
+        }
         return Ok(Some(Err(SubmitRefusal::NoHead(from.into()))));
     };
     Ok(Some(match s.forecast_read(&view, &head, from, after)? {
@@ -2787,7 +2829,6 @@ fn submit(
     json: bool,
     confirms: Confirms,
     pause: &dyn Pause,
-    tick: Duration,
     out: &mut dyn Write,
 ) -> Result<i32> {
     let accepted = match s.submit(&req)? {
@@ -2802,6 +2843,14 @@ fn submit(
     };
     let id = accepted.id;
     let copy = accepted.copy.as_ref();
+    // 135: its entry written, the host process is told of it, and started
+    // where none answers; the submit then returns or waits as asked.
+    host_process::ask::serve(&host_process::Here {
+        s,
+        host,
+        pulls,
+        clock,
+    });
     if json && no_wait {
         let mut doc =
             serde_json::json!({ "id": id, "branch": req.branch, "ahead": accepted.ahead });
@@ -2843,7 +2892,6 @@ fn submit(
         deadline: None,
         json,
         pause,
-        tick,
         copy,
         // 124: a branch named is delivered by nothing (record 0090).
         worktree: match &req.head {
@@ -2885,7 +2933,6 @@ fn submit_group(
     no_wait: bool,
     json: bool,
     pause: &dyn Pause,
-    tick: Duration,
     out: &mut dyn Write,
 ) -> Result<i32> {
     let branch = &req.branch;
@@ -2895,6 +2942,13 @@ fn submit_group(
     };
     let names = req.names();
     let items: Vec<(&String, Accepted)> = names.iter().zip(accepted).collect();
+    // 135: every entry written, the host process is told of them.
+    host_process::ask::serve(&host_process::Here {
+        s,
+        host,
+        pulls,
+        clock,
+    });
     if json && no_wait {
         let submissions: Vec<serde_json::Value> = items
             .iter()
@@ -2938,7 +2992,6 @@ fn submit_group(
         deadline: None,
         json,
         pause,
-        tick,
         copy: None,
         worktree: None,
         confirms: Confirms::No,
@@ -2950,8 +3003,6 @@ fn submit_group(
     // followed one.
     let mut carriers = Vec::new();
     let mut stopped = None;
-    // 122: what failed after a landing, said once the outcomes are.
-    let mut after = Vec::new();
     for (_, a) in &items {
         let sub = s.state_on(branch, a.id)?.expect("a submission just made");
         if stopped.is_some() {
@@ -2960,8 +3011,7 @@ fn submit_group(
             continue;
         }
         match wait_on(s, &waiting, sub, Some(State::Queued), out)? {
-            Waited::Decided(sub, by, e) => {
-                after.extend(e);
+            Waited::Decided(sub, by) => {
                 subs.push(sub);
                 carriers.push(by);
             }
@@ -2974,14 +3024,6 @@ fn submit_group(
                 stopped = Some(code);
                 subs.push(sub);
                 carriers.push(by);
-            }
-            Waited::Unread(sub, e) => {
-                // Said on stderr; the act's answer holds it as it stands.
-                let (what, again) = (format!("#{}", sub.id), format!("sluice wait {}", sub.id));
-                let code = could_not_read(&e, &what, &again, false, &mut std::io::sink())?;
-                stopped = Some(code);
-                subs.push(sub);
-                carriers.push(None);
             }
         }
     }
@@ -3013,9 +3055,6 @@ fn submit_group(
                 writeln!(out, "still waiting: sluice wait {}", sub.id)?;
             }
         }
-    }
-    for e in &after {
-        after_landing(e);
     }
     if let Some(code) = stopped {
         return Ok(code);
@@ -3183,9 +3222,6 @@ struct Waiting<'a> {
     deadline: Option<chrono::DateTime<chrono::Utc>>,
     json: bool,
     pause: &'a dyn Pause,
-    /// How long `pause` pauses, the tick the wait names as its reader
-    /// (64, 129).
-    tick: Duration,
     /// 124: how the host's copy differed from what the submit waited on
     /// submitted, carried by its `--json` document.
     copy: Option<&'a CopyDiffers>,
@@ -3246,10 +3282,10 @@ fn await_submission(
     out: &mut dyn Write,
 ) -> Result<i32> {
     let (sub, by, code, tested) = match wait_on(s, waiting, sub, said, out)? {
-        Waited::Decided(sub, by, after) => {
+        Waited::Decided(sub, by) => {
             let branch = sub.branch.clone();
             let names = BTreeMap::new();
-            let code = report_delivering(
+            return report_delivering(
                 s,
                 waiting.worktree,
                 sub,
@@ -3260,15 +3296,7 @@ fn await_submission(
                 waiting.json,
                 waiting.confirms,
                 out,
-            )?;
-            if let Some(e) = after {
-                after_landing(&e);
-            }
-            return Ok(code);
-        }
-        Waited::Unread(sub, e) => {
-            let again = asked("sluice wait", sub.id, waiting.named);
-            return could_not_read(&e, &format!("#{}", sub.id), &again, waiting.json, out);
+            );
         }
         Waited::Request(sub, number) => {
             let Some(pulls) = waiting.pulls else {
@@ -3294,7 +3322,6 @@ fn await_submission(
                 waiting.json,
                 waiting.confirms,
                 waiting.pause,
-                waiting.tick,
                 out,
             );
         }
@@ -3332,6 +3359,21 @@ fn decided_document(sub: &Submission, decided: Option<&Decided>) -> Result<serde
         doc["notice"] = sluice_core::notice(sub.id, &sub.branch, d).into();
     }
     Ok(doc)
+}
+
+/// 49, 69 (design D17): `doc`, `sub`'s record, with `checks`, a row for
+/// each required check of the combination it was last tested in, as its
+/// report gives them, read from the results of that combination alone. It
+/// decides nothing, so a read that fails adds nothing, and says so.
+fn with_checks(s: &Sluice<'_>, sub: &Submission, doc: &mut serde_json::Value) {
+    match s.verdict_of(&sub.branch, sub.id) {
+        Ok(Some(v)) if !v.rows.is_empty() => doc["checks"] = serde_json::json!(v.rows),
+        Ok(_) => {}
+        Err(e) => telemetry::warn(&format!(
+            "sluice: warning: could not read #{}'s checks: {e:#}",
+            sub.id
+        )),
+    }
 }
 
 /// 84, record 0074; 114, record 0105: `doc`, `sub`'s record, with what its
@@ -3418,17 +3460,14 @@ fn report_delivering(
 /// and, where it followed what carried its work in its stead, that, as
 /// it stands (record 0100 D1, D2).
 enum Waited {
-    /// Landed, failed, conflict or withdrawn; when it landed in a round
-    /// that then failed, what failed after the landing (122).
-    Decided(Submission, Option<CarriedBy>, Option<anyhow::Error>),
+    /// Landed, failed, conflict or withdrawn: whatever the host process's
+    /// round failed after a landing, it is landed (122; rule core.48).
+    Decided(Submission, Option<CarriedBy>),
     /// As it stands when the wait's time ran out ([`WAITING`]) or it was
     /// stopped ([`STOPPED`]), with its combination under test, or that of
     /// what it follows, as last read: what it waits for (84, record 0074)
     /// and why its last run had no outcome (114, record 0105).
     Undecided(Submission, Option<CarriedBy>, i32, Option<CandidateView>),
-    /// As last read, when a round failed as the forge could not answer
-    /// for the retry policy's time.
-    Unread(Submission, anyhow::Error),
     /// Withdrawn, while pull request `n`, on a head that carries its work,
     /// is still to be taken in or is taken in on another host: the wait
     /// follows the request (67, 137).
@@ -3466,19 +3505,19 @@ fn decided(
                 true => o,
                 false => own_end(s, own.clone(), Some(&by))?,
             };
-            Next::End(Waited::Decided(end, Some(by), None))
+            Next::End(Waited::Decided(end, Some(by)))
         }
-        WorkGoes::Outcome(o, _) if o.id == own.id => Next::End(Waited::Decided(o, None, None)),
+        WorkGoes::Outcome(o, _) if o.id == own.id => Next::End(Waited::Decided(o, None)),
         // What carried its work ended as its request closed: the request.
         WorkGoes::Outcome(_, Some(n)) => {
             let by = CarriedBy::Request(n, RequestEnd::Closed);
             let end = own_end(s, own.clone(), Some(&by))?;
-            Next::End(Waited::Decided(end, Some(by), None))
+            Next::End(Waited::Decided(end, Some(by)))
         }
         WorkGoes::Outcome(o, None) => {
             let by = CarriedBy::Entry(o);
             let end = own_end(s, own.clone(), Some(&by))?;
-            Next::End(Waited::Decided(end, Some(by), None))
+            Next::End(Waited::Decided(end, Some(by)))
         }
     })
 }
@@ -3697,24 +3736,23 @@ fn could_not_read(
     Ok(INTERNAL)
 }
 
-/// Read `sub` again until it is decided, running a round between reads
-/// as a waiting driver does (1; rule core.4; ADR 0011), until the
-/// deadline or Ctrl-C. It reads before its first round, so a submission
-/// already decided runs nothing, and takes its first pass before it looks
-/// at its deadline, so a wait whose start used its time up still moves its
-/// queue once. Where `sluice run` lives on the host, it
-/// runs no round and takes no pull request in: it follows the driver's
-/// document, looking again at each tick, and runs rounds from the tick
-/// after the driver stops (135). Each call a round makes to a remote is
-/// tried again under the retry policy for the wait's five minutes (134);
-/// a round that still fails as the forge could not answer ends the wait as
-/// it could not read. Without `--json`, it says the
-/// submission's state, or its combination's progress, each time either
-/// moves (ADR 0042). It reads them as [`Reading`] does (129). It waits on
-/// `own` and ends with it, whatever it follows: where a later submission
-/// carries `own`'s work, it follows that one, its state and its
-/// combination's progress, and ends with `own` as [`decided`] has it
-/// (record 0100 D1, D2).
+/// Read `sub` again until it is decided, following sluice's host process,
+/// which runs the rounds (129, 135; rule core.4; design D9), until the
+/// deadline or Ctrl-C. It runs no round and takes no pull request in: it
+/// opens a follow of the host process, starting it where none answers,
+/// whose first answer comes once the pass it asked for has written its
+/// document, so a wait's first pass, whatever its timeout, is the host
+/// process's; then it reads as a follower at each tick, reaching the
+/// process again at the tick after it ended. A round's failure on its
+/// branch, read from the passes it is told of, is said once on stderr and
+/// the wait goes on; what a round failed after the landing of the
+/// submission's work leaves it landed (122; rule core.48). Without
+/// `--json`, it says the submission's state, or its combination's
+/// progress, each time either moves (ADR 0042). It reads them as
+/// [`Reading`] does (129). It waits on `own` and ends with it, whatever it
+/// follows: where a later submission carries `own`'s work, it follows that
+/// one, its state and its combination's progress, and ends with `own` as
+/// [`decided`] has it (record 0100 D1, D2).
 fn wait_on(
     s: &Sluice<'_>,
     waiting: &Waiting<'_>,
@@ -3727,19 +3765,28 @@ fn wait_on(
     let mut said: Option<Moved> = said_before.map(|t| (t, None));
     // 121: the branch's hold as last said, so each is said once.
     let mut said_hold = None;
+    // 26, 133: the words a round on its branch last failed with, as said.
+    let mut said_failed: Option<String> = None;
     let mut first = true;
     // Record 0100 D1: what carries `own`'s work, followed in its stead.
     let mut following: Option<Submission> = None;
-    // Decided already: nothing read again, and no round run.
+    // Decided already: nothing read again, and nothing followed.
     if own.state.is_out() {
         match decided(s, waiting, &own, own.clone(), out)? {
             Next::End(w) => return Ok(w),
             Next::Follow(e) => following = Some(e),
         }
     }
-    let mut reading = Reading::take(waiting.host)?;
-    let _let_go = LetGo(waiting.pulls);
-    reading.read(s, waiting, following.as_mut().unwrap_or(&mut own))?;
+    let here = host_process::Here {
+        s,
+        host: waiting.host,
+        pulls: waiting.follows,
+        clock: waiting.clock,
+    };
+    let mut reading = Reading::follow(waiting.host)?;
+    let mut follower =
+        host_process::ask::Follower::new(&here, host_process::protocol::FollowKind::Wait);
+    reading.read(s, following.as_mut().unwrap_or(&mut own))?;
     loop {
         let sub = following.as_ref().unwrap_or(&own);
         if sub.state.is_out() {
@@ -3747,7 +3794,7 @@ fn wait_on(
                 Next::End(w) => return Ok(w),
                 Next::Follow(e) => {
                     let e = following.insert(e);
-                    reading.read(s, waiting, e)?;
+                    reading.read(s, e)?;
                     continue;
                 }
             }
@@ -3782,10 +3829,9 @@ fn wait_on(
                 tell_hold(out, &branch, v.held.as_ref(), &mut said_hold)?;
             }
         }
-        // Its first pass is taken whatever its deadline, as a wait that
-        // follows a pull request takes its first intake: a start that used
-        // its time up still moves the queue once, and out of time it says
-        // its submission as that pass left it (1).
+        // Its first pass is the host process's whatever its deadline: a
+        // start that used its time up still moves the queue once, and out
+        // of time it says its submission as that pass left it (1).
         if !first {
             if waiting.deadline.is_some_and(|d| waiting.clock.now() >= d) {
                 return Ok(undecided(WAITING, &reading));
@@ -3794,92 +3840,51 @@ fn wait_on(
                 return Ok(undecided(STOPPED, &reading));
             }
         }
-        first = false;
         // 129: what the last read kept by revision and this one does not
         // use is forgotten.
         s.next_pass();
         waiting.host.next_pass();
-        let driven = reading.driven();
-        if !driven {
-            if let Some(pulls) = waiting.pulls {
-                // A spent allowance waited out to the wait's deadline: the
-                // wait's time is up; to Ctrl-C: stopped (134).
-                let spent = intake(
-                    pulls,
-                    s.seams(),
-                    waiting.clock,
-                    &branch,
-                    Taker::Wait,
-                    waiting.json,
-                    out,
-                );
-                if spent.is_some_and(|e| waited_out(&e)) {
-                    let code = match INTERRUPTED.load(Ordering::SeqCst) {
-                        true => STOPPED,
-                        false => WAITING,
-                    };
-                    return Ok(undecided(code, &reading));
+        // D9: its first tick is the pass its follow asked for, ended.
+        let reports = match first {
+            true => follower.first(&here, host_process::read_for()),
+            false => follower.tick(&here),
+        };
+        tell_released(&reports, &branch, waiting.json, out)?;
+        let failed = reports
+            .into_iter()
+            .filter_map(|r| r.failed.get(&branch).cloned())
+            .next_back();
+        first = false;
+        if INTERRUPTED.load(Ordering::SeqCst) {
+            return Ok(undecided(STOPPED, &reading));
+        }
+        if let Some(words) = failed {
+            // 122: the branch took the work it follows, and what failed came
+            // after; record 0100 D2: what it follows landed, its own end.
+            if let Some(landed) = landed(s, id, &branch) {
+                if landed.id == own.id {
+                    return Ok(Waited::Decided(landed, None));
                 }
+                let by = CarriedBy::Entry(landed);
+                let end = own_end(s, own.clone(), Some(&by))?;
+                return Ok(Waited::Decided(end, Some(by)));
             }
-            // 137: another host takes the branch's pull requests in; this
-            // wait runs no round for them.
-            let away = waiting.pulls.and_then(|p| p.elsewhere(&branch));
-            let round = match away {
-                Some(_) => None,
-                None => Some(s.round(&branch)),
-            };
-            match round {
-                None => {}
-                Some(Ok(round)) => {
-                    exec::tell_abandoned(out, waiting.json, &round.released)?;
-                    exec::tell_releases(out, waiting.json, &round.releases)?;
-                }
-                Some(Err(e)) => {
-                    // Ctrl-C reaches the tools a round runs in the foreground.
-                    if INTERRUPTED.load(Ordering::SeqCst) {
-                        return Ok(undecided(STOPPED, &reading));
-                    }
-                    // Record 0100 D2: what it follows landed, its own end.
-                    if let Some(landed) = landed(s, id, &branch) {
-                        if landed.id == own.id {
-                            return Ok(Waited::Decided(landed, None, Some(e)));
-                        }
-                        let by = CarriedBy::Entry(landed);
-                        let end = own_end(s, own.clone(), Some(&by))?;
-                        return Ok(Waited::Decided(end, Some(by), Some(e)));
-                    }
-                    return Ok(Waited::Unread(own.clone(), unread(e)?));
-                }
+            if said_failed.as_deref() != Some(words.as_str()) {
+                telemetry::warn(&format!("sluice: {branch}: {words}"));
+                said_failed = Some(words);
             }
         }
-        // A wait takes no lease, but lets go of the lock once a newer
-        // watch has taken its, or once a driver lives; it follows from then
-        // on.
-        let drives = if driven {
-            Drives::Another
-        } else {
-            Drives::Nobody
-        };
-        reading.reader.step(false, drives)?;
-        reading.read(s, waiting, following.as_mut().unwrap_or(&mut own))?;
+        reading.read(s, following.as_mut().unwrap_or(&mut own))?;
     }
 }
 
 /// How a wait reads its submission, its combination and its branch's
-/// hold (129; ADR 0056; rule core.25): the first watch or wait of the
-/// repository on the host is its reader, which reads the records and
-/// writes the whole overview for the others, unless `sluice run` lives on
-/// the host, which is the reader there (135); every other wait reads them
-/// from the reader's document, and its own record only once a document no
-/// longer holds it, as when it has left the queue. A wait that is the
-/// reader lets go once a newer watch has taken its lease, and follows from
-/// then on as any other wait.
+/// hold (129; ADR 0056; rule core.25): from the document sluice's host
+/// process writes as the repository's reader, never the records, and its
+/// own record only once a document no longer holds it, as when it has left
+/// the queue. It takes no lock and no lease.
 struct Reading {
-    reader: Reader,
-    /// Where the host's readers and drivers keep their files, and the
-    /// repository whose they are.
-    readers: std::path::PathBuf,
-    repository: String,
+    follow: reader::Follow,
     /// Its branch's part of the overview, as last read.
     view: Option<BranchView>,
     /// The reader's last document that did not hold the submission: its
@@ -3898,102 +3903,75 @@ impl Reading {
             .cloned()
     }
 
-    fn take(host: &dyn exec::Host) -> Result<Reading> {
+    fn follow(host: &dyn exec::Host) -> Result<Reading> {
         let (readers, repository) = (host.readers()?, host.repository()?);
         Ok(Reading {
-            reader: Reader::take(&readers, &repository, host.version())?,
-            readers,
-            repository,
+            follow: reader::Follow::of(&readers, &repository, host.version()),
             view: None,
             lacked: None,
         })
     }
 
-    /// Whether `sluice run` drives the repository on the host, as probed
-    /// now: once a tick, the wait's round left to it (135).
-    fn driven(&self) -> bool {
-        reader::driver_live(&self.readers, &self.repository)
-    }
-
-    /// Read `sub` again, and its branch's part of the overview. A follower
-    /// with no whole overview to read says nothing new.
-    fn read(&mut self, s: &Sluice<'_>, waiting: &Waiting<'_>, sub: &mut Submission) -> Result<()> {
+    /// Read `sub` again, and its branch's part of the overview, from the
+    /// reader's document; with no whole overview to read it says nothing
+    /// new.
+    fn read(&mut self, s: &Sluice<'_>, sub: &mut Submission) -> Result<()> {
         let (id, branch) = (sub.id, sub.branch.clone());
-        // The reader's document, when it was read from one.
-        let followed = match &mut self.reader {
-            Reader::Lead(lead) => {
-                // A read whose start it could not mark leaves a forecast
-                // reading past this reader, which decides nothing (64).
-                let _ = lead.begin();
-                let follows = Follows::Kept(waiting.follows);
-                match overview::document(s, waiting.host, waiting.clock, follows) {
-                    Ok((branches, doc)) => {
-                        // Ctrl-C reaching the git a branch's read runs is no
-                        // refusal of that branch's (26).
-                        if !INTERRUPTED.load(Ordering::SeqCst) {
-                            lead.write(&overview::ticked(doc, waiting.tick))?;
-                        }
-                        self.view = branches
-                            .into_iter()
-                            .find(|b| b.branch == branch && b.unread.is_none());
-                        None
-                    }
-                    // The records, or the host's part, could not be read: the
-                    // failure is the reader's document, in the words it was
-                    // refused with (133), and its own part is read as a wait
-                    // alone reads it. Ctrl-C reaching the git a read runs is no
-                    // failure of the queues'.
-                    Err(e) => {
-                        if !INTERRUPTED.load(Ordering::SeqCst) {
-                            let failed = told::document(Kind::Internal, &format!("{e:#}"), &[]);
-                            lead.write(&overview::ticked(failed, waiting.tick))?;
-                        }
-                        self.view = s.branch_view_of(&branch).ok();
-                        *sub = record(s, id, &branch)?;
-                        return Ok(());
-                    }
-                }
-            }
-            Reader::Follow(follow) => {
-                // The reader's read that failed is no whole document either:
-                // the last view stands, and no record is read for it (129).
-                let Some(doc) = follow.read().filter(|d| d["branches"].is_array()) else {
-                    return Ok(());
-                };
-                self.view = branch_in(&doc, &branch);
-                Some(doc)
-            }
+        // The reader's read that failed is no whole document either: the
+        // last view stands, and no record is read for it (129).
+        let Some(doc) = self.follow.read().filter(|d| d["branches"].is_array()) else {
+            return Ok(());
         };
+        self.view = branch_in(&doc, &branch);
         let held = self
             .view
             .as_ref()
             .and_then(|v| v.submissions.iter().find(|x| x.id == id));
-        match (held, followed) {
+        match held {
             // In the queue: the overview's record is its record.
-            (Some(x), _) => *sub = x.clone(),
-            // Out of the queue, as the records just read say.
-            (None, None) => *sub = record(s, id, &branch)?,
+            Some(x) => *sub = x.clone(),
             // Out of the reader's queue, or not yet in it.
-            (None, Some(doc)) if self.lacked.as_ref() != Some(&doc) => {
+            None if self.lacked.as_ref() != Some(&doc) => {
                 *sub = record(s, id, &branch)?;
                 self.lacked = Some(doc);
             }
-            (None, Some(_)) => {}
+            None => {}
         }
         Ok(())
     }
 }
 
-/// A probe of whether `sluice run` drives the host's repository, each
-/// call a probe at that moment (135): the host's readers and repository
-/// are read once, and a host that cannot say where they are reads as
-/// having no driver, so a wait runs rounds rather than wait on nothing.
-fn driven_by(host: &dyn exec::Host) -> impl Fn() -> bool {
-    let at = host.readers().ok().zip(host.repository().ok());
-    move || {
-        at.as_ref()
-            .is_some_and(|(dir, repository)| reader::driver_live(dir, repository))
+/// 97, 123: what the host process's passes in `reports` freed, and what
+/// their rounds of `branch` released, as a waiting command's own rounds
+/// said them: beside its lines, or on stderr under `--json`.
+fn tell_released(
+    reports: &[host_process::pass::Report],
+    branch: &str,
+    json: bool,
+    out: &mut dyn Write,
+) -> Result<()> {
+    for r in reports {
+        let lines = r
+            .freed
+            .iter()
+            .chain(r.released.get(branch).into_iter().flatten());
+        for line in lines {
+            if json {
+                eprintln!("{line}");
+            } else {
+                writeln!(out, "{line}")?;
+            }
+        }
     }
+    Ok(())
+}
+
+/// 121: `branch`'s hold, as the reader's document sluice's host process
+/// writes has it; `None` where it has none or none can be read.
+fn read_hold(host: &dyn exec::Host, branch: &str) -> Option<BranchHold> {
+    let (readers, repository) = (host.readers().ok()?, host.repository().ok()?);
+    let doc = reader::Follow::of(&readers, &repository, host.version()).read()?;
+    branch_in(&doc, branch)?.held
 }
 
 /// Submission `id`'s record, from the records of `branch` alone, whatever
@@ -4038,20 +4016,6 @@ fn landed(s: &Sluice<'_>, id: u64, branch: &str) -> Option<Submission> {
     sub.state = State::Landed;
     sub.landed_as = Some(to);
     Some(sub)
-}
-
-/// The latest submission to `branch` on `head`, as a pull request's is
-/// taken in on the head its worktree pushed; `None` when there is none or
-/// the records cannot be read.
-fn taken_in(s: &Sluice<'_>, branch: &str, head: &sluice_seams::Rev) -> Option<u64> {
-    let all = s.history(branch).ok()?;
-    all.iter().rev().find(|x| x.head == *head).map(|x| x.id)
-}
-
-/// 122: what failed after a landing, said apart from its outcome, on
-/// stderr and to telemetry as sluice failing itself is.
-fn after_landing(e: &anyhow::Error) {
-    telemetry::error(&format!("sluice: after the landing: {e:#}"));
 }
 
 /// A submission's outcome, as a waiting submit ends with it; `by`, what
@@ -4785,8 +4749,16 @@ fn delivering<'s, 'a>(
 
 /// Whether `branch`, at its revision, takes its work as pull requests
 /// (C.7 `pull_requests`).
+/// 137 (design D22): the refusal of a branch that takes pull requests on
+/// records each host keeps, where `e` is one.
+fn no_intake(e: &anyhow::Error) -> Option<&sluice_core::policy::NoIntake> {
+    e.chain()
+        .find_map(|c| c.downcast_ref::<sluice_core::policy::NoIntake>())
+}
+
 fn takes_pulls(s: &Sluice<'_>, branch: &str) -> Result<bool> {
-    let Some(tip) = s.seams().branch.read(branch)? else {
+    // 129 (design D16): a sluice that reads held fetches nothing for it.
+    let Some(tip) = s.branch_read(branch)? else {
         return Ok(false);
     };
     Ok(s.rules_at(branch, &tip)?
@@ -5099,7 +5071,6 @@ fn submit_pull(
     json: bool,
     confirms: Confirms,
     pause: &dyn Pause,
-    tick: Duration,
     out: &mut dyn Write,
 ) -> Result<i32> {
     let seams = s.seams();
@@ -5140,7 +5111,6 @@ fn submit_pull(
             deadline: mode.deadline(),
             json,
             pause,
-            tick,
             copy,
             worktree: delivered_to,
             confirms,
@@ -5211,30 +5181,32 @@ fn submit_pull(
     let what = format!("#{number}");
     // The submission the pull request was last read taken in as.
     let mut taken: Option<u64> = None;
-    let probe = driven_by(host);
     let mut first = true;
     // 137: a wait lets go of the intake mark it holds when it ends.
-    let _let_go = LetGo(Some(pulls));
+    let here = host_process::Here {
+        s,
+        host,
+        pulls,
+        clock,
+    };
+    let mut follower: Option<host_process::ask::Follower<'_>> = None;
     loop {
-        // 135: probed once a pass. The first pass's intake is a submit's
-        // own, and `--status`'s: the answer names what it took in. Every
-        // other, and all of `sluice wait <branch>`'s, is the driver's
-        // while it lives.
-        let driven = probe();
-        if !driven || first && !mode.waits() {
-            // 137: a wait on a host where no driver lives shows itself by
-            // the intake mark; a submit that does not wait, `--status`, and
-            // a submit's first pass beside a live driver push none.
-            let taker = match driven || no_wait || status {
-                true => Taker::Step,
-                false => Taker::Wait,
-            };
+        // 135: the first pass's intake is a submit's own, and `--status`'s:
+        // the answer names what it took in. Every other, and all of `sluice
+        // wait <branch>`'s, is sluice's host process's.
+        if first && !mode.waits() {
             // The user, 2026-10-28: a submit that does not wait fails at
             // once on a spent allowance, naming when it ends (134).
-            match intake(pulls, seams, clock, branch, taker, json, out) {
+            let intaken = intake(pulls, s, clock, branch, json, out);
+            intaken.say(branch);
+            match intaken.limited {
                 Some(e) if no_wait => return Err(e),
                 Some(_) if INTERRUPTED.load(Ordering::SeqCst) => return Ok(STOPPED),
                 _ => {}
+            }
+            // 135: the host process is told of the request it takes in.
+            if !status {
+                host_process::ask::serve(&here);
             }
         }
         first = false;
@@ -5387,7 +5359,7 @@ fn submit_pull(
                 // again only when it changes.
                 there = pulls
                     .elsewhere(branch)
-                    .map(|_| There { taken_in_by, queue });
+                    .then_some(There { taken_in_by, queue });
                 if let (false, Some(t)) = (json, &there) {
                     let line = t.line(number, branch);
                     if said_there.as_ref() != Some(&line) {
@@ -5517,76 +5489,24 @@ fn submit_pull(
                 return still(out, WAITING);
             }
         }
-        // 137: no round where another host takes the branch's pull
-        // requests in.
-        let away = pulls.elsewhere(branch).is_some();
-        let round = if driven || away {
-            None
-        } else {
-            Some(s.round(branch))
-        };
-        match round {
-            None => {}
-            Some(Ok(round)) => {
-                exec::tell_abandoned(out, json, &round.released)?;
-                exec::tell_releases(out, json, &round.releases)?;
-                if !json && matches!(round.step, Step::Stepped | Step::Held) {
-                    tell_hold(out, branch, round.held.as_ref(), &mut said_hold)?;
-                }
-            }
-            Some(Err(e)) => {
-                if INTERRUPTED.load(Ordering::SeqCst) {
-                    return still(out, STOPPED);
-                }
-                // 122: as `wait_on`, for the submission the pull request
-                // was taken in as, on the head its worktree, or the branch
-                // named, submitted (124).
-                let submitted = match head {
-                    SubmitHead::Worktree(w) => seams
-                        .driver
-                        .session(w)
-                        .ok()
-                        .and_then(|w| s.submitted_head(&w).ok()),
-                    SubmitHead::Branch(b) => s
-                        .named_session(b, branch)
-                        .ok()
-                        .and_then(|r| r.ok())
-                        .map(|(_, h)| h),
-                };
-                let landed = submitted
-                    .and_then(|h| taken_in(s, branch, &h.head))
-                    .and_then(|id| landed(s, id, branch));
-                if let Some(sub) = landed {
-                    let names = match pulls.follow(seams, clock, branch, number) {
-                        Ok(Followed::Done(_, names)) => names,
-                        _ => BTreeMap::new(),
-                    };
-                    // Record 0100 D2: another submission's landing is its
-                    // own's end, never its own.
-                    let (sub, by) = match follows_for.or(own.as_ref()) {
-                        Some(own) if own.id != sub.id => {
-                            let by = CarriedBy::Entry(sub);
-                            (own_end(s, own.clone(), Some(&by))?, Some(by))
-                        }
-                        _ => (sub, None),
-                    };
-                    let code = report_delivering(
-                        s,
-                        delivered_to,
-                        sub,
-                        branch,
-                        &names,
-                        by.as_ref(),
-                        copy.as_ref(),
-                        json,
-                        confirms,
-                        out,
-                    )?;
-                    after_landing(&e);
-                    return Ok(code);
-                }
-                return could_not_read(&unread(e)?, &what, &again, json, out);
-            }
+        // 135: the host process runs the rounds; the wait follows it, says
+        // what its passes released as a wait does, and says the branch's
+        // hold as its reader's document has it (121).
+        let follower = follower.get_or_insert_with(|| {
+            host_process::ask::Follower::new(&here, host_process::protocol::FollowKind::Wait)
+        });
+        let reports = follower.tick(&here);
+        tell_released(&reports, branch, json, out)?;
+        if !json {
+            tell_hold(
+                out,
+                branch,
+                read_hold(host, branch).as_ref(),
+                &mut said_hold,
+            )?;
+        }
+        if INTERRUPTED.load(Ordering::SeqCst) {
+            return still(out, STOPPED);
         }
         if !pause.pause() {
             return still(out, STOPPED);
@@ -5675,25 +5595,28 @@ fn submit_pull_group(
         &mut BTreeSet::new(),
     );
     let again = format!("sluice wait {branch}");
-    // 122: what failed after a landing, said once the outcomes are.
-    let mut after = Vec::new();
-    let probe = driven_by(host);
     let mut first = true;
     // 137: a wait lets go of the intake mark it holds when it ends.
-    let _let_go = LetGo(Some(pulls));
+    let here = host_process::Here {
+        s,
+        host,
+        pulls,
+        clock,
+    };
+    let mut follower: Option<host_process::ask::Follower<'_>> = None;
     let stopped = 'wait: loop {
-        // 135: as `submit_pull`, the first pass's intake the submit's own.
-        let driven = probe();
-        if !driven || first {
-            let taker = match driven || no_wait {
-                true => Taker::Step,
-                false => Taker::Wait,
-            };
-            match intake(pulls, seams, clock, branch, taker, json, out) {
+        // 135: as `submit_pull`, the first pass's intake the submit's own,
+        // every other sluice's host process's.
+        if first {
+            let intaken = intake(pulls, s, clock, branch, json, out);
+            intaken.say(branch);
+            match intaken.limited {
                 Some(e) if no_wait => return Err(e),
                 Some(_) if INTERRUPTED.load(Ordering::SeqCst) => break 'wait Some(STOPPED),
                 _ => {}
             }
+            // 135: the host process is told of the requests it takes in.
+            host_process::ask::serve(&here);
         }
         first = false;
         for (i, o) in opened.iter().enumerate() {
@@ -5722,7 +5645,7 @@ fn submit_pull_group(
                     // 137, design D5: as `submit_pull`'s.
                     there[i] = pulls
                         .elsewhere(branch)
-                        .map(|_| There { taken_in_by, queue });
+                        .then_some(There { taken_in_by, queue });
                     if let (false, Some(t)) = (json, &there[i]) {
                         let line = t.line(o.number, branch);
                         if said_there[i].as_ref() != Some(&line) {
@@ -5747,60 +5670,22 @@ fn submit_pull_group(
         if no_wait || decided.iter().all(Option::is_some) {
             break None;
         }
-        let away = pulls.elsewhere(branch).is_some();
-        let round = if driven || away {
-            None
-        } else {
-            Some(s.round(branch))
-        };
-        match round {
-            None => {}
-            Some(Ok(round)) => {
-                exec::tell_abandoned(out, json, &round.released)?;
-                exec::tell_releases(out, json, &round.releases)?;
-                if !json && matches!(round.step, Step::Stepped | Step::Held) {
-                    tell_hold(out, branch, round.held.as_ref(), &mut said_hold)?;
-                }
-            }
-            Some(Err(e)) => {
-                if INTERRUPTED.load(Ordering::SeqCst) {
-                    break Some(STOPPED);
-                }
-                // 122: as `submit_pull`, each the round landed is decided,
-                // on the head its worktree submitted (124), and what failed
-                // is said after the outcomes.
-                let mut landed_now = false;
-                for (i, (w, o)) in names.iter().zip(&opened).enumerate() {
-                    if decided[i].is_some() {
-                        continue;
-                    }
-                    let sub = seams
-                        .driver
-                        .session(w)
-                        .ok()
-                        .and_then(|w| s.submitted_head(&w).ok())
-                        .and_then(|h| taken_in(s, branch, &h.head))
-                        .and_then(|id| landed(s, id, branch));
-                    if let Some(sub) = sub {
-                        let names = match pulls.follow(seams, clock, branch, o.number) {
-                            Ok(Followed::Done(_, names)) => names,
-                            _ => BTreeMap::new(),
-                        };
-                        decided[i] = Some(Followed::Done(sub, names));
-                        landed_now = true;
-                    }
-                }
-                if landed_now {
-                    after.push(e);
-                    if decided.iter().all(Option::is_some) {
-                        break None;
-                    }
-                } else {
-                    let e = unread(e)?;
-                    let code = could_not_read(&e, &what, &again, false, &mut std::io::sink())?;
-                    break Some(code);
-                }
-            }
+        // 135: the host process runs the rounds; the wait follows it.
+        let follower = follower.get_or_insert_with(|| {
+            host_process::ask::Follower::new(&here, host_process::protocol::FollowKind::Wait)
+        });
+        let reports = follower.tick(&here);
+        tell_released(&reports, branch, json, out)?;
+        if !json {
+            tell_hold(
+                out,
+                branch,
+                read_hold(host, branch).as_ref(),
+                &mut said_hold,
+            )?;
+        }
+        if INTERRUPTED.load(Ordering::SeqCst) {
+            break Some(STOPPED);
         }
         if !pause.pause() {
             break Some(STOPPED);
@@ -5867,16 +5752,12 @@ fn submit_pull_group(
             code = this;
         }
     }
-    for e in &after {
-        after_landing(e);
-    }
     Ok(stopped.unwrap_or(code))
 }
 
-/// 137, design D2: where a pull request another host takes in stands, as
-/// a wait last read it: the host its branch's intake mark names, as this
-/// host's last fetch brought it, and the queue sluice's check on its head
-/// carries.
+/// 137, design D25: where a pull request another host takes in stands, as
+/// a wait last read it: the host that keeps its branch, as the branch's
+/// records name it, and the queue sluice's check on its head carries.
 #[derive(Clone, Debug, PartialEq)]
 struct There {
     taken_in_by: Option<TakenInBy>,
@@ -5884,17 +5765,17 @@ struct There {
 }
 
 impl There {
-    /// Design D5: pull request `n` into `branch` in words: the submission
-    /// the check names on the host that posted it, taken in by the host the
-    /// mark names; or that it waits to be taken in by the mark's host.
+    /// Design D25: pull request `n` into `branch` in words: the submission
+    /// the check names on the host that posted it, taken in by the host
+    /// that keeps the branch; or that it waits to be taken in by that host.
     fn line(&self, n: u64, branch: &str) -> String {
         let held = self
             .queue
             .as_ref()
             .filter(|q| q.taken_in)
             .and_then(|q| Some((q.submission?, &q.host)));
-        let by = self.taken_in_by.as_ref().map(TakenInBy::said);
-        let none = format!("no host holds {branch}'s intake mark");
+        let by = self.taken_in_by.as_ref().map(|t| t.host.clone());
+        let none = format!("no host keeps {branch} yet");
         match (held, by) {
             (Some((id, host)), Some(by)) => {
                 format!("#{n} is submission {id} on {host}, taken in by {by}")
@@ -6228,6 +6109,9 @@ fn write_status(
     if let Some(refused) = &status.refused {
         writeln!(out, "{}", refused_lines(refused))?;
     }
+    if let Some(refused) = &status.intake_refused {
+        writeln!(out, "{}", intake_refused_lines(&status.branch, refused))?;
+    }
     write_refused_writes(status, out)?;
     for t in testing {
         writeln!(out, "  {t}")?;
@@ -6417,6 +6301,10 @@ fn status_json(status: &Status, submissions: &[Submission]) -> Result<serde_json
     if let Some(refused) = &status.refused {
         json["refused"] = serde_json::json!(refused);
     }
+    // 133 (design D27): this host's standing refusal of the intake.
+    if let Some(refused) = &status.intake_refused {
+        json["intake_refused"] = serde_json::json!(refused);
+    }
     Ok(json)
 }
 
@@ -6516,6 +6404,26 @@ fn refused_lines(refused: &sluice_core::Refused) -> String {
         refused.asked,
         refused.remote,
         refused.since,
+        said.next().unwrap_or_default()
+    );
+    for line in said {
+        text.push_str(&format!("\n  {line}"));
+    }
+    text
+}
+
+/// 133 (design D27): this host's refusal of `branch`'s intake, the
+/// forge's words on as many lines as it gave them.
+fn intake_refused_lines(branch: &str, refused: &sluice_core::Refused) -> String {
+    let rounds = match refused.rounds {
+        1 => "1 round".to_string(),
+        n => format!("{n} rounds"),
+    };
+    let mut said = refused.said.lines();
+    let mut text = format!(
+        "this host could not take in {branch}'s pull requests since {}, {rounds}: {}: {}",
+        refused.since,
+        refused.asked,
         said.next().unwrap_or_default()
     );
     for line in said {
@@ -6686,7 +6594,7 @@ fn sessions_json(places: &[SessionPlace], held: &[Held]) -> Vec<serde_json::Valu
 /// on 1a2b3c4, recorded`, or a command's `command passed on 1a2b3c4`
 /// (session-runs-1 clauses 92, 97).
 fn last_result_text(r: &sluice_seams::LastResult) -> String {
-    use sluice_seams::{RunKind, RunOutcome};
+    use sluice_seams::{RunOutcome, SessionRunKind};
     let how = match r.outcome {
         RunOutcome::Pass => "passed",
         RunOutcome::Fail => "failed",
@@ -6697,9 +6605,9 @@ fn last_result_text(r: &sluice_seams::LastResult) -> String {
     };
     let head = r.head.short();
     match (r.kind, r.recorded) {
-        (RunKind::Command, _) => format!("command {how} on {head}"),
-        (RunKind::Checks, true) => format!("{how} on {head}, recorded"),
-        (RunKind::Checks, false) => format!("{how} on {head}, not recorded"),
+        (SessionRunKind::Command, _) => format!("command {how} on {head}"),
+        (SessionRunKind::Checks, true) => format!("{how} on {head}, recorded"),
+        (SessionRunKind::Checks, false) => format!("{how} on {head}, not recorded"),
     }
 }
 
@@ -6809,6 +6717,62 @@ mod tests {
         assert_eq!(
             hashes(&[12, 13], Some(&names), &mut BTreeSet::new()),
             "#12 Batch review cards, #13"
+        );
+    }
+
+    /// 137 (design D25): the rows' heading names the host that keeps the
+    /// branch, which takes its pull requests in, or that none keeps it
+    /// yet; a row and a wait's words name that host as the one a request
+    /// waits to be taken in by.
+    #[test]
+    fn the_rows_heading_names_the_host_that_keeps_the_branch() {
+        let row = AcrossRow {
+            pull_request: 41,
+            title: "Add the export".into(),
+            from: "export".into(),
+            head: "h".into(),
+            draft: false,
+            state: "waiting".into(),
+            queue: None,
+            read_at: None,
+        };
+        let kept = Across {
+            taken_in_by: Some(TakenInBy { host: "b".into() }),
+            pull_requests: vec![row.clone()],
+        };
+        assert_eq!(kept.heading("main"), "pull requests b takes in:");
+        assert_eq!(
+            kept.line(&row),
+            "#41 Add the export · waiting to be taken in by b"
+        );
+        let unkept = Across {
+            taken_in_by: None,
+            ..kept.clone()
+        };
+        assert_eq!(
+            unkept.heading("main"),
+            "pull requests this host follows; no host keeps main yet:"
+        );
+        assert_eq!(
+            unkept.line(&row),
+            "#41 Add the export · waiting to be taken in"
+        );
+        let there = There {
+            taken_in_by: Some(TakenInBy { host: "b".into() }),
+            queue: None,
+        };
+        assert_eq!(there.line(41, "main"), "#41 waits to be taken in by b");
+        let nowhere = There {
+            taken_in_by: None,
+            queue: None,
+        };
+        assert_eq!(
+            nowhere.line(41, "main"),
+            "#41 waits to be taken in; no host keeps main yet"
+        );
+        assert_eq!(
+            serde_json::to_value(&kept.taken_in_by).unwrap(),
+            serde_json::json!({"host": "b"})
         );
     }
 }

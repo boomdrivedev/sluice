@@ -180,11 +180,15 @@ struct RecordedChecks {
 }
 
 impl Tests for RecordedChecks {
-    fn start(&self, request: &RunRequest) -> Result<RunHandle> {
+    fn start(&self, request: &RunRequest, part: sluice_seams::Part) -> Result<RunHandle> {
         self.requests.borrow_mut().push(request.clone());
-        let run = self.inner.start(request)?;
+        let run = self.inner.start(request, part)?;
         self.started.borrow_mut().push(request.revision.clone());
         Ok(run)
+    }
+
+    fn hold(&self, kind: sluice_seams::RunKind) -> Result<Option<sluice_seams::Part>> {
+        self.inner.hold(kind)
     }
 
     fn progress(&self, run: &RunHandle) -> Result<Progress> {
@@ -515,7 +519,7 @@ impl Real {
             release_ok,
             checkout: RecordedPlaces {
                 inner: checkout
-                    .with_blocks(blocks.path().to_path_buf())
+                    .with_ports(blocks.path().to_path_buf())
                     .with_scratch_root(support::test_user_scratch()),
                 log: RefCell::default(),
             },

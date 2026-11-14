@@ -10,11 +10,12 @@ nothing to do costs its host nothing a person can measure (129, 135).
 ### Requirement: An idle tick starts no process
 
 In a repository where nothing is in play, no submission queued or under
-test, no place to release and no preview to drop, a pass of `sluice run`
-after its first, and a tick after its first of the overview watch that is
-the reader, SHALL start no process, no git, credential helper or other
-command, but the one fetch a remote that keeps records is asked by (see
-"A remote's records are asked for once a tick") (129).
+test, no place to release and no preview to drop, a pass of the host
+process after its first, at its own tick or a follower's ask, SHALL start
+no process, no git, credential helper or other command, but the one fetch
+a remote that keeps records is asked by (see "A remote's records are
+asked for once a tick") (129, 135). A follower SHALL start none of its
+own.
 
 #### Scenario: sluice run in a set-up repository with nothing queued
 
@@ -22,14 +23,15 @@ command, but the one fetch a remote that keeps records is asked by (see
   hold one landed submission and nothing queued, and git on the path
   counts every start
 - **THEN** `sluice run --rounds 6` starts git exactly as many times as
-  `sluice run --rounds 1`
+  `sluice run --rounds 1`, the host process's starts counted with its own
 
 #### Scenario: A watch of a set-up repository with nothing queued
 
 - **WHEN** the same repository is watched by `sluice overview --json
-  --watch`, the reader, with git on the path counting every start
-- **THEN** once it has printed its first line, it starts git no more while
-  it goes on watching
+  --watch`, which the host process reads for, with git on the path
+  counting every start
+- **THEN** once the watch has printed its first line, git starts no more
+  while it goes on watching
 
 #### Scenario: A branch on a remote with its records on the host
 
@@ -47,10 +49,10 @@ command, but the one fetch a remote that keeps records is asked by (see
 
 #### Scenario: Held worktrees are named without git
 
-- **WHEN** a worktree has `main` checked out and a watch, the reader, is
-  running with git counting every start
-- **THEN** each line it prints names that worktree under `sessions` as
-  before, and it starts git no more after its first line
+- **WHEN** a worktree has `main` checked out and a watch follows the host
+  process, with git counting every start
+- **THEN** each line the watch prints names that worktree under
+  `sessions` as before, and git starts no more after its first line
 
 ### Requirement: An idle tick reads only what tells it whether anything changed
 
@@ -120,20 +122,21 @@ policy read at no revision a branch still names MAY be forgotten (56,
 
 ### Requirement: A remote's records are asked for once a tick
 
-Where branches' records are on a remote, a tick SHALL ask that remote
-once for the records of every branch on it, and in the overview the hosts'
-signs of life on it, in one fetch under the retry policy (rule core.29),
-and SHALL read each branch's records from what it brought, inside sluice,
-never fetching once per branch or once per read. A round still fetches its
-own branch's records before it decides anything (remote-records).
+Where branches' records are on a remote, a pass of the host process SHALL
+ask that remote once for the records of every branch on it, and in the
+overview the hosts' signs of life on it, in one fetch under the retry
+policy (rule core.29), and SHALL read each branch's records from what it
+brought, inside sluice, never fetching once per branch or once per read.
+A round still fetches its own branch's records before it decides
+anything (remote-records).
 
 #### Scenario: Two branches' records on one remote
 
 - **WHEN** `main` and `release` keep their records on `origin`, nothing is
   queued, and git counts every start
-- **THEN** each pass of `sluice run` after its first starts git once,
-  for one fetch from `origin`, and each tick of the reader's watch the
-  same
+- **THEN** each pass of the host process after its first starts git once,
+  for one fetch from `origin`, whether `sluice run --rounds` or a watch
+  follows it
 
 ### Requirement: A refused ask leaves each branch read as last fetched
 

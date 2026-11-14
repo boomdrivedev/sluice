@@ -33,7 +33,7 @@ use std::rc::Rc;
 use anyhow::{anyhow, bail, Context, Result};
 use sluice_core::records::{parse_lines, to_line, ResultKind, ResultLine, RESULT_SCHEMA};
 use sluice_seams::{
-    read_refused, Changes, Enforced, Guard, ReadRefused, Rev, Snapshot, State, TaskLog,
+    read_refused, Changes, Enforced, Guard, ReadRefused, ResultAsk, Rev, Snapshot, State, TaskLog,
     TaskProgress, Written, FINISHED, KEPT_LOGS,
 };
 
@@ -143,6 +143,9 @@ pub struct RemoteRefs {
     /// 129: a tick's ask fetched the hosts' signs of life since
     /// [`State::beats`] last answered: the next answers from it.
     asked: std::cell::Cell<bool>,
+    /// 129 (design D16): every answer reads what the host process's last
+    /// ask fetched, and none fetches ([`RemoteRefs::hold`]).
+    held: std::cell::Cell<bool>,
 }
 
 impl RemoteRefs {
@@ -161,7 +164,15 @@ impl RemoteRefs {
             stale: RefCell::default(),
             verified: RefCell::default(),
             asked: std::cell::Cell::new(false),
+            held: std::cell::Cell::new(false),
         }
+    }
+
+    /// 129 (design D16): from now on the hosts' signs of life are read as
+    /// the host process's last ask fetched them, with no fetch: a one-shot
+    /// read's.
+    pub fn hold(&self) {
+        self.held.set(true);
     }
 
     /// The same profile, its branches locked through `locks`, the lock the
@@ -195,6 +206,22 @@ impl RemoteRefs {
     /// key `signers` lists for it and with no other, and this host's own
     /// replays (core.9). `signers` is the list the policy of the branch
     /// whose gate reads them names (78; rule core.22).
+    /// Where this host's own replays on the remote are kept (design D17).
+    pub fn own_results_path(&self) -> PathBuf {
+        self.own.results_path()
+    }
+
+    /// `signer`'s runs on the remote as this host last fetched them, read
+    /// for a branch whose policy lists `key` for it: what the host
+    /// process's results index reads (design D17; rule core.22).
+    pub fn signer_ref<'a>(&'a self, signer: &'a str, key: &'a SignerKey) -> FetchedRuns<'a> {
+        FetchedRuns {
+            refs: self,
+            signer,
+            key,
+        }
+    }
+
     pub fn results_with(&self, signers: &BTreeMap<String, SignerKey>) -> Result<Vec<u8>> {
         let mut bytes = self.own.results_log()?;
         for (signer, key) in signers {
@@ -438,6 +465,12 @@ impl RemoteRefs {
             all.extend(blobs.clone());
             let commit = self.commit(&all, tip.as_deref(), message)?;
             if self.push_leased(&commit, name, tip.as_deref())? {
+                // What was pushed is read here as fetched, so the host
+                // process's index reads a round's own runs with no fetch
+                // (design D17).
+                self.pushed
+                    .local()
+                    .write_ref(&self.fetched(name), &Rev(commit.clone()))?;
                 return Ok(());
             }
         }
@@ -605,7 +638,10 @@ pub(crate) fn ask(pushed: &PushedRefs) -> Result<()> {
     let heads = format!("+{HEADS}:refs/sluice-fetched/{remote}/heads/*");
     let combinations =
         format!("+refs/sluice/combinations/*:refs/sluice-fetched/{remote}/combinations/*");
-    let specs = [&state, &hosts, &branches, &heads, &combinations].map(String::as_str);
+    // Design D17: each signer's runs, which the host process's results
+    // index reads as this ask last fetched them.
+    let runs = format!("+refs/sluice/runs/*:refs/sluice-fetched/{remote}/runs/*");
+    let specs = [&state, &hosts, &branches, &heads, &combinations, &runs].map(String::as_str);
     pushed.fetch_specs("refs/sluice/*", &specs, &["--prune"])?;
     Ok(())
 }
@@ -617,6 +653,57 @@ pub(crate) fn fetched_branches(pushed: &PushedRefs) -> Result<Vec<(String, Rev)>
         .local()
         .refs_under(&format!("refs/sluice-fetched/{}/state/", pushed.remote()))
 }
+/// A signer's runs on a remote as this host last fetched them, read for a
+/// branch whose policy lists `key` for the signer (design D17; rule
+/// core.22).
+pub struct FetchedRuns<'a> {
+    refs: &'a RemoteRefs,
+    signer: &'a str,
+    key: &'a SignerKey,
+}
+
+impl crate::host_process::results::SignerRef for FetchedRuns<'_> {
+    fn signer(&self) -> &str {
+        self.signer
+    }
+
+    fn digest(&self) -> &str {
+        self.key.digest()
+    }
+
+    fn entries(&self) -> Result<Vec<(String, String)>> {
+        let name = format!("refs/sluice/runs/{}", self.signer);
+        match self.refs.pushed.read_ref(&self.refs.fetched(&name))? {
+            Some(commit) => self.refs.pushed.local().tree_entries(commit.as_str()),
+            None => Ok(Vec::new()),
+        }
+    }
+
+    fn blob(&self, oid: &str) -> Result<Vec<u8>> {
+        self.refs.pushed.local().blob(oid)
+    }
+
+    fn verify(&self, bytes: &[u8]) -> Result<Vec<ResultLine>> {
+        verify(self.signer, self.key, bytes)
+    }
+}
+
+/// Keep `doc` at `path`, written whole, or remove it with `None` (133).
+fn keep_file(path: &Path, doc: Option<&[u8]>) -> Result<()> {
+    let Some(doc) = doc else {
+        return match std::fs::remove_file(path) {
+            Ok(()) => Ok(()),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
+            Err(e) => Err(e.into()),
+        };
+    };
+    std::fs::create_dir_all(path.parent().expect("a parent"))?;
+    let tmp = path.with_extension("json.tmp");
+    std::fs::write(&tmp, doc)?;
+    std::fs::rename(&tmp, path)?;
+    Ok(())
+}
+
 /// `refs/sluice/state/<branch>`, for a branch git may name.
 fn state_ref(branch: &str) -> Result<String> {
     if branch.is_empty()
@@ -840,7 +927,7 @@ impl State for RemoteRefs {
     /// 129: once a tick's ask fetched them, the next answer reads what it
     /// fetched, with no fetch of its own.
     fn beats(&self) -> Result<BTreeMap<String, (String, Vec<u8>)>> {
-        if !self.asked.replace(false) {
+        if !self.asked.replace(false) && !self.held.get() {
             let spec = format!(
                 "+refs/sluice/hosts/*:refs/sluice-fetched/{}/hosts/*",
                 self.remote()
@@ -964,6 +1051,18 @@ impl State for RemoteRefs {
 
     fn stale(&self, branch: &str) -> Option<ReadRefused> {
         self.stale.borrow().get(branch).cloned()
+    }
+
+    fn intake_refusal(&self, branch: &str) -> Result<Option<Vec<u8>>> {
+        match std::fs::read(self.own_file("intake", branch)?) {
+            Ok(b) => Ok(Some(b)),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
+            Err(e) => Err(e.into()),
+        }
+    }
+
+    fn keep_intake_refusal(&self, branch: &str, doc: Option<&[u8]>) -> Result<()> {
+        keep_file(&self.own_file("intake", branch)?, doc)
     }
 
     fn refusal(&self, branch: &str) -> Result<Option<Vec<u8>>> {
@@ -1117,8 +1216,8 @@ impl State for RemoteRefs {
     /// This host's own replays alone: the profile keeps no signer's key,
     /// so a branch's signed runs are read with
     /// [`RemoteRefs::results_with`] and its own policy's list (78).
-    fn results(&self, _: &str) -> Result<Vec<u8>> {
-        self.results_with(&BTreeMap::new())
+    fn results_for(&self, _: &str, ask: &ResultAsk) -> Result<Vec<u8>> {
+        Ok(ask.answer(&self.results_with(&BTreeMap::new())?))
     }
 
     /// Nothing this host signs counts: with no list, no signed run is
@@ -1129,9 +1228,14 @@ impl State for RemoteRefs {
 
     /// Could-not-run-1 116: every result set aside on the remote, one file
     /// each under `refs/sluice/set-aside`. A set-aside only stops a result
-    /// counting, so any host that submits may add one.
+    /// counting, so any host that submits may add one. 129 (design D16):
+    /// held, as this host last fetched them, with no fetch.
     fn set_asides(&self) -> Result<Vec<u8>> {
-        let Some(commit) = self.fetch(SET_ASIDE)? else {
+        let commit = match self.held.get() {
+            true => self.pushed.read_ref(&self.fetched(SET_ASIDE))?.map(|r| r.0),
+            false => self.fetch(SET_ASIDE)?,
+        };
+        let Some(commit) = commit else {
             return Ok(Vec::new());
         };
         let mut bytes = Vec::new();

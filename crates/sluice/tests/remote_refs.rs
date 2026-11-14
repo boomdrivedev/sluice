@@ -331,9 +331,12 @@ fn signed_runs_are_read_verified_on_another_host() {
             .is_empty()
     );
     // Nor does a profile asked with no list.
-    assert!(parse_lines::<ResultLine>(&hc.results("main").unwrap())
-        .unwrap()
-        .is_empty());
+    assert!(parse_lines::<ResultLine>(
+        &hc.results_for("main", &sluice_seams::ResultAsk::every())
+            .unwrap()
+    )
+    .unwrap()
+    .is_empty());
 }
 
 /// 19, 138, design D3 (the check-grant spec's "Two grants in one
@@ -1065,12 +1068,15 @@ fn records(repo: &Repo) -> sluice::profiles::records::Records {
 
 /// The tasks of the signed runs `branch`'s gate reads, in order.
 fn signed(r: &sluice::profiles::records::Records, branch: &str) -> Vec<String> {
-    let mut tasks: Vec<String> = parse_lines::<ResultLine>(&r.results(branch).unwrap())
-        .unwrap()
-        .into_iter()
-        .filter(|l| l.signer.is_some())
-        .map(|l| l.task)
-        .collect();
+    let mut tasks: Vec<String> = parse_lines::<ResultLine>(
+        &r.results_for(branch, &sluice_seams::ResultAsk::every())
+            .unwrap(),
+    )
+    .unwrap()
+    .into_iter()
+    .filter(|l| l.signer.is_some())
+    .map(|l| l.task)
+    .collect();
     tasks.sort();
     tasks
 }

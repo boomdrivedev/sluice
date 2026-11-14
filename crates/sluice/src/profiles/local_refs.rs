@@ -221,6 +221,59 @@ impl LocalRefs {
         Ok(files)
     }
 
+    /// Every file of a commit's tree, by path, with its blob's id, no
+    /// blob read: what an index that reads only blobs it has not seen
+    /// lists (design D17).
+    pub fn tree_entries(&self, commit: &str) -> Result<Vec<(String, String)>> {
+        let id = ObjectId::from_hex(commit.as_bytes())
+            .map_err(|e| anyhow!("{commit} is not an object id: {e}"))?;
+        let tree = self
+            .repo
+            .find_object(id)
+            .map_err(|e| anyhow!("reading {commit}: {e}"))?
+            .peel_to_tree()
+            .map_err(|e| anyhow!("{commit} has no tree: {e}"))?;
+        let mut entries = Vec::new();
+        self.entries_of(&tree, "", &mut entries)?;
+        Ok(entries)
+    }
+
+    fn entries_of(
+        &self,
+        tree: &gix::Tree<'_>,
+        under: &str,
+        entries: &mut Vec<(String, String)>,
+    ) -> Result<()> {
+        let decoded = tree
+            .decode()
+            .map_err(|e| anyhow!("reading the tree {}: {e}", tree.id))?;
+        for e in &decoded.entries {
+            let path = format!("{under}{}", e.filename);
+            if e.mode.is_tree() {
+                let object = self
+                    .repo
+                    .find_object(e.oid)
+                    .map_err(|err| anyhow!("reading {path}: {err}"))?;
+                self.entries_of(&object.into_tree(), &format!("{path}/"), entries)?;
+            } else if e.mode.is_blob_or_symlink() {
+                entries.push((path, e.oid.to_string()));
+            }
+        }
+        Ok(())
+    }
+
+    /// The blob `oid`'s bytes, read with no process.
+    pub fn blob(&self, oid: &str) -> Result<Vec<u8>> {
+        let id = ObjectId::from_hex(oid.as_bytes())
+            .map_err(|e| anyhow!("{oid} is not an object id: {e}"))?;
+        Ok(self
+            .repo
+            .find_object(id)
+            .map_err(|e| anyhow!("reading {oid}: {e}"))?
+            .data
+            .clone())
+    }
+
     fn files_of(
         &self,
         tree: &gix::Tree<'_>,

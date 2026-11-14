@@ -35,11 +35,13 @@ rounds. Every effect is written to the state before it is performed, so
 a round that crashes at any point is finished correctly by the next one.
 
 A round takes the branch's lock, so two rounds never act on one branch
-at once. Any process may run one: a waiting `sluice submit` between
-reads of its own submission's state
-([ADR 0011](/sluice/decisions/0011/)), `sluice step` for a tool with a
-loop of its own, or `sluice run`, a loop around the step for a host.
-Nothing behaves differently because of which one ran it.
+at once. sluice's own process on the host runs them, one task for each
+repository with work: the first command that needs the host's queues
+moved starts it, and it ends once none has work
+([ADR 0093](/sluice/decisions/0093/)). `sluice step` asks it for one
+round of a branch, and a waiting `sluice submit` or `sluice wait`
+follows it. Nothing behaves differently because of what asked for the
+round.
 
 ## The seams
 

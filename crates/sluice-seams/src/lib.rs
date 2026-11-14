@@ -92,6 +92,109 @@ pub fn read_refused(e: &anyhow::Error) -> Option<&ReadRefused> {
     e.chain().find_map(|c| c.downcast_ref::<ReadRefused>())
 }
 
+/// 69 (design D17): what a reader of the results log asks for: keys, a
+/// check's task and the hash it ran at, combinations and tasks. A line
+/// matching any of them is answered: its task and hash one of the keys,
+/// its combination one of the combinations, or its task one of the tasks.
+/// Every caller asks for what it reads: a candidate's verdict its checks'
+/// keys and its combination, a session run its plan's keys, a verdict view
+/// its submission's combination, a landing's second reading the
+/// combinations it lands and their keys, a set-aside the task it names.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ResultAsk {
+    #[serde(default, skip_serializing_if = "BTreeSet::is_empty")]
+    pub keys: BTreeSet<(String, String)>,
+    #[serde(default, skip_serializing_if = "BTreeSet::is_empty")]
+    pub combinations: BTreeSet<Rev>,
+    #[serde(default, skip_serializing_if = "BTreeSet::is_empty")]
+    pub tasks: BTreeSet<String>,
+    /// Every line: what a test that inspects the whole log asks. No step,
+    /// gate or command asks it.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    every: bool,
+}
+
+/// What a line of the results log is matched by: its task, hash and
+/// combination, read alone.
+#[derive(Deserialize)]
+struct Matched {
+    #[serde(default)]
+    task: String,
+    #[serde(default)]
+    hash: String,
+    #[serde(default)]
+    combination: String,
+}
+
+impl ResultAsk {
+    /// Every line of the log: a test's inspection of it, never a step's,
+    /// a gate's or a command's (design D17).
+    pub fn every() -> ResultAsk {
+        ResultAsk {
+            every: true,
+            ..ResultAsk::default()
+        }
+    }
+
+    /// Whether it asks for every line.
+    pub fn is_every(&self) -> bool {
+        self.every
+    }
+
+    /// Whether it asks for nothing: a read of it answers no line.
+    pub fn is_empty(&self) -> bool {
+        !self.every && self.keys.is_empty() && self.combinations.is_empty() && self.tasks.is_empty()
+    }
+
+    /// The same, asking for the key `task` ran at `hash` too.
+    pub fn key(mut self, task: &str, hash: &str) -> ResultAsk {
+        self.keys.insert((task.to_string(), hash.to_string()));
+        self
+    }
+
+    /// The same, asking for the results of `combination` too.
+    pub fn combination(mut self, combination: &Rev) -> ResultAsk {
+        self.combinations.insert(combination.clone());
+        self
+    }
+
+    /// The same, asking for every result of `task` too.
+    pub fn task(mut self, task: &str) -> ResultAsk {
+        self.tasks.insert(task.to_string());
+        self
+    }
+
+    /// Whether a line of `task` at `hash` on `combination` is asked for.
+    pub fn matches(&self, task: &str, hash: &str, combination: &str) -> bool {
+        self.every
+            || self.tasks.contains(task)
+            || self.combinations.iter().any(|c| c.0 == combination)
+            || self.keys.iter().any(|(t, h)| t == task && h == hash)
+    }
+
+    /// The lines of `log`, one JSON document per line, it asks for, each
+    /// whole with its newline. A line that names no task, hash or
+    /// combination it reads is answered only where it asks for every line.
+    pub fn answer(&self, log: &[u8]) -> Vec<u8> {
+        if self.every {
+            return log.to_vec();
+        }
+        let mut out = Vec::new();
+        for line in log.split_inclusive(|b| *b == b'\n') {
+            let Ok(m) = serde_json::from_slice::<Matched>(line) else {
+                continue;
+            };
+            if self.matches(&m.task, &m.hash, &m.combination) {
+                out.extend_from_slice(line);
+                if !line.ends_with(b"\n") {
+                    out.push(b'\n');
+                }
+            }
+        }
+        out
+    }
+}
+
 /// A git revision, as the branch seam names it.
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 #[serde(transparent)]
@@ -198,7 +301,7 @@ pub struct LastResult {
     pub at: String,
     /// The head the run was given.
     pub head: Rev,
-    pub kind: RunKind,
+    pub kind: SessionRunKind,
     pub outcome: RunOutcome,
     /// Its results are under their keys (92): only a run of the checks in
     /// a place holding exactly its head that did not hit its time limit.
@@ -218,7 +321,7 @@ pub struct LastResult {
 /// What a session run ran (89).
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
-pub enum RunKind {
+pub enum SessionRunKind {
     Checks,
     Command,
 }
@@ -870,13 +973,25 @@ pub trait Tests {
     /// limit and the request's limits (32, 66; rule core.10). 84: a limit
     /// the executor cannot hold is an error naming it, and nothing runs.
     ///
-    /// 71: before it runs anything, the toolchain or the runner's setup
-    /// among it, it admits the run against the host's count of running
-    /// checks, every repository's, in one step under the host's lock; at
-    /// the host's bound it fails with [`AtBound`] and nothing runs. A
-    /// session's or a preview's run is admitted only under the bound less
-    /// the part kept for submissions' runs (91, 102).
-    fn start(&self, request: &RunRequest) -> Result<RunHandle>;
+    /// 71 (rule core.49; record 0087): the run takes `part`, its room in
+    /// the host's bound that [`Tests::hold`] gave, and keeps it until it
+    /// ends; a start that fails gives it back as the part is dropped. A
+    /// part the host's room no longer honours is refused with [`AtBound`]
+    /// and nothing runs.
+    fn start(&self, request: &RunRequest, part: Part) -> Result<RunHandle>;
+
+    /// 71, 150 (rule core.49; records 0087, 0123): a run's room in the
+    /// host's bound, counted and held in one step against every
+    /// repository's runs, before the decision to start the run is written:
+    /// a combination's where a run of the bound is free, owed to no waiting
+    /// session and to no repository with fewer runs under test; a
+    /// session's or a preview's where a run of the bound less the part kept
+    /// for combinations is free and owed to no one. `None` where there is
+    /// none: the run's wait is recorded for the host, and nothing is held.
+    /// The part is held until [`Tests::start`] takes it, or is dropped,
+    /// which gives it back at once. The profile names its own repository
+    /// to the host's room, so the core names none.
+    fn hold(&self, kind: RunKind) -> Result<Option<Part>>;
 
     /// 37: a started run's progress; once finished, every check's key,
     /// outcome, executor and whether it was replayed.
@@ -1128,6 +1243,59 @@ impl Running {
     /// Every check running on the host.
     pub fn total(&self) -> usize {
         self.queue + self.sessions
+    }
+}
+
+/// What a part of the host's bound is held for (71, 150; record 0087).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum RunKind {
+    /// A submission's combination.
+    Queue,
+    /// A session's run (`sluice exec`) or a preview's command.
+    Session,
+}
+
+/// 71 (rule core.49; record 0087): a run's room in the host's bound, held
+/// from the count that chose it to its start. It is opaque to the core:
+/// the check profile that held it reads what it holds back when the run
+/// starts. Dropped unstarted, by a start that failed, a decision whose
+/// write was refused or a round that stopped, it gives its room back at
+/// once, whatever it holds doing so as it drops.
+pub struct Part {
+    kind: RunKind,
+    held: Box<dyn std::any::Any>,
+}
+
+impl Part {
+    /// A part of `kind`, holding `held`, whose drop gives the room back.
+    pub fn new(kind: RunKind, held: impl std::any::Any) -> Part {
+        Part {
+            kind,
+            held: Box::new(held),
+        }
+    }
+
+    pub fn kind(&self) -> RunKind {
+        self.kind
+    }
+
+    /// What the part holds, as the profile that held it made it; the part
+    /// back where it holds something else.
+    pub fn take<T: 'static>(self) -> std::result::Result<T, Part> {
+        match self.held.downcast::<T>() {
+            Ok(held) => Ok(*held),
+            Err(held) => Err(Part {
+                kind: self.kind,
+                held,
+            }),
+        }
+    }
+}
+
+impl fmt::Debug for Part {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("Part").field("kind", &self.kind).finish()
     }
 }
 
@@ -1696,6 +1864,15 @@ pub trait State {
     /// that decides nothing reads. A round reads with [`State::read`].
     fn read_held(&self, branch: &str) -> Result<Snapshot>;
 
+    /// 129 (design D16): from now on, read every remote that keeps
+    /// branches' records as the host process's last ask fetched it, as
+    /// though this binding had made that ask, and ask none itself: the
+    /// branches with records and the hosts' signs of life listed from what
+    /// was fetched. A one-shot read's, once the host process's reading is
+    /// current; a round never runs under it. Records in the host's own
+    /// files need nothing.
+    fn hold(&self) {}
+
     /// 80: why the branch's last read could not reach the records it keeps
     /// elsewhere and read what was last fetched; `None` when the read was
     /// current.
@@ -1713,6 +1890,20 @@ pub trait State {
     /// Keep `doc` as this host's document of a refusal of `branch`'s
     /// remote, in place of the one kept before, or, with `None`, remove it.
     fn keep_refusal(&self, _branch: &str, _doc: Option<&[u8]>) -> Result<()> {
+        Ok(())
+    }
+
+    /// 133, rule core.28 (design D27): this host's document of a standing
+    /// refusal of `branch`'s intake, its pull requests on the forge, beside
+    /// its refusal of the remote and in the same form; kept on this host
+    /// alone, so it decides nothing.
+    fn intake_refusal(&self, _branch: &str) -> Result<Option<Vec<u8>>> {
+        Ok(None)
+    }
+
+    /// Keep `doc` as this host's document of a refusal of `branch`'s
+    /// intake, or, with `None`, remove it.
+    fn keep_intake_refusal(&self, _branch: &str, _doc: Option<&[u8]>) -> Result<()> {
         Ok(())
     }
 
@@ -1826,17 +2017,19 @@ pub trait State {
     /// holds (26; record 0114; rule core.41).
     fn allocate_id(&self, branch: &str) -> Result<u64>;
 
-    /// 69: the repository's results log, one JSON document per line, as
-    /// `branch`'s gate reads it: the branch is the one whose gate, session
-    /// run or verdict reads the log, and a profile that reads signed runs
-    /// verifies them with the signers and keys that branch's own policy
-    /// names, never another branch's (78; rule core.22).
-    fn results(&self, branch: &str) -> Result<Vec<u8>>;
+    /// 69 (design D17): the lines of the repository's results log that
+    /// `ask` names, one JSON document per line, as `branch`'s gate reads
+    /// them: the branch is the one whose gate, session run or verdict
+    /// reads them, and a profile that reads signed runs verifies them with
+    /// the signers and keys that branch's own policy names, never another
+    /// branch's (78; rule core.22). A line matching any of what `ask`
+    /// names is answered; nothing else is.
+    fn results_for(&self, branch: &str, ask: &ResultAsk) -> Result<Vec<u8>>;
 
     /// 78, 87: whether `branch`'s gate at `at`, the revision a round read
     /// it at, would count a run this host signs: the host signs as a signer
     /// the branch's own policy there names, with a key that policy lists
-    /// for it, as [`State::results`] verifies the branch's runs. The
+    /// for it, as [`State::results_for`] verifies the branch's runs. The
     /// signer's name alone, which another branch may give another key, is
     /// not enough (rule core.22). A profile that verifies no signed run
     /// leaves the name to the gate.
@@ -2003,5 +2196,29 @@ mod tests {
         assert!(!from("bolt/x", None).by_name());
         assert!(!from("pull/7", Some("bolt/x")).by_name());
         assert!(!from("unit/a", Some("bolt/x")).by_name());
+    }
+
+    /// 69 (design D17): a line matching any of what is asked is answered
+    /// whole, and nothing else; an ask for every line answers the log.
+    #[test]
+    fn a_result_ask_answers_the_lines_it_names() {
+        let log = b"{\"task\":\"a:test\",\"hash\":\"h1\",\"combination\":\"c1\"}\n\
+                    {\"task\":\"b:test\",\"hash\":\"h2\",\"combination\":\"c2\"}\n\
+                    {\"task\":\"c:test\",\"hash\":\"h3\",\"combination\":\"c3\"}\n\
+                    not a line\n";
+        let lines = |ask: &ResultAsk| String::from_utf8(ask.answer(log)).unwrap();
+        assert_eq!(lines(&ResultAsk::default()), "");
+        let by_key = lines(&ResultAsk::default().key("a:test", "h1"));
+        assert!(
+            by_key.contains("a:test") && by_key.lines().count() == 1,
+            "{by_key}"
+        );
+        assert_eq!(lines(&ResultAsk::default().key("a:test", "h2")), "");
+        let any = ResultAsk::default()
+            .combination(&Rev("c2".into()))
+            .task("c:test");
+        assert_eq!(lines(&any).lines().count(), 2, "{}", lines(&any));
+        assert_eq!(ResultAsk::every().answer(log), log.to_vec());
+        assert!(ResultAsk::default().is_empty() && !ResultAsk::every().is_empty());
     }
 }

@@ -184,14 +184,6 @@ pub enum Requester {
     Session(String),
     Planner,
     Operator,
-    /// A host's intake handing its own pull requests' submissions over to
-    /// `to`, the host that takes the branch's pull requests in, in
-    /// `words` (137). Its withdrawal's record names `to`, which is what
-    /// tells it a hand-over (120; record 0088 as amended).
-    HandOver {
-        to: String,
-        words: String,
-    },
 }
 
 impl Requester {
@@ -200,23 +192,13 @@ impl Requester {
             Requester::Session(a) => a.clone(),
             Requester::Planner => "planner".into(),
             Requester::Operator => "operator".into(),
-            Requester::HandOver { words, .. } => words.clone(),
-        }
-    }
-
-    /// 120, 137: the host a hand-over's withdrawal names; `None` for any
-    /// other withdrawal.
-    fn handed_over_to(&self) -> Option<String> {
-        match self {
-            Requester::HandOver { to, .. } => Some(to.clone()),
-            _ => None,
         }
     }
 
     fn may_change(&self, sub: &Submission) -> bool {
         match self {
             Requester::Session(a) => *a == sub.from.agent,
-            Requester::Planner | Requester::Operator | Requester::HandOver { .. } => true,
+            Requester::Planner | Requester::Operator => true,
         }
     }
 }
@@ -445,6 +427,10 @@ pub struct Status {
     /// 133: this host's refusal of the branch's remote, while it stands
     /// (record 0061).
     pub refused: Option<Refused>,
+    /// 133 (design D27): this host's refusal of the branch's intake, its
+    /// pull requests on the forge, while it stands: what its latest pass
+    /// could not ask, since when and for how many passes.
+    pub intake_refused: Option<Refused>,
     /// 148: every host's causes of writes the protection refused that
     /// stand now, newest last refusal first (design D5).
     pub refused_writes: Vec<crate::records::RefusedWrite>,
@@ -852,16 +838,21 @@ impl Sluice<'_> {
         branch: &str,
         after: &[u64],
     ) -> Result<Result<Forecasted, SubmitRefusal>> {
-        let Some(head) = self.seams.branch.read(from)? else {
+        let Some(head) = self.branch_read(from)? else {
+            if self.held {
+                return Err(crate::Unheld::Branch(from.into()).into());
+            }
             return Ok(Err(SubmitRefusal::NoHead(from.into())));
         };
         self.forecast_head(&head, from, branch, after)
     }
 
     /// 64, 65, 47a: the forecast of `head` on the branch as a round reads
-    /// it. `own` is the work the head is, as its driver names it:
-    /// submissions of it are left out, as a submission of it would
-    /// withdraw them (67).
+    /// it, or, where this sluice reads held, as the host holds it since the
+    /// host process's last reading, with nothing fetched: what the host
+    /// lacks of it is then [`crate::Unheld`] (129; design D16). `own` is
+    /// the work the head is, as its driver names it: submissions of it are
+    /// left out, as a submission of it would withdraw them (67).
     pub fn forecast_head(
         &self,
         head: &Rev,
@@ -869,7 +860,10 @@ impl Sluice<'_> {
         branch: &str,
         after: &[u64],
     ) -> Result<Result<Forecasted, SubmitRefusal>> {
-        let Some(tip) = self.seams.branch.read(branch)? else {
+        let Some(tip) = self.branch_read(branch)? else {
+            if self.held {
+                return Err(crate::Unheld::Branch(branch.into()).into());
+            }
             return Ok(Err(SubmitRefusal::NoBranch));
         };
         if self.rules_at(branch, &tip)?.is_none() {
@@ -940,6 +934,10 @@ impl Sluice<'_> {
         let line = self.read_line(branch)?;
         let queue = Queue::from_line(&line, tip);
         if self.lacks(&queue)? {
+            // 129 (design D16): a forecast read held fetches nothing.
+            if self.held {
+                return Err(crate::Unheld::Work(branch.into()).into());
+            }
             self.seams.state.fetch_heads(branch)?;
             self.seams.state.fetch_candidates(branch)?;
         }
@@ -1194,14 +1192,14 @@ impl Sluice<'_> {
             s.withdrawn = Some(Withdrawal {
                 by: by.word(),
                 at: now.clone(),
-                handed_over_to: by.handed_over_to(),
+                handed_over_to: None,
             });
             l.log(
                 &now,
                 Event::Withdrawn {
                     id,
                     by: by.word(),
-                    handed_over_to: by.handed_over_to(),
+                    handed_over_to: None,
                 },
             );
             Ok(Ok(Withdrew::Now))
@@ -1518,7 +1516,7 @@ impl Sluice<'_> {
     /// said to be gone: by that read where it was made, and otherwise by
     /// the revision the host holds of it, with no fetch (record 0091).
     pub fn status(&self, branch: &str) -> Result<Status> {
-        let snapshot = self.seams.state.read(branch)?;
+        let snapshot = self.state_read(branch)?;
         let found = snapshot.version > 0 || !snapshot.files.is_empty();
         let kept_out = kept_out(&Line::read_log(&snapshot)?);
         let line = Line::load(branch, snapshot)?;
@@ -1532,7 +1530,7 @@ impl Sluice<'_> {
                 (Some(base.clone()), held, gone)
             }
             None => {
-                let read = self.seams.branch.read(branch)?;
+                let read = self.branch_read(branch)?;
                 let gone = read.is_none();
                 (read, self.seams.branch.held(branch)?, gone)
             }
@@ -1550,6 +1548,19 @@ impl Sluice<'_> {
         warnings.extend(kept_out.iter().map(|t| kept_out_warning(branch, t)));
         let refused = self
             .refusal(branch)?
+            .filter(|r| r.ended.is_none())
+            .and_then(|r| {
+                let latest = r.latest()?.clone();
+                Some(Refused {
+                    remote: r.remote,
+                    asked: latest.asked,
+                    said: latest.said,
+                    since: r.since,
+                    rounds: r.rounds,
+                })
+            });
+        let intake_refused = self
+            .intake_refusal(branch)?
             .filter(|r| r.ended.is_none())
             .and_then(|r| {
                 let latest = r.latest()?.clone();
@@ -1595,6 +1606,7 @@ impl Sluice<'_> {
             warnings,
             stale: self.seams.state.stale(branch).map(|r| r.remote),
             refused,
+            intake_refused,
         })
     }
 }
@@ -2033,13 +2045,15 @@ mod tests {
             Ok(id)
         }
 
-        fn results(&self, branch: &str) -> Result<Vec<u8>> {
-            Ok(self
-                .results
-                .borrow()
-                .get(branch)
-                .cloned()
-                .unwrap_or_default())
+        fn results_for(&self, branch: &str, ask: &sluice_seams::ResultAsk) -> Result<Vec<u8>> {
+            Ok(ask.answer(
+                &self
+                    .results
+                    .borrow()
+                    .get(branch)
+                    .cloned()
+                    .unwrap_or_default(),
+            ))
         }
 
         fn record_results(&self, _: &[u8]) -> Result<()> {
@@ -2147,7 +2161,11 @@ mod tests {
     }
 
     impl Tests for Host {
-        fn start(&self, _: &RunRequest) -> Result<RunHandle> {
+        fn start(&self, _: &RunRequest, _: sluice_seams::Part) -> Result<RunHandle> {
+            unreachable!("a submit runs nothing")
+        }
+
+        fn hold(&self, _: sluice_seams::RunKind) -> Result<Option<sluice_seams::Part>> {
             unreachable!("a submit runs nothing")
         }
 
