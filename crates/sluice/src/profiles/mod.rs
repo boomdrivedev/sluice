@@ -441,6 +441,10 @@ fn operator_token() -> Option<String> {
 }
 
 impl crate::exec::Host for Bound {
+    fn host_process(&self) -> &dyn crate::host_process::HostProcess {
+        &*self.host_process
+    }
+
     fn reserved(&self) -> usize {
         self.tests.instance().reserved
     }

@@ -28,6 +28,11 @@ use crate::{Pause, Pushers, CONFLICT, FAILED, LANDED, STOPPED};
 pub trait Host {
     /// The part of the bound session runs never use (91).
     fn reserved(&self) -> usize;
+
+    /// 135 (design D2, D14): sluice's host process, as this command asks
+    /// it: through its socket, or, in the host process's own tasks and the
+    /// tests' host, in place.
+    fn host_process(&self) -> &dyn crate::host_process::HostProcess;
     /// 72 to 74: this host among the hosts of a branch whose records are
     /// on its remote: its name and the lease it waits out.
     fn peer(&self) -> sluice_core::Peer {

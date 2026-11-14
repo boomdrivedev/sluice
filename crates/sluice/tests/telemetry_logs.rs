@@ -129,10 +129,7 @@ fn sluice(f: &Fakes, pulls: &dyn PullRequests, args: &[&str]) -> i32 {
     run(
         cli,
         f.seams(),
-        &support::FakeHost {
-            world: f.world.clone(),
-            reserved: 0,
-        },
+        &support::FakeHost::new(f.world.clone(), 0),
         &(),
         pulls,
         &f.clock,

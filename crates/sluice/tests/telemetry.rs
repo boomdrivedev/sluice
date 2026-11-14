@@ -128,10 +128,7 @@ fn sluice(f: &Fakes, seen: &Seen, args: &[&str]) -> anyhow::Result<i32> {
         run(
             cli,
             f.seams(),
-            &support::FakeHost {
-                world: f.world.clone(),
-                reserved: 0,
-            },
+            &support::FakeHost::new(f.world.clone(), 0),
             &(),
             &(),
             &f.clock,

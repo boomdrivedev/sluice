@@ -227,6 +227,141 @@ impl Lent {
     }
 }
 
+/// Tell the host process the repository `here` binds has work, starting
+/// it where none answers (135; design D15). One that cannot be reached is
+/// said on stderr, and the command's own work stands: the next command of
+/// sluice's that finds work in play starts it.
+pub fn serve(here: &Here<'_, '_>) {
+    if let Err(e) = here.host.host_process().serve(here) {
+        crate::telemetry::warn(&format!(
+            "sluice: warning: sluice's host process could not be reached, so nothing moves the queue until a command of sluice's starts it: {e:#}"
+        ));
+    }
+}
+
+/// List the repository `here` binds in the host's index where it has
+/// sluice (135; design D4). One that cannot be listed is passed over.
+pub fn note(here: &Here<'_, '_>) {
+    let _ = here.host.host_process().note(here);
+}
+
+/// 135 (design D14): a command that moves no queue itself, `sluice
+/// status`, `sluice overview` or the home view, reaches the host process
+/// where one answers; where none answers, it reads whether anything is in
+/// play as an idle tick reads it, with no process started, and starts one
+/// only where something is, so a host process that crashed or slept is
+/// started again by the next command of sluice's. What it could not reach
+/// is said on stderr, and the command's answer stands. The process that
+/// answers, with its room, where one does.
+pub fn reach_if_in_play(here: &Here<'_, '_>) -> Option<(Named, RoomView)> {
+    note(here);
+    let process = here.host.host_process();
+    match process.room(here) {
+        Ok(Some(answered)) => return Some(answered),
+        Ok(None) => {}
+        Err(e) => {
+            crate::telemetry::warn(&format!("sluice: warning: {e:#}"));
+            return None;
+        }
+    }
+    if !super::pass::in_play(here.s) {
+        return None;
+    }
+    if let Err(e) = process.reach(here) {
+        crate::telemetry::warn(&format!(
+            "sluice: warning: sluice's host process could not be started, so nothing moves the queue until a command of sluice's starts it: {e:#}"
+        ));
+        return None;
+    }
+    process.room(here).ok().flatten()
+}
+
+/// A watch's, a wait's or `sluice run`'s part in following the host
+/// process (129; design D7, D9, D11): it asks a pass at each of its ticks
+/// where passes are taken only when asked, keeps a follow open otherwise,
+/// and reaches the process again at the tick after it ended, starting it
+/// where none answers.
+pub struct Follower<'a> {
+    process: &'a dyn HostProcess,
+    kind: FollowKind,
+    following: Option<Box<dyn Following + 'a>>,
+}
+
+impl<'a> Follower<'a> {
+    pub fn new(here: &Here<'a, '_>, kind: FollowKind) -> Follower<'a> {
+        let mut f = Follower {
+            process: here.host.host_process(),
+            kind,
+            following: None,
+        };
+        f.reach(here);
+        f
+    }
+
+    /// Follow again where it follows nothing: the process ended under it,
+    /// or could not be reached at its last tick.
+    fn reach(&mut self, here: &Here<'a, '_>) {
+        if self.following.is_some() {
+            return;
+        }
+        match self.process.follow(here, self.kind) {
+            Ok(f) => self.following = Some(f),
+            Err(e) => crate::telemetry::warn(&format!(
+                "sluice: warning: sluice's host process could not be reached; tried again at the next tick: {e:#}"
+            )),
+        }
+    }
+
+    /// One tick: a pass asked first where passes are taken only when
+    /// asked; the reports of the passes since the last tick.
+    pub fn tick(&mut self, here: &Here<'a, '_>) -> Vec<Report> {
+        let mut reports = Vec::new();
+        if self.process.asked_only() {
+            match self.process.pass(here) {
+                Ok(r) => reports.push(r),
+                Err(e) => crate::telemetry::warn(&format!("sluice: warning: {e:#}")),
+            }
+        }
+        self.reach(here);
+        if let Some(f) = self.following.as_mut() {
+            loop {
+                match f.next(Duration::from_millis(1)) {
+                    Ok(Some(r)) => reports.push(r),
+                    Ok(None) => break,
+                    Err(_) => {
+                        self.following = None;
+                        break;
+                    }
+                }
+            }
+        }
+        reports
+    }
+
+    /// The next pass's report, waiting up to `wait` for one, a pass asked
+    /// where passes are taken only when asked: as `sluice run` prints each.
+    pub fn next(&mut self, here: &Here<'a, '_>, wait: Duration) -> Option<Report> {
+        if self.process.asked_only() {
+            return match self.process.pass(here) {
+                Ok(r) => Some(r),
+                Err(e) => {
+                    crate::telemetry::warn(&format!("sluice: warning: {e:#}"));
+                    None
+                }
+            };
+        }
+        self.reach(here);
+        let f = self.following.as_mut()?;
+        match f.next(wait) {
+            Ok(r) => r,
+            Err(_) => {
+                self.following = None;
+                None
+            }
+        }
+    }
+}
+
 /// The host process as its own repositories' tasks ask it: its room, read
 /// in place, and nothing else, since nothing in it asks its own socket.
 pub struct Inside {
