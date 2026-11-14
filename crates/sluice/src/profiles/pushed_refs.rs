@@ -703,9 +703,15 @@ pub struct Mark {
     pub sluice: String,
 }
 
-/// Which process of its host holds an intake mark, as the core names it
-/// for status and a wait (design D2).
-pub use crate::Holder;
+/// 137: which process of its host holds an intake mark.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Holder {
+    /// The host's `sluice run`, the holder of its driver's lock.
+    Driver,
+    /// A `sluice wait` or a waiting submit.
+    Wait,
+}
 
 /// A git call to the remote under the retry policy: its last try's output,
 /// what each credential the remote refused was, and how the last try stood

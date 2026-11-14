@@ -341,7 +341,8 @@ pub struct Pulls {
 /// mark's commit they were read at.
 struct KeptAcross {
     modified: std::time::SystemTime,
-    mark: Option<Rev>,
+    /// The host the branch's records named as keeping it (design D25).
+    lead: Option<String>,
     across: Option<Across>,
 }
 
@@ -3008,6 +3009,15 @@ fn once<'a>(seams: Seams<'a>, memo: &'a ReadOnce<'a>) -> Seams<'a> {
     }
 }
 
+/// 137 (design D25): `rows` with `lead`, the host that keeps their
+/// branch; `None` where there are none.
+fn across_of(lead: Option<String>, rows: Vec<AcrossRow>) -> Option<Across> {
+    (!rows.is_empty()).then(|| Across {
+        taken_in_by: lead.map(|host| TakenInBy { host }),
+        pull_requests: rows,
+    })
+}
+
 impl crate::PullRequests for Pulls {
     fn request_of(&self, place: &str) -> Option<u64> {
         number(place)
@@ -3019,9 +3029,8 @@ impl crate::PullRequests for Pulls {
 
     fn across(&self, seams: Seams<'_>, clock: &dyn Clock, branch: &str) -> Result<Option<Across>> {
         let s = Sluice::new(seams, clock);
-        // 26, 80: where the branch's records are on its remote, every host
-        // reads the request's submission from them, as its queue shows it.
-        let Some(t) = self.target(&s, branch)?.filter(|t| !t.signed) else {
+        // Design D25: a branch on its remote that this host does not keep.
+        let Some((t, lead)) = self.away_from(&s, branch)? else {
             return Ok(None);
         };
         let repo = &t.repo;
@@ -3052,7 +3061,7 @@ impl crate::PullRequests for Pulls {
         let (rows, gone) = self.across_rows(&s, branch, follows, read)?;
         // Design D3: one read merged or closed is said once, here.
         self.unfollow(repo, branch, &gone);
-        Ok(self.across_of(&t, branch, rows))
+        Ok(across_of(lead, rows))
     }
 
     fn kept_across(
@@ -3064,30 +3073,31 @@ impl crate::PullRequests for Pulls {
         // 129: the branch's policy read from git once while its revision
         // stands, across the reader's ticks.
         let s = Sluice::new(seams, clock).keeping(&self.policies);
-        let target = self.target(&s, branch)?.filter(|t| !t.signed);
-        let Some((t, modified)) = target.and_then(|t| {
+        // Design D25: a branch on its remote that this host does not keep,
+        // and the lead its records name, read with no process: the rows are
+        // read again only once the kept follows or the lead moved (rule
+        // core.31).
+        let away = self.away_from(&s, branch)?;
+        let Some(((t, lead), modified)) = away.and_then(|(t, lead)| {
             let modified = self.kept.follows_modified(&t.repo, branch)?;
-            Some((t, modified))
+            Some(((t, lead), modified))
         }) else {
             self.kept_across.borrow_mut().remove(branch);
             return Ok(None);
         };
-        // The mark's commit, read with no process: what it says is read
-        // again only once it moved (rule core.31).
-        let mark = self.pushed(&t.remote)?.intake_mark_at(branch)?;
         if let Some(k) = self.kept_across.borrow().get(branch) {
-            if k.modified == modified && k.mark == mark {
+            if k.modified == modified && k.lead == lead {
                 return Ok(k.across.clone());
             }
         }
         let follows = self.kept.follows(&t.repo, branch).requests;
         let (rows, _) = self.across_rows(&s, branch, follows, |_, kept| kept)?;
-        let across = self.across_of(&t, branch, rows);
+        let across = across_of(lead.clone(), rows);
         self.kept_across.borrow_mut().insert(
             branch.to_string(),
             KeptAcross {
                 modified,
-                mark,
+                lead,
                 across: across.clone(),
             },
         );
@@ -3673,13 +3683,20 @@ impl Pulls {
         Ok((rows, gone))
     }
 
-    /// 137, design D2: `rows` with the host `t`'s intake mark names for
-    /// `branch`; `None` where there are none.
-    fn across_of(&self, t: &Target, branch: &str, rows: Vec<AcrossRow>) -> Option<Across> {
-        (!rows.is_empty()).then(|| Across {
-            taken_in_by: self.taken_in_by(&t.remote, branch),
-            pull_requests: rows,
-        })
+    /// 72, 137 (design D25): `branch`'s pull requests and where they are,
+    /// where its records are on its remote and this host does not keep it,
+    /// with the host its records name as keeping it, `None` where none
+    /// does yet; `None` where the branch takes none, its records are each
+    /// host's own, or this host keeps it.
+    fn away_from(&self, s: &Sluice<'_>, branch: &str) -> Result<Option<(Target, Option<String>)>> {
+        let Some(t) = self.target(s, branch)?.filter(|t| t.signed) else {
+            return Ok(None);
+        };
+        let lead = s.lead_of(branch)?;
+        if lead.as_deref() == Some(self.peer.name.as_str()) {
+            return Ok(None);
+        }
+        Ok(Some((t, lead)))
     }
 
     /// 137, design D3: follow `numbers` into `branch` no longer, writing
@@ -3706,10 +3723,7 @@ impl Pulls {
     /// mark stands, or where it could not be read, which is warned of.
     fn taken_in_by(&self, remote: &str, branch: &str) -> Option<TakenInBy> {
         match self.pushed(remote).and_then(|p| p.intake_mark(branch)) {
-            Ok(mark) => mark.map(|(_, m)| TakenInBy {
-                host: m.host,
-                holder: m.holder,
-            }),
+            Ok(mark) => mark.map(|(_, m)| TakenInBy { host: m.host }),
             Err(e) => {
                 crate::telemetry::warn(&format!("sluice: warning: {e:#}"));
                 None

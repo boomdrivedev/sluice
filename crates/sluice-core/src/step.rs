@@ -289,6 +289,13 @@ impl Sluice<'_> {
         Ok(Step::Stepped)
     }
 
+    /// 72, 137 (design D25): the instance `branch`'s records name as
+    /// keeping it, as read, taking nothing; `None` where none does yet, or
+    /// where its records are this host's own.
+    pub fn lead_of(&self, branch: &str) -> Result<Option<String>> {
+        Ok(self.read_line(branch)?.doc.lead)
+    }
+
     /// 72, 73: whether this instance keeps `branch`, taking it when no one
     /// does, or when the instance that does has written nothing for the
     /// lease by this host's own observation and there is work to do.
