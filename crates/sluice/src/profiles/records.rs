@@ -436,9 +436,12 @@ impl Records {
     }
 
     /// Record 0122 (design D2): `branch`'s home document on `remote`, as
-    /// this host last fetched it, with no fetch.
+    /// this host last fetched it, with no fetch and with no profile of the
+    /// remote opened: a remote opened is one every pass asks for the hosts'
+    /// signs of life and reads results from, which a branch whose home is
+    /// this host's own files never needs (129; rule core.31).
     fn held_home(&self, remote: &str, branch: &str) -> Result<Option<HomeDoc>> {
-        self.open(remote)?.held_home(branch)
+        super::remote_refs::fetched_home(self.branches.local(), remote, branch)
     }
 
     /// The remotes that may hold a branch's state: those the default

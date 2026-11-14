@@ -40,6 +40,7 @@ use sluice_seams::{
 };
 
 use super::local_files::LocalFiles;
+use super::local_refs::LocalRefs;
 use super::pushed_refs::{command, Pushed, PushedRefs};
 use crate::signing::dsse::Envelope;
 use crate::signing::ssh;
@@ -241,18 +242,7 @@ impl RemoteRefs {
     /// without touching what a write is leased on; `None` where the state
     /// fetched holds none, or none was fetched.
     pub fn held_home(&self, branch: &str) -> Result<Option<HomeDoc>> {
-        let name = state_ref(branch)?;
-        let Some(at) = self.pushed.read_ref(&self.fetched(&name))? else {
-            return Ok(None);
-        };
-        let entries = self.pushed.local().tree_entries(at.as_str())?;
-        let Some((_, oid)) = entries.iter().find(|(p, _)| p == HOME_FILE) else {
-            return Ok(None);
-        };
-        let bytes = self.pushed.local().blob(oid)?;
-        Ok(Some(serde_json::from_slice(&bytes).with_context(|| {
-            format!("reading {branch}'s {HOME_FILE} on {}", self.remote())
-        })?))
+        fetched_home(self.pushed.local(), self.remote(), branch)
     }
 
     /// The results each signer in `signers` signed, each verified with the
@@ -697,6 +687,32 @@ pub(crate) fn ask(pushed: &PushedRefs) -> Result<()> {
     let specs = [&state, &hosts, &branches, &heads, &combinations, &runs].map(String::as_str);
     pushed.fetch_specs("refs/sluice/*", &specs, &["--prune"])?;
     Ok(())
+}
+
+/// Record 0122 (design D2): `branch`'s home document in its state on
+/// `remote` as this host last fetched it into `local`, read with no
+/// process and with no profile of the remote opened, so a branch whose
+/// home is this host's own files asks its remote nothing for it (129;
+/// rule core.31); `None` where the state fetched holds none, or none was
+/// fetched.
+pub(crate) fn fetched_home(
+    local: &LocalRefs,
+    remote: &str,
+    branch: &str,
+) -> Result<Option<HomeDoc>> {
+    let name = state_ref(branch)?;
+    let rest = name.strip_prefix("refs/sluice/").unwrap_or(&name);
+    let Some(at) = local.read_ref(&format!("refs/sluice-fetched/{remote}/{rest}"))? else {
+        return Ok(None);
+    };
+    let entries = local.tree_entries(at.as_str())?;
+    let Some((_, oid)) = entries.iter().find(|(p, _)| p == HOME_FILE) else {
+        return Ok(None);
+    };
+    let bytes = local.blob(oid)?;
+    Ok(Some(serde_json::from_slice(&bytes).with_context(|| {
+        format!("reading {branch}'s {HOME_FILE} on {remote}")
+    })?))
 }
 
 /// 129: the branches whose state this host fetched from `pushed`'s remote,
