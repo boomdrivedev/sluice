@@ -292,6 +292,77 @@ fn a_crash_mid_write_reads_whole_and_finishes_once() {
     }
 }
 
+/// Record 0122, 63 (design D1): a branch's `home.json` is one of its
+/// records, read among them and written with them in one write, a write a
+/// crash left part done read whole with it.
+#[test]
+fn a_branchs_home_is_read_and_written_with_its_records() {
+    use sluice_core::line::Line;
+    use sluice_core::records::{HomeDoc, HomeState, Moving, HERE, HOME_FILE};
+    const SUBMISSION: &str = "{\"schema\":\"sluice/submission@1\",\"id\":1,\"branch\":\"bolt/x\",\
+        \"head\":\"h1\",\"from\":{\"agent\":\"a\",\"worktree\":\"unit/a\"},\"submitted\":\"t\",\
+        \"after\":[],\"priority\":0,\"attempt\":1,\"state\":\"queued\"}\n";
+    let dir = Scratch::new("home");
+    let s = LocalFiles::new(dir.path());
+    let mut home = HomeDoc::open(HERE, Some(sluice_seams::Rev::new("c43609b")));
+    let doc = String::from_utf8(sluice_core::records::to_document(&home)).unwrap();
+    write(
+        &s,
+        "bolt/x",
+        changes(
+            &[
+                ("branch.json", "{\"schema\":\"sluice/branch@1\",\"branch\":\"bolt/x\",\"log\":\"sluice/log@1\"}\n"),
+                (HOME_FILE, &doc),
+                ("submissions/1.json", SUBMISSION),
+            ],
+            &[],
+        ),
+    );
+    let read = s.read("bolt/x").unwrap();
+    assert_eq!(read.files[HOME_FILE], doc.as_bytes());
+    let mut line = Line::load("bolt/x", read).unwrap();
+    assert_eq!(line.home.as_ref(), Some(&home));
+
+    // A move written with the rest, in one write.
+    home.state = HomeState::Moving;
+    home.moving = Some(Moving {
+        to: "origin".into(),
+        chosen_at: None,
+        since: "2026-11-14T10:00:00Z".into(),
+    });
+    line.home = Some(home.clone());
+    line.doc.window = 2;
+    let c = line.changes();
+    assert!(c.put.contains_key("branch.json") && c.put.contains_key(HOME_FILE));
+    let _g = s.wait_lock("bolt/x").unwrap();
+    assert_eq!(
+        s.write("bolt/x", line.version, c).unwrap(),
+        Written::Written(2)
+    );
+    drop(_g);
+    let moved = Line::load("bolt/x", s.read("bolt/x").unwrap()).unwrap();
+    assert_eq!(moved.home, Some(home.clone()));
+    assert_eq!(moved.doc.window, 2);
+
+    // Stopped after the write was pending: read whole, home and all.
+    let branch = dir.path().join("sluice/bolt/x");
+    let closed = doc.replace("\"open\"", "\"closed\"");
+    let pending = serde_json::json!({
+        "version": 3,
+        "put": { HOME_FILE: closed, "branch.json": "{\"schema\":\"sluice/branch@1\",\"branch\":\"bolt/x\",\"log\":\"sluice/log@1\",\"window\":3}\n" },
+        "append": {},
+        "lengths": {},
+    });
+    std::fs::write(branch.join(".pending.json"), pending.to_string()).unwrap();
+    let read = s.read("bolt/x").unwrap();
+    assert_eq!(read.version, 3);
+    assert_eq!(read.files[HOME_FILE], closed.as_bytes());
+    assert_eq!(
+        Line::load("bolt/x", read).unwrap().home.map(|h| h.state),
+        Some(HomeState::Closed)
+    );
+}
+
 /// 5, 53: the bytes read back are the fake store's bytes for the same
 /// writes, so a reader of one profile's records reads the other's.
 #[test]
@@ -303,6 +374,7 @@ fn the_records_are_the_fake_stores_records() {
         changes(
             &[
                 ("branch.json", "{\"schema\":\"sluice/branch@1\"}\n"),
+                ("home.json", "{\"schema\":\"sluice/home@1\"}\n"),
                 ("submissions/1.json", "{\"id\":1}\n"),
             ],
             &[("log.jsonl", "{\"event\":\"submitted\"}\n")],
