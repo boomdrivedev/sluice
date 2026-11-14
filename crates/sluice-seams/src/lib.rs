@@ -198,7 +198,7 @@ pub struct LastResult {
     pub at: String,
     /// The head the run was given.
     pub head: Rev,
-    pub kind: RunKind,
+    pub kind: SessionRunKind,
     pub outcome: RunOutcome,
     /// Its results are under their keys (92): only a run of the checks in
     /// a place holding exactly its head that did not hit its time limit.
@@ -218,7 +218,7 @@ pub struct LastResult {
 /// What a session run ran (89).
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
-pub enum RunKind {
+pub enum SessionRunKind {
     Checks,
     Command,
 }
@@ -870,13 +870,25 @@ pub trait Tests {
     /// limit and the request's limits (32, 66; rule core.10). 84: a limit
     /// the executor cannot hold is an error naming it, and nothing runs.
     ///
-    /// 71: before it runs anything, the toolchain or the runner's setup
-    /// among it, it admits the run against the host's count of running
-    /// checks, every repository's, in one step under the host's lock; at
-    /// the host's bound it fails with [`AtBound`] and nothing runs. A
-    /// session's or a preview's run is admitted only under the bound less
-    /// the part kept for submissions' runs (91, 102).
-    fn start(&self, request: &RunRequest) -> Result<RunHandle>;
+    /// 71 (rule core.49; record 0087): the run takes `part`, its room in
+    /// the host's bound that [`Tests::hold`] gave, and keeps it until it
+    /// ends; a start that fails gives it back as the part is dropped. A
+    /// part the host's room no longer honours is refused with [`AtBound`]
+    /// and nothing runs.
+    fn start(&self, request: &RunRequest, part: Part) -> Result<RunHandle>;
+
+    /// 71, 150 (rule core.49; records 0087, 0123): a run's room in the
+    /// host's bound, counted and held in one step against every
+    /// repository's runs, before the decision to start the run is written:
+    /// a combination's where a run of the bound is free, owed to no waiting
+    /// session and to no repository with fewer runs under test; a
+    /// session's or a preview's where a run of the bound less the part kept
+    /// for combinations is free and owed to no one. `None` where there is
+    /// none: the run's wait is recorded for the host, and nothing is held.
+    /// The part is held until [`Tests::start`] takes it, or is dropped,
+    /// which gives it back at once. The profile names its own repository
+    /// to the host's room, so the core names none.
+    fn hold(&self, kind: RunKind) -> Result<Option<Part>>;
 
     /// 37: a started run's progress; once finished, every check's key,
     /// outcome, executor and whether it was replayed.
@@ -1128,6 +1140,59 @@ impl Running {
     /// Every check running on the host.
     pub fn total(&self) -> usize {
         self.queue + self.sessions
+    }
+}
+
+/// What a part of the host's bound is held for (71, 150; record 0087).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum RunKind {
+    /// A submission's combination.
+    Queue,
+    /// A session's run (`sluice exec`) or a preview's command.
+    Session,
+}
+
+/// 71 (rule core.49; record 0087): a run's room in the host's bound, held
+/// from the count that chose it to its start. It is opaque to the core:
+/// the check profile that held it reads what it holds back when the run
+/// starts. Dropped unstarted, by a start that failed, a decision whose
+/// write was refused or a round that stopped, it gives its room back at
+/// once, whatever it holds doing so as it drops.
+pub struct Part {
+    kind: RunKind,
+    held: Box<dyn std::any::Any>,
+}
+
+impl Part {
+    /// A part of `kind`, holding `held`, whose drop gives the room back.
+    pub fn new(kind: RunKind, held: impl std::any::Any) -> Part {
+        Part {
+            kind,
+            held: Box::new(held),
+        }
+    }
+
+    pub fn kind(&self) -> RunKind {
+        self.kind
+    }
+
+    /// What the part holds, as the profile that held it made it; the part
+    /// back where it holds something else.
+    pub fn take<T: 'static>(self) -> std::result::Result<T, Part> {
+        match self.held.downcast::<T>() {
+            Ok(held) => Ok(*held),
+            Err(held) => Err(Part {
+                kind: self.kind,
+                held,
+            }),
+        }
+    }
+}
+
+impl fmt::Debug for Part {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("Part").field("kind", &self.kind).finish()
     }
 }
 

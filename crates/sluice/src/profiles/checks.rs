@@ -63,9 +63,9 @@ use anyhow::{anyhow, bail, Context as _, Result};
 use serde::{Deserialize, Serialize};
 use sluice_seams::{
     log_tail, AtBound, Enforced, Equip, EquipStep, Equipped, HostRun, KeptOutTask, Limits, Network,
-    NotRun, Outcome, Place, Progress, Proof, Reading, Reads, Refusals, Rev, RunHandle, RunReport,
-    RunRequest, Running, Setting, Settings, Source, TaskLog, TaskProgress, TaskResult, Tests,
-    Through,
+    NotRun, Outcome, Part, Place, Progress, Proof, Reading, Reads, Refusals, Rev, RunHandle,
+    RunKind, RunReport, RunRequest, Running, Setting, Settings, Source, TaskLog, TaskProgress,
+    TaskResult, Tests, Through,
 };
 
 use super::moon::{self, Moon};
@@ -360,35 +360,38 @@ impl Checks {
         &self.instance
     }
 
-    /// 71: admit the run `name` of `request` against the host's count:
-    /// a session's or a preview's under the bound less the reserve, any
-    /// other under the bound. `None` at the bound.
-    fn admit(
-        &self,
-        request: &RunRequest,
-        name: &str,
-        session: bool,
-    ) -> Result<Option<host_count::Admission>> {
-        let kind = if session || request.place.name.starts_with(super::places::PREVIEW) {
-            host_count::Kind::Session
-        } else {
-            host_count::Kind::Queue
-        };
-        let limit = match kind {
-            host_count::Kind::Queue => self.instance.bound,
-            host_count::Kind::Session => self.instance.bound.saturating_sub(self.instance.reserved),
+    /// 71 (rule core.49; record 0087): a part of `kind` through the
+    /// host's registry: a combination's under the bound, a session's or a
+    /// preview's under the bound less the reserve (91, 102), admitted with
+    /// no run directory yet, which its start names. `None` at the bound.
+    fn admit(&self, kind: RunKind) -> Result<Option<Part>> {
+        let (entry_kind, limit) = match kind {
+            RunKind::Queue => (host_count::Kind::Queue, self.instance.bound),
+            RunKind::Session => (
+                host_count::Kind::Session,
+                self.instance.bound.saturating_sub(self.instance.reserved),
+            ),
         };
         let entry = host_count::Entry {
-            kind,
+            kind: entry_kind,
             repository: self.common.clone(),
-            place: request.place.name.clone(),
-            run_dir: self.runs.dir(name),
+            place: String::new(),
+            run_dir: PathBuf::new(),
             pid: std::process::id(),
             admitted: chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
         };
-        self.host_count()?.admit(&entry, limit)
+        Ok(self
+            .host_count()?
+            .admit(&entry, limit)?
+            .map(|a| Part::new(kind, Holding(a))))
     }
 }
+
+/// A part of the host's bound held through its registry (71; record
+/// 0087): its entry names its run directory once the run begins, and its
+/// hold keeps it counted until the run's supervisor holds that directory.
+/// Dropped unstarted, its entry goes.
+struct Holding(host_count::Admission);
 
 /// The executors this host has.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -1737,7 +1740,11 @@ pub fn hostname() -> String {
 }
 
 impl Tests for Checks {
-    fn start(&self, request: &RunRequest) -> Result<RunHandle> {
+    fn start(&self, request: &RunRequest, part: Part) -> Result<RunHandle> {
+        // 71 (rule core.49): the room its part holds, or none it honours.
+        let Ok(Holding(mut admission)) = part.take::<Holding>() else {
+            return Err(AtBound.into());
+        };
         let runner = text(&request.tests, "runner")?
             .ok_or_else(|| anyhow!("[tests] names no runner: \"moon\" or \"command\""))?
             .to_string();
@@ -1767,19 +1774,10 @@ impl Tests for Checks {
         } else {
             request.place.name.clone()
         };
-        // 71: admitted against the host's count before anything runs; a
-        // session's or a preview's run never into the reserve (91, 102).
-        let admission = match self.admit(request, name, session)? {
-            Some(a) => a,
-            None => {
-                if session {
-                    // The run's number goes unused; nothing is in it.
-                    let _ = std::fs::remove_dir(self.runs.dir(name));
-                }
-                return Err(AtBound.into());
-            }
-        };
         let dir = self.runs.prepare(name)?;
+        // 71: its part's entry names the run from now, its hold keeping it
+        // counted until the run's supervisor holds the run directory.
+        admission.begin(&request.place.name, &dir)?;
         // 84, record 0097 (design D2): the host's system as the run
         // begins, before its checkout is equipped, so a switch while it is
         // equipped is one during the run.
@@ -2119,6 +2117,10 @@ impl Tests for Checks {
             timed_out: ended.timed_out,
             refusals_unread: None,
         }))
+    }
+
+    fn hold(&self, kind: RunKind) -> Result<Option<Part>> {
+        self.admit(kind)
     }
 
     fn bound(&self) -> Result<usize> {

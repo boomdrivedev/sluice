@@ -287,8 +287,8 @@ fn a_report_holding_none_of_the_required_checks_is_no_pass() {
 }
 
 /// Two bolt branches, each with two submissions, under a bound of two;
-/// how many runs are live after `serves` steps both branches.
-fn live_runs_serving(serves: sluice_core::Serves) -> usize {
+/// how many runs are live after rounds of both branches.
+fn live_runs_of_two_branches() -> usize {
     let h = Harness::bolt();
     let other = "bolt/y";
     h.w().init(
@@ -322,7 +322,7 @@ fn live_runs_serving(serves: sluice_core::Serves) -> usize {
             .unwrap()
             .unwrap();
     }
-    let s = h.sluice().serving(serves);
+    let s = h.sluice();
     for _ in 0..3 {
         s.step(BRANCH).unwrap();
         s.step(other).unwrap();
@@ -333,37 +333,30 @@ fn live_runs_serving(serves: sluice_core::Serves) -> usize {
 /// satisfies: 71
 #[test]
 fn every_instance_on_the_host_shares_its_bound() {
-    // One instance serving every branch: two runs across both.
-    assert_eq!(live_runs_serving(sluice_core::Serves::Every), 2);
-    // Instances that each serve the branch they step share the host's
-    // bound all the same: two runs across both.
-    assert_eq!(live_runs_serving(sluice_core::Serves::Stepped), 2);
+    // Rounds of either branch hold each run's part of the host's bound
+    // (rule core.49): two runs across both.
+    assert_eq!(live_runs_of_two_branches(), 2);
 }
 
 /// satisfies: 71; session-runs-1 89
 #[test]
-fn session_runs_hold_the_bound_under_either_instance() {
-    for serves in [sluice_core::Serves::Stepped, sluice_core::Serves::Every] {
-        let h = Harness::bolt();
-        h.w().host_limit(2);
-        h.w().session_run("/work/a", true);
-        h.w().session_run("/work/b", true);
-        h.work("unit/a", "agent-a", &[("a/lib", Some("a2"))]);
-        let one = h.submit("unit/a");
-        let s = h.sluice().serving(serves);
-        s.step(BRANCH).unwrap();
-        s.step(BRANCH).unwrap();
-        assert!(
-            h.w().started().is_empty(),
-            "{serves:?}: started into a full bound"
-        );
-        // A session run whose process is gone holds nothing.
-        h.w().kill_session("/work/a");
-        s.step(BRANCH).unwrap();
-        assert_eq!(h.w().started().len(), 1, "{serves:?}");
-        h.settle();
-        assert_eq!(h.sub(one).state, State::Landed);
-    }
+fn session_runs_hold_the_bound() {
+    let h = Harness::bolt();
+    h.w().host_limit(2);
+    h.w().session_run("/work/a", true);
+    h.w().session_run("/work/b", true);
+    h.work("unit/a", "agent-a", &[("a/lib", Some("a2"))]);
+    let one = h.submit("unit/a");
+    let s = h.sluice();
+    s.step(BRANCH).unwrap();
+    s.step(BRANCH).unwrap();
+    assert!(h.w().started().is_empty(), "started into a full bound");
+    // A session run whose process is gone holds nothing.
+    h.w().kill_session("/work/a");
+    s.step(BRANCH).unwrap();
+    assert_eq!(h.w().started().len(), 1);
+    h.settle();
+    assert_eq!(h.sub(one).state, State::Landed);
 }
 
 /// satisfies: 71; session-runs-1 89, 91

@@ -431,7 +431,7 @@ fn telemetry_is_off_unless_asked() {
         replay: true,
         system: None,
     };
-    let handle = checks.start(&request).unwrap();
+    let handle = support::start(&checks, &request).unwrap();
     let until = Instant::now() + Duration::from_secs(60);
     let report = loop {
         match checks.progress(&handle).unwrap() {

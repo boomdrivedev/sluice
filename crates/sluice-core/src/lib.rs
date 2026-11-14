@@ -76,20 +76,9 @@ pub struct Seams<'a> {
     pub state: &'a dyn State,
 }
 
-/// The branches an instance serves, whose runs count against its bound
-/// (71).
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum Serves {
-    /// The branch it steps: a waiting submit's rounds, or `sluice step`.
-    Stepped,
-    /// Every branch with records: `sluice run`.
-    Every,
-}
-
 pub struct Sluice<'a> {
     seams: Seams<'a>,
     clock: &'a dyn Clock,
-    serves: Serves,
     peer: Peer,
     /// 124: whether it reads the policy only as far as guarding needs.
     guarding: bool,
@@ -209,7 +198,6 @@ impl<'a> Sluice<'a> {
         Sluice {
             seams,
             clock,
-            serves: Serves::Stepped,
             peer: Peer::default(),
             guarding: false,
             policies: Keeping::Own(Policies::default()),
@@ -236,11 +224,6 @@ impl<'a> Sluice<'a> {
     /// records are on its remote (72 to 74).
     pub fn as_peer(self, peer: Peer) -> Self {
         Sluice { peer, ..self }
-    }
-
-    /// The same sluice, serving `serves` (71).
-    pub fn serving(self, serves: Serves) -> Self {
-        Sluice { serves, ..self }
     }
 
     /// The same sluice, for branch protection: it reads the policy only as

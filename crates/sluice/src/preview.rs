@@ -217,8 +217,12 @@ impl Ask<'_> {
             let mut told_waiting = false;
             loop {
                 let guard = seams.state.lock(&self.branch)?;
-                if guard.is_some() && s.session_capacity(self.host.reserved())? > 0 {
-                    match s.start_preview(&plan, place.clone()) {
+                let part = match guard {
+                    Some(_) => seams.tests.hold(sluice_seams::RunKind::Session)?,
+                    None => None,
+                };
+                if let Some(part) = part {
+                    match s.start_preview(&plan, place.clone(), part) {
                         Ok(run) => {
                             let held = self.host.lock_sessions()?;
                             self.host.begin_session(

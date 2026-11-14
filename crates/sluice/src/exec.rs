@@ -344,8 +344,12 @@ impl Exec<'_> {
         let mut told_waiting = false;
         let (place, run) = loop {
             let guard = seams.state.lock(&self.branch)?;
-            if guard.is_some() && s.session_capacity(self.host.reserved())? > 0 {
-                match s.start_session(&plan, &worktree, &session.head, command.as_deref()) {
+            let part = match guard {
+                Some(_) => seams.tests.hold(sluice_seams::RunKind::Session)?,
+                None => None,
+            };
+            if let Some(part) = part {
+                match s.start_session(&plan, &worktree, &session.head, command.as_deref(), part) {
                     Ok(started) => {
                         let (place, run) = (started.place, started.run);
                         let held = self.host.lock_sessions()?;

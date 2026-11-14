@@ -2147,7 +2147,11 @@ mod tests {
     }
 
     impl Tests for Host {
-        fn start(&self, _: &RunRequest) -> Result<RunHandle> {
+        fn start(&self, _: &RunRequest, _: sluice_seams::Part) -> Result<RunHandle> {
+            unreachable!("a submit runs nothing")
+        }
+
+        fn hold(&self, _: sluice_seams::RunKind) -> Result<Option<sluice_seams::Part>> {
             unreachable!("a submit runs nothing")
         }
 

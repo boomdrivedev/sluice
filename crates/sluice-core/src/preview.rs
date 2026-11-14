@@ -13,7 +13,7 @@
 
 use anyhow::Result;
 use sluice_seams::{
-    GoneRelease, Limits, Place, PreviewPlace, Progress, Rev, RunHandle, RunRequest,
+    GoneRelease, Limits, Part, Place, PreviewPlace, Progress, Rev, RunHandle, RunRequest,
 };
 
 use crate::policy::{Policy, Preview};
@@ -189,14 +189,14 @@ impl Sluice<'_> {
         }
     }
 
-    /// 98, 102: start a preview's command; the caller has counted it
-    /// against the bound.
-    pub fn start_preview(&self, plan: &PreviewPlan, place: Place) -> Result<RunHandle> {
+    /// 98, 102: start a preview's command in `part`, the room in the
+    /// host's bound its caller holds for it (71, 150; rule core.49).
+    pub fn start_preview(&self, plan: &PreviewPlan, place: Place, part: Part) -> Result<RunHandle> {
         let name = place.name.clone();
         let run = self
             .seams
             .tests
-            .start(&Sluice::preview_request(plan, place))?;
+            .start(&Sluice::preview_request(plan, place), part)?;
         self.seams.checkout.preview_run(&name, &run)?;
         Ok(run)
     }

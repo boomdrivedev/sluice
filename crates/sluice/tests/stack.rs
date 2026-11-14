@@ -415,8 +415,9 @@ fn a_sessions_stack_stays_between_runs_and_goes_on_release() {
                 "2026-10-14T09:00:00Z",
             )
             .unwrap();
-        let handle = checks
-            .start(&RunRequest {
+        let handle = support::start(
+            &checks,
+            &RunRequest {
                 place: place.clone(),
                 revision: head.clone(),
                 required: vec!["sh check.sh".into()],
@@ -430,8 +431,9 @@ fn a_sessions_stack_stays_between_runs_and_goes_on_release() {
                 command: None,
                 replay: false,
                 system: None,
-            })
-            .unwrap();
+            },
+        )
+        .unwrap();
         let until = std::time::Instant::now() + std::time::Duration::from_secs(200);
         let report = loop {
             match checks.progress(&handle).unwrap() {

@@ -19,10 +19,10 @@ use sluice_core::{Clock, Seams, Sluice};
 use sluice_seams::{
     Adopted, AtBound, Branch, Changes, CheckedOut, Checkout, Delivery, Driver, Enforced, Equip,
     EquipStep, Equipped, Formed, GoneRelease, Guard, HostCopy, HostRun, KeptOutTask, LandingCommit,
-    LastResult, Moved, Network, NotRun, Notification, Outcome, Place, PreviewPlace, Progress,
+    LastResult, Moved, Network, NotRun, Notification, Outcome, Part, Place, PreviewPlace, Progress,
     Proof, ReadRefused, Reading, Reads, ReleaseFailure, ReleasePolicy, Released, Rev, RunHandle,
-    RunReport, RunRequest, Running, Session, SessionPlace, Settings, Snapshot, Source, State,
-    Submitter, TaskLog, TaskProgress, TaskResult, Tests, Unanswered, Written,
+    RunKind, RunReport, RunRequest, Running, Session, SessionPlace, Settings, Snapshot, Source,
+    State, Submitter, TaskLog, TaskProgress, TaskResult, Tests, Unanswered, Written,
 };
 
 /// A tree: path to content.
@@ -256,9 +256,22 @@ struct Inner {
     unanswered_starts: usize,
     /// The next start finds the host at its bound (71).
     refuse_start: bool,
+    /// The next hold finds the host at its bound, as when another
+    /// repository's run took the last one (71).
+    refuse_hold: bool,
+    /// Every part held, by kind, in order (record 0087).
+    holds: Vec<RunKind>,
+    /// Whether each release of a place and each outcome pushed asks, as an
+    /// agent's `sluice exec` asks meanwhile, for a session's room.
+    probe_holds: bool,
+    /// What each such ask was answered: whether the room was there.
+    probed: Vec<bool>,
     host_limit: Option<usize>,
     /// Other repositories' runs going on each host, by host (71).
     other_runs: BTreeMap<String, usize>,
+    /// Parts of each host's bound held and not yet started, by host and
+    /// kind (71; record 0087).
+    parts: BTreeMap<(String, RunKind), usize>,
     /// The system the host's executor is, as `(os, arch)` (87).
     platform: (String, String),
     /// Tasks whose reported keys the candidate's tree does not bear out
@@ -954,6 +967,52 @@ impl World {
     /// repository's run took the last one after the round counted (71).
     pub fn refuse_next_start(&self) {
         self.0.borrow_mut().refuse_start = true;
+    }
+
+    /// The next hold of a part finds the host at its bound, as when
+    /// another repository's run took the last one (71).
+    pub fn refuse_next_hold(&self) {
+        self.0.borrow_mut().refuse_hold = true;
+    }
+
+    /// From now, each release of a place and each outcome pushed asks for
+    /// a session's room as an agent's `sluice exec` would meanwhile, and
+    /// gives it back at once: what a round holds between its decision and
+    /// its starts (rule core.49).
+    pub fn probe_holds(&self, probe: bool) {
+        self.0.borrow_mut().probe_holds = probe;
+    }
+
+    /// What each ask [`World::probe_holds`] made was answered: whether a
+    /// session's room was there.
+    pub fn probed(&self) -> Vec<bool> {
+        self.0.borrow().probed.clone()
+    }
+
+    /// An agent's ask for a session's room meanwhile, where asked for.
+    fn probe(inner: &mut Inner) {
+        if inner.probe_holds {
+            let free = FakeTests::count(inner).total() < inner.host_limit.unwrap_or(usize::MAX);
+            inner.probed.push(free);
+        }
+    }
+
+    /// Every part of the host's bound held so far, by kind, in order
+    /// (record 0087).
+    pub fn holds(&self) -> Vec<RunKind> {
+        self.0.borrow().holds.clone()
+    }
+
+    /// The parts of this world's host's bound held and not yet started
+    /// (record 0087).
+    pub fn parts_held(&self) -> usize {
+        let inner = self.0.borrow();
+        inner
+            .parts
+            .iter()
+            .filter(|((h, _), _)| *h == inner.host)
+            .map(|(_, n)| n)
+            .sum()
     }
 
     /// Runs started from now stay running until completed.
@@ -2224,16 +2283,64 @@ impl FakeTests {
             .iter()
             .filter(|r| r.live() && r.queue() && r.host == inner.host)
             .count();
+        let parts = |kind| {
+            inner
+                .parts
+                .get(&(inner.host.clone(), kind))
+                .copied()
+                .unwrap_or(0)
+        };
         Running {
-            queue: own + inner.other_runs.get(&inner.host).copied().unwrap_or(0),
-            sessions: inner.sessions.values().filter(|(r, _)| *r).count(),
+            queue: own
+                + inner.other_runs.get(&inner.host).copied().unwrap_or(0)
+                + parts(RunKind::Queue),
+            sessions: inner.sessions.values().filter(|(r, _)| *r).count() + parts(RunKind::Session),
+        }
+    }
+}
+
+/// A part of the fakes' host's bound (71; record 0087): counted while it
+/// is held, and given back when it is dropped unstarted. A start that
+/// takes it moves its room to the run it starts.
+struct FakePart {
+    world: std::rc::Weak<RefCell<Inner>>,
+    host: String,
+    kind: RunKind,
+    /// Taken by a start, which counted it out itself.
+    spent: bool,
+}
+
+impl FakePart {
+    fn give_back(inner: &mut Inner, host: &str, kind: RunKind) {
+        if let Some(n) = inner.parts.get_mut(&(host.to_string(), kind)) {
+            *n = n.saturating_sub(1);
+        }
+    }
+}
+
+impl Drop for FakePart {
+    fn drop(&mut self) {
+        if self.spent {
+            return;
+        }
+        if let Some(world) = self.world.upgrade() {
+            if let Ok(mut inner) = world.try_borrow_mut() {
+                FakePart::give_back(&mut inner, &self.host, self.kind);
+            }
         }
     }
 }
 
 impl Tests for FakeTests {
-    fn start(&self, request: &RunRequest) -> Result<RunHandle> {
+    fn start(&self, request: &RunRequest, part: Part) -> Result<RunHandle> {
+        // The part's room moves to the run, or back to the host where the
+        // start fails: either way it is held no longer.
+        let mut part = part.take::<FakePart>().ok();
         let mut inner = self.0 .0.borrow_mut();
+        if let Some(p) = part.as_mut() {
+            FakePart::give_back(&mut inner, &p.host, p.kind);
+            p.spent = true;
+        }
         let held = inner
             .places
             .get(&request.place.name)
@@ -2260,12 +2367,9 @@ impl Tests for FakeTests {
         ) {
             bail!("the open executor cannot keep a run off the network");
         }
-        // 71: admitted against the host's count, other repositories' runs
-        // among it, before anything of the run runs.
-        let running = FakeTests::count(&inner);
-        if running.total() >= inner.host_limit.unwrap_or(usize::MAX)
-            || std::mem::take(&mut inner.refuse_start)
-        {
+        // 71: its room was held by its part; a part the host no longer
+        // honours is refused before anything of the run runs.
+        if std::mem::take(&mut inner.refuse_start) {
             return Err(AtBound.into());
         }
         if std::mem::take(&mut inner.crash_start) {
@@ -2381,6 +2485,32 @@ impl Tests for FakeTests {
 
     fn bound(&self) -> Result<usize> {
         Ok(self.0 .0.borrow().host_limit.unwrap_or(usize::MAX))
+    }
+
+    /// 71 (record 0087): a part while the parts held and the runs going
+    /// on the host, other repositories' and sessions' among them, are
+    /// under its bound.
+    fn hold(&self, kind: RunKind) -> Result<Option<Part>> {
+        let mut inner = self.0 .0.borrow_mut();
+        if std::mem::take(&mut inner.refuse_hold) {
+            return Ok(None);
+        }
+        let running = FakeTests::count(&inner);
+        if running.total() >= inner.host_limit.unwrap_or(usize::MAX) {
+            return Ok(None);
+        }
+        let host = inner.host.clone();
+        *inner.parts.entry((host.clone(), kind)).or_default() += 1;
+        inner.holds.push(kind);
+        Ok(Some(Part::new(
+            kind,
+            FakePart {
+                world: Rc::downgrade(&self.0 .0),
+                host,
+                kind,
+                spent: false,
+            },
+        )))
     }
 
     fn launch(&self, launch: &sluice_seams::Launch) -> Result<()> {
@@ -2885,6 +3015,7 @@ impl Checkout for FakeCheckout {
             !self.0 .0.borrow().worktrees.contains_key(name) && !name.starts_with("session/"),
             "sluice released a session's place {name}"
         );
+        World::probe(&mut self.0 .0.borrow_mut());
         if self.0 .0.borrow().places.contains_key(name) {
             self.attempt(name)?;
         }
@@ -3099,6 +3230,7 @@ impl Driver for FakeDriver {
     /// nothing.
     fn notify(&self, notification: &Notification) -> Result<Delivery> {
         let mut inner = self.0 .0.borrow_mut();
+        World::probe(&mut inner);
         let to = &notification.to;
         if inner.undelivering.contains(&to.agent) {
             inner.undelivered.push(notification.clone());
@@ -3626,7 +3758,7 @@ mod tests {
                 replay: false,
                 system: None,
             };
-            let h = f.tests.start(&request).unwrap();
+            let h = f.tests.start(&request, queue_part(&f)).unwrap();
             match f.tests.progress(&h).unwrap() {
                 Progress::Finished(r) => r.executor.grant,
                 other => panic!("{other:?}"),
@@ -3739,7 +3871,7 @@ mod tests {
                 replay: true,
                 system: None,
             };
-            let h = f.tests.start(&request).unwrap();
+            let h = f.tests.start(&request, queue_part(&f)).unwrap();
             match f.tests.progress(&h).unwrap() {
                 Progress::Finished(r) => (h, r),
                 other => panic!("{other:?}"),
@@ -3811,7 +3943,7 @@ mod tests {
             replay: true,
             system: None,
         };
-        let h = f.tests.start(&request).unwrap();
+        let h = f.tests.start(&request, queue_part(&f)).unwrap();
         let Progress::Finished(r) = f.tests.progress(&h).unwrap() else {
             panic!("finished")
         };
@@ -3852,7 +3984,7 @@ mod tests {
                 replay: false,
                 system: None,
             };
-            let h = f.tests.start(&request).unwrap();
+            let h = f.tests.start(&request, queue_part(&f)).unwrap();
             match f.tests.progress(&h).unwrap() {
                 Progress::Finished(r) => (h, r),
                 other => panic!("{other:?}"),
@@ -3912,7 +4044,7 @@ mod tests {
             replay: false,
             system: None,
         };
-        let h = f.tests.start(&request).unwrap();
+        let h = f.tests.start(&request, queue_part(&f)).unwrap();
         let Progress::Finished(r) = f.tests.progress(&h).unwrap() else {
             panic!("finished")
         };
@@ -3930,8 +4062,85 @@ mod tests {
         );
     }
 
+    /// A part of the fakes' host's bound for a combination's run.
+    fn queue_part(f: &Fakes) -> Part {
+        f.tests
+            .hold(RunKind::Queue)
+            .unwrap()
+            .expect("room on the host")
+    }
+
+    fn a_request(f: &Fakes, name: &str, rev: &Rev) -> RunRequest {
+        RunRequest {
+            place: f.checkout.materialize(name, rev, &Settings::new()).unwrap(),
+            revision: rev.clone(),
+            required: Vec::new(),
+            since: None,
+            limit: None,
+            limits: Default::default(),
+            tests: Settings::new(),
+            command: None,
+            replay: true,
+            system: None,
+        }
+    }
+
+    /// 71 (record 0087): a part is held while the parts held and the runs
+    /// going are under the bound, other repositories' and sessions' among
+    /// them, and none past it.
+    #[test]
+    fn a_part_is_refused_at_the_bound() {
+        let f = Fakes::new();
+        let rev = f.world.init("main", &[("x", "1")]);
+        f.world.host_limit(3);
+        f.world.hold_runs(true);
+        f.world.other_runs(1);
+        let first = f.tests.hold(RunKind::Queue).unwrap().expect("room");
+        assert_eq!(first.kind(), RunKind::Queue);
+        f.tests
+            .start(&a_request(&f, "sluice/try/main/1", &rev), first)
+            .unwrap();
+        let second = f.tests.hold(RunKind::Session).unwrap().expect("room");
+        assert_eq!(
+            f.tests.running().unwrap(),
+            Running {
+                queue: 2,
+                sessions: 1
+            },
+            "the part counts while it is held"
+        );
+        assert!(f.tests.hold(RunKind::Queue).unwrap().is_none());
+        assert!(f.tests.hold(RunKind::Session).unwrap().is_none());
+        drop(second);
+        f.world.complete(&rev);
+        assert!(f.tests.hold(RunKind::Queue).unwrap().is_some());
+    }
+
+    /// 71 (record 0087): a part dropped unstarted, or one whose start
+    /// failed, gives its room back at once.
+    #[test]
+    fn a_dropped_part_frees_its_room() {
+        let f = Fakes::new();
+        let rev = f.world.init("main", &[("x", "1")]);
+        f.world.host_limit(1);
+        f.world.hold_runs(true);
+        let part = f.tests.hold(RunKind::Queue).unwrap().expect("room");
+        assert_eq!(f.world.parts_held(), 1);
+        assert!(f.tests.hold(RunKind::Session).unwrap().is_none());
+        drop(part);
+        assert_eq!(f.world.parts_held(), 0);
+        assert_eq!(f.tests.running().unwrap(), Running::default());
+        // A start that fails gives its part back.
+        let part = f.tests.hold(RunKind::Queue).unwrap().expect("room");
+        f.world.start_fails(Some("the toolchain did not enter"));
+        let request = a_request(&f, "sluice/try/main/1", &rev);
+        assert!(f.tests.start(&request, part).is_err());
+        assert_eq!(f.tests.running().unwrap(), Running::default());
+        assert!(f.tests.hold(RunKind::Queue).unwrap().is_some());
+    }
+
     /// 71: the host's count holds other repositories' runs beside its own,
-    /// and a start at the bound is refused with nothing of it run.
+    /// and no part is held at the bound, nothing of a run started.
     #[test]
     fn the_host_count_holds_other_repositories_runs() {
         let f = Fakes::new();
@@ -3961,19 +4170,27 @@ mod tests {
             replay: true,
             system: None,
         };
-        f.tests.start(&request("sluice/try/main/1")).unwrap();
+        f.tests
+            .start(&request("sluice/try/main/1"), queue_part(&f))
+            .unwrap();
         assert_eq!(f.tests.running().unwrap().queue, 2);
         let second = request("sluice/try/main/2");
-        let err = f.tests.start(&second).unwrap_err();
-        assert!(err.downcast_ref::<AtBound>().is_some(), "{err:#}");
+        assert!(f.tests.hold(RunKind::Queue).unwrap().is_none());
         assert_eq!(f.world.requests().len(), 1, "nothing of it ran");
         // Another host's count is its own.
         f.world.be_host("other");
         assert_eq!(f.tests.running().unwrap().queue, 0);
         f.world.be_host("fake-host");
         f.world.other_runs(0);
-        f.tests.start(&second).unwrap();
+        f.tests.start(&second, queue_part(&f)).unwrap();
         assert_eq!(f.tests.running().unwrap().queue, 2);
+        // A part the host no longer honours is refused at its start.
+        f.world.host_limit(3);
+        let third = request("sluice/try/main/3");
+        f.world.refuse_next_start();
+        let err = f.tests.start(&third, queue_part(&f)).unwrap_err();
+        assert!(err.downcast_ref::<AtBound>().is_some(), "{err:#}");
+        assert_eq!(f.world.parts_held(), 0);
     }
 
     /// 124: a branch on a remote has a host copy, levelled only from the
@@ -4101,7 +4318,7 @@ mod tests {
         LastResult {
             at: "2026-10-16T09:00:00Z".into(),
             head: Rev("a".into()),
-            kind: sluice_seams::RunKind::Checks,
+            kind: sluice_seams::SessionRunKind::Checks,
             outcome,
             recorded: true,
             tasks: Vec::new(),

@@ -43,8 +43,8 @@ use sluice_core::overview::{in_queue, BranchView, CandidateView, Held};
 use sluice_core::records::{Beside, BranchHold, CopyBehind, Event, FailedTask, State, Submission};
 use sluice_core::{
     Accepted, AmendRefusal, Clock, Collect, CopyDiffers, Forecast, Forecasted, GroupRequest,
-    Lookup, Owed, Requester, Seams, Serves, Several, Sluice, Status, Step, SubmitHead,
-    SubmitRefusal, SubmitRequest, Unread, WithdrawRefusal, Withdrew,
+    Lookup, Owed, Requester, Seams, Several, Sluice, Status, Step, SubmitHead, SubmitRefusal,
+    SubmitRequest, Unread, WithdrawRefusal, Withdrew,
 };
 use sluice_seams::{Decided, Outcome, Rev, SessionPlace, Submitter};
 use told::Kind;
@@ -1428,7 +1428,6 @@ pub fn drive(
 ) -> Result<Driven> {
     let s = Sluice::new(seams, clock)
         .as_peer(host.peer())
-        .serving(Serves::Every)
         .keeping(&driving.policies);
     if !driving.checked {
         s.check_host_systems()?;
@@ -6686,7 +6685,7 @@ fn sessions_json(places: &[SessionPlace], held: &[Held]) -> Vec<serde_json::Valu
 /// on 1a2b3c4, recorded`, or a command's `command passed on 1a2b3c4`
 /// (session-runs-1 clauses 92, 97).
 fn last_result_text(r: &sluice_seams::LastResult) -> String {
-    use sluice_seams::{RunKind, RunOutcome};
+    use sluice_seams::{RunOutcome, SessionRunKind};
     let how = match r.outcome {
         RunOutcome::Pass => "passed",
         RunOutcome::Fail => "failed",
@@ -6697,9 +6696,9 @@ fn last_result_text(r: &sluice_seams::LastResult) -> String {
     };
     let head = r.head.short();
     match (r.kind, r.recorded) {
-        (RunKind::Command, _) => format!("command {how} on {head}"),
-        (RunKind::Checks, true) => format!("{how} on {head}, recorded"),
-        (RunKind::Checks, false) => format!("{how} on {head}, not recorded"),
+        (SessionRunKind::Command, _) => format!("command {how} on {head}"),
+        (SessionRunKind::Checks, true) => format!("{how} on {head}, recorded"),
+        (SessionRunKind::Checks, false) => format!("{how} on {head}, not recorded"),
     }
 }
 

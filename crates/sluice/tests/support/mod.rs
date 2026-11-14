@@ -81,6 +81,20 @@ fn no_credentials(dir: &Path) {
     }
 }
 
+/// `tests` starting `request` in a combination's part it holds first: a
+/// round's start, refused with [`sluice_seams::AtBound`] where the host has
+/// no room (71; rule core.49).
+#[allow(dead_code)]
+pub fn start(
+    tests: &dyn sluice_seams::Tests,
+    request: &sluice_seams::RunRequest,
+) -> anyhow::Result<sluice_seams::RunHandle> {
+    let part = tests
+        .hold(sluice_seams::RunKind::Queue)?
+        .ok_or(sluice_seams::AtBound)?;
+    tests.start(request, part)
+}
+
 /// Whether `free` holds within two seconds. A lock a process let go may
 /// still be held for a moment by a process another thread of this binary
 /// starts meanwhile, until it runs its program: a check that a lock is

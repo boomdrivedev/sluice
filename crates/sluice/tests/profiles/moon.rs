@@ -127,7 +127,7 @@ fn finish(c: &Checks, req: &RunRequest) -> RunReport {
 }
 
 fn finish_run(c: &Checks, req: &RunRequest) -> (RunHandle, RunReport) {
-    let run = c.start(req).unwrap();
+    let run = support::start(c, req).unwrap();
     let until = Instant::now() + Duration::from_secs(120);
     loop {
         match c.progress(&run).unwrap() {
@@ -250,7 +250,7 @@ fn shows_each_task_as_it_ends(name: &str, place: impl Fn(&Repo) -> String) {
     );
     let c = checks(&repo);
     let req = request(&repo, &place(&repo), &["alpha:test", "slow:test"], None);
-    let run = c.start(&req).unwrap();
+    let run = support::start(&c, &req).unwrap();
     let until = Instant::now() + Duration::from_secs(120);
     let seen = loop {
         let tasks = c.tasks(&run).unwrap();
@@ -331,7 +331,7 @@ fn a_project_whose_id_holds_a_slash() {
     let c = checks(&repo);
     let targets = ["group/many:fail", "group/many:pass", "group/many:wait"];
     let req = request(&repo, "p1", &targets, None);
-    let run = c.start(&req).unwrap();
+    let run = support::start(&c, &req).unwrap();
     let until = Instant::now() + Duration::from_secs(120);
     let seen = loop {
         let tasks = c.tasks(&run).unwrap();
@@ -429,7 +429,7 @@ fn a_task_the_time_limit_cut_off_has_no_outcome() {
     let limit = Duration::from_secs(15);
     req.limit = Some(limit);
     let started = Instant::now();
-    let run = c.start(&req).unwrap();
+    let run = support::start(&c, &req).unwrap();
     // The two that end do so well inside the limit, or the test says
     // nothing of a task that ended before it.
     loop {
@@ -861,7 +861,7 @@ fn an_old_moon_is_refused() {
             "toolchain".into(),
             Setting::List(vec![enter.to_string_lossy().into()]),
         );
-        let err = format!("{:#}", checks(&repo).start(&req).unwrap_err());
+        let err = format!("{:#}", support::start(&checks(&repo), &req).unwrap_err());
         assert!(err.starts_with("moon --version: "), "{err}");
         assert!(err.contains(&format!("moon {version}")), "{err}");
         assert!(err.contains("moon 2.6"), "{err}");

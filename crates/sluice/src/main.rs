@@ -13,7 +13,7 @@ use sluice::profiles::Bound;
 use sluice::retry::Policy;
 use sluice::telemetry::{Settings, Telemetry};
 use sluice::{drive, run, Carried, Cli, Command, Driven, Driving, Pause, Skipped, Sleep};
-use sluice_core::{Clock, Serves, Sluice, SystemClock};
+use sluice_core::{Clock, Sluice, SystemClock};
 
 fn main() {
     // 135: what a `sluice run` this process started afresh from handed it,
@@ -366,7 +366,6 @@ fn keep_running(
                 .and_then(|b| {
                     Sluice::new(b.seams(), clock)
                         .as_peer(b.peer())
-                        .serving(Serves::Every)
                         .check_host_systems()?;
                     Ok(b)
                 });
