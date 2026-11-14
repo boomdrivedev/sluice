@@ -8,8 +8,8 @@ use sluice_seams::{Changes, Rev, Snapshot};
 
 use crate::records::{
     finished_file, parse_lines, submission_file, to_document, to_line, BranchDoc, Candidate, Event,
-    FinishedLine, LogLine, OutboxItem, RefusedWrite, State, Submission, BRANCH_FILE,
-    DELIVERIES_FILE, FINISHED_INDEX, LOG_FILE,
+    FinishedLine, HomeDoc, LogLine, OutboxItem, RefusedWrite, State, Submission, BRANCH_FILE,
+    DELIVERIES_FILE, FINISHED_INDEX, HOME_FILE, LOG_FILE,
 };
 use crate::refused_writes::{command_of, ends, stands, STANDING};
 
@@ -18,6 +18,9 @@ pub struct Line {
     pub branch: String,
     pub version: u64,
     pub doc: BranchDoc,
+    /// Record 0122 (design D1): the home document, `None` where the
+    /// records hold none; written back with the rest where it changed.
+    pub home: Option<HomeDoc>,
     /// The submissions in the live records: every one not yet moved to
     /// the finished records.
     pub subs: BTreeMap<u64, Submission>,
@@ -39,6 +42,13 @@ impl Line {
             Some(bytes) => serde_json::from_slice(bytes)
                 .with_context(|| format!("reading {branch}'s {BRANCH_FILE}"))?,
             None => BranchDoc::new(branch),
+        };
+        let home = match snapshot.files.get(HOME_FILE) {
+            Some(bytes) => Some(
+                serde_json::from_slice(bytes)
+                    .with_context(|| format!("reading {branch}'s {HOME_FILE}"))?,
+            ),
+            None => None,
         };
         let mut subs = BTreeMap::new();
         for (path, bytes) in &snapshot.files {
@@ -65,6 +75,7 @@ impl Line {
             branch: branch.into(),
             version: snapshot.version,
             doc,
+            home,
             subs,
             finished,
             deliveries_read: deliveries.len(),
@@ -451,6 +462,9 @@ impl Line {
                 }
             };
             put(BRANCH_FILE.into(), to_document(&self.doc));
+            if let Some(home) = &self.home {
+                put(HOME_FILE.into(), to_document(home));
+            }
             for s in self.subs.values() {
                 if !self.done_with(s) {
                     put(submission_file(s.id), to_document(s));
