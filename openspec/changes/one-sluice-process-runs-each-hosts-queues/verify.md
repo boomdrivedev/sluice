@@ -1,32 +1,31 @@
 # Verify: one-sluice-process-runs-each-hosts-queues
 
 The branch `change/one-sluice-process-runs-each-hosts-queues` was verified at
-`683ba07c` on 2026-11-14. It was cut from
+`e7e13952` on 2026-11-14. It was cut from
 `bolt/sluice-is-refactored-and-runs-on-pools` and holds that bolt at
 `7ce112b4`, the bolt's revision when the gate ran.
 
-Outcome: **not archived.** The bolt's gate failed: `cli:test` failed 2 of
-its 221 tests. Five requirements the change adds or modifies are not met,
-one of them shown by five failing tests of the tools tier. All 89 tasks are
-ticked, but tasks 3.4, 6.3, 6.6 and 8.3 do not hold as written. The change
-goes back to its code stage.
+Outcome: **not archived.** The bolt's gate passed. The change validates
+strictly, and all 102 tasks are ticked. But 13 tests of the tools tier fail
+in the five suites the tasks name. Main's `#check-tools` runs that tier when
+the bolt lands on main. One of the 13 is task 6.15's named check, so 6.15
+does not hold as written. Two of them show behaviour the specs rule out. The
+change goes back to its code stage.
 
 ## The whole checks
 
 The gate is `sluice exec bolt/sluice-is-refactored-and-runs-on-pools`
-(sluice 0.93.2), the bolt's `#check-fast`. It ran once on `683ba07` and
-**failed** with exit 1.
+(sluice 0.93.2), the bolt's `#check-fast`. It ran once on `e7e1395` and
+**passed** with exit 0.
 
 ```
-running the checks 683ba07 affects against bolt/sluice-is-refactored-and-runs-on-pools (7ce112b)
+running the checks e7e1395 affects against bolt/sluice-is-refactored-and-runs-on-pools (7ce112b)
 ...
-test result: FAILED. 219 passed; 2 failed; 0 ignored; 0 measured; 0 filtered out; finished in 89.57s
-...
-Tasks: 14 completed, 1 failed
- Time: 2m 16s 890ms
+Tasks: 15 completed
+ Time: 3m 22s 740ms
 
-failed: cli:test
-recorded 15 results under their keys for 683ba07
+passed: 15 tasks
+recorded 15 results under their keys for e7e1395
 ```
 
 | Task | Outcome |
@@ -45,196 +44,231 @@ recorded 15 results under their keys for 683ba07
 | `fakes:test` | passed |
 | `conformance:test` | passed |
 | `plugin-sluice:validate` | passed |
-| `cli:test` | **failed**: 219 passed, 2 failed |
+| `cli:test` | passed: the library's 305, `cli.rs`'s 222 and `host_process.rs`'s 39 among them |
 
-The two failures in `crates/sluice/tests/cli.rs`:
+The fast-tier tests that tasks 3.4, 3.5, 4.12, 5.21, 5.23, 6.14, 6.16,
+6.18 and 8.22 name all passed in that run.
 
-```
----- a_refusal_under_json_is_an_error_document stdout ----
-thread 'a_refusal_under_json_is_an_error_document' panicked at crates/sluice/tests/cli.rs:59:6:
-called `Result::unwrap()` on an `Err` value: could not read what a forecast of bolt/none forms from: the host process's reading did not bring a revision of bolt/none to this host
+`openspec validate one-sluice-process-runs-each-hosts-queues --strict`:
+valid.
 
----- check_forecasts_a_branch_with_no_worktree stdout ----
-thread 'check_forecasts_a_branch_with_no_worktree' panicked at crates/sluice/tests/cli.rs:59:6:
-called `Result::unwrap()` on an `Err` value: could not read what a forecast of bolt/concurrent-units forms from: the host process's reading did not bring a revision of bolt/none to this host
-```
+## The tools tier
 
-The `#check-tools` tier is main's gate, not the bolt's, so the gate ran none
-of it. That tier holds the binary suites that most of the tasks of groups
-1, 5, 6, 7 and 8 name (`places`, `peers`, `remote_branch`, `instance`,
-`pull_requests`, `overview_watch`). Its whole suite was not run. To confirm
-finding 2 below, five of its tests were run once through sluice:
+`#check-tools` is main's gate, not the bolt's, so the bolt's gate runs none
+of it. The tasks name five of its suites: `instance`, `peers`, `places`,
+`pull_requests` and `remote_branch`. Each was run once through sluice
+against the bolt.
+
+The first run stopped at `instance`, cargo's first failing target. The
+other four were then run with `--no-fail-fast`:
 
 ```
-sluice exec bolt/sluice-is-refactored-and-runs-on-pools -- cargo test -p sluice --features tools --test pull_requests -- held_then_marked_ready_waits_to_be_taken_in two_waits_and_a_status_read_at_one_pace a_waits_words_across_hosts not_yet_taken_in_across_hosts a_wait_across_hosts_reads_at_its_pace
-test result: FAILED. 0 passed; 5 failed; 0 ignored; 0 measured; 151 filtered out; finished in 59.31s
+sluice exec bolt/sluice-is-refactored-and-runs-on-pools -- cargo test -p sluice --features tools --test instance --test peers --test places --test pull_requests --test remote_branch
+instance:       FAILED. 11 passed; 1 failed
+
+sluice exec bolt/sluice-is-refactored-and-runs-on-pools -- cargo test --no-fail-fast -p sluice --features tools --test peers --test places --test pull_requests --test remote_branch
+peers:          FAILED. 10 passed; 2 failed
+places:         ok. 47 passed; 0 failed
+pull_requests:  FAILED. 148 passed; 8 failed
+remote_branch:  FAILED. 32 passed; 2 failed
 ```
+
+Before those whole runs, the tests that tasks 5.22, 6.3, 6.6, 6.15, 8.3,
+8.20 and 8.21 name were run once by name. Every one passed except 6.15's
+`remote_branch forecast` filter, which failed one test, the same one the
+whole run fails.
 
 ## What falls short
 
-Each finding below was confirmed in the code. For finding 2, the tests
-named above also fail.
+### 1. A forecast beside a current reader: task 6.15's check
 
-1. **A forecast of a branch that exists nowhere is an error, not a
-   refusal (the gate's two failures).** `forecast`'s unchanged requirement
-   "A branch is forecast with no worktree of it" has the scenario "No such
-   branch": the forecast says `no branch bolt/gone to forecast` and exits 2.
-   `cli.rs:1030` also asks for the refusal `no branch bolt/none` with its
-   next steps. In held mode, `Sluice::forecast_branch` and `forecast_head`
-   (`crates/sluice-core/src/ops.rs:840-866`) and `forecast_read`
-   (`crates/sluice/src/lib.rs:2712-2716`) return `Unheld` for any branch
-   missing from the host. `forecast` (`lib.rs:2642-2654`) asks for a reading
-   afresh and then fails with exit 3. The delta's "where that reading does
-   not hold the branch … exit 3" has to be reconciled with this refusal:
-   once a reading is current, a branch that no remote and no local ref names
-   is no branch, not something unheld.
+`remote_branch.rs`'s `a_forecast_beside_a_current_reader_asks_the_remote_nothing`
+fails at `remote_branch.rs:1792`:
 
-2. **A wait on a host that does not keep the branch never follows the
-   request across hosts.** `Pulls::follow` takes `follow_across` only where
-   `away` names the branch (`crates/sluice/src/profiles/github/pulls.rs:3032`).
-   Only an intake sets `away` (`pulls.rs:727`). A wait runs no intake
-   (`lib.rs:5131`) and calls `pulls.follow` directly (`lib.rs:5147`), so it
-   reads the request as its keeper would. It names no host, gives no
-   `draft`, reads GitHub at each process's own pace rather than the host's,
-   and keeps nothing in `forge/follows/`. Not met:
-   - `request-intake-host`: "A wait whose pull request another host takes in
-     runs nothing for it", "A host keeps the pull requests it follows" (its
-     pace) and "A wait reads a held pull request by its draft mark".
-   - `submission-wait`: "A wait across hosts names where its pull request
-     stands".
+```
+a reader of /private/tmp/sluice-501/.../sluice-test-23266-64-forecast-reader/.git already
+```
 
-   Task 8.3's tests fail: `a_wait_across_hosts_reads_at_its_pace` (7 reads),
-   `two_waits_and_a_status_read_at_one_pace` (15 reads),
-   `a_waits_words_across_hosts`, `not_yet_taken_in_across_hosts` (`draft`
-   null) and `held_then_marked_ready_waits_to_be_taken_in` (`waiting`, not
-   `waiting to be taken in by b`).
+The test steps `bolt/y` with `sluice step` until it lands, then takes the
+reader's lease itself to write a reader's document. Since task 4.12,
+`Job::Step` calls `Task::drives`, which takes the repository's driver lock
+(`host_process/tasks.rs:807`, `Driver::try_take`), and the task keeps it.
+`Reader::take` makes no process the lead while a driver lives
+(`reader.rs:107-112`), so the test finds itself a follower and panics.
 
-3. **A wait's first pass is not the host process's pass it asked for.**
-   `submission-wait`'s "A timeout returns the submission as it stands" says
-   a wait takes "the host process's pass it asked for when it began to
-   follow". Its scenario "Out of time as it starts" has `--timeout 0s` find
-   `testing`. When a host process passes on its own tick, a follow wakes a
-   pass only for a watch (`crates/sluice/src/host_process/tasks.rs:441`).
-   The client reads no first answer (`host_process/client.rs:338-348`), and
-   `Follower::tick` asks no pass (`host_process/ask.rs:340`). So `wait_on`
-   checks its deadline on its second loop and returns the record as it
-   stood, which may be `queued` (`lib.rs:3774-3788`). This contradicts the
-   doc comment at `lib.rs:3682` and D9. Every test runs passes only when
-   asked (`SLUICE_ROUND_SLEEP=record`, or `FakeHost`), and that mode asks a
-   pass first, which hides the gap. The review also reports the same race
-   for a watch, in `overview-reader`'s "sluice set up after a watch ended":
-   the watch's first read can find an earlier reader's `set_up: false`
-   document before the host process's first pass replaces it.
+The test never ends the host process its steps started.
+`support::end_host_process` is there for that. Task 6.15's "True when"
+names `remote_branch forecast` passing, so 6.15 does not hold.
 
-4. **A one-shot overview and the home view are not printed from the
-   reader's document.** `overview-reader`'s "A one-shot read is answered
-   from the host process's last reading" and its scenario "A one-shot
-   overview beside a current reading" ask for "the reader's document of
-   that reading", and so does task 6.3 ("text rendered from it as the
-   watch's is"). Instead `overview::run` rebuilds the document from the
-   records in held mode (`crates/sluice/src/overview.rs:239-249`), and so
-   does `home.rs:68`. Nothing is fetched, but the document is not the
-   reader's. `cli.rs:2743`'s `one_shot_overview_reads_the_records_beside_a_reader`
-   still asserts the removed requirement "A one-shot overview reads the
-   records itself".
+### 2. A one-shot overview shows a removed branch as present
 
-5. **A forecast beside a ticking reader whose document lacks the branch
-   fetches.** Where a reader keeps its tick, the command's `Sluice` is not
-   held (`lib.rs:1476`). Where that reader's document lacks the branch or a
-   revision, `forecast_read` returns `None` (`lib.rs:2696-2701`), and the
-   forecast forms as a round reads (`lib.rs:2631-2641`), fetching on disk.
-   It asks no reading afresh, gives no exit 3, and says nothing of the
-   remote's refusal on stderr. This breaks the requirement "A forecast with
-   no current reader has the host process read" ("SHALL fetch nothing
-   itself") and its scenario "The reader could not reach the remote", and so
-   task 6.6. `cli.rs:748`'s `a_forecast_with_no_revision_reads_as_a_round`
-   asserts the old behaviour.
+`remote_branch.rs`'s `a_bolt_is_made_and_deleted_with_no_remote` fails at
+`:943`. After `bolt/x` is deleted, `sluice status bolt/x` says
+`bolt/x is gone, last at 83b56d6`. But `sluice overview` prints:
+
+```
+bolt/x at 83b56d6 · 0 in the queue · testing 0 at once (up to 4)
+```
+
+The one-shot overview now prints the reader's document whenever a reader
+keeps its tick (`overview.rs:244`, `reader_document`). That document comes
+from a pass before the deletion, and the reading it gives counts as current
+within its tick. So the overview names a branch that the status says is
+gone, which rule core.11 rules out. `overview-reader`'s "A one-shot read is
+answered from the host process's last reading" does not hold here either.
+
+### 3. A blamed pull request is no longer marked a draft
+
+Four `pull_requests.rs` tests find the blamed request open and not a
+draft:
+
+- `a_submits_pull_request_sent_back_says_so` (`:1735`)
+- `blamed_then_submitted_again_on_the_same_head` (`:3262`)
+- `run_again_marks_a_draft_ready` (`:2909`)
+- `submitted_by_the_operators_ops` (`:3368`, `g.pull_from("unit/unit-1").draft`)
+
+For example:
+
+```
+Pull { number: 1, ..., title: "unit/blamed", draft: false, open: true, ... }
+```
+
+`held_when_github_refuses_the_draft` fails at `:1318` on the step's
+output:
+
+```
+main: stepped
+sluice: warning: taking in main's pull requests: pull/1: it waits for the next submit, and GitHub would not mark it a draft: POST /graphql: Resource not accessible by integration
+```
+
+The cause was not traced.
+
+### 4. A wait's timeout and a pause
+
+These two `pull_requests.rs` tests fail:
+
+- `a_wait_whose_timeout_comes_first_calls_nothing` (`:4817`) exits 0, where
+  the test asks for exit 5. Its wait printed the submission through
+  `passed · landed as 5231c56`, so the wait landed it rather than timing
+  out first.
+- `a_waiting_submit_waits_out_the_pause` (`:4802`) panics with `landed`.
+
+Both fit task 5.21: a wait's first tick now waits for the pass its follow
+asked for. They also fit task 5.22, a pass's time set to its asker's. The
+cause was not traced.
+
+### 5. The test of passes between discoveries contradicts its scenario
+
+`passes_between_discoveries_start_no_git_and_ask_github_nothing` fails at
+`pull_requests.rs:5030`:
+
+```
+assertion `left == right` failed: one: [..2 starts..]; six: [..2 starts..]
+  left: 2
+ right: 7
+```
+
+`reader-tick`'s scenario "A branch that takes pull requests between
+discoveries" says `sluice run --rounds 6` starts git exactly as many times
+as `--rounds 1`. The code now does that. The test asserts five more starts
+and five more fetches, so the test, not the code, is wrong. It still fails
+main's gate.
+
+### 6. Two hosts never land
+
+Two `peers.rs` tests fail at `:468` with `never landed: testing`. The
+`land` helper's 90 seconds of `sluice step main` and `release` on each host
+pass with the combination still under test:
+
+- `a_host_runs_a_branch_only_where_its_policy_lists_the_hosts_key`
+- `the_other_host_runs_the_other_branch`
+
+Each step now runs only where the host process's task holds the driver
+lock (task 4.12), and a combination's hold over the socket is answered once
+(task 3.5). The cause was not traced.
+
+### 7. The keeper's cores
+
+`instance.rs`'s `bound::the_keepers_cores_set_each_runs_share` fails at
+`:774`. Under `[runs] max = 2` and `cores = 2`, the run was given 9 cores,
+where one is asked:
+
+```
+assertion `left == right` failed: [(1, 9)]
+  left: [9]
+ right: [1]
+```
+
+The test submits first, which starts a host process under `max = 2` with no
+`cores`, and only then writes `cores = 2`. A host process that passes on
+its own tick may start the combination's run before the file changes. That
+run keeps the settings it started under (core.54). This reading was not
+confirmed. Either the test or the take-up of `[runs]` has to change. The
+test predates the change (`d1b1121e`, on the bolt), but the change rewrote
+`instance.rs` and moved every run's start into the host process.
 
 ## Smaller departures
 
 These were confirmed in the code. None would block the change alone.
 
-- **`sluice step` beside an older `sluice run`.** `Job::Step`
-  (`host_process/tasks.rs:780`) runs `pass::step` without the
-  `Driver::try_take` that a pass makes (`tasks.rs:860`). The branch's lock
-  keeps it safe, but `host-process`'s "An older sluice run keeps the
-  repository it drives" says the host process runs no round of that
-  repository while the run lives.
-- **Task 3.4's room handle.** `RoomHandle` has only `Here`
-  (`crates/sluice/src/profiles/checks.rs:396-407`). A profile bound with no
-  handle builds a `Room` of its own over `running/` (`checks.rs:299-311`),
-  where the task says the host process's socket. `sluice exec` and
-  `sluice preview` hold over the socket by another path, so no production
-  process decides by itself today. The tree does not enforce that.
-
-The review also reports these from the code. They were not run:
-
-- The host process notes in its index any repository it is asked about,
-  without reading that it has sluice (`host_process/mod.rs:856-930`, `note`
-  at `:967`). Such a repository leaves the index only when a host process
-  starts.
-- On a host that does not keep the branch, a followed request the queue
-  holds at its head is passed over by `across_rows` but not removed from
-  the follows (`pulls.rs:3407-3413`). The requirement removes it.
-- `pull_requests_need_records_on_the_remote` finds that the overview lists
-  nothing of a refused `main` with no records (`overview.rs:374`).
-  `pull-request-intake`'s refusal scenario has the overview show the
-  refusal.
-- A look's read marks are kept only in the host process's memory
-  (`tasks.rs:276-293`). The scenario "The tick is named" says `"tick": 3`
-  once only a wait follows, and that half has no test.
-- In the claim loop (`crates/sluice-core/src/step.rs:3546-3590`), `update`
-  runs its closure again on a refused write, and the second run gets
-  `part.take() == None`. For a moment, a run can be written as starting
-  with no part. The next `perform_starts` opens it again.
-- Two tests contradict their specs:
-  - `a_watch_reads_no_followed_request_itself` (`pull_requests.rs:6672`)
-    asserts no GitHub read while a row is due, but the host process's pass
-    reads a due request (`pass.rs:200`).
-  - The test of "A branch that takes pull requests between discoveries"
-    asserts one start more for six passes than for one, where the scenario
-    says exactly as many.
-- Stale words about the mark and the hand-over remain:
-  - `lib.rs:950-986`, `5119` and `5533`
-  - `pulls.rs:3155-3162`
-  - `reader.rs:1-12`
-  - an empty `impl OnGitHub {}` at `pull_requests.rs:7205-7213`
-  - `main.rs:314-318`'s "took up … in this sluice run started afresh"
+- **A look writes no reader's document.** On a repository with no task
+  running, a one-shot overview's reading is a look. A look writes no
+  document, so the overview and the home view render the records as the
+  host holds them. Design D16 says so; the requirement text names only the
+  reader's document. The output carries the same data.
+- **The host process notes every repository it is asked about.** It does
+  so without reading whether the repository has sluice
+  (`host_process/mod.rs`, `note`). Such a repository leaves the index only
+  when a host process starts.
+- **The claim loop's moment with no part.** In
+  `crates/sluice-core/src/step.rs:3546-3590`, `update` runs its closure
+  again on a refused write, and the second run gets `part.take() == None`.
+  For a moment a run can be written as starting with no part. The next
+  `perform_starts` opens it again.
+- **A watch's test contradicts its spec.**
+  `a_watch_reads_no_followed_request_itself` (`pull_requests.rs:6680`)
+  asserts no GitHub read while a row is due. The host process's pass reads
+  a due request.
+- **`"tick": 3` once only a wait follows.** A look's read marks are kept
+  only in the host process's memory. The second half of "The tick is
+  named", where only a wait follows, has no test.
+- **Stale words about the intake mark and the hand-over.** They remain in:
+  - `lib.rs:955`, `:970` and `:5142`
+  - `pulls.rs:332`, `:1980` and `:3183`
+  - the empty `impl OnGitHub {}` at `pull_requests.rs:7227`
 
 ## Requirements and scenarios
 
-There are 16 delta specs with 123 requirements and 188 scenarios. They were
-read against the code and its tests, without running the tools tier.
+There are 16 delta specs with 124 requirements, 31 of them removed, and 192
+scenarios. They were read against the code and its tests. The tools-tier
+results come from the five suites above.
 
 | Spec | Verdict |
 |---|---|
-| `host-process` | Met but for the step's `.driver` departure above. Several scenarios have thin tests: "A watch keeps it" has none; "The queue empties" allows 10 s for two ticks; "The host's sluice is upgraded" never lands a submission. |
-| `host-driver` | Met. The removed driver is gone (`drive`, `Driving`, `session_capacity`). |
+| `host-process` | Met. A step beside an older `sluice run` is refused, naming it. Finding 6 may bear on its steps. |
+| `host-driver` | Met. |
 | `standing-executor` | Met. |
-| `obsolete-combinations` | Met. `Requester::HandOver` and `drop_obsolete` are gone. |
+| `obsolete-combinations` | Met. |
 | `run-signing` | Met. |
-| `place-ports` | Met. |
-| `run-bound` | Met, with the claim loop's moment above. "A start that fails" and the S19 pool job have thin tests. |
-| `settings-take-up` | Met. "A submit during the hand-over" does not force the race. |
-| `submission-wait` | Not met: findings 2 and 3. |
-| `request-intake-host` | Not met: finding 2. Its REMOVED requirements are gone: no mark refs, `put_intake_mark`, `hand_over`, `drop_obsolete` or `Taker`. |
-| `pull-request-intake` | Met but for the overview's refusal above. |
-| `remote-read-log` | Met, with thin tests of each refusal ending on its own. |
-| `overview-reader` | Not met: finding 4, and the watch's race in finding 3. |
-| `overview` | Met in code. Its watch test contradicts the spec. |
-| `forecast` | Not met: findings 1 and 5. |
-| `reader-tick` | Met but for the test that contradicts its scenario. |
+| `place-ports` | Met. `places` passes whole. |
+| `run-bound` | Met in code, with the claim loop's moment. A check profile holds through the host process's socket (`RoomHandle::Socket`). Finding 7 is unresolved. |
+| `settings-take-up` | Met in code. Finding 7 is unresolved. |
+| `submission-wait` | Met in code: a wait's first tick is the pass its follow asked for, and a wait across hosts names where its request stands. Finding 4's two tests fail. |
+| `request-intake-host` | Met: a wait follows across hosts by the branch's records at the host's pace, with its draft mark, and a request the queue holds at its head leaves `forge/follows/`. Finding 3 bears on the draft a blamed request is given. |
+| `pull-request-intake` | Not met while finding 3 stands: a blamed request is left ready. |
+| `remote-read-log` | Met. |
+| `overview-reader` | Not met: finding 2. A watch's first read is of the pass its follow asked for. |
+| `overview` | Not met: finding 2. |
+| `forecast` | Met in code: every forecast reads held, a branch a current reading brings no revision of is refused as no branch, exit 2, and what is still missing is exit 3. Finding 1's test fails. |
+| `reader-tick` | Met in code; finding 5's test contradicts its scenario. |
 
 ## Tasks
 
-All 89 tasks are ticked. These do not hold as written:
+All 102 tasks are ticked. One does not hold as written:
 
-- **3.4**: there is no socket room handle.
-- **6.3**: the one-shot overview and home view are not rendered from the
-  reader's document (finding 4).
-- **6.6**: a forecast beside a ticking reader fetches (finding 5).
-- **8.3**: its named tests fail (finding 2).
+- **6.15**: its named check, `remote_branch forecast`, fails one test
+  (finding 1).
 
-The gate's `cli:test` failure (finding 1) belongs to no task's own test,
-but every task "leaves the tree building and its named check passing", and
-`cli` no longer passes.
+The other 12 failing tests are named by no task. But every task "leaves the
+tree building and its named check passing". The tasks name these five
+suites, and main's `#check-tools` runs all of them when the bolt lands.
