@@ -106,9 +106,10 @@ back: the queue never depends on it
    On nix-darwin and NixOS, sluice's module writes it from
    `services.sluice.settings.telemetry`. Nothing goes in a session's
    environment, and nothing wraps sluice: every command on the host
-   reads the table, an agent's `sluice submit` and a `sluice run` alike.
-   A `sluice run` kept running takes a change of the table up at its
-   next pass.
+   reads the table, an agent's `sluice submit` and sluice's host process
+   alike. The host process takes a change of the table up by handing its
+   repositories to a fresh host process it starts itself, with nothing to
+   restart.
    sluice names the host itself, so hosts sending to one backend stay
    apart.
 3. **No secrets in sluice's settings.** An API key belongs to the

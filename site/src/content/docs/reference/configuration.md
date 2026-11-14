@@ -518,8 +518,12 @@ on its `remote`. A pull request joins the queue only once it is out of
 draft and meets these conditions on its latest commit.
 
 ```toml
+[signers.box]
+ssh = ".config/sluice.boxes" # one line per host's key
+
 [branches.main]
 remote = "origin"
+trust = ["box"]
 
 [branches.main.pull_requests]
 reviews = 1                  # approving reviews on the current head
@@ -537,8 +541,20 @@ The conditions are read from the branch itself, so a pull request that
 changes `.config/sluice.toml` can't loosen its own. They decide when
 sluice takes a pull request, never what it tests: that is `required`.
 The table needs `remote`, and sluice refuses a policy that has it
-without one. Without the table, `sluice submit` puts work straight into
-the queue. The guide [Pull requests](/sluice/guides/pull-requests/) sets
+without one. It needs
+[`[signers]`](#signersname-who-may-sign-results) too: then the branch's
+state is on its remote, and the host that keeps the branch there takes
+its pull requests in. In a policy with no `[signers]`, each host keeps
+its own state, so sluice refuses the branch alone, and reads every other
+branch as before:
+
+```text
+main takes pull requests, which only the host that keeps it on origin takes in, and its state is each host's own: name [signers] in .config/sluice.toml so its state is kept on origin (137)
+```
+
+A submit to it exits 2 before anything is pushed or opened, and status,
+a step and the overview show it. Without the table, `sluice submit` puts
+work straight into the queue. The guide [Pull requests](/sluice/guides/pull-requests/) sets
 it up.
 
 No key covers operator approval: that is the caller's business, and
@@ -555,24 +571,27 @@ every repository on the host reads the same file. sluice never writes
 it. A command reads it as it starts, so a change counts from the next
 command. Without the file, every setting has its default.
 
-A `sluice run` you keep running looks at the file between its passes.
-It takes a change up before its next pass, and says on stderr which
-tables it took up. A run already testing keeps what it started with:
-its cores, its caches and what its executor lets it touch. A new bound
-holds the runs that start after it. A file that is gone, doesn't read,
-or names a key that doesn't read leaves the `sluice run` on the
-settings it holds. It says so once, with the file and the reason, and
-reads the file again once it changes again. To go back to the
-defaults, write an empty file. A key changed in place, at the path the
-file names, counts once the file next changes or sluice next starts.
+sluice's host process looks at the file between its passes, and takes a
+change up before each repository's next pass, with nothing to restart.
+Its log says which tables it took up. A run already testing keeps what
+it started with: its cores, its caches and what its executor lets it
+touch. A new bound holds the runs that start after it. A file that is
+gone, doesn't read, or names a key that doesn't read leaves the host
+process on the settings it holds. It says so once in its log, with the
+file and the reason, and reads the file again once it changes again. To
+go back to the defaults, write an empty file. A key changed in place, at
+the path the file names, counts once the file next changes or the host
+process next starts.
 
-A `sluice run` can't swap its telemetry in place, so it takes a change
-of `[telemetry]` up by starting itself afresh, in the same process,
-with nothing to restart. Whatever runs it, a terminal, a pane or a
-service manager, keeps following it, and runs already testing keep
-what they started with. Its stderr says the tables it took up, as for
-any change. A change it couldn't start afresh for leaves it on the
-settings it holds, and it says so once, with the file and the reason.
+The host process can't swap its telemetry in place, so it takes a change
+of `[telemetry]` up by handing its repositories to a fresh host process
+it starts itself, with nothing to restart. Runs already testing keep
+what they started with. Its log says the tables it took up, as for any
+change. A change whose settings don't bind, or whose fresh host process
+doesn't start, leaves it on the settings it holds, and it says so once,
+with the file and the reason. A `sluice run` still kept running follows
+the host process, and starts itself afresh for a change of `[telemetry]`
+alone.
 
 ```toml
 [runs]
@@ -642,8 +661,8 @@ It is read-only, or a link into the tool's own store, or the tool writes
 it again each time it applies the configuration. Change it where the
 host's configuration is managed, and apply it from there: an edit on the
 host is refused, or lost at the next apply. Nothing need restart sluice
-when the managed file changes: a `sluice run` kept running takes the
-change up before its next pass. A `->` in the listing marks
+when the managed file changes: sluice's host process takes the change up
+before its next pass. A `->` in the listing marks
 a link, and a mode with no `w` marks a read-only file:
 
 ```sh
@@ -829,8 +848,9 @@ installed on shares. Between two askings, sluice asks GitHub nothing.
 
 The systems this host runs, by the policy's
 [`[systems]`](#systems-what-a-test-runs-on) names. Without it, the host
-runs the one system it is. `sluice run` refuses a system whose operating
-system and architecture the host isn't.
+runs the one system it is. sluice's host process claims no run of a
+repository whose policy names, for a system this lists, an operating
+system and architecture the host isn't, and says so in its log.
 
 ### `[signing]`
 
@@ -877,8 +897,8 @@ Whether sluice sends its telemetry, where, as what, which signals and
 how much of a failure. sluice sends OTLP over HTTP, protobuf, to a
 collector, as the [telemetry reference](/sluice/reference/telemetry/)
 describes. A host with no `[telemetry]` sends nothing unless a command
-asks. A `sluice run` you keep running takes a change of the table up
-by starting itself afresh, in the same process, as
+asks. sluice's host process takes a change of the table up by handing
+its repositories to a fresh host process it starts itself, as
 [the host's config](#the-hosts-config-configsluiceconfigtoml) says.
 
 ```toml

@@ -179,8 +179,9 @@ While it lasts:
   its `--timeout`, saying once on stderr until when, then goes on;
 - a `sluice submit --no-wait` fails at once, exit `3`, saying until
   when;
-- `sluice run` and `sluice step` leave the pull requests until the time
-  has passed, say so once, and go on landing what has passed its checks.
+- sluice's host process, and the round `sluice step` asks of it, leave
+  the pull requests until the time has passed, say so once, and go on
+  landing what has passed its checks.
 
 ## What the app does not do
 

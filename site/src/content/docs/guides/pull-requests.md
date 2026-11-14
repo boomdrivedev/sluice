@@ -42,7 +42,7 @@ itself, in the combination it tested.
 
 The rest of this page holds the detail: [how a pull request waits, then
 joins the queue](#two-stages-waiting-then-the-queue), [the
-policy](#the-policy), [keeping sluice running](#keep-sluice-running),
+policy](#the-policy), [how sluice notices them](#sluice-notices-them),
 [what sluice posts](#what-sluice-posts) and [GitHub's
 settings](#github-settings).
 
@@ -79,9 +79,13 @@ Everything in the queue is ready to land as soon as it passes.
 ## The policy
 
 ```toml
+[signers.box]
+ssh = ".config/sluice.boxes"   # one line per host's key
+
 [branches.main]
 remote = "origin"
 required = ["#check-fast", "#check-tools"]
+trust = ["box"]                # the signers whose runs count on main
 
 [branches.main.pull_requests]
 reviews = 1                  # approving reviews on the current head
@@ -101,76 +105,73 @@ on the host instead. Anyone who can read the repository reads the pull
 request, and scrubbing catches the common shapes of a secret, not every
 one, so turn it on only where the tests' output is safe to show.
 
+A branch that takes pull requests names
+[`[signers]`](/sluice/reference/configuration/#signersname-who-may-sign-results),
+so its state is kept on its `remote` and the host that keeps it there
+takes its pull requests in. A policy with no `[signers]` keeps every
+branch's state on each host, where no host takes the pull requests in
+for the others, so sluice refuses that branch alone and every other goes
+on. `sluice submit main` exits 2, and pushes and opens nothing:
+
+```console
+$ sluice submit main
+refused: main takes pull requests, which only the host that keeps it on origin takes in, and its state is each host's own: name [signers] in .config/sluice.toml so its state is kept on origin (137)
+```
+
+`sluice status main`, `sluice step main` and `sluice overview` say the
+same.
+
 With no `[branches.main.pull_requests]` table, there are no pull
 requests and work goes straight into the queue, as in the previous
 guide.
 
-## Keep sluice running
+## sluice notices them
 
-An agent's waiting `wt submit` runs sluice's rounds, but a pull request
-opened by hand has nobody waiting on it. Something has to notice it, so
-keep a `sluice run` going while you work:
+An agent's waiting `wt submit` follows sluice's host process, which moves
+the queue. sluice starts that process itself when work arrives, and it
+ends once nothing is in play and nothing follows it, with nothing to
+install. A pull request opened by hand has nobody waiting on it, so the
+host process notices it while it lives, or once the next command of
+sluice's on the host starts it. To keep it noticing while you work, keep
+a watch going, which the host process lives for:
 
 ```sh
-sluice run
+sluice overview --json --watch
 ```
 
-Each round fetches `main` and moves the queue. Once a minute it also asks
+Each pass fetches `main` and moves the queue. Once a minute it also asks
 GitHub for the open pull requests into `main` and posts their states.
 It asks at once when a submit on the host opened or updated a pull
 request, or when the queue changed. A pull request opened by hand, a review, or another
 system's check is seen within that minute of happening; an agent's
 submit sees its own pull request at once. `[forge] discovery` in the
 [host's config](/sluice/reference/configuration/#forge) sets the minute.
-sluice starts no service of its own, so how `sluice run` stays up (a
-terminal, a login item, a service manager) is your choice.
 
 ### One host takes the pull requests in
 
-When several hosts reach `main`, one at a time takes its pull requests
-in, so no pull request is tested on two hosts. Where `main`'s records
-are on its remote, that is the host that keeps `main`. Where each host
-keeps its own records, it is the host that holds `main`'s intake mark,
-the ref `refs/sluice/intake/main` on the remote:
+When several hosts reach `main`, one takes its pull requests in, so no
+pull request is tested on two hosts: the host that keeps `main` on its
+remote, which `main`'s state names. Whichever of that host's sluice
+processes asks, a round, a `sluice step` or a submit, takes them in, one
+at a time. The first host to pass `main` keeps it. Another host takes it
+once `main`'s state has stood unchanged for `[peers] lease`, as that host
+has watched it, with work queued, as when the host that kept it stopped.
 
-- `sluice run` pushes the mark when it starts, and pushes it again
-  every third of `[peers] lease`, never each round. A second host's
-  `sluice run` finds it and takes nothing in.
-- A `sluice wait` or waiting submit on a host where `sluice run` isn't
-  running pushes the mark where none stands. The host's waits hold it
-  together: the last of them to end removes it. A `sluice run` takes the
-  mark from a wait at once.
-- Any host takes the mark once it has stood unchanged for `[peers]
-  lease` as that host has watched it, as when the host that held it
-  stopped.
-- A `sluice step` pushes no mark. A repository one host reaches with
-  waits and steps alone keeps none between them.
-
-A host that doesn't hold the mark asks GitHub nothing about `main`'s
-pull requests. Once it finds another host's mark, it withdraws its own
-queued submissions of them, naming that host, and that host takes each
-in again. Such a withdrawal marks no pull request a draft and waits for
-no one's submit or ready mark. Whichever host holds the mark takes each
-in again at its latest commit, this host too once the mark comes back
-to it. `sluice status` shows the submission `handed over to` that
-host. A host withdraws nothing where its push of the mark was
-refused and the mark names no other host. A submission that is landing
-finishes, one whose work `main` already holds is recorded landed, and
-work submitted from the host's own worktrees stays in its queue. A wait on that host follows its pull
+A host that doesn't keep `main` asks GitHub nothing about its pull
+requests and withdraws nothing. A wait on that host follows its pull
 request on GitHub, as [`sluice wait`](/sluice/reference/commands/#sluice-wait)
 says. `sluice status main` and
 [`sluice overview`](/sluice/reference/commands/#sluice-overview) there
-list each pull request the host submitted, handed over or waited on,
-with the host that holds the mark and where the request stands in that
-host's queue.
+list each pull request the host submitted or waited on, with the host
+that keeps `main` and where the request stands in that host's queue.
 
-The mark is safe to remove, as after moving to another host:
+An older sluice took the pull requests in by an intake mark, the ref
+`refs/sluice/intake/main` on the remote. Nothing reads it now. Once every
+host runs this sluice, delete it by hand:
 
 ```sh
 git push origin :refs/sluice/intake/main
 ```
-
-The next host to pass `main` takes the pull requests in.
 
 ## An agent submits
 
@@ -448,7 +449,7 @@ combination is formed again. Only the blamed pull request is told.
 ```mermaid
 sequenceDiagram
     participant A as agent
-    participant S as sluice run
+    participant S as sluice
     participant G as GitHub
     participant Q as QA and a reviewer
     A->>G: wt submit: push the branch, open PR 41

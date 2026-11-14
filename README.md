@@ -101,12 +101,15 @@ combination passes.
   keeps it until it is released: one per landing, with nothing kept
   checked out by hand. It is a cheap environment on the tests' own fakes,
   not a deployment ([previews](https://agentplot.github.io/sluice/guides/previews/)).
-- **Nothing to install.** sluice is one binary. A `sluice submit`
-  returns at once; the first command that needs a host's queues moved
-  starts sluice's own host process, which moves every repository's
-  queues on the host and exits once none has work. Waits and watches
-  follow it. A crash or a sleeping laptop loses nothing: the next
-  command starts it again from the records. What a preview leaves up, the repository's own tools keep
+- **Nothing to install.** sluice is one binary, and no service is kept
+  for it. A submit queues its head and tells sluice's own host process,
+  which the first command that needs the host's queues moved starts; it
+  moves every repository's queues on the host, each apart, and ends once
+  none has work and nothing follows it. A submit waits for the outcome,
+  or returns at once with `--no-wait`; waits and watches follow the host
+  process. A crash or a sleeping laptop loses nothing: the next command
+  that finds work in play starts it again, and it carries on from the
+  records. What a preview leaves up, the repository's own tools keep
   until its release. Every decision is written to plain files before it
   is acted on, so a crash at any point resumes cleanly.
 
@@ -235,9 +238,9 @@ branches, is walked through in [docs/examples](docs/examples/README.md).
 **4. On many hosts**, when agents on several machines submit to one
 branch, or a check must pass on Linux and macOS: name signers in the
 policy, and the branch's queue moves to its git remote, shared by every
-host, with no server. Each host signs the results it runs; a box you keep
-running with `sluice run` takes the checks first, and an agent can submit
-and switch its machine off. [Executors and
+host, with no server. Each host signs the results it runs; another host
+whose sluice is moving its queues takes the checks, and an agent can
+submit and switch its machine off. [Executors and
 systems](https://agentplot.github.io/sluice/guides/executors-and-systems/)
 sets it up.
 
@@ -246,12 +249,11 @@ sets it up.
 | Command | |
 |---|---|
 | `sluice submit <branch>` | Queue this worktree's head and wait for the outcome. `--no-wait` returns once queued; `--status` reports where this worktree's last submission stands; `--check` only reports whether it would conflict; `--after 2,5` lands it after those; `--json` for scripts. |
-| `sluice wait <id>` | Wait for a submission's outcome, running the rounds as a waiting submit does; `--timeout 9m` returns after that long, exiting `5`, for an agent whose tool calls are capped; `--json` prints its record. |
+| `sluice wait <id>` | Wait for a submission's outcome, following sluice's host process, which runs the rounds; `--timeout 9m` returns after that long, exiting `5`, for an agent whose tool calls are capped; `--json` prints its record. |
 | `sluice status <branch>` | The queue: each submission still in it, its agent, its worktree and its state, and how far each combination under test has got; `--all` for every one the branch has had. `sluice status <id>` for one; `sluice status` alone lists the worktrees sluice holds. |
 | `sluice` | Where this worktree stands: its submission, each branch's queue, its place and what to run next. `--json` for a status line. |
 | `sluice overview` | Every branch's queue at a glance, with the latest landings and blames. `--json` for tools; `--json --watch` prints it again on each change. |
-| `sluice run` | Work every branch's queue until stopped. |
-| `sluice step <branch>` | One round of a branch's work, then exit: for cron, CI or a hook. `--json` for scripts. |
+| `sluice step <branch>` | One round of a branch's work, run by sluice's host process, then exit: for cron, CI or a hook. `--json` for scripts. |
 | `sluice amend <id>` | Reorder a queued submission (`--after`, `--priority`) until it is under test. `--json` for scripts. |
 | `sluice withdraw <id>` | Take a submission out of the queue; one already withdrawn exits `0` and says so. `--json` for scripts. |
 | `sluice protect` | Install the branch-protection hook; `--remove` takes it out. Warns of a worktree that has checked out a protected branch. `--json` for scripts. |
