@@ -1853,7 +1853,13 @@ impl Sluice<'_> {
             sluice.replayed = 0u64,
         );
         let _span = span.enter();
-        let mut results = self.results(&line.branch)?;
+        // Design D17: the results of the keys this run reported and of its
+        // combination alone.
+        let ask = report.tasks.iter().chain(&report.dependencies).fold(
+            sluice_seams::ResultAsk::default().combination(&c.revision),
+            |ask, t| ask.key(&t.task, &t.hash),
+        );
+        let mut results = self.results_for(&line.branch, &ask)?;
         let mut fresh = Vec::new();
         // Design D9 (C.6): on a branch whose records are on its remote, a
         // result is recorded signed, and only for a key the candidate's
@@ -1951,7 +1957,7 @@ impl Sluice<'_> {
             self.seams.state.record_results(&bytes)?;
             if rules.signed {
                 // 78: what counts is what the records hold signed.
-                results = self.results(&line.branch)?;
+                results = self.results_for(&line.branch, &ask)?;
             } else {
                 results.extend(fresh);
             }
@@ -2747,7 +2753,17 @@ impl Sluice<'_> {
             // Design D8: on a branch whose records any host may write, a
             // landing reads its verdict again from the signed results.
             if rules.signed {
-                let results = self.results(&line.branch)?;
+                // Design D17: the results of the combinations it lands,
+                // and of the keys they replayed or failed, which a pass
+                // elsewhere may prove.
+                let landed = cands[..n]
+                    .iter()
+                    .fold(sluice_seams::ResultAsk::default(), |ask, c| {
+                        ask.combination(&c.revision)
+                    });
+                let mine = self.results_for(&line.branch, &landed)?;
+                let ask = mine.iter().fold(landed, |ask, r| ask.key(&r.task, &r.hash));
+                let results = self.results_for(&line.branch, &ask)?;
                 let judged: BTreeSet<&String> = cands[..n]
                     .iter()
                     .map(|c| {

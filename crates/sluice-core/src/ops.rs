@@ -2048,13 +2048,15 @@ mod tests {
             Ok(id)
         }
 
-        fn results(&self, branch: &str) -> Result<Vec<u8>> {
-            Ok(self
-                .results
-                .borrow()
-                .get(branch)
-                .cloned()
-                .unwrap_or_default())
+        fn results_for(&self, branch: &str, ask: &sluice_seams::ResultAsk) -> Result<Vec<u8>> {
+            Ok(ask.answer(
+                &self
+                    .results
+                    .borrow()
+                    .get(branch)
+                    .cloned()
+                    .unwrap_or_default(),
+            ))
         }
 
         fn record_results(&self, _: &[u8]) -> Result<()> {

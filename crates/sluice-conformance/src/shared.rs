@@ -1321,7 +1321,13 @@ pub fn s30_a_landed_revision_is_previewed_at_its_addresses(h: &impl Rig) {
     let up = preview_up(h, &landed);
     assert_eq!(up.revision, landed);
     // 103: nothing of it is a result.
-    let results = String::from_utf8(s.seams().state.results(BRANCH).unwrap()).unwrap();
+    let results = String::from_utf8(
+        s.seams()
+            .state
+            .results_for(BRANCH, &sluice_seams::ResultAsk::every())
+            .unwrap(),
+    )
+    .unwrap();
     assert!(!results.contains(&up.name) && !results.contains("preview"));
     assert!(s.release_preview(&up.name).unwrap());
 }

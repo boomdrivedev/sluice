@@ -368,7 +368,16 @@ impl Sluice<'_> {
         report: &RunReport,
     ) -> Result<usize> {
         let now = self.now();
-        let have = self.results(&plan.branch)?;
+        // Design D17: the results of the keys this run observed alone.
+        let ask = report
+            .tasks
+            .iter()
+            .chain(&report.dependencies)
+            .filter(|t| matches!(t.source, Source::Ran { .. }))
+            .fold(sluice_seams::ResultAsk::default(), |ask, t| {
+                ask.key(&t.task, &t.hash)
+            });
+        let have = self.results_for(&plan.branch, &ask)?;
         let mut bytes = Vec::new();
         let mut n = 0;
         for t in report.tasks.iter().chain(&report.dependencies) {

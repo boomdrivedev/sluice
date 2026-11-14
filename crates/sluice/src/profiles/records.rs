@@ -15,8 +15,8 @@ use anyhow::{Context, Result};
 use sluice_core::policy::{Policy, POLICY_PATH};
 use sluice_core::records::{parse_lines, to_line, ResultLine, SetAside};
 use sluice_seams::{
-    read_refused, Branch, Changes, Guard, ReadRefused, Rev, Setting, Snapshot, State, TaskLog,
-    TaskProgress, Written,
+    read_refused, Branch, Changes, Guard, ReadRefused, ResultAsk, Rev, Setting, Snapshot, State,
+    TaskLog, TaskProgress, Written,
 };
 
 use super::branches::Branches;
@@ -715,12 +715,13 @@ impl State for Records {
         }
     }
 
-    /// This host's own results, and the runs on every remote opened, each
-    /// signer's verified with the key `branch`'s own policy lists for it
-    /// at its revision and read for no signer it does not name
-    /// ([`Records::signers_of`]; 78; rule core.22).
-    fn results(&self, branch: &str) -> Result<Vec<u8>> {
-        let mut bytes = self.local.results(branch)?;
+    /// Of this host's own results, and the runs on every remote opened,
+    /// each signer's verified with the key `branch`'s own policy lists for
+    /// it at its revision and read for no signer it does not name
+    /// ([`Records::signers_of`]; 78; rule core.22), the lines `ask` names
+    /// (design D17).
+    fn results_for(&self, branch: &str, ask: &ResultAsk) -> Result<Vec<u8>> {
+        let mut bytes = self.local.results_for(branch, ask)?;
         let routed = self.route(branch)?;
         let remotes: Vec<Rc<RemoteRefs>> = self.remotes.borrow().values().cloned().collect();
         if remotes.is_empty() {
@@ -728,7 +729,7 @@ impl State for Records {
         }
         let signers = self.signers_of(branch, routed.as_ref().map(|r| r.remote()))?;
         for r in remotes {
-            bytes.extend(r.results_with(&signers)?);
+            bytes.extend(ask.answer(&r.results_with(&signers)?));
         }
         Ok(bytes)
     }

@@ -20,9 +20,9 @@ use sluice_seams::{
     Adopted, AtBound, Branch, Changes, CheckedOut, Checkout, Delivery, Driver, Enforced, Equip,
     EquipStep, Equipped, Formed, GoneRelease, Guard, HostCopy, HostRun, KeptOutTask, LandingCommit,
     LastResult, Moved, Network, NotRun, Notification, Outcome, Part, Place, PreviewPlace, Progress,
-    Proof, ReadRefused, Reading, Reads, ReleaseFailure, ReleasePolicy, Released, Rev, RunHandle,
-    RunKind, RunReport, RunRequest, Running, Session, SessionPlace, Settings, Snapshot, Source,
-    State, Submitter, TaskLog, TaskProgress, TaskResult, Tests, Unanswered, Written,
+    Proof, ReadRefused, Reading, Reads, ReleaseFailure, ReleasePolicy, Released, ResultAsk, Rev,
+    RunHandle, RunKind, RunReport, RunRequest, Running, Session, SessionPlace, Settings, Snapshot,
+    Source, State, Submitter, TaskLog, TaskProgress, TaskResult, Tests, Unanswered, Written,
 };
 
 /// A tree: path to content.
@@ -3592,8 +3592,9 @@ impl State for FakeState {
         Ok(id)
     }
 
-    fn results(&self, _: &str) -> Result<Vec<u8>> {
-        Ok(self.0 .0.borrow().results.clone())
+    /// From their own log, the lines `ask` names (design D17).
+    fn results_for(&self, _: &str, ask: &ResultAsk) -> Result<Vec<u8>> {
+        Ok(ask.answer(&self.0 .0.borrow().results))
     }
 
     fn verifies_own(&self, _: &str, _: &Rev) -> Result<bool> {

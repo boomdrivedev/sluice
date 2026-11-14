@@ -22,7 +22,7 @@ use std::path::{Path, PathBuf};
 use anyhow::{anyhow, bail, Context, Result};
 use serde::{Deserialize, Serialize};
 use sluice_seams::{
-    Changes, Guard, Snapshot, State, TaskLog, TaskProgress, Written, FINISHED, KEPT_LOGS,
+    Changes, Guard, ResultAsk, Snapshot, State, TaskLog, TaskProgress, Written, FINISHED, KEPT_LOGS,
 };
 
 use crate::runs::flat_name;
@@ -552,10 +552,10 @@ impl State for LocalFiles {
         Ok(id)
     }
 
-    /// Every result this host recorded, whichever branch reads them: none
-    /// is signed, so no signer's key is read.
-    fn results(&self, _: &str) -> Result<Vec<u8>> {
-        self.results_log()
+    /// The results this host recorded that `ask` names, whichever branch
+    /// reads them: none is signed, so no signer's key is read.
+    fn results_for(&self, _: &str, ask: &ResultAsk) -> Result<Vec<u8>> {
+        Ok(ask.answer(&self.results_log()?))
     }
 
     fn keep_logs(&self, branch: &str, candidate: &str, logs: &[TaskLog]) -> Result<Vec<TaskLog>> {

@@ -92,6 +92,109 @@ pub fn read_refused(e: &anyhow::Error) -> Option<&ReadRefused> {
     e.chain().find_map(|c| c.downcast_ref::<ReadRefused>())
 }
 
+/// 69 (design D17): what a reader of the results log asks for: keys, a
+/// check's task and the hash it ran at, combinations and tasks. A line
+/// matching any of them is answered: its task and hash one of the keys,
+/// its combination one of the combinations, or its task one of the tasks.
+/// Every caller asks for what it reads: a candidate's verdict its checks'
+/// keys and its combination, a session run its plan's keys, a verdict view
+/// its submission's combination, a landing's second reading the
+/// combinations it lands and their keys, a set-aside the task it names.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ResultAsk {
+    #[serde(default, skip_serializing_if = "BTreeSet::is_empty")]
+    pub keys: BTreeSet<(String, String)>,
+    #[serde(default, skip_serializing_if = "BTreeSet::is_empty")]
+    pub combinations: BTreeSet<Rev>,
+    #[serde(default, skip_serializing_if = "BTreeSet::is_empty")]
+    pub tasks: BTreeSet<String>,
+    /// Every line: what a test that inspects the whole log asks. No step,
+    /// gate or command asks it.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    every: bool,
+}
+
+/// What a line of the results log is matched by: its task, hash and
+/// combination, read alone.
+#[derive(Deserialize)]
+struct Matched {
+    #[serde(default)]
+    task: String,
+    #[serde(default)]
+    hash: String,
+    #[serde(default)]
+    combination: String,
+}
+
+impl ResultAsk {
+    /// Every line of the log: a test's inspection of it, never a step's,
+    /// a gate's or a command's (design D17).
+    pub fn every() -> ResultAsk {
+        ResultAsk {
+            every: true,
+            ..ResultAsk::default()
+        }
+    }
+
+    /// Whether it asks for every line.
+    pub fn is_every(&self) -> bool {
+        self.every
+    }
+
+    /// Whether it asks for nothing: a read of it answers no line.
+    pub fn is_empty(&self) -> bool {
+        !self.every && self.keys.is_empty() && self.combinations.is_empty() && self.tasks.is_empty()
+    }
+
+    /// The same, asking for the key `task` ran at `hash` too.
+    pub fn key(mut self, task: &str, hash: &str) -> ResultAsk {
+        self.keys.insert((task.to_string(), hash.to_string()));
+        self
+    }
+
+    /// The same, asking for the results of `combination` too.
+    pub fn combination(mut self, combination: &Rev) -> ResultAsk {
+        self.combinations.insert(combination.clone());
+        self
+    }
+
+    /// The same, asking for every result of `task` too.
+    pub fn task(mut self, task: &str) -> ResultAsk {
+        self.tasks.insert(task.to_string());
+        self
+    }
+
+    /// Whether a line of `task` at `hash` on `combination` is asked for.
+    pub fn matches(&self, task: &str, hash: &str, combination: &str) -> bool {
+        self.every
+            || self.tasks.contains(task)
+            || self.combinations.iter().any(|c| c.0 == combination)
+            || self.keys.iter().any(|(t, h)| t == task && h == hash)
+    }
+
+    /// The lines of `log`, one JSON document per line, it asks for, each
+    /// whole with its newline. A line that names no task, hash or
+    /// combination it reads is answered only where it asks for every line.
+    pub fn answer(&self, log: &[u8]) -> Vec<u8> {
+        if self.every {
+            return log.to_vec();
+        }
+        let mut out = Vec::new();
+        for line in log.split_inclusive(|b| *b == b'\n') {
+            let Ok(m) = serde_json::from_slice::<Matched>(line) else {
+                continue;
+            };
+            if self.matches(&m.task, &m.hash, &m.combination) {
+                out.extend_from_slice(line);
+                if !line.ends_with(b"\n") {
+                    out.push(b'\n');
+                }
+            }
+        }
+        out
+    }
+}
+
 /// A git revision, as the branch seam names it.
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 #[serde(transparent)]
@@ -1900,17 +2003,19 @@ pub trait State {
     /// holds (26; record 0114; rule core.41).
     fn allocate_id(&self, branch: &str) -> Result<u64>;
 
-    /// 69: the repository's results log, one JSON document per line, as
-    /// `branch`'s gate reads it: the branch is the one whose gate, session
-    /// run or verdict reads the log, and a profile that reads signed runs
-    /// verifies them with the signers and keys that branch's own policy
-    /// names, never another branch's (78; rule core.22).
-    fn results(&self, branch: &str) -> Result<Vec<u8>>;
+    /// 69 (design D17): the lines of the repository's results log that
+    /// `ask` names, one JSON document per line, as `branch`'s gate reads
+    /// them: the branch is the one whose gate, session run or verdict
+    /// reads them, and a profile that reads signed runs verifies them with
+    /// the signers and keys that branch's own policy names, never another
+    /// branch's (78; rule core.22). A line matching any of what `ask`
+    /// names is answered; nothing else is.
+    fn results_for(&self, branch: &str, ask: &ResultAsk) -> Result<Vec<u8>>;
 
     /// 78, 87: whether `branch`'s gate at `at`, the revision a round read
     /// it at, would count a run this host signs: the host signs as a signer
     /// the branch's own policy there names, with a key that policy lists
-    /// for it, as [`State::results`] verifies the branch's runs. The
+    /// for it, as [`State::results_for`] verifies the branch's runs. The
     /// signer's name alone, which another branch may give another key, is
     /// not enough (rule core.22). A profile that verifies no signed run
     /// leaves the name to the gate.
@@ -2077,5 +2182,29 @@ mod tests {
         assert!(!from("bolt/x", None).by_name());
         assert!(!from("pull/7", Some("bolt/x")).by_name());
         assert!(!from("unit/a", Some("bolt/x")).by_name());
+    }
+
+    /// 69 (design D17): a line matching any of what is asked is answered
+    /// whole, and nothing else; an ask for every line answers the log.
+    #[test]
+    fn a_result_ask_answers_the_lines_it_names() {
+        let log = b"{\"task\":\"a:test\",\"hash\":\"h1\",\"combination\":\"c1\"}\n\
+                    {\"task\":\"b:test\",\"hash\":\"h2\",\"combination\":\"c2\"}\n\
+                    {\"task\":\"c:test\",\"hash\":\"h3\",\"combination\":\"c3\"}\n\
+                    not a line\n";
+        let lines = |ask: &ResultAsk| String::from_utf8(ask.answer(log)).unwrap();
+        assert_eq!(lines(&ResultAsk::default()), "");
+        let by_key = lines(&ResultAsk::default().key("a:test", "h1"));
+        assert!(
+            by_key.contains("a:test") && by_key.lines().count() == 1,
+            "{by_key}"
+        );
+        assert_eq!(lines(&ResultAsk::default().key("a:test", "h2")), "");
+        let any = ResultAsk::default()
+            .combination(&Rev("c2".into()))
+            .task("c:test");
+        assert_eq!(lines(&any).lines().count(), 2, "{}", lines(&any));
+        assert_eq!(ResultAsk::every().answer(log), log.to_vec());
+        assert!(ResultAsk::default().is_empty() && !ResultAsk::every().is_empty());
     }
 }

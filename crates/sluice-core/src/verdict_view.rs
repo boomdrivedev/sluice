@@ -46,7 +46,16 @@ impl Sluice<'_> {
             .filter(|s| s.id < id && !s.state.is_out())
             .map(|s| s.id)
             .collect();
-        let results: Vec<ResultLine> = parse_lines(&self.seams.state.results(branch)?)?;
+        // Design D17: the results of the combination it was tested in
+        // alone, where it was.
+        let ask = match &sub.tested {
+            Some(t) => sluice_seams::ResultAsk::default().combination(&t.combination),
+            None => sluice_seams::ResultAsk::default(),
+        };
+        let results: Vec<ResultLine> = match ask.is_empty() {
+            true => Vec::new(),
+            false => parse_lines(&self.seams.state.results_for(branch, &ask)?)?,
+        };
         let asides: Vec<SetAside> = parse_lines(&self.seams.state.set_asides()?)?;
         let mut view = verdict_view(&sub, &ahead, &results, &asides, &log);
         if view.standing == Standing::Testing {

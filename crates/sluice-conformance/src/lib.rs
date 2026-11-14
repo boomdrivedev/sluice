@@ -308,10 +308,15 @@ pub trait Rig {
         s.seams().state.read(BRANCH).expect("records read").files
     }
 
-    /// The repository's results log, as the branch's gate reads it.
+    /// The repository's results log, as the branch's gate reads it, every
+    /// line: the test's inspection of it, which no step makes (design D17).
     fn results(&self) -> Vec<ResultLine> {
         let s = self.sluice();
-        let bytes = s.seams().state.results(BRANCH).expect("results read");
+        let bytes = s
+            .seams()
+            .state
+            .results_for(BRANCH, &sluice_seams::ResultAsk::every())
+            .expect("results read");
         parse_lines(&bytes).expect("the results log parses")
     }
 

@@ -33,7 +33,7 @@ use std::rc::Rc;
 use anyhow::{anyhow, bail, Context, Result};
 use sluice_core::records::{parse_lines, to_line, ResultKind, ResultLine, RESULT_SCHEMA};
 use sluice_seams::{
-    read_refused, Changes, Enforced, Guard, ReadRefused, Rev, Snapshot, State, TaskLog,
+    read_refused, Changes, Enforced, Guard, ReadRefused, ResultAsk, Rev, Snapshot, State, TaskLog,
     TaskProgress, Written, FINISHED, KEPT_LOGS,
 };
 
@@ -1128,8 +1128,8 @@ impl State for RemoteRefs {
     /// This host's own replays alone: the profile keeps no signer's key,
     /// so a branch's signed runs are read with
     /// [`RemoteRefs::results_with`] and its own policy's list (78).
-    fn results(&self, _: &str) -> Result<Vec<u8>> {
-        self.results_with(&BTreeMap::new())
+    fn results_for(&self, _: &str, ask: &ResultAsk) -> Result<Vec<u8>> {
+        Ok(ask.answer(&self.results_with(&BTreeMap::new())?))
     }
 
     /// Nothing this host signs counts: with no list, no signed run is

@@ -479,34 +479,21 @@ impl<'a> Sluice<'a> {
         })
     }
 
-    /// 69: the results log as `branch`'s gate reads it, its signed runs
-    /// verified with the signers `branch`'s own policy names (78; rule
-    /// core.22), less every result set aside (could-not-run-1 116); the
-    /// lines themselves stay (rule core.7).
-    fn results(&self, branch: &str) -> Result<Vec<ResultLine>> {
-        let all: Vec<ResultLine> = parse_lines(&self.seams.state.results(branch)?)?;
+    /// 69 (design D17): the results `ask` names, as `branch`'s gate reads
+    /// them, its signed runs verified with the signers `branch`'s own
+    /// policy names (78; rule core.22), less every result set aside
+    /// (could-not-run-1 116); the lines themselves stay (rule core.7). An
+    /// ask for nothing reads nothing.
+    fn results_for(&self, branch: &str, ask: &sluice_seams::ResultAsk) -> Result<Vec<ResultLine>> {
+        if ask.is_empty() {
+            return Ok(Vec::new());
+        }
+        let all: Vec<ResultLine> = parse_lines(&self.seams.state.results_for(branch, ask)?)?;
         let aside: Vec<SetAside> = parse_lines(&self.seams.state.set_asides()?)?;
         Ok(all
             .into_iter()
             .filter(|r| !aside.iter().any(|a| r.set_aside_by(a)))
             .collect())
-    }
-
-    /// Every result any gate could count: each branch with records' results,
-    /// joined, a line two branches read kept once. A branch whose results
-    /// cannot be read is passed by into the unread list with its words
-    /// (26; rule core.11).
-    fn every_result(&self) -> Result<(Vec<ResultLine>, Vec<Unread>)> {
-        let mut seen = std::collections::BTreeSet::new();
-        let mut all = Vec::new();
-        let mut unread = Vec::new();
-        for b in self.seams.state.branches()? {
-            match self.results(&b) {
-                Ok(lines) => all.extend(lines.into_iter().filter(|r| seen.insert(to_line(r)))),
-                Err(e) => unread.push(Unread::of(&b, &e)),
-            }
-        }
-        Ok((all, unread))
     }
 
     /// Could-not-run-1 116: set aside the one result of `task` recorded at
@@ -524,7 +511,20 @@ impl<'a> Sluice<'a> {
         if reason.trim().is_empty() {
             bail!("a result is set aside with why: give a reason");
         }
-        let (every, unread) = self.every_result()?;
+        // Design D17: each branch with records asked for `task`'s results
+        // alone, a line two branches read kept once. A branch whose
+        // results cannot be read is passed by into the unread list with
+        // its words (26; rule core.11).
+        let ask = sluice_seams::ResultAsk::default().task(task);
+        let mut seen = std::collections::BTreeSet::new();
+        let mut every = Vec::new();
+        let mut unread = Vec::new();
+        for b in self.seams.state.branches()? {
+            match self.results_for(&b, &ask) {
+                Ok(lines) => every.extend(lines.into_iter().filter(|r| seen.insert(to_line(r)))),
+                Err(e) => unread.push(Unread::of(&b, &e)),
+            }
+        }
         let found: Vec<ResultLine> = every
             .into_iter()
             .filter(|r| r.task == task && r.at == at)
