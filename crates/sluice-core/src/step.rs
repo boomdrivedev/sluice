@@ -338,13 +338,17 @@ impl Sluice<'_> {
         if let Some(refused) = self.seams.state.stale(branch) {
             return Err(refused.into());
         }
-        if line.home.as_ref().is_some_and(|h| h.at == HERE) {
-            return Ok(true);
-        }
         let Some(tip) = self.seams.branch.read(branch)? else {
             return Ok(true);
         };
+        // 56, S64, 124 (record 0069): the rules at the branch's revision are
+        // read before anything is decided, wherever its home is, so a policy
+        // refused there refuses the round before it levels this host's copy,
+        // lands or runs anything.
         let rules = self.rules_at(branch, &tip)?;
+        if line.home.as_ref().is_some_and(|h| h.at == HERE) {
+            return Ok(true);
+        }
         let signed = rules.as_ref().is_some_and(|r| r.signed);
         // Records with no home yet go where the rules at the head send them.
         if line.home.is_none() && !signed {
