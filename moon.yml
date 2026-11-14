@@ -6,7 +6,8 @@ tasks:
   # Every formatter treefmt.nix configures, writing nothing it would change
   # and keeping no cache outside the tree. It reads every tracked file: one
   # that no formatter claims and no exclude names fails it (core.21).
-  # moon 2.6.1 hashes what a glob finds on disk, ignored or not, and a
+  # moon 2.6.1 hashes what a glob finds on disk, ignored or not, whatever
+  # its hasher's walkStrategy or ignorePatterns say, and a
   # signer passes a key only where the tree holds every input it names
   # (C.6; core.9), so the inputs leave out what .gitignore names, and
   # ruff's cache, which ignores itself: a run's place holds devenv's,
