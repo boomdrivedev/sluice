@@ -6,7 +6,7 @@
 
 use sluice_conformance::{policy, Harness, Rig, BRANCH};
 use sluice_core::records::{CandidateState, Event, HomeState, State, HERE};
-use sluice_core::{Peer, Step};
+use sluice_core::{Lookup, Peer, Step};
 use sluice_seams::Rev;
 
 /// The bolt policy with its records on `origin`, trusting the signer
@@ -503,4 +503,125 @@ fn a_round_carries_its_hosts_submissions_home_before_it_reads_the_branch() {
         .map(|(n, t)| (n, t.number, t.host))
         .collect();
     assert_eq!(by, [(7, 7, Some("a".into())), (8, 8, Some("b".into()))]);
+}
+
+/// satisfies: record 0122, 26, rule core.41 (design D5, D6); the
+/// queue-home spec's "Two hosts each held #52": host b's own queue holds
+/// #52, and host a, with no records of its own, has #52 on origin, opened
+/// by its policy; b's queue moves to origin and carries its #52 under
+/// origin's next number. A status of 52 on b names the submission as it is
+/// now, by the pointer b's closed home holds, never origin's own #52; on a,
+/// it is a's.
+#[test]
+fn a_status_of_a_carried_number_names_the_number_it_has_now() {
+    let h = Harness::new(&unsigned());
+    h.w().numbers_from(52);
+    h.w().be_host("b");
+    h.work("unit/b", "agent-b", &[("b/lib", Some("2"))]);
+    h.w().from_host("unit/b", "b");
+    assert_eq!(h.submit("unit/b"), 52);
+    h.w()
+        .hand_commit(BRANCH, &[(".config/sluice.toml", Some(&signed()))]);
+    h.w().numbers_from(52);
+    h.w().be_host("a");
+    h.work("unit/a", "agent-a", &[("a/lib", Some("2"))]);
+    h.w().from_host("unit/a", "a");
+    assert_eq!(h.submit("unit/a"), 52);
+    assert!(h
+        .w()
+        .file_in("origin", BRANCH, "submissions/52.json")
+        .is_some());
+
+    on(&h, "b").step(BRANCH).unwrap();
+    let now = match on(&h, "b").lookup(52).unwrap() {
+        Lookup::Found(s) => s,
+        other => panic!("52 on b: {other:?}"),
+    };
+    assert_ne!(now.id, 52);
+    assert_eq!(
+        (now.was, now.carried_from.as_deref()),
+        (Some(52), Some(HERE))
+    );
+    assert_eq!(now.from.worktree, "unit/b");
+    assert_eq!(
+        on(&h, "b").moved_to(52).unwrap().map(|s| s.id),
+        Some(now.id)
+    );
+    match on(&h, "a").lookup(52).unwrap() {
+        Lookup::Found(s) => assert_eq!((s.id, s.from.worktree.as_str()), (52, "unit/a")),
+        other => panic!("52 on a: {other:?}"),
+    }
+}
+
+/// satisfies: record 0122, rule core.41 (design D7); the queue-home spec's
+/// "A submission landed before the move": #40 landed in this host's own
+/// files, and the queue then moved to origin; a status of 40 answers it
+/// landed, read from this host's closed home, which nothing wrote again
+/// but its pointer.
+#[test]
+fn a_submission_finished_before_the_move_is_read_in_the_closed_home() {
+    let h = Harness::new(&unsigned());
+    h.w().numbers_from(40);
+    h.work("unit/a", "agent-a", &[("a/lib", Some("a2"))]);
+    assert_eq!(h.submit("unit/a"), 40);
+    h.settle();
+    assert_eq!(h.sub(40).state, State::Landed);
+    let landed_as = h.sub(40).landed_as;
+    h.w()
+        .hand_commit(BRANCH, &[(".config/sluice.toml", Some(&signed()))]);
+    step_box(&h);
+    assert_eq!(
+        h.w().home_in(HERE, BRANCH).unwrap().closed_to(),
+        Some("origin")
+    );
+    assert!(h
+        .w()
+        .file_in("origin", BRANCH, ".finished/40.json")
+        .is_none());
+    let read = h.sub(40);
+    assert_eq!((read.state, read.landed_as), (State::Landed, landed_as));
+    assert!(h.w().file_in(HERE, BRANCH, ".finished/40.json").is_some());
+}
+
+/// satisfies: record 0122, 26 (design D4); the queue-home spec's "A host
+/// that has not come back": `bolt/x` came home and host c, which made #9 on
+/// origin, has not run sluice since; on any host that reads origin, a
+/// status of 9 answers #9 queued in origin's closed home, waiting for c to
+/// take it home.
+#[test]
+fn a_submission_left_for_its_host_says_it_waits_for_it() {
+    let h = Harness::new(&signed());
+    h.w().signs_as("box");
+    for (host, id) in [("a", 7), ("c", 9)] {
+        h.w().numbers_from(id);
+        h.w().be_host(host);
+        let worktree = format!("unit/{host}");
+        h.work(
+            &worktree,
+            &format!("agent-{host}"),
+            &[("a/lib", Some(host))],
+        );
+        h.w().from_host(&worktree, host);
+        assert_eq!(h.submit(&worktree), id);
+    }
+    h.w()
+        .hand_commit(BRANCH, &[(".config/sluice.toml", Some(&unsigned()))]);
+    on(&h, "a").step(BRANCH).unwrap();
+    assert_eq!(
+        h.w().home_in("origin", BRANCH).unwrap().closed_to(),
+        Some(HERE)
+    );
+    for host in ["a", "d"] {
+        let s = on(&h, host);
+        match s.lookup(9).unwrap() {
+            Lookup::Found(sub) => assert_eq!((sub.id, sub.state), (9, State::Queued), "on {host}"),
+            other => panic!("9 on {host}: {other:?}"),
+        }
+        assert_eq!(
+            s.left_for_host(BRANCH, 9).unwrap(),
+            Some(("origin".to_string(), Some("c".to_string()))),
+            "on {host}"
+        );
+        assert_eq!(s.left_for_host(BRANCH, 7).unwrap(), None);
+    }
 }

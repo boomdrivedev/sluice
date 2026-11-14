@@ -820,6 +820,43 @@ impl State for Records {
         }
     }
 
+    /// Record 0122 (design D6, D7): this host's own files where their home
+    /// is closed, and each remote that may hold the branch whose home, as
+    /// last fetched, is.
+    fn closed_homes(&self, branch: &str) -> Result<Vec<String>> {
+        let mut out = Vec::new();
+        if self
+            .own_home(branch)?
+            .is_some_and(|h| h.state == HomeState::Closed)
+        {
+            out.push(HERE.to_string());
+        }
+        for r in self.home_remotes(branch)? {
+            if self
+                .held_home(&r, branch)?
+                .is_some_and(|h| h.state == HomeState::Closed)
+            {
+                out.push(r);
+            }
+        }
+        Ok(out)
+    }
+
+    /// A remote's closed home as last fetched, with no fetch.
+    fn read_in(&self, branch: &str, home: &str) -> Result<Snapshot> {
+        match home {
+            HERE => self.local.read(branch),
+            remote => self.open(remote)?.read_held(branch),
+        }
+    }
+
+    fn read_finished_in(&self, branch: &str, home: &str, name: &str) -> Result<Option<Vec<u8>>> {
+        match home {
+            HERE => self.local.read_finished(branch, name),
+            remote => self.open(remote)?.read_finished(branch, name),
+        }
+    }
+
     fn read(&self, branch: &str) -> Result<Snapshot> {
         let routed = self.route(branch)?;
         self.read_from.borrow_mut().insert(

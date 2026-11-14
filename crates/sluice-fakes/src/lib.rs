@@ -3903,6 +3903,43 @@ impl State for FakeState {
         sluice_core::home::carry(branch, &source, &target, &me, owed, chosen_at, &now, &stop)
     }
 
+    fn closed_homes(&self, branch: &str) -> Result<Vec<String>> {
+        let inner = self.0 .0.borrow();
+        let own = own_home(&inner.host);
+        Ok(inner
+            .lines
+            .keys()
+            .filter(|(h, b)| b == branch && (*h == own || !h.starts_with("here@")))
+            .filter(|(h, _)| {
+                World::home_at(&inner, h, branch).is_some_and(|d| d.state == HomeState::Closed)
+            })
+            .map(|(h, _)| match h.starts_with("here@") {
+                true => HERE.to_string(),
+                false => h.clone(),
+            })
+            .collect())
+    }
+
+    fn read_in(&self, branch: &str, home: &str) -> Result<Snapshot> {
+        let key = World::home_key(&self.0 .0.borrow(), home);
+        FakeHome {
+            world: &self.0,
+            key,
+            branch: branch.into(),
+        }
+        .read()
+    }
+
+    fn read_finished_in(&self, branch: &str, home: &str, name: &str) -> Result<Option<Vec<u8>>> {
+        let key = World::home_key(&self.0 .0.borrow(), home);
+        FakeHome {
+            world: &self.0,
+            key,
+            branch: branch.into(),
+        }
+        .read_finished(name)
+    }
+
     fn allocate_id(&self, _branch: &str) -> Result<u64> {
         let mut inner = self.0 .0.borrow_mut();
         let id = inner.next_id;

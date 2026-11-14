@@ -1240,18 +1240,17 @@ impl Sluice<'_> {
         self.held_on(&branch, id)
     }
 
-    /// Submission `id` as `branch`'s records hold it, live or finished.
+    /// Submission `id` as `branch`'s records hold it, live or finished, in
+    /// its open home or a closed one this host reached it through (record
+    /// 0122; design D6, D7).
     fn held_on(&self, branch: &str, id: u64) -> Result<Option<Submission>> {
-        let mut line = self.read_line(branch)?;
-        if let Some(s) = line.subs.remove(&id) {
-            return Ok(Some(s));
-        }
-        self.finished_sub(branch, id)
+        self.reach(branch, id)
     }
 
     /// 49, 26: submission `id` as `sluice wait <n>` and `sluice status
     /// <n>` look it up: as last written, or the submission it became when
-    /// its branch's records moved to its remote (design D10). Every branch
+    /// a move carried it under another number (record 0122; design D5,
+    /// D6). Every branch
     /// is read. A branch that cannot be read is passed by where one branch
     /// read holds the number; named, with the words it was refused with,
     /// where none does (rule core.11); and named beside the branches that
@@ -1335,9 +1334,9 @@ impl Sluice<'_> {
         Ok(moved.then(|| commit.commit.clone()))
     }
 
-    /// Design D10: the submission that `old`, a submission of this host's
-    /// own records, became when the branch's records moved to its remote,
-    /// from the branches that read (26): none where it became one on more
+    /// Record 0122 (design D5): the submission that `old` became when a
+    /// move carried it under another number, from the branches that read
+    /// (26): none where it became one on more
     /// than one branch, since it then names none of them alone (record
     /// 0114).
     pub fn moved_to(&self, old: u64) -> Result<Option<Submission>> {
@@ -1374,15 +1373,18 @@ impl Sluice<'_> {
         Ok(moved)
     }
 
-    /// The submission of `branch` that `old` became, if any.
+    /// The submission of `branch` that `old` became, if any: one a carry
+    /// took under another number, its record naming `old` in `was` and the
+    /// home it came from in `carried_from` (record 0122; design D5).
     fn moved_on(&self, branch: &str, old: u64) -> Result<Option<Submission>> {
         let line = self.read_line(branch)?;
-        if let Some(s) = line.subs.values().find(|s| s.was == Some(old)) {
+        let carried = |s: &Submission| s.was == Some(old) && s.carried_from.is_some();
+        if let Some(s) = line.subs.values().find(|s| carried(s)) {
             return Ok(Some(s.clone()));
         }
         for id in line.finished.keys() {
             if let Some(s) = self.finished_sub(branch, *id)? {
-                if s.was == Some(old) {
+                if carried(&s) {
                     return Ok(Some(s));
                 }
             }

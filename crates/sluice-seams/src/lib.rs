@@ -2011,6 +2011,27 @@ pub trait State {
         Ok(Carried::default())
     }
 
+    /// Record 0122 (design D6, D7): each closed home of `branch` this host
+    /// reaches it through, by name, `here` for its own files or a remote's:
+    /// where a submission carried away, finished before the move, or left
+    /// for its host is read. None for a branch never moved.
+    fn closed_homes(&self, _branch: &str) -> Result<Vec<String>> {
+        Ok(Vec::new())
+    }
+
+    /// Record 0122 (design D6, D7): the branch's live records in its home
+    /// `home`, as [`State::closed_homes`] names it, as last read there with
+    /// no fetch: nothing under [`FINISHED`].
+    fn read_in(&self, _branch: &str, _home: &str) -> Result<Snapshot> {
+        Ok(Snapshot::default())
+    }
+
+    /// Record 0122 (design D7): one file of the branch's finished records
+    /// in its home `home`, by its name under [`FINISHED`].
+    fn read_finished_in(&self, _branch: &str, _home: &str, _name: &str) -> Result<Option<Vec<u8>>> {
+        Ok(None)
+    }
+
     /// 61, 131: one file of the branch's finished records, by its name
     /// under [`FINISHED`], as last written.
     fn read_finished(&self, branch: &str, name: &str) -> Result<Option<Vec<u8>>>;

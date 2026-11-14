@@ -1940,18 +1940,32 @@ pub fn run(
                     if let Some(d) = s.delivery_of(&sub)? {
                         doc["delivery"] = d.to_json();
                     }
+                    // Record 0122 (design D4): left for its host in a closed
+                    // remote home.
+                    if let Some((home, host)) = s.left_for_host(&sub.branch, sub.id)? {
+                        doc["left_for"] = serde_json::json!({ "home": home, "host": host });
+                    }
                     with_checks(&s, &sub, &mut doc);
                     writeln!(out, "{}", serde_json::to_string_pretty(&doc)?)?;
                     Ok(0)
                 }
                 Lookup::Found(sub) => {
+                    // Record 0122 (design D5, D6): carried under another
+                    // number, named as it is now.
                     if sub.id != id {
+                        let from = sub
+                            .carried_from
+                            .as_deref()
+                            .unwrap_or(sluice_core::records::HERE);
                         writeln!(
                             out,
-                            "submission {id} is #{} now: {}'s queue moved to its remote",
-                            sub.id, sub.branch
+                            "submission {id} is #{} now: {}'s queue moved, and carried it from {} under the next number",
+                            sub.id,
+                            sub.branch,
+                            sluice_core::home::describe(from)
                         )?;
                     }
+                    let left = s.left_for_host(&sub.branch, sub.id)?;
                     let branch = sub.branch.clone();
                     let pusher = pushers.pusher(&branch)?;
                     let room = s.room(host.reserved())?;
@@ -1977,6 +1991,15 @@ pub fn run(
                     )?;
                     for w in ways {
                         writeln!(out, "{w}")?;
+                    }
+                    // Record 0122 (design D4): a submission its host has not
+                    // taken home says so.
+                    if let Some((home, host)) = left {
+                        writeln!(
+                            out,
+                            "#{id} is in {home}'s closed home, waiting for {} to take it home",
+                            host.as_deref().unwrap_or("the host that made it")
+                        )?;
                     }
                     Ok(0)
                 }

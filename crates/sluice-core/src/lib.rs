@@ -34,7 +34,7 @@ use sluice_seams::{Branch, Checkout, Driver, ReadRefused, Rev, State, Tests, Wri
 
 use crate::line::Line;
 use crate::policy::{Policy, Rules, POLICY_PATH};
-use crate::records::{parse_lines, to_line, ResultLine, SetAside, SET_ASIDE_SCHEMA};
+use crate::records::{parse_lines, to_line, ResultLine, SetAside, Submission, SET_ASIDE_SCHEMA};
 use crate::refused::Refusal;
 
 pub use notice::notice;
@@ -733,16 +733,7 @@ impl<'a> Sluice<'a> {
         let mut held = Vec::new();
         let mut unread = Vec::new();
         for b in branches {
-            let holds = self.read_line(&b).and_then(|line| {
-                if line.subs.contains_key(&id) {
-                    return Ok(true);
-                }
-                if line.finished.contains_key(&id) {
-                    self.finished_sub(&b, id)?;
-                    return Ok(true);
-                }
-                Ok(false)
-            });
+            let holds = self.reach(&b, id).map(|s| s.is_some());
             match holds {
                 Ok(true) => held.push(b),
                 Ok(false) => {}
@@ -757,6 +748,94 @@ impl<'a> Sluice<'a> {
                 unread,
             }),
         })
+    }
+}
+
+impl Sluice<'_> {
+    /// Record 0122 (design D6, D7): `branch`'s submission `id` as this host
+    /// reaches it. A closed home this host reached the branch through whose
+    /// pointer names `id` decides first: the submission is the one it is
+    /// now in the open home, under the number the pointer gives it, since
+    /// the number it had there may be another's; one the pointer took to
+    /// another host's own files is not here. Otherwise the open home's,
+    /// live or finished; otherwise a closed home's, live, as one left for
+    /// its host, or finished there before the move. `None` where none
+    /// holds it.
+    pub(crate) fn reach(&self, branch: &str, id: u64) -> Result<Option<Submission>> {
+        let closed = self.closed_lines(branch)?;
+        for (_, line) in &closed {
+            let pointed = line
+                .home
+                .as_ref()
+                .and_then(|h| h.closed.as_ref())
+                .and_then(|c| c.carried.get(&id));
+            if let Some(to) = pointed {
+                if to.host.as_deref().is_some_and(|h| h != self.peer.name) {
+                    return Ok(None);
+                }
+                return self.open_sub(branch, to.number);
+            }
+        }
+        if let Some(s) = self.open_sub(branch, id)? {
+            return Ok(Some(s));
+        }
+        for (home, line) in closed {
+            if let Some(s) = line.subs.get(&id) {
+                return Ok(Some(s.clone()));
+            }
+            if line.finished.contains_key(&id) {
+                let name = records::finished_name(id);
+                if let Some(bytes) = self.seams.state.read_finished_in(branch, &home, &name)? {
+                    return Ok(Some(serde_json::from_slice(&bytes).with_context(|| {
+                        format!("reading {branch}'s finished submission {id} in {home}")
+                    })?));
+                }
+            }
+        }
+        Ok(None)
+    }
+
+    /// Submission `id` as `branch`'s open home holds it, live or finished.
+    fn open_sub(&self, branch: &str, id: u64) -> Result<Option<Submission>> {
+        let mut line = self.read_line(branch)?;
+        if let Some(s) = line.subs.remove(&id) {
+            return Ok(Some(s));
+        }
+        if !line.finished.contains_key(&id) {
+            return Ok(None);
+        }
+        self.finished_sub(branch, id)
+    }
+
+    /// Record 0122 (design D6): each closed home of `branch` this host
+    /// reaches it through, with its records as last read there.
+    fn closed_lines(&self, branch: &str) -> Result<Vec<(String, Line)>> {
+        let mut out = Vec::new();
+        for home in self.seams.state.closed_homes(branch)? {
+            let line = Line::load(branch, self.seams.state.read_in(branch, &home)?)?;
+            out.push((home, line));
+        }
+        Ok(out)
+    }
+
+    /// Record 0122 (design D4): where `branch`'s submission `id` waits, live
+    /// in a remote home closed toward the hosts' own files, for the host
+    /// that made it to take it home: that home and the host, `None` for a
+    /// submission naming none. `None` where it waits in no such home.
+    pub fn left_for_host(&self, branch: &str, id: u64) -> Result<Option<(String, Option<String>)>> {
+        for (home, line) in self.closed_lines(branch)? {
+            let toward_here = line
+                .home
+                .as_ref()
+                .is_some_and(|h| h.closed_to() == Some(records::HERE));
+            if home == records::HERE || !toward_here {
+                continue;
+            }
+            if let Some(s) = line.subs.get(&id) {
+                return Ok(Some((home, s.from.host.clone())));
+            }
+        }
+        Ok(None)
     }
 }
 
