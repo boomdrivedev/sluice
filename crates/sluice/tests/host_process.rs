@@ -201,6 +201,16 @@ fn answering(d: &OnDisk) -> Option<u32> {
         .map(|c| c.named.pid)
 }
 
+/// `pid` is the one host process, within ten seconds: it answers, or it has
+/// ended. A host process ends once its queues are empty and nothing follows
+/// it, and a command after that, a status among them, starts one of its own
+/// (135; design D6), so another answering once `pid` is gone is no second
+/// host process. Another answering while `pid` lives is asked again, as a
+/// process that let its lock go lives a moment as it ends.
+fn the_one_host_process(d: &OnDisk, pid: u32, what: &str) {
+    within(10, what, || answering(d) == Some(pid) || !alive(pid));
+}
+
 /// 26, 129, 135 (design D5): a repository served to the host process is
 /// moved by it, with no other command run.
 #[test]
@@ -341,7 +351,15 @@ fn the_host_process_ends_once_its_queues_are_empty() {
         state(&d, d.repo.dir(), id) == "landed"
     });
     within(10, "the host process ends", || !alive(pid));
-    assert!(!client.paths().socket.exists(), "its socket went with it");
+    // Its socket went with it: none is left at its path, or a host process
+    // a later command started answers there, the status that read the
+    // landing starting one where it read after the first had ended (D6).
+    within(10, "its socket went with it", || {
+        match client.answering().unwrap() {
+            Some(other) => other.named.pid != pid,
+            None => !client.paths().socket.exists(),
+        }
+    });
 }
 
 /// reader-tick, "An idle tick starts no process" (129, 135; design D4): a
@@ -1654,11 +1672,7 @@ fn a_submit_during_a_hand_over_reaches_the_successor() {
     within(60, "the submission lands", || {
         state(&d, d.repo.dir(), id) == "landed"
     });
-    assert_eq!(
-        answering(&d),
-        Some(successor),
-        "one host process throughout"
-    );
+    the_one_host_process(&d, successor, "one host process throughout");
 }
 
 /// 135, record 0107 as amended 2026-11-13 (design D20): where the
@@ -1762,5 +1776,5 @@ fn a_successor_that_does_not_start_leaves_the_host_process_as_it_was() {
         );
         std::thread::sleep(Duration::from_millis(100));
     }
-    assert_eq!(answering(&d), Some(first), "{}", said());
+    the_one_host_process(&d, first, "the host process as it was");
 }
