@@ -1463,6 +1463,45 @@ fn a_standing_intake_failure_is_said_once_for_each_cause_and_host() {
     assert_eq!(logged(&g), 1);
 }
 
+/// 133 (design D27): while this host's passes cannot take in one of
+/// main's pull requests, `sluice status main` says so above the queue, and
+/// `--json` carries it as `intake_refused`; once a pass asks GitHub and
+/// meets nothing, it says nothing of it.
+#[test]
+fn status_shows_this_hosts_standing_intake_refusal() {
+    let g = OnGitHub::new("pr-intake-status", "");
+    g.named("a", "");
+    let (n, _) = g.by_hand("unit/headless", &[("h.txt", Some("h\n"))], false);
+    g.no_head(n);
+    g.on_main();
+    for _ in 0..2 {
+        g.discovery_passes();
+        let out = g.skipping(g.repo.dir(), &["run", "--rounds", "1"]);
+        assert!(out.status.success(), "{}", text(&out));
+    }
+    let words = g.status_words();
+    let line = "this host could not take in main's pull requests since ";
+    assert!(words.contains(line), "{words}");
+    assert!(
+        words.contains(&format!(": pull/{n}: pull/{n} has no head")),
+        "{words}"
+    );
+    let doc = g.status_document();
+    let refused = &doc["intake_refused"];
+    assert_eq!(refused["remote"], "origin", "{doc}");
+    assert_eq!(refused["asked"], format!("pull/{n}").as_str(), "{doc}");
+    assert!(refused["since"].is_string(), "{doc}");
+    assert!(refused["rounds"].as_u64().is_some_and(|r| r >= 2), "{doc}");
+    // Closed, it is asked for no more, and the next pass meets nothing.
+    g.gh.forge.close(n).unwrap();
+    g.discovery_passes();
+    let out = g.skipping(g.repo.dir(), &["run", "--rounds", "1"]);
+    assert!(out.status.success(), "{}", text(&out));
+    let doc = g.status_document();
+    assert!(doc.get("intake_refused").is_none(), "{doc}");
+    assert!(!g.status_words().contains(line));
+}
+
 /// 128 (design D26): GitHub serves no head for a pull request; `sluice
 /// step` says on stderr what its intake met, `sluice: warning: taking in
 /// main's pull requests: pull/<n>: ...`, every step, its own intake

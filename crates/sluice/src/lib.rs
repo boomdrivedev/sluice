@@ -6043,6 +6043,9 @@ fn write_status(
     if let Some(refused) = &status.refused {
         writeln!(out, "{}", refused_lines(refused))?;
     }
+    if let Some(refused) = &status.intake_refused {
+        writeln!(out, "{}", intake_refused_lines(&status.branch, refused))?;
+    }
     write_refused_writes(status, out)?;
     for t in testing {
         writeln!(out, "  {t}")?;
@@ -6232,6 +6235,10 @@ fn status_json(status: &Status, submissions: &[Submission]) -> Result<serde_json
     if let Some(refused) = &status.refused {
         json["refused"] = serde_json::json!(refused);
     }
+    // 133 (design D27): this host's standing refusal of the intake.
+    if let Some(refused) = &status.intake_refused {
+        json["intake_refused"] = serde_json::json!(refused);
+    }
     Ok(json)
 }
 
@@ -6331,6 +6338,26 @@ fn refused_lines(refused: &sluice_core::Refused) -> String {
         refused.asked,
         refused.remote,
         refused.since,
+        said.next().unwrap_or_default()
+    );
+    for line in said {
+        text.push_str(&format!("\n  {line}"));
+    }
+    text
+}
+
+/// 133 (design D27): this host's refusal of `branch`'s intake, the
+/// forge's words on as many lines as it gave them.
+fn intake_refused_lines(branch: &str, refused: &sluice_core::Refused) -> String {
+    let rounds = match refused.rounds {
+        1 => "1 round".to_string(),
+        n => format!("{n} rounds"),
+    };
+    let mut said = refused.said.lines();
+    let mut text = format!(
+        "this host could not take in {branch}'s pull requests since {}, {rounds}: {}: {}",
+        refused.since,
+        refused.asked,
         said.next().unwrap_or_default()
     );
     for line in said {

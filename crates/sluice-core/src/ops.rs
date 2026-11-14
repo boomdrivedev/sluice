@@ -427,6 +427,10 @@ pub struct Status {
     /// 133: this host's refusal of the branch's remote, while it stands
     /// (record 0061).
     pub refused: Option<Refused>,
+    /// 133 (design D27): this host's refusal of the branch's intake, its
+    /// pull requests on the forge, while it stands: what its latest pass
+    /// could not ask, since when and for how many passes.
+    pub intake_refused: Option<Refused>,
     /// 148: every host's causes of writes the protection refused that
     /// stand now, newest last refusal first (design D5).
     pub refused_writes: Vec<crate::records::RefusedWrite>,
@@ -1558,6 +1562,19 @@ impl Sluice<'_> {
                     rounds: r.rounds,
                 })
             });
+        let intake_refused = self
+            .intake_refusal(branch)?
+            .filter(|r| r.ended.is_none())
+            .and_then(|r| {
+                let latest = r.latest()?.clone();
+                Some(Refused {
+                    remote: r.remote,
+                    asked: latest.asked,
+                    said: latest.said,
+                    since: r.since,
+                    rounds: r.rounds,
+                })
+            });
         let refused_writes =
             crate::refused_writes::standing(&line.doc.refused_writes, || self.now());
         let on_remote =
@@ -1592,6 +1609,7 @@ impl Sluice<'_> {
             warnings,
             stale: self.seams.state.stale(branch).map(|r| r.remote),
             refused,
+            intake_refused,
         })
     }
 }
