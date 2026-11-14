@@ -35,8 +35,8 @@ use crate::overview::Room;
 use crate::policy::{Rules, POLICY_PATH};
 use crate::records::{
     Beside, BesideWhy, BranchHold, Candidate, CandidateState, ConflictRecord, CopyBehind,
-    DecidedRecord, Event, FailedTask, Held, LandingCommitRecord, LandingIntent, LostRun,
-    OutboxItem, Recorded, ResultKind, ResultLine, RunState, State, SystemRun, Tested,
+    DecidedRecord, Event, FailedTask, Held, HomeState, LandingCommitRecord, LandingIntent, LostRun,
+    Moving, OutboxItem, Recorded, ResultKind, ResultLine, RunState, State, SystemRun, Tested, HERE,
 };
 use crate::refused::Refusal;
 use crate::release::{ReleaseOutcome, Releasing};
@@ -309,6 +309,11 @@ impl Sluice<'_> {
         // last fetched, refuses the round before anything is decided.
         if let Some(refused) = self.seams.state.stale(branch) {
             return Err(refused.into());
+        }
+        // Record 0122 (design D8): a queue open in this host's own files is
+        // this host's, whatever the policy at its head names.
+        if line.home.as_ref().is_some_and(|h| h.at == HERE) {
+            return Ok(true);
         }
         let Some(tip) = self.seams.branch.read(branch)? else {
             return Ok(true);
@@ -1315,6 +1320,9 @@ impl Sluice<'_> {
             line.doc.covered_by = None;
         }
         let rules = self.gate(branch, &tip)?;
+        // Record 0122 (design D3): the home the rules at the head name,
+        // weighed against the one the queue is open in.
+        let moving = self.weigh_home(&mut line, &crate::home::named(&rules), &tip, &now);
         let home = self.home_system(&tip)?;
         let listed = self.key_listed(branch, &tip, &rules)?;
         let unmet = Unmet::of(self.policy_at(&tip)?.map(|p| p.limits).unwrap_or_default());
@@ -1362,11 +1370,14 @@ impl Sluice<'_> {
         // 140: work no required check reads lands beside the chain, before
         // anything is formed; a round that lands so does nothing else, and
         // the next forms on the revision it made.
-        let beside = info_span!("sluice.beside")
-            .in_scope(|| self.choose_beside(&mut line, &rules, &tip, &now))?;
+        // Record 0122 (design D3): nothing lands beside a queue whose move
+        // is written, which waits for no landing but its chain's.
+        let beside = !moving
+            && info_span!("sluice.beside")
+                .in_scope(|| self.choose_beside(&mut line, &rules, &tip, &now))?;
         if !beside {
             let chain = loop {
-                let (chain, removed) = self.arrange(&mut line, &rules, &now)?;
+                let (chain, removed) = self.arrange(&mut line, &rules, moving, &now)?;
                 if !removed {
                     break chain;
                 }
@@ -1412,6 +1423,46 @@ impl Sluice<'_> {
         } else {
             Decided::Contended
         })
+    }
+
+    /// Record 0122, 58 (design D3): in a round that keeps the queue's open
+    /// home, the home the rules at the head `tip` name, `named`, against it.
+    /// Where they differ, the move is written in the home, logged `moving`;
+    /// a head naming the open home again ends a move written, logged
+    /// `stayed`; one naming a third home writes the move there instead.
+    /// Whether the queue's move stands written after it. Records with no
+    /// home yet have the one their first write writes, and move nothing.
+    fn weigh_home(&self, line: &mut Line, named: &str, tip: &Rev, now: &str) -> bool {
+        let Some(home) = line.home.as_mut() else {
+            return false;
+        };
+        let event = match home.state {
+            HomeState::Closed => return false,
+            HomeState::Open if home.at == named => return false,
+            HomeState::Moving if home.at == named => {
+                home.state = HomeState::Open;
+                home.moving = None;
+                Event::Stayed {
+                    at: Some(tip.clone()),
+                }
+            }
+            HomeState::Moving if home.moving_to() == Some(named) => return true,
+            HomeState::Open | HomeState::Moving => {
+                home.state = HomeState::Moving;
+                home.moving = Some(Moving {
+                    to: named.to_string(),
+                    chosen_at: Some(tip.clone()),
+                    since: now.to_string(),
+                });
+                Event::Moving {
+                    to: named.to_string(),
+                    at: Some(tip.clone()),
+                }
+            }
+        };
+        let moving = matches!(event, Event::Moving { .. });
+        line.log(now, event);
+        moving
     }
 
     /// 122: every submission in the queue, not landing and in no candidate
@@ -2203,7 +2254,17 @@ impl Sluice<'_> {
     /// it, drop candidates it does not hold, and attribute failures.
     /// Returns the chain's candidates, and whether a submission was
     /// removed, in which case the chain is arranged again (8, 12, 21).
-    fn arrange(&self, line: &mut Line, rules: &Rules, now: &str) -> Result<(Vec<String>, bool)> {
+    ///
+    /// Record 0122 (design D3): while the queue's move is written, nothing is
+    /// formed: the chain holds only the combinations under test or judged
+    /// on the base, and those formed and not under test are dropped.
+    fn arrange(
+        &self,
+        line: &mut Line,
+        rules: &Rules,
+        moving: bool,
+        now: &str,
+    ) -> Result<(Vec<String>, bool)> {
         let base = line.doc.base.clone().expect("decide reads the base first");
         let ord = line.order(Some(&base), false);
         let mut removed = false;
@@ -2227,6 +2288,9 @@ impl Sluice<'_> {
                 Some(c) if self.carried(c)?.is_none() => None,
                 found => found,
             };
+            if moving && !reused.is_some_and(|c| c.state.pins()) {
+                break;
+            }
             if let Some(c) = reused {
                 prev = c.revision.clone();
                 ids.push(c.id.clone());
