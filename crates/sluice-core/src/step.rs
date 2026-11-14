@@ -1512,35 +1512,6 @@ impl Sluice<'_> {
         Ok(())
     }
 
-    /// Design D5 (137; the obsolete-combinations spec): what a hand-over of
-    /// `branch`'s pull requests to another host ends in its own pass,
-    /// whether or not a round follows: the combinations its withdrawals made
-    /// obsolete dropped, as a round drops them before it reads any run, and
-    /// the places listed to release released, ending this host's runs of
-    /// them. No round: no run is read, and nothing formed, started or
-    /// landed. A branch whose lock another step holds is that step's, which
-    /// began after the withdrawals and drops them itself (rule core.14).
-    /// Each release not plainly released is returned (123).
-    pub fn drop_obsolete(&self, branch: &str) -> Result<Vec<ReleaseOutcome>> {
-        let Some(_lock) = self.seams.state.lock(branch)? else {
-            return Ok(Vec::new());
-        };
-        let mut line = self.read_line(branch)?;
-        let held = line.doc.candidates.len();
-        self.drop_withdrawn(&mut line)?;
-        if line.doc.candidates.len() != held {
-            if let Written::Refused = self.write(&line)? {
-                // 62: written since; the next round reads it again.
-                return Ok(Vec::new());
-            }
-        } else if line.doc.release.is_empty() {
-            return Ok(Vec::new());
-        }
-        let mut releases = Vec::new();
-        self.perform_releases(branch, &mut releases)?;
-        Ok(releases)
-    }
-
     /// Design D10: what this host had queued on the branch in its own
     /// records, left behind when another host's queue reached the remote
     /// first, submitted again under new ids, each naming its old one.

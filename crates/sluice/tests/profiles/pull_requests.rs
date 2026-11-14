@@ -754,6 +754,58 @@ fn closed_while_queued() {
     assert_eq!(g.of(n)[0]["state"], "withdrawn", "{:?}", g.subs());
 }
 
+/// obsolete-combinations, "Closed while under test" (24, 67; design D24):
+/// the host keeps main and is testing a pull request's combination, with a
+/// check that goes on until it is ended, and the request is closed; the
+/// round whose intake withdraws it drops its combination before reading
+/// any run, so main's records hold no combination with it, and its run is
+/// ended.
+#[test]
+fn a_request_closed_under_test_drops_its_combination() {
+    let g = OnGitHub::new("pr-closed-under-test", "");
+    g.named("a", "");
+    let pid = g.repo.dir().join(".git/closed.pid");
+    let hang = format!("{}\n", pid.display());
+    let (n, _) = g.by_hand("unit/closing", &[("hang", Some(&hang))], false);
+    g.step();
+    let id = g.of(n)[0]["id"].clone();
+    let until = Instant::now() + Duration::from_secs(60);
+    while !pid.exists() {
+        assert!(Instant::now() < until, "the check never started");
+        std::thread::sleep(Duration::from_millis(100));
+    }
+    let process = std::fs::read_to_string(&pid).unwrap().trim().to_string();
+    let holding = |g: &OnGitHub| -> usize {
+        let out = Command::new("git")
+            .args(["--git-dir", g.bare.path().to_str().unwrap()])
+            .args(["show", "refs/sluice/state/main:branch.json"])
+            .output()
+            .unwrap();
+        let doc: Value = serde_json::from_slice(&out.stdout).unwrap_or(Value::Null);
+        doc["candidates"].as_array().map_or(0, |c| {
+            c.iter()
+                .filter(|c| c["submissions"].as_array().is_some_and(|s| s.contains(&id)))
+                .count()
+        })
+    };
+    assert_eq!(holding(&g), 1, "under test");
+    g.gh.forge.close(n).unwrap();
+    g.step();
+    assert_eq!(g.of(n)[0]["state"], "withdrawn", "{:?}", g.subs());
+    assert_eq!(holding(&g), 0, "its combination dropped");
+    let until = Instant::now() + Duration::from_secs(10);
+    while Command::new("kill")
+        .args(["-0", &process])
+        .stderr(Stdio::null())
+        .status()
+        .unwrap()
+        .success()
+    {
+        assert!(Instant::now() < until, "its run goes on");
+        std::thread::sleep(Duration::from_millis(100));
+    }
+}
+
 /// Another queue of `main` lands `head`: a merge commit onto main on
 /// GitHub, as a second copy of the repository on the host lands it, which
 /// GitHub reads as the pull request merged. Returns the landing.
