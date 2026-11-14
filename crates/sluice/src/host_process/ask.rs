@@ -11,7 +11,7 @@ use sluice_seams::{Part, RunKind};
 
 use super::client::{Client, Connection};
 use super::pass::Report;
-use super::protocol::{Answer, FollowKind, Named, RoomView};
+use super::protocol::{Answer, FollowKind, Named, Reading, RoomView};
 use super::room::Why;
 use crate::{exec, PullRequests};
 
@@ -76,6 +76,10 @@ pub trait HostProcess {
 
     /// A pass of the repository now, once it ends (D14).
     fn pass(&self, here: &Here<'_, '_>) -> Result<Report>;
+
+    /// A reading of the repository, once one is current, the host process
+    /// started where none answers (D16).
+    fn read(&self, here: &Here<'_, '_>) -> Result<Reading>;
 
     /// Follow the repository's passes as `kind`.
     fn follow<'a>(
@@ -148,6 +152,10 @@ impl HostProcess for Socketed {
 
     fn pass(&self, here: &Here<'_, '_>) -> Result<Report> {
         self.client()?.pass(&here.repository()?)
+    }
+
+    fn read(&self, here: &Here<'_, '_>) -> Result<Reading> {
+        self.client()?.read(&here.repository()?)
     }
 
     fn follow<'a>(
@@ -401,6 +409,12 @@ impl HostProcess for Inside {
     fn pass(&self, _: &Here<'_, '_>) -> Result<Report> {
         Err(anyhow!(
             "a pass is asked of the host process, not from within it"
+        ))
+    }
+
+    fn read(&self, _: &Here<'_, '_>) -> Result<Reading> {
+        Err(anyhow!(
+            "a reading is asked of the host process, not from within it"
         ))
     }
 

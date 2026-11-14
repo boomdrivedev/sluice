@@ -796,6 +796,23 @@ impl sluice::host_process::HostProcess for FakeProcess {
         )
     }
 
+    /// It passes only when asked: a read is answered at once, as the
+    /// fakes' records stand, which every read reads directly.
+    fn read(
+        &self,
+        here: &sluice::host_process::Here<'_, '_>,
+    ) -> anyhow::Result<sluice::host_process::protocol::Reading> {
+        Ok(sluice::host_process::protocol::Reading {
+            current: true,
+            ended: Some(
+                here.clock
+                    .now()
+                    .to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
+            ),
+            refused: None,
+        })
+    }
+
     fn follow<'a>(
         &'a self,
         _: &sluice::host_process::Here<'a, '_>,

@@ -60,6 +60,16 @@ const LOOK: Duration = Duration::from_millis(100);
 /// task for, as an idle tick reads it (129; design D4).
 const SCAN: Duration = Duration::from_secs(3);
 
+/// The tick a reading is current within for a one-shot read (64, 129;
+/// design D16).
+pub const READ_TICK: Duration = Duration::from_secs(3);
+
+/// How long a one-shot read waits for a current reading: the round's retry
+/// bound and a tick (design D16).
+pub fn read_for() -> Duration {
+    crate::retry::COMMAND_FOR + READ_TICK
+}
+
 /// Where one state folder's host process keeps its files and its socket.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Paths {
@@ -244,7 +254,12 @@ fn run_holding(paths: Paths, _lock: File) -> Result<i32> {
     ));
     let tasks = tasks::Tasks::new(
         tasks::repository_body(room.clone(), asked_only(), named.clone()),
-        Arc::new(|r: &Path| index::in_play(r).unwrap_or(true)),
+        Arc::new(|r: &Path| {
+            index::in_play(r).unwrap_or(tasks::Looked {
+                in_play: true,
+                refused: None,
+            })
+        }),
     );
     let tasks = match asked_only() {
         true => tasks.passes_when_asked(),
@@ -503,6 +518,11 @@ fn answer(hosting: &Arc<Hosting>, stream: UnixStream) -> Result<()> {
             &mut writer,
             &mut reader,
         ),
+        Request::Read { repository } => {
+            note(hosting, &repository);
+            let reading = hosting.tasks.read(&repository, READ_TICK, read_for());
+            send(&mut writer, &Answer::Read(reading))
+        }
         Request::Room => send(&mut writer, &Answer::Room(view(hosting)?)),
         Request::HandOver => {
             log(&format!(

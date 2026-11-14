@@ -61,6 +61,8 @@ pub enum Request {
     },
     /// A pass of the repository now, answered once it ends (D14).
     Pass { repository: PathBuf },
+    /// Answered once a reading of the repository is current (D16).
+    Read { repository: PathBuf },
     /// A session's or a preview's room, the connection kept while it
     /// waits and while it is held (D12).
     Hold {
@@ -73,6 +75,19 @@ pub enum Request {
     Room,
     /// End, for a newer sluice (D8).
     HandOver,
+}
+
+/// A repository's reading, as the host process answers a `read` (129;
+/// design D16): whether it was current, when it ended, and the words a
+/// remote refused it with, where one did.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Reading {
+    pub current: bool,
+    /// When it ended, RFC 3339; `None` where none has.
+    #[serde(default)]
+    pub ended: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub refused: Option<String>,
 }
 
 /// What a held room's command says once its run has begun.
@@ -114,6 +129,8 @@ pub enum Answer {
     /// The room is the asker's.
     Held,
     Room(RoomView),
+    /// A reading of the repository, as it stood when answered (D16).
+    Read(Reading),
     /// The request could not be answered, in these words.
     Error(String),
 }

@@ -24,7 +24,7 @@ use sluice_seams::RunKind;
 
 use super::pass::Report;
 use super::protocol::{
-    receive, send, Answer, FollowKind, Hello, Named, Request, RoomView, Started,
+    receive, send, Answer, FollowKind, Hello, Named, Reading, Request, RoomView, Started,
 };
 use super::{environment, Paths};
 use crate::reader::older;
@@ -280,6 +280,25 @@ impl Client {
         })? {
             Answer::Step(doc) => Ok(doc),
             other => Err(unexpected(other)),
+        }
+    }
+
+    /// A reading of `repository`, once one is current, started where none
+    /// answers (D16): waited for the round's retry bound and a tick, then
+    /// answered as not current, the command reading as the host holds it.
+    pub fn read(&self, repository: &Path) -> Result<Reading> {
+        let mut c = self.reach()?;
+        send(
+            &mut c.writer,
+            &Request::Read {
+                repository: repository.to_path_buf(),
+            },
+        )?;
+        let wait = super::read_for() + super::READ_TICK;
+        match c.next(Some(wait))? {
+            Some(Answer::Read(r)) => Ok(r),
+            Some(other) => Err(unexpected(other)),
+            None => Ok(Reading::default()),
         }
     }
 

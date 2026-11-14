@@ -23,7 +23,7 @@ use sluice_core::{Clock, Sluice, SystemClock};
 use super::ask::Inside;
 use super::log;
 use super::pass::{self, Kept, Report};
-use super::protocol::{FollowKind, Named};
+use super::protocol::{FollowKind, Named, Reading};
 use super::room::Shared;
 use crate::exec::Host;
 use crate::profiles::checks::RoomHandle;
@@ -48,9 +48,50 @@ pub enum Job {
 /// What a task's thread runs, given its inbox.
 pub type Body = Arc<dyn Fn(Inbox) + Send + Sync>;
 
-/// Whether a repository has work in play, read as an idle tick reads it
-/// (129, 135; design D4).
-pub type InPlay = Arc<dyn Fn(&Path) -> bool + Send + Sync>;
+/// What the host process's look found of a repository: whether it has
+/// work in play, read as an idle tick reads it, and the words a remote
+/// refused its ask with (129, 135; design D4, D16).
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct Looked {
+    pub in_play: bool,
+    pub refused: Option<String>,
+}
+
+/// How the host process looks at a repository it holds no task for (129,
+/// 135; design D4).
+pub type InPlay = Arc<dyn Fn(&Path) -> Looked + Send + Sync>;
+
+/// One repository's reading, as the host process marks it: when its last
+/// pass or look began and ended, and what a remote refused it (129;
+/// design D7, D16).
+#[derive(Clone, Debug, Default)]
+struct Marks {
+    began: Option<Instant>,
+    ended: Option<Instant>,
+    ended_at: Option<String>,
+    refused: Option<String>,
+}
+
+impl Marks {
+    /// Whether the reading is current at `now` with `tick`: one that ended
+    /// within its tick, or one under way that began within a tick of the
+    /// last one's end (64, 129).
+    fn current(&self, now: Instant, tick: Duration) -> bool {
+        match (self.began, self.ended) {
+            (Some(b), Some(e)) if b > e => b.saturating_duration_since(e) < tick,
+            (_, Some(e)) => now.saturating_duration_since(e) < tick,
+            _ => false,
+        }
+    }
+
+    fn answer(&self, current: bool) -> Reading {
+        Reading {
+            current,
+            ended: self.ended_at.clone(),
+            refused: self.refused.clone(),
+        }
+    }
+}
 
 struct Slot {
     id: u64,
@@ -76,6 +117,8 @@ struct Inner {
     /// Repositories the host process's look is reading now, each on a
     /// thread of its own.
     looking: Mutex<BTreeSet<PathBuf>>,
+    /// Each repository's reading, as its passes and looks mark it (D16).
+    readings: Mutex<BTreeMap<PathBuf, Marks>>,
     body: Body,
     in_play: InPlay,
     stopping: AtomicBool,
@@ -99,6 +142,7 @@ impl Tasks {
             panicked: Mutex::new(BTreeSet::new()),
             refused: Mutex::new(BTreeMap::new()),
             looking: Mutex::new(BTreeSet::new()),
+            readings: Mutex::new(BTreeMap::new()),
             body,
             in_play,
             stopping: AtomicBool::new(false),
@@ -186,9 +230,17 @@ impl Tasks {
     /// repository still being read, or whose task could not start, is
     /// passed by, the latter until a command asks for it again.
     pub fn look(&self, repository: &Path) {
+        if locked(&self.0.refused).contains_key(repository) {
+            return;
+        }
+        self.look_at(repository);
+    }
+
+    /// The look at `repository`, where no task runs for it and none is
+    /// under way, its reading marked as it begins and ends (D16).
+    fn look_at(&self, repository: &Path) {
         if self.0.stopping.load(Ordering::SeqCst)
             || self.holds(repository)
-            || locked(&self.0.refused).contains_key(repository)
             || !locked(&self.0.looking).insert(repository.to_path_buf())
         {
             return;
@@ -196,17 +248,94 @@ impl Tasks {
         let tasks = self.clone();
         let repository = repository.to_path_buf();
         std::thread::spawn(move || {
+            tasks.begin_reading(&repository);
             let in_play = tasks.0.in_play.clone();
-            let busy =
+            let looked =
                 std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| in_play(&repository)))
-                    .unwrap_or(true);
+                    .unwrap_or(Looked {
+                        in_play: true,
+                        refused: None,
+                    });
+            tasks.end_reading(&repository, looked.refused.clone());
             // Started before the look is let go, so the process never reads
-            // itself idle between the two.
-            if busy && !tasks.0.stopping.load(Ordering::SeqCst) {
+            // itself idle between the two; a repository whose task could not
+            // start is a command's to ask for again.
+            if looked.in_play
+                && !tasks.0.stopping.load(Ordering::SeqCst)
+                && !locked(&tasks.0.refused).contains_key(&repository)
+            {
                 tasks.handle(&repository);
             }
             locked(&tasks.0.looking).remove(&repository);
         });
+    }
+
+    /// `repository`'s reading begins now (D16).
+    fn begin_reading(&self, repository: &Path) {
+        locked(&self.0.readings)
+            .entry(repository.to_path_buf())
+            .or_default()
+            .began = Some(Instant::now());
+    }
+
+    /// `repository`'s reading ends now, a remote having refused it with
+    /// `refused`, where one did (D16).
+    fn end_reading(&self, repository: &Path, refused: Option<String>) {
+        let mut readings = locked(&self.0.readings);
+        let marks = readings.entry(repository.to_path_buf()).or_default();
+        marks.ended = Some(Instant::now());
+        marks.ended_at =
+            Some(chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true));
+        marks.refused = refused;
+    }
+
+    /// 129 (design D16): `repository` read for a one-shot read: answered
+    /// once a reading of it is current, one that ended within `tick`, or one
+    /// under way that began within a tick of the last one's end. Where none
+    /// is, it reads now, by its task's next pass where one runs and by the
+    /// look otherwise, and answers when that reading ends, waiting `within`
+    /// at most, then answering with the reading as it stands. Where passes
+    /// are taken only when asked, it answers at once from the last reading.
+    pub fn read(&self, repository: &Path, tick: Duration, within: Duration) -> Reading {
+        let asked = Instant::now();
+        let marks = || {
+            locked(&self.0.readings)
+                .get(repository)
+                .cloned()
+                .unwrap_or_default()
+        };
+        let now = marks();
+        if self.0.asked_only.load(Ordering::SeqCst) {
+            return now.answer(now.current(asked, tick));
+        }
+        if now.current(asked, tick) {
+            return now.answer(true);
+        }
+        if self.holds(repository) {
+            self.handle(repository).wake();
+        } else {
+            self.look_at(repository);
+        }
+        let until = asked + within;
+        loop {
+            let m = marks();
+            if m.ended.is_some_and(|e| e >= asked) {
+                return m.answer(true);
+            }
+            if Instant::now() >= until {
+                return m.answer(false);
+            }
+            // A look that could not start, the task's start refused, is no
+            // reading under way: it reads as it stands.
+            if !self.holds(repository) && !self.looking(repository) {
+                std::thread::sleep(Duration::from_millis(20));
+                let m = marks();
+                if !m.ended.is_some_and(|e| e >= asked) && !self.looking(repository) {
+                    return m.answer(m.current(Instant::now(), tick));
+                }
+            }
+            std::thread::sleep(Duration::from_millis(20));
+        }
     }
 
     /// Whether the look is reading `repository` now.
@@ -409,6 +538,17 @@ impl Inbox {
     pub fn started(&self) {
         locked(&self.tasks.0.refused).remove(&self.repository);
     }
+
+    /// Its repository's reading begins now: a pass begins (D7, D16).
+    pub fn begin_reading(&self) {
+        self.tasks.begin_reading(&self.repository);
+    }
+
+    /// Its repository's reading ends now, a remote having refused it with
+    /// `refused`, where one did (D7, D16).
+    pub fn end_reading(&self, refused: Option<String>) {
+        self.tasks.end_reading(&self.repository, refused);
+    }
 }
 
 /// The body of a repository's task in the host process: its own binding,
@@ -510,7 +650,7 @@ fn repository(inbox: Inbox, room: Shared, asked_only: bool, named: Named) {
         let due = !asked_only && last.is_none_or(|at| at.elapsed() >= every);
         match job {
             Some(Job::Pass(reply)) => {
-                let report = task.pass(&s, &bound, clock, every);
+                let report = task.read(&inbox, &s, &bound, clock, every);
                 if asked_only {
                     skipped.pause();
                 }
@@ -527,14 +667,14 @@ fn repository(inbox: Inbox, room: Shared, asked_only: bool, named: Named) {
                 task.in_play = pass::in_play(&s);
             }
             Some(Job::Wake) if !asked_only => {
-                if let Ok(r) = task.pass(&s, &bound, clock, every) {
+                if let Ok(r) = task.read(&inbox, &s, &bound, clock, every) {
                     inbox.tell(&r);
                 }
                 last = Some(Instant::now());
             }
             Some(Job::Wake) => {}
             None if due => {
-                if let Ok(r) = task.pass(&s, &bound, clock, every) {
+                if let Ok(r) = task.read(&inbox, &s, &bound, clock, every) {
                     inbox.tell(&r);
                 }
                 last = Some(Instant::now());
@@ -563,6 +703,22 @@ struct Task {
 }
 
 impl Task {
+    /// One pass, its reading marked as it begins and ends, so a one-shot
+    /// read beside it is answered from it (129; design D7, D16).
+    fn read(
+        &mut self,
+        inbox: &Inbox,
+        s: &Sluice<'_>,
+        bound: &Bound,
+        clock: &dyn Clock,
+        tick: Duration,
+    ) -> Result<Report, String> {
+        inbox.begin_reading();
+        let report = self.pass(s, bound, clock, tick);
+        inbox.end_reading(report.as_ref().ok().and_then(|r| r.refused.clone()));
+        report
+    }
+
     /// One pass, as the repository's driver and reader on the host; none
     /// while an older `sluice run` drives it or an older reader reads it,
     /// which it follows (D7).
@@ -667,7 +823,10 @@ mod tests {
                 // The second start answers its asks, then ends when idle.
                 answer_until_idle(&inbox);
             }),
-            Arc::new(|_: &Path| true),
+            Arc::new(|_: &Path| Looked {
+                in_play: true,
+                refused: None,
+            }),
         );
         let other = Tasks::clone(&tasks);
         let repo = PathBuf::from("/host/a.git");
@@ -735,7 +894,10 @@ mod tests {
                         }
                     }
                 }),
-                Arc::new(|_: &Path| true),
+                Arc::new(|_: &Path| Looked {
+                    in_play: true,
+                    refused: None,
+                }),
             );
             let tasks = match asked_only {
                 true => tasks.passes_when_asked(),
@@ -760,6 +922,82 @@ mod tests {
                 assert!(!locked(&woken).contains(&busy));
             }
         }
+    }
+
+    /// 129 (design D16): a read is answered once a reading of its
+    /// repository is current: one ended within its tick at once; with none,
+    /// a look's or the task's next pass's, its refusal named; under passes
+    /// when asked, at once from the last reading.
+    #[test]
+    fn a_read_is_answered_once_a_reading_is_current() {
+        let repo = PathBuf::from("/host/read.git");
+        let looks = Arc::new(AtomicUsize::new(0));
+        let counted = looks.clone();
+        let passes = Arc::new(AtomicUsize::new(0));
+        let passed = passes.clone();
+        let body: Body = Arc::new(move |inbox: Inbox| loop {
+            match inbox.next(Duration::from_millis(20)) {
+                Some(Job::Wake) => {
+                    inbox.begin_reading();
+                    std::thread::sleep(Duration::from_millis(100));
+                    passed.fetch_add(1, Ordering::SeqCst);
+                    inbox.end_reading(None);
+                }
+                Some(Job::Pass(reply)) => {
+                    let _ = reply.send(Ok(Report::default()));
+                }
+                Some(_) => {}
+                None => {
+                    if inbox.end_if_idle().is_ok() {
+                        return;
+                    }
+                }
+            }
+        });
+        let in_play: InPlay = Arc::new(move |_: &Path| {
+            counted.fetch_add(1, Ordering::SeqCst);
+            std::thread::sleep(Duration::from_millis(100));
+            Looked {
+                in_play: false,
+                refused: Some("origin: 503 Service Unavailable".into()),
+            }
+        });
+        let tasks = Tasks::new(body.clone(), in_play.clone());
+        let (tick, within) = (Duration::from_millis(500), Duration::from_secs(5));
+
+        // No reading: the look reads now, and its refusal is named.
+        let read = tasks.read(&repo, tick, within);
+        assert!(read.current && read.ended.is_some(), "{read:?}");
+        assert_eq!(
+            read.refused.as_deref(),
+            Some("origin: 503 Service Unavailable")
+        );
+        assert_eq!(looks.load(Ordering::SeqCst), 1);
+        // One ended within its tick: at once, nothing read again.
+        let began = Instant::now();
+        assert!(tasks.read(&repo, tick, within).current);
+        assert!(began.elapsed() < Duration::from_millis(50));
+        assert_eq!(looks.load(Ordering::SeqCst), 1);
+        // Past its tick: read again.
+        std::thread::sleep(tick);
+        assert!(tasks.read(&repo, tick, within).current);
+        assert_eq!(looks.load(Ordering::SeqCst), 2);
+
+        // With a task running, its next pass is the reading.
+        let _held = tasks.handle(&repo).follow(FollowKind::Wait);
+        std::thread::sleep(tick);
+        let read = tasks.read(&repo, tick, within);
+        assert!(read.current, "{read:?}");
+        assert_eq!(read.refused, None);
+        assert_eq!(passes.load(Ordering::SeqCst), 1);
+        assert_eq!(looks.load(Ordering::SeqCst), 2);
+
+        // Under passes when asked, at once from the last reading, if none.
+        let asked = Tasks::new(body, in_play).passes_when_asked();
+        let began = Instant::now();
+        let read = asked.read(&repo, tick, within);
+        assert!(!read.current && read.ended.is_none(), "{read:?}");
+        assert!(began.elapsed() < Duration::from_millis(50));
     }
 
     /// `check` holds within ten seconds.
@@ -796,7 +1034,10 @@ mod tests {
                 inbox.started();
                 answer_until_idle(&inbox);
             }),
-            Arc::new(|r: &Path| r != Path::new("/host/idle.git")),
+            Arc::new(|r: &Path| Looked {
+                in_play: r != Path::new("/host/idle.git"),
+                refused: None,
+            }),
         );
         let started = |r: &PathBuf| locked(&starts).iter().filter(|s| *s == r).count();
 
@@ -859,7 +1100,10 @@ mod tests {
                         std::thread::sleep(Duration::from_millis(10));
                     }
                 }
-                true
+                Looked {
+                    in_play: true,
+                    refused: None,
+                }
             }),
         );
         let began = Instant::now();

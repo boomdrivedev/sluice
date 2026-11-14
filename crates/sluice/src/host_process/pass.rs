@@ -77,6 +77,10 @@ pub struct Report {
     pub in_play: bool,
     /// 129: the reader found the repository has no sluice.
     pub no_sluice: bool,
+    /// 129, 133 (design D16): the words a remote refused the pass's one
+    /// ask with, where one did.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub refused: Option<String>,
 }
 
 /// One pass of the repository `s` and `host` bind, writing `reader`'s
@@ -108,6 +112,7 @@ pub fn pass(
     // refusal is its branches' alone, read as last fetched.
     if let Err(e) = seams.state.refresh() {
         telemetry::warn(&format!("sluice: warning: {e:#}"));
+        report.refused = Some(format!("{e:#}"));
     }
     // 97, previews-1 101: every pass, whether or not a branch has a queue.
     let mut freed: Vec<u8> = Vec::new();
