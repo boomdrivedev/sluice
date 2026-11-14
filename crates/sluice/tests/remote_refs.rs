@@ -1510,3 +1510,245 @@ fn the_first_write_writes_the_home_its_policy_chose() {
     assert!(refs.is_empty(), "nothing pushed: {refs}");
     drop(bare);
 }
+
+/// A submission's document on `main`, `id` made on host-a from
+/// `unit/<id>`, in `state`.
+fn carried_doc(id: u64, state: &str) -> String {
+    format!(
+        "{{\"schema\":\"sluice/submission@1\",\"id\":{id},\"branch\":\"main\",\
+         \"head\":\"h{id}\",\"from\":{{\"agent\":\"a\",\"worktree\":\"unit/{id}\",\"host\":\"host-a\"}},\
+         \"submitted\":\"t{id}\",\"after\":[],\"priority\":0,\"attempt\":1,\"state\":\"{state}\"}}\n"
+    )
+}
+
+/// An outcome owed to `unit/<id>` under `<id>:<outcome>`, in weir's
+/// spelling (core.52).
+fn owed(id: u64, outcome: &str) -> String {
+    format!(
+        "{{\"format\": \"weir-delivery/1\", \"key\": \"{id}:{outcome}\", \"readers\": [\"unit/{id}\"], \
+         \"message\": \"#{id} {outcome}\", \"recorded_at\": \"2026-11-14T10:00:00Z\", \
+         \"expires_at\": \"2026-11-21T10:00:00Z\"}}\n"
+    )
+}
+
+/// A host whose `main` names signers and origin, with origin.
+fn signed_main(name: &str) -> (Repo, Scratch) {
+    let a = Repo::new(name);
+    a.write(
+        ".config/sluice.toml",
+        &signers_policy(&[("box", &[&key()])]),
+    );
+    a.git(&["add", "-A"]);
+    a.git(&["commit", "-q", "-m", "signers"]);
+    let bare = a.bare_origin();
+    (a, bare)
+}
+
+/// This host's own queue of `main`: `subs` as `(id, state)`, `deliveries`
+/// as written, and its home moving to origin.
+fn own_queue_moving(repo: &Repo, subs: &[(u64, &str)], deliveries: &str) {
+    use sluice_core::records::{to_document, HomeDoc, HomeState, Moving, HERE, HOME_FILE};
+    let mut home = HomeDoc::open(HERE, None);
+    home.state = HomeState::Moving;
+    home.moving = Some(Moving {
+        to: "origin".into(),
+        chosen_at: Some(Rev::new(&repo.rev("main"))),
+        since: "2026-11-14T10:00:00Z".into(),
+    });
+    let own = LocalFiles::new(&repo.dir().join(".git"));
+    let _g = own.wait_lock("main").unwrap();
+    let at = own.read("main").unwrap().version;
+    let mut files: Vec<(String, String)> = subs
+        .iter()
+        .map(|(id, state)| (format!("submissions/{id}.json"), carried_doc(*id, state)))
+        .collect();
+    files.push((
+        HOME_FILE.into(),
+        String::from_utf8(to_document(&home)).unwrap(),
+    ));
+    if !deliveries.is_empty() {
+        files.push(("deliveries.jsonl".into(), deliveries.into()));
+    }
+    let put_files: Vec<(&str, &str)> = files.iter().map(|(p, d)| (&p[..], &d[..])).collect();
+    own.write("main", at, put(&put_files)).unwrap();
+}
+
+/// `r`'s carry of `main`, under its lock, as a round asks it.
+fn carry_main(r: &sluice::profiles::records::Records) -> sluice_seams::Carried {
+    let _g = r.wait_lock("main").unwrap();
+    r.carry("main").unwrap()
+}
+
+/// satisfies: record 0122, 62, 63, core.41, core.52 (design D3, D5); the
+/// queue-home spec's "A host's queue moves to origin" and "Numbers past the
+/// remote's count": #52 queued and #53 blamed, in this host's own files and
+/// moving to origin, go there under their numbers and states in one leased
+/// write with the deliveries store whole and a home open naming where it
+/// came from, `refs/sluice/ids` raised past 53; then this host's own home
+/// is closed with its pointer and their documents leave it.
+#[test]
+fn a_hosts_queue_moves_to_its_remote_with_its_numbers() {
+    use sluice_core::line::Line;
+    use sluice_core::records::{Event, HomeState, HERE};
+    let (a, _bare) = signed_main("rr-carry");
+    own_queue_moving(&a, &[(52, "queued"), (53, "failed")], &owed(53, "failed"));
+    let r = records(&a).as_host("host-a");
+    assert!(
+        r.route("main").unwrap().is_none(),
+        "moving, in its own files"
+    );
+    let carried = carry_main(&r);
+    assert_eq!(carried.to.as_deref(), Some("origin"));
+    assert_eq!(carried.numbers, BTreeMap::from([(52, 52), (53, 53)]));
+
+    let theirs = host(&a, None);
+    let line = Line::load("main", theirs.read("main").unwrap()).unwrap();
+    assert_eq!(
+        line.subs
+            .values()
+            .map(|s| (s.id, s.state.word()))
+            .collect::<Vec<_>>(),
+        [(52, "queued"), (53, "failed")]
+    );
+    assert!(line
+        .subs
+        .values()
+        .all(|s| s.was.is_none() && s.carried_from.is_none()));
+    assert_eq!(line.deliveries().len(), 1, "the deliveries store whole");
+    let home = line.home.clone().unwrap();
+    assert_eq!((home.at.as_str(), home.state), ("origin", HomeState::Open));
+    let came = home.came_from.unwrap();
+    assert_eq!(
+        (came.home.as_str(), came.host.as_deref()),
+        (HERE, Some("host-a"))
+    );
+    assert_eq!(came.carried, BTreeMap::from([(52, 52), (53, 53)]));
+    let log = Line::read_log(&theirs.read("main").unwrap()).unwrap();
+    assert!(log.iter().any(|l| l.event
+        == Event::Carried {
+            to: "origin".into(),
+            numbers: BTreeMap::from([(52, 52), (53, 53)]),
+        }));
+    assert_eq!(theirs.allocate_id("main").unwrap(), 54, "past 53");
+
+    let own = LocalFiles::new(&a.dir().join(".git")).read("main").unwrap();
+    let own = Line::load("main", own).unwrap();
+    assert!(own.subs.is_empty(), "their documents left it");
+    let closed = own.home.unwrap();
+    assert_eq!(closed.closed_to(), Some("origin"));
+    assert_eq!(closed.closed.unwrap().carried[&53].number, 53);
+    r.next_pass();
+    assert!(r.route("main").unwrap().is_some(), "read on origin now");
+    assert_eq!(
+        carry_main(&r),
+        sluice_seams::Carried::default(),
+        "nothing more"
+    );
+}
+
+/// satisfies: record 0122, record 0114, core.41 (design D5); the
+/// queue-home spec's "A carried number the new home holds takes the next
+/// one": origin's `main` holds #52 live and #41 finished; this host's #41
+/// and #52 are carried under origin's next numbers, each naming the number
+/// it had in `was` and this host's own files in `carried_from`, and #70 is
+/// kept, the count raised past it first.
+#[test]
+fn a_number_the_remote_holds_is_carried_under_the_next() {
+    use sluice_core::line::Line;
+    use sluice_core::records::{to_document, HomeDoc, HERE, HOME_FILE};
+    let (a, _bare) = signed_main("rr-carry-next");
+    let theirs = host(&a, None);
+    let other = carried_doc(52, "queued")
+        .replace("host-a", "host-b")
+        .replace("\"h52\"", "\"hb52\"");
+    let finished = carried_doc(41, "landed")
+        .replace("host-a", "host-b")
+        .replace("\"h41\"", "\"hb41\"");
+    let index = "{\"id\":41,\"state\":\"landed\",\"worktree\":\"unit/41\"}\n";
+    let home = String::from_utf8(to_document(&HomeDoc::open("origin", None))).unwrap();
+    theirs
+        .write(
+            "main",
+            0,
+            put(&[
+                (HOME_FILE, &home),
+                ("submissions/52.json", &other),
+                (".finished/41.json", &finished),
+                ("finished.jsonl", index),
+            ]),
+        )
+        .unwrap();
+    own_queue_moving(&a, &[(41, "queued"), (52, "conflict"), (70, "queued")], "");
+    let r = records(&a).as_host("host-a");
+    let carried = carry_main(&r);
+    assert_eq!(
+        carried.numbers,
+        BTreeMap::from([(41, 71), (52, 72), (70, 70)])
+    );
+    let line = Line::load("main", theirs.read("main").unwrap()).unwrap();
+    let was: Vec<(u64, Option<u64>, Option<&str>)> = line
+        .subs
+        .values()
+        .map(|s| (s.id, s.was, s.carried_from.as_deref()))
+        .collect();
+    assert_eq!(
+        was,
+        [
+            (52, None, None),
+            (70, None, None),
+            (71, Some(41), Some(HERE)),
+            (72, Some(52), Some(HERE)),
+        ]
+    );
+    let own = Line::load(
+        "main",
+        LocalFiles::new(&a.dir().join(".git")).read("main").unwrap(),
+    )
+    .unwrap();
+    let pointer = own.home.unwrap().closed.unwrap().carried;
+    assert_eq!(
+        pointer
+            .iter()
+            .map(|(o, t)| (*o, t.number))
+            .collect::<Vec<_>>(),
+        [(41, 71), (52, 72), (70, 70)]
+    );
+}
+
+/// satisfies: record 0122, 59 (design D3); the queue-home spec's "Stopped
+/// after the new home was written": origin already holds what a carry wrote
+/// of this host's queue, and this host's own home is still moving with the
+/// submissions, as a carry stopped between its writes leaves them; the next
+/// carry closes this host's own home naming origin, writes nothing more on
+/// origin, and each submission is there once.
+#[test]
+fn a_carry_stopped_after_the_remote_was_written_is_closed_by_the_next() {
+    use sluice_core::line::Line;
+    let (a, _bare) = signed_main("rr-carry-stopped");
+    own_queue_moving(&a, &[(52, "queued"), (53, "failed")], &owed(53, "failed"));
+    let r = records(&a).as_host("host-a");
+    carry_main(&r);
+    // As a carry stopped before its second write leaves it: this host's own
+    // home still moving, its submissions still there.
+    own_queue_moving(&a, &[(52, "queued"), (53, "failed")], &owed(53, "failed"));
+    let theirs = host(&a, None);
+    let written = theirs.read("main").unwrap().version;
+    r.next_pass();
+    let carried = carry_main(&r);
+    assert_eq!(carried.numbers, BTreeMap::from([(52, 52), (53, 53)]));
+    assert_eq!(
+        theirs.read("main").unwrap().version,
+        written,
+        "nothing more on origin"
+    );
+    let line = Line::load("main", theirs.read("main").unwrap()).unwrap();
+    assert_eq!(line.subs.keys().copied().collect::<Vec<_>>(), [52, 53]);
+    assert_eq!(line.deliveries().len(), 1);
+    let own = Line::load(
+        "main",
+        LocalFiles::new(&a.dir().join(".git")).read("main").unwrap(),
+    )
+    .unwrap();
+    assert_eq!(own.home.unwrap().closed_to(), Some("origin"));
+    assert!(own.subs.is_empty());
+}

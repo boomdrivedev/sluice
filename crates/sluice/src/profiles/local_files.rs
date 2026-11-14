@@ -107,6 +107,33 @@ impl LocalFiles {
         }
     }
 
+    /// Record 0122 (design D5; record 0114): raise the host's count past
+    /// `number`, so it gives no number up to it; a count already past it is
+    /// left as it is.
+    pub fn raise_ids_past(&self, number: u64) -> Result<()> {
+        std::fs::create_dir_all(&self.root)
+            .with_context(|| format!("creating {}", self.root.display()))?;
+        let lock = open_lock(&self.root.join(".lock"))?;
+        lock.lock().context("locking the repository's records")?;
+        let path = self.root.join(".next-id");
+        let next: u64 = match std::fs::read_to_string(&path) {
+            Ok(s) => s
+                .trim()
+                .parse()
+                .with_context(|| format!("{} holds {s:?}", path.display()))?,
+            Err(e) if e.kind() == ErrorKind::NotFound => 1,
+            Err(e) => return Err(e).with_context(|| format!("reading {}", path.display())),
+        };
+        if next <= number {
+            write_atomic(
+                &self.root,
+                ".next-id",
+                format!("{}\n", number + 1).as_bytes(),
+            )?;
+        }
+        Ok(())
+    }
+
     fn dir(&self, branch: &str) -> Result<PathBuf> {
         if branch.is_empty()
             || branch == RESULTS

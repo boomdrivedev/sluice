@@ -204,6 +204,38 @@ impl RemoteRefs {
         self.pushed.remote()
     }
 
+    /// Record 0122 (design D5; record 0114): raise the remote's count past
+    /// `number`, so it gives no number up to it, by a leased write of
+    /// `refs/sluice/ids`; a count already past it is left as it is.
+    pub fn raise_ids_past(&self, number: u64) -> Result<()> {
+        let name = "refs/sluice/ids";
+        for _ in 0..ADD_TRIES {
+            let tip = self.fetch(name)?;
+            let next: u64 = match &tip {
+                Some(c) => match self.tree(c)?.get("next") {
+                    Some((_, b)) => std::str::from_utf8(b)?.trim().parse()?,
+                    None => 1,
+                },
+                None => 1,
+            };
+            if next > number {
+                return Ok(());
+            }
+            let files = BTreeMap::from([(
+                "next".to_string(),
+                self.blob(format!("{}\n", number + 1).as_bytes())?,
+            )]);
+            let commit = self.commit(&files, None, &format!("next id {}", number + 1))?;
+            if self.push_leased(&commit, name, tip.as_deref())? {
+                return Ok(());
+            }
+        }
+        bail!(
+            "raising the submission ids on {} was refused {ADD_TRIES} times",
+            self.remote()
+        )
+    }
+
     /// Record 0122 (design D2): `branch`'s home document in its state on
     /// the remote as this host last fetched it, read with no process and
     /// without touching what a write is leased on; `None` where the state

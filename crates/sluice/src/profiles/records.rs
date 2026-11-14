@@ -14,13 +14,14 @@ use std::path::{Path, PathBuf};
 use std::rc::Rc;
 
 use anyhow::{Context, Result};
+use sluice_core::home::{HomeStore, Owed};
 use sluice_core::policy::{Policy, POLICY_PATH};
 use sluice_core::records::{
     parse_lines, to_document, to_line, HomeDoc, HomeState, ResultLine, SetAside, HERE, HOME_FILE,
 };
 use sluice_seams::{
-    read_refused, Branch, Changes, Guard, ReadRefused, ResultAsk, Rev, Setting, Snapshot, State,
-    TaskLog, TaskProgress, Written,
+    read_refused, Branch, Carried, Changes, Guard, ReadRefused, ResultAsk, Rev, Setting, Snapshot,
+    State, TaskLog, TaskProgress, Written,
 };
 
 use super::branches::Branches;
@@ -129,6 +130,72 @@ struct Route {
     /// Where no home holds them anywhere: routed by the policy at this
     /// revision, which the first write's home names.
     by_policy: Option<Option<Rev>>,
+}
+
+/// Record 0122 (design D3): the host's own files as one home of a branch,
+/// for the core's carry.
+struct OwnHome<'a> {
+    local: &'a LocalFiles,
+    branch: &'a str,
+}
+
+impl HomeStore for OwnHome<'_> {
+    fn name(&self) -> String {
+        HERE.into()
+    }
+
+    fn read(&self) -> Result<Snapshot> {
+        self.local.read(self.branch)
+    }
+
+    fn read_finished(&self, name: &str) -> Result<Option<Vec<u8>>> {
+        self.local.read_finished(self.branch, name)
+    }
+
+    fn write(&self, read_at: u64, changes: Changes) -> Result<Written> {
+        self.local.write(self.branch, read_at, changes)
+    }
+
+    fn raise_past(&self, number: u64) -> Result<()> {
+        self.local.raise_ids_past(number)
+    }
+
+    fn next_number(&self) -> Result<u64> {
+        self.local.allocate_id(self.branch)
+    }
+}
+
+/// Record 0122 (design D3): a remote's refs as one home of a branch, for
+/// the core's carry, its state written leased on the version read.
+struct RemoteHome {
+    refs: Rc<RemoteRefs>,
+    branch: String,
+}
+
+impl HomeStore for RemoteHome {
+    fn name(&self) -> String {
+        self.refs.remote().to_string()
+    }
+
+    fn read(&self) -> Result<Snapshot> {
+        self.refs.read(&self.branch)
+    }
+
+    fn read_finished(&self, name: &str) -> Result<Option<Vec<u8>>> {
+        self.refs.read_finished(&self.branch, name)
+    }
+
+    fn write(&self, read_at: u64, changes: Changes) -> Result<Written> {
+        self.refs.write(&self.branch, read_at, changes)
+    }
+
+    fn raise_past(&self, number: u64) -> Result<()> {
+        self.refs.raise_ids_past(number)
+    }
+
+    fn next_number(&self) -> Result<u64> {
+        self.refs.allocate_id(&self.branch)
+    }
 }
 
 /// Both of a branch's locks on the host, held together: its own files'
@@ -729,6 +796,81 @@ impl State for Records {
         match self.route(branch)? {
             None => Ok(()),
             Some(r) => r.observe(branch, version, at),
+        }
+    }
+
+    /// Record 0122 (design D3, D4; C.6): the core's one carry, between the
+    /// host's own files and a remote's refs. Where the home the branch is
+    /// routed to is moving, which only the round that keeps it asks, its
+    /// queue goes to the home the move names, every live submission of it,
+    /// or, coming home from a remote, those this host made; where it is not,
+    /// what this host made left in a remote home closed toward the hosts'
+    /// own files comes into its own. Each write reads its target first, a
+    /// remote's leased on the version read (62).
+    fn carry(&self, branch: &str) -> Result<Carried> {
+        let routed = self.route(branch)?;
+        let home = match &routed {
+            None => self.own_home(branch)?,
+            Some(r) => r.held_home(branch)?,
+        };
+        let own = || OwnHome {
+            local: &self.local,
+            branch,
+        };
+        let remote = |name: &str| -> Result<RemoteHome> {
+            Ok(RemoteHome {
+                refs: self.open(name)?,
+                branch: branch.to_string(),
+            })
+        };
+        let now = chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
+        let done = || Ok(());
+        match home
+            .as_ref()
+            .and_then(|h| h.moving.as_ref().filter(|_| h.state == HomeState::Moving))
+        {
+            Some(moving) => {
+                let chosen_at = moving.chosen_at.clone();
+                let from: Box<dyn HomeStore + '_> = match &routed {
+                    None => Box::new(own()),
+                    Some(r) => Box::new(remote(r.remote())?),
+                };
+                let (to, owed): (Box<dyn HomeStore + '_>, Owed) = match moving.to.as_str() {
+                    HERE => (Box::new(own()), Owed::Mine),
+                    name => (Box::new(remote(name)?), Owed::All),
+                };
+                sluice_core::home::carry(
+                    branch,
+                    from.as_ref(),
+                    to.as_ref(),
+                    &self.host,
+                    owed,
+                    chosen_at,
+                    &now,
+                    &done,
+                )
+            }
+            None if routed.is_none() => {
+                for r in self.home_remotes(branch)? {
+                    let closed_here = self
+                        .held_home(&r, branch)?
+                        .is_some_and(|h| h.closed_to() == Some(HERE));
+                    if closed_here {
+                        return sluice_core::home::carry(
+                            branch,
+                            &remote(&r)?,
+                            &own(),
+                            &self.host,
+                            Owed::Mine,
+                            None,
+                            &now,
+                            &done,
+                        );
+                    }
+                }
+                Ok(Carried::default())
+            }
+            None => Ok(Carried::default()),
         }
     }
 
