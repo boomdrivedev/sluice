@@ -1613,8 +1613,9 @@ fn a_failed_list_ends_intake_and_the_queue_still_lands() {
     loop {
         let said = g.round();
         assert!(
-            said.contains("sluice: warning: taking in main's pull requests: tried ")
-                && said.contains(": GET /repos/o/r/pulls?state=open&base=main")
+            said.contains(
+                "sluice: warning: taking in main's pull requests: main's pull requests: tried "
+            ) && said.contains(": GET /repos/o/r/pulls?state=open&base=main")
                 && said.contains("500 Server Error")
                 && !said.contains(&format!("pull/{n}: ")),
             "{said}"
@@ -2638,13 +2639,19 @@ fn submit_refuses_a_gate_requiring_a_task_kept_out_of_ci() {
         ],
     );
     let w = g.session("kept", &[("k.txt", "k\n")]);
+    // The policy as written, its signers before `main`'s table (D28).
+    let policy = std::fs::read_to_string(g.repo.dir().join(".config/sluice.toml")).unwrap();
+    let line = 1 + policy
+        .lines()
+        .position(|l| l.starts_with("required = "))
+        .expect("main's required checks");
     let out = g.wt_submit(&w, &["--no-wait"]);
     assert_eq!(out.status.code(), Some(2), "{}", text(&out));
     assert!(
-        text(&out).contains(
-            "refused: main requires app:integration (.config/sluice.toml line 6), which the \
-             task runner in this worktree keeps out of CI"
-        ),
+        text(&out).contains(&format!(
+            "refused: main requires app:integration (.config/sluice.toml line {line}), which \
+             the task runner in this worktree keeps out of CI"
+        )),
         "{}",
         text(&out)
     );
@@ -6666,8 +6673,9 @@ fn a_one_shot_overview_lists_requests_taken_in_elsewhere() {
 /// --watch` is host A's reader while A follows its pull request, which
 /// host B holds, and nothing else on A runs. Its documents carry the
 /// request's row as A last kept it, and carry it again once what A keeps
-/// of it moves; and A reads neither the request nor its check from GitHub
-/// meanwhile, though the kept row is due to be read again (core.31).
+/// of it moves; the watch reads nothing from GitHub itself, and the host
+/// process's reading reads the row that fell due at the host's one pace,
+/// no more than four times a minute (core.31; design D25).
 #[test]
 fn a_watch_reads_no_followed_request_itself() {
     let g = OnGitHub::new("overview-watch-there", "");
@@ -6734,8 +6742,8 @@ fn a_watch_reads_no_followed_request_itself() {
     std::thread::sleep(Duration::from_secs(3));
     let _ = watch.kill();
     let out = watch.wait_with_output().unwrap();
-    assert_eq!(g.pull_reads(n), pulls, "{}", text(&out));
-    assert_eq!(g.posted_reads(&pull.head), checks, "{}", text(&out));
+    assert!(g.pull_reads(n) - pulls <= 4, "{}", text(&out));
+    assert!(g.posted_reads(&pull.head) - checks <= 4, "{}", text(&out));
     assert!(g.of(n).is_empty(), "A took nothing in");
 }
 

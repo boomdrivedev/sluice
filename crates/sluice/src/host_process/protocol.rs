@@ -61,8 +61,8 @@ pub enum Request {
     },
     /// A pass of the repository now, answered once it ends (D14). `at`,
     /// RFC 3339, is the asker's time: where passes are taken only when
-    /// asked, the pass's time moves on to it, so the host process's time
-    /// is its askers', however many ask.
+    /// asked, the pass is at that time, so the host process's time is its
+    /// askers', however many ask.
     Pass {
         repository: PathBuf,
         #[serde(default, skip_serializing_if = "Option::is_none")]

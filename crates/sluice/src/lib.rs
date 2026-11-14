@@ -1239,11 +1239,13 @@ impl Skipped {
 }
 
 impl Skipped {
-    /// Its time moved on to `at`, where `at` is later (design D14).
-    pub fn reach(&self, at: chrono::DateTime<chrono::Utc>) {
-        if let Ok(to) = (at - self.start).to_std() {
-            self.moved.set(self.moved.get().max(to));
-        }
+    /// Its time set to `at`, a command's that asked for a pass (design
+    /// D14): each pass of a test's host process is at the time of the
+    /// command that asked for it, however many ask, and a command started
+    /// later starts from its own time.
+    pub fn set(&self, at: chrono::DateTime<chrono::Utc>) {
+        self.moved
+            .set((at - self.start).to_std().unwrap_or_default());
     }
 }
 

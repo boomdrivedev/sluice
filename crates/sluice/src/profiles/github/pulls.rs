@@ -2812,9 +2812,19 @@ impl crate::PullRequests for Pulls {
                 None => kept,
             }
         };
-        let (rows, gone) = self.across_rows(&s, branch, follows, read)?;
-        // Design D3: one read merged or closed is said once, here.
-        self.unfollow(repo, branch, &gone);
+        // 137: one read merged or closed is kept until a status or a wait
+        // has said so, which lets it go; one the queue holds at its head
+        // goes now.
+        let (rows, _) = self.across_rows(&s, branch, follows, read)?;
+        let held: Vec<u64> = self
+            .kept
+            .follows(repo, branch)
+            .requests
+            .keys()
+            .copied()
+            .filter(|n| !rows.iter().any(|r| r.pull_request == *n))
+            .collect();
+        self.unfollow(repo, branch, &held);
         Ok(across_of(lead, rows))
     }
 
@@ -2845,7 +2855,11 @@ impl crate::PullRequests for Pulls {
             }
         }
         let follows = self.kept.follows(&t.repo, branch).requests;
-        let (rows, _) = self.across_rows(&s, branch, follows, |_, kept| kept)?;
+        let (rows, gone) = self.across_rows(&s, branch, follows, |_, kept| kept)?;
+        // 137 (design D3): what a status shows of one read merged or closed
+        // says so once: it is followed no longer, and the next status shows
+        // no row for it.
+        self.unfollow(&t.repo, branch, &gone);
         let across = across_of(lead.clone(), rows);
         self.kept_across.borrow_mut().insert(
             branch.to_string(),

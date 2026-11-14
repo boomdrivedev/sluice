@@ -789,7 +789,7 @@ fn repository(inbox: Inbox, room: Shared, asked_only: bool, named: Named, settin
                 // so two waits asking passes move it no faster than one;
                 // else it moves on by its tick after the pass.
                 if let (true, Some(at)) = (asked_only, at) {
-                    skipped.reach(at);
+                    skipped.set(at);
                 }
                 let report = task.read(&inbox, &s, &bound, clock, every);
                 if asked_only && at.is_none() {
