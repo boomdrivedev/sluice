@@ -97,7 +97,7 @@ they describe.
 - [x] 6.10 A status of a submission reads only the results it asks for, the command reading no line of the results log itself (`host-process`'s "A status reads what it asks for"; D17). True when `sluice exec bolt/sluice-is-refactored-and-runs-on-pools -- cargo test -p sluice --test host_process a_status_reads_only_the_results_it_asks_for` passes.
 - [x] 6.11 No landing, branch removal or release removes a result or a signed record: test `a_removed_branchs_results_still_count` in `crates/sluice-conformance/tests/verdicts.rs`, as `run-signing`'s scenario has it (69, 109; D17). True when `cargo test -p sluice-conformance --test verdicts a_removed_branchs_results_still_count` passes.
 - [x] 6.12 The commands reference says a status, an overview and a forecast are answered from the host process's last reading and fetch nothing, and the state reference that the host process reads results once and a branch keeps every result it recorded (D16, D17). True when `sluice exec bolt/sluice-is-refactored-and-runs-on-pools -- moon run site:prose` passes.
-- [ ] 6.13 Record 0093's build amendment adds the `read` request, the held read, the reading's marks spanning a pass, the read's bound and the results index with the `results` request, each with the path not taken (D16, D17). True when `sluice exec bolt/sluice-is-refactored-and-runs-on-pools -- moon run root:adrs` passes.
+- [x] 6.13 Record 0093's build amendment adds the `read` request, the held read, the reading's marks spanning a pass, the read's bound and the results index with the `results` request, each with the path not taken (D16, D17). True when `sluice exec bolt/sluice-is-refactored-and-runs-on-pools -- moon run root:adrs` passes.
 
 ## 7. The host process takes up changed settings
 
