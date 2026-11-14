@@ -202,3 +202,145 @@ fn a_policy_naming_the_open_home_again_ends_the_move() {
         h.tested()
     );
 }
+
+/// satisfies: record 0122, 59 (design D3); the queue-home spec's "A move
+/// waits for a combination under test": while `[a]` is under test the move
+/// carries nothing, rounds after rounds; once it has landed, the next round
+/// carries the submission made meanwhile to origin and closes this host's
+/// own home.
+#[test]
+fn a_move_waits_for_the_combination_under_test() {
+    let (h, _, a) = moving(false);
+    h.work("unit/b", "agent-b", &[("b/lib", Some("b2"))]);
+    let b = h.submit("unit/b");
+    for _ in 0..3 {
+        step_box(&h);
+        assert_eq!(h.w().carries(), 0);
+    }
+    h.w().signs_as("box");
+    land(&h, a);
+    assert_eq!(
+        h.w().carries(),
+        0,
+        "the round that landed it carried nothing"
+    );
+    step_box(&h);
+    assert_eq!(h.w().carries(), 1);
+    let own = h.w().home_in(HERE, BRANCH).unwrap();
+    assert_eq!(own.closed_to(), Some("origin"));
+    assert!(h
+        .w()
+        .file_in("origin", BRANCH, &format!("submissions/{b}.json"))
+        .is_some());
+    assert_eq!(h.sub(b).state, State::Queued);
+}
+
+/// A bolt open in this host's own files holding #52 queued and #53 blamed,
+/// with no combination under test, and a policy naming signers and
+/// `remote = "origin"` put on the branch by hand.
+fn blamed_and_queued() -> Harness {
+    let h = Harness::new(&unsigned());
+    h.w().fails_with("b:test", "b/lib", "bad");
+    h.w().numbers_from(53);
+    h.work("unit/b", "agent-b", &[("b/lib", Some("bad"))]);
+    assert_eq!(h.submit("unit/b"), 53);
+    for _ in 0..4 {
+        h.step();
+    }
+    assert_eq!(h.sub(53).state, State::Failed);
+    h.w().numbers_from(52);
+    h.work("unit/a", "agent-a", &[("a/lib", Some("a2"))]);
+    assert_eq!(h.submit("unit/a"), 52);
+    h.w()
+        .hand_commit(BRANCH, &[(".config/sluice.toml", Some(&signed()))]);
+    h
+}
+
+/// satisfies: record 0122, 62, 63 (design D3, D5); the queue-home spec's
+/// "A host's queue moves to origin": #52 queued and #53 blamed are carried
+/// to origin under those numbers and in those states, origin's next number
+/// is past 53, this host's own home is closed naming origin, and the round
+/// logs `carried` naming both.
+#[test]
+fn a_move_carries_every_live_submission_with_its_number_and_state() {
+    let h = blamed_and_queued();
+    step_box(&h);
+    assert_eq!(h.w().carries(), 1);
+    assert_eq!(h.sub(52).state, State::Queued);
+    assert_eq!(h.sub(53).state, State::Failed);
+    for id in [52, 53] {
+        assert!(h
+            .w()
+            .file_in("origin", BRANCH, &format!("submissions/{id}.json"))
+            .is_some());
+        assert!(h
+            .w()
+            .file_in(HERE, BRANCH, &format!("submissions/{id}.json"))
+            .is_none());
+    }
+    let s = h.sluice();
+    let next = s.seams().state.allocate_id(BRANCH).unwrap();
+    assert!(next > 53, "origin's next number is past 53: {next}");
+    let own = h.w().home_in(HERE, BRANCH).unwrap();
+    assert_eq!(own.state, HomeState::Closed);
+    assert_eq!(own.closed_to(), Some("origin"));
+    let origin = h.w().home_in("origin", BRANCH).unwrap();
+    assert_eq!(origin.state, HomeState::Open);
+    assert_eq!(origin.came_from.unwrap().home, HERE);
+    assert!(h.events().contains(&Event::Carried {
+        to: "origin".into(),
+        numbers: [(52, 52), (53, 53)].into(),
+    }));
+}
+
+/// satisfies: record 0122, 59 (design D3); the queue-home spec's "Stopped
+/// after the new home was written": a round that wrote the submissions and
+/// the home on origin and stopped before closing this host's own home is
+/// followed by one that closes it naming origin and writes nothing more on
+/// origin, each submission queued there once.
+#[test]
+fn a_move_stopped_after_the_new_home_was_written_is_closed_by_the_next_round() {
+    let h = blamed_and_queued();
+    h.w().stop_next_carry();
+    assert!(h
+        .sluice()
+        .as_peer(Peer {
+            signer: Some("box".into()),
+            ..Peer::default()
+        })
+        .step(BRANCH)
+        .is_err());
+    assert_eq!(
+        h.w().home_in(HERE, BRANCH).unwrap().state,
+        HomeState::Moving
+    );
+    assert_eq!(
+        h.w().home_in("origin", BRANCH).unwrap().state,
+        HomeState::Open
+    );
+    let written = h.w().file_in("origin", BRANCH, "version");
+    step_box(&h);
+    assert_eq!(
+        h.w().home_in(HERE, BRANCH).unwrap().closed_to(),
+        Some("origin")
+    );
+    assert_eq!(
+        h.w().file_in("origin", BRANCH, "version"),
+        written,
+        "nothing more written on origin"
+    );
+    let live: Vec<u64> =
+        sluice_core::line::Line::load(BRANCH, h.sluice().seams().state.read(BRANCH).unwrap())
+            .unwrap()
+            .subs
+            .keys()
+            .copied()
+            .collect();
+    assert_eq!(live, [52, 53], "each once");
+    let carried = h
+        .events()
+        .into_iter()
+        .filter(|e| matches!(e, Event::Carried { .. }))
+        .count();
+    assert_eq!(carried, 1);
+}

@@ -16,8 +16,8 @@ use sluice_seams::{Carried, Rev, Snapshot, Written};
 use crate::line::Line;
 use crate::policy::Rules;
 use crate::records::{
-    finished_name, CameFrom, CarriedTo, Closed, FinishedLine, HomeDoc, HomeState, OutboxItem,
-    Submission, HERE,
+    finished_name, CameFrom, CarriedTo, Closed, Event, FinishedLine, HomeDoc, HomeState,
+    OutboxItem, Submission, HERE,
 };
 
 /// Design D3: the home the rules at a branch's head name for its queue: a
@@ -102,6 +102,9 @@ pub enum Owed {
 /// naming `to` and each submission carried, and their live documents leave
 /// it; its finished submissions, its index and its log stay (design D7).
 ///
+/// The target's write logs `carried` there, with each number as it was and
+/// as it is, so the line is written once with what it names.
+///
 /// Each write reads its target first and writes only what is not there, so
 /// a carry stopped between its two writes is finished by the next, which
 /// carries nothing twice (59). With [`Owed::Mine`], only what `me` made and
@@ -115,6 +118,7 @@ pub fn carry(
     me: &str,
     owed: Owed,
     chosen_at: Option<Rev>,
+    now: &str,
     after_target: &dyn Fn() -> Result<()>,
 ) -> Result<Carried> {
     let from_name = from.name();
@@ -217,6 +221,13 @@ pub fn carry(
             });
             target.home = Some(home);
         }
+        target.log(
+            now,
+            Event::Carried {
+                to: to_name.clone(),
+                numbers: given.clone(),
+            },
+        );
         match to.write(target.version, target.changes())? {
             Written::Written(_) => {}
             Written::Refused => bail!(

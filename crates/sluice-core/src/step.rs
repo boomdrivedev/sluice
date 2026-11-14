@@ -1334,6 +1334,19 @@ impl Sluice<'_> {
             line.doc.window = rules.parallel;
         }
         line.doc.window = line.doc.window.clamp(1, rules.parallel);
+        // Record 0122, 59 (design D3): a moving home with no combination
+        // under test or judged, and no landing unsettled, is carried under
+        // this round's lock: the round's decisions written first, then every
+        // live submission carried to the home the move names, logged
+        // `carried` there, and the old home closed with its pointer. The
+        // round ends there; the next forms in the new home.
+        if moving && !line.doc.candidates.iter().any(|c| c.state.pins()) {
+            if let Written::Refused = self.write(&line)? {
+                return Ok(Decided::Contended);
+            }
+            self.seams.state.carry(branch)?;
+            return Ok(Decided::Written(unmet, Parts::new()));
+        }
 
         let adopted = self.adopt_left_behind(&mut line, &now)?;
         // 82: heads submitted from other hosts, fetched to be formed here;
@@ -1403,7 +1416,7 @@ impl Sluice<'_> {
                 )?;
                 self.note_declined(&mut line, &rules, home.as_deref(), listed, &unmet, &now);
             }
-            derive_states(&mut line, &chain);
+            derive_states(&mut line, &chain, moving);
         }
         self.keep_tasks(&line)?;
         let queued = line.subs.values().filter(|s| !s.state.is_out()).count() as u64;
@@ -4210,7 +4223,10 @@ fn held(
 }
 
 /// Each queued submission's state, read from the chain (26, 49).
-fn derive_states(line: &mut Line, chain: &[String]) {
+/// Record 0122 (design D3): while the queue's move is written, a
+/// submission no combination holds is queued, never waiting: the chain
+/// stops at what is under test, not at what it waits on (7).
+fn derive_states(line: &mut Line, chain: &[String], moving: bool) {
     let base = line.doc.base.clone();
     let mut under_test: BTreeSet<u64> = BTreeSet::new();
     let mut own: BTreeMap<u64, CandidateState> = BTreeMap::new();
@@ -4234,7 +4250,10 @@ fn derive_states(line: &mut Line, chain: &[String]) {
         // Its own candidate passed: passed, though a deeper one holding it
         // is under test, as when a hold keeps it (117).
         s.state = if !in_chain.contains(&s.id) {
-            State::Waiting
+            match moving {
+                true => State::Queued,
+                false => State::Waiting,
+            }
         } else if own.get(&s.id) == Some(&CandidateState::Passed) {
             State::Passed
         } else if under_test.contains(&s.id) {

@@ -3919,6 +3919,7 @@ impl State for FakeState {
             }
         };
         let chosen_at = inner.refs.get(branch).cloned();
+        let now = inner.now.to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
         drop(inner);
         let source = FakeHome {
             world: &self.0,
@@ -3938,7 +3939,7 @@ impl State for FakeState {
             }
             Ok(())
         };
-        sluice_core::home::carry(branch, &source, &target, &me, owed, chosen_at, &stop)
+        sluice_core::home::carry(branch, &source, &target, &me, owed, chosen_at, &now, &stop)
     }
 
     fn allocate_id(&self, _branch: &str) -> Result<u64> {
