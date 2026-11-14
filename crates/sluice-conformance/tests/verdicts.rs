@@ -841,3 +841,70 @@ fn a_fail_under_another_grant_is_never_weighed_against_a_pass() {
         (Outcome::Fail, Some("g1"), Outcome::Pass, Some("g2"))
     );
 }
+
+/// satisfies: 69, 109, 15, 38; design D17: a result belongs to its key
+/// and its system, not to a branch. A bolt's passes, recorded under their
+/// keys, still count for `main`'s gate once the bolt landed and was
+/// removed: `main`'s combination, whose tree gives each check the same
+/// key, replays them with nothing run, and the results log still holds
+/// the bolt's runs.
+#[test]
+fn a_removed_branchs_results_still_count() {
+    let h = Harness::bolt();
+    let main_policy = format!(
+        "{}\n[branches.main]\nrequired = [\"#gate\"]\nparallel = 4\nbatch = false\n\
+         flaky = \"fail\"\ntimeout = \"20m\"\ntrust = [\"open\", \"sandbox\", \"container\"]\n",
+        policy(false, "fail", 4)
+    );
+    h.w().init(
+        "main",
+        &[
+            (".config/sluice.toml", &main_policy),
+            ("a/lib", "a1"),
+            ("b/lib", "b1"),
+            ("c/lib", "c1"),
+        ],
+    );
+    h.work("unit/a", "agent-a", &[("a/lib", Some("a2"))]);
+    let one = h.submit("unit/a");
+    h.settle();
+    assert_eq!(h.sub(one).state, State::Landed);
+    let ran = h.w().observed().len();
+    let bolts: Vec<ResultLine> = results(&h)
+        .into_iter()
+        .filter(|l| l.branch == BRANCH && l.kind == ResultKind::Ran)
+        .collect();
+    assert!(!bolts.is_empty());
+
+    // The bolt lands onto main, and is removed.
+    let before = h.w().tip("main");
+    let head = h.w().work(&before, &[("a/lib", Some("a2"))]);
+    h.w().delete_branch(BRANCH);
+    h.w().session("unit/m", "agent-m", &head);
+    let s = h.sluice();
+    let two = s
+        .submit(&sluice_core::SubmitRequest {
+            head: sluice_core::SubmitHead::Worktree("unit/m".into()),
+            branch: "main".into(),
+            after: vec![],
+            priority: 0,
+            subject: None,
+        })
+        .unwrap()
+        .unwrap()
+        .id;
+    for _ in 0..6 {
+        s.step("main").unwrap();
+    }
+    assert_ne!(h.w().tip("main"), before, "#{two} landed on main");
+    // Nothing ran again: main's gate counted the bolt's passes (15, 38).
+    assert_eq!(h.w().observed().len(), ran);
+    let r = results(&h);
+    let replays: Vec<&ResultLine> = r.iter().filter(|l| l.branch == "main").collect();
+    assert!(!replays.is_empty());
+    assert!(replays.iter().all(|l| l.kind == ResultKind::Replayed));
+    // The bolt's runs stay in the log (69, 109).
+    for b in &bolts {
+        assert!(r.contains(b), "{b:?} is gone from the results log");
+    }
+}
