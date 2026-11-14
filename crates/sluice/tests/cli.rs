@@ -9560,3 +9560,51 @@ mod number_on_two_branches {
         );
     }
 }
+
+/// settings-take-up, "A run handed over counts its passes" (135; record
+/// 0107; design D11): a `sluice run --rounds 3` that followed one pass of
+/// the host process and handed over what it carries follows on from what
+/// it handed over, and ends after two passes more, saying again nothing it
+/// said.
+#[test]
+fn a_run_handed_over_keeps_following_and_counts_its_passes() {
+    use sluice::host_process::ask::Follower;
+    use sluice::host_process::protocol::FollowKind;
+    use sluice::{Driven, Following};
+    let f = one_queued();
+    f.world.hold_runs(true);
+    let host = support::FakeHost::new(f.world.clone(), 0);
+    let s = sluice_core::Sluice::new(f.seams(), &f.clock);
+    let here = sluice::host_process::Here {
+        s: &s,
+        host: &host,
+        pulls: &(),
+        clock: &f.clock,
+    };
+    let pause = Rounds(Cell::new(0));
+    let mut out = Vec::new();
+
+    let mut following = Following::new(Some(3));
+    following.start(&s).unwrap();
+    let mut follower = Follower::new(&here, FollowKind::Run);
+    let first = following
+        .next(&here, &mut follower, &pause, &mut out)
+        .unwrap();
+    assert_eq!(first, Driven::Next);
+    let doc = sluice::hand_over::HandOver {
+        settings: String::new(),
+        tables: vec!["[telemetry]".into()],
+        passes: following.passes(),
+        told: following.told(),
+    };
+    assert_eq!((doc.passes, doc.told), (1, true));
+
+    let mut afresh = Following::handed(Some(3), &doc);
+    let mut follower = Follower::new(&here, FollowKind::Run);
+    let next = afresh.next(&here, &mut follower, &pause, &mut out).unwrap();
+    assert_eq!(next, Driven::Next);
+    let last = afresh.next(&here, &mut follower, &pause, &mut out).unwrap();
+    assert_eq!(last, Driven::Ended(0));
+    assert_eq!(afresh.passes(), 3);
+    assert!(afresh.told(), "it says again nothing it said");
+}

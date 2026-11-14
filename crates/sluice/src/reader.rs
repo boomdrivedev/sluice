@@ -47,8 +47,6 @@
 //! in the reader's place.
 
 use std::fs::{File, OpenOptions, TryLockError};
-use std::os::fd::OwnedFd;
-use std::os::unix::fs::MetadataExt;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime};
 
@@ -244,47 +242,6 @@ impl Driver {
                 Err(e).with_context(|| format!("locking {}", path.display()))
             }
         }
-    }
-
-    /// The driver's lock as a `sluice run` that starts afresh hands it to
-    /// itself: a duplicate of the descriptor that holds it, left open
-    /// across a start of a new image, as the lock itself is not. The
-    /// driver is kept, so a hand-over that cannot start still drives; the
-    /// lock is held while either is open, with no moment let go (135;
-    /// design D4, D6 of `a-kept-run-hands-over-what-it-cannot-take-up`).
-    pub fn hand_over(&self) -> Result<OwnedFd> {
-        nix::unistd::dup(&self._lock).context("duplicating the driver's lock to hand it over")
-    }
-
-    /// The driver handed over as `fd` by the `sluice run` this process
-    /// started afresh from, where `fd` is the driver's lock of `repository`
-    /// among the readers in `dir`, the same file by device and inode, and
-    /// the lock it holds is this process's. It is held as a file closed on
-    /// a start, so no process this one starts holds it past this run, and
-    /// `fd` is dropped. Otherwise `fd` is dropped and the answer is `None`,
-    /// and the driver is taken as any start takes it (135; design D4, D6).
-    pub fn adopt(fd: OwnedFd, dir: &Path, repository: &str) -> Result<Option<Driver>> {
-        let handed = File::from(fd);
-        let path = driver_file(dir, repository);
-        let same = match (handed.metadata(), std::fs::metadata(&path)) {
-            (Ok(a), Ok(b)) => (a.dev(), a.ino()) == (b.dev(), b.ino()),
-            _ => false,
-        };
-        if !same {
-            return Ok(None);
-        }
-        match handed.try_lock() {
-            Ok(()) => {}
-            Err(TryLockError::WouldBlock) => return Ok(None),
-            Err(TryLockError::Error(e)) => {
-                return Err(e).with_context(|| format!("locking {}", path.display()))
-            }
-        }
-        let lock = handed
-            .try_clone()
-            .with_context(|| format!("holding {}", path.display()))?;
-        drop(handed);
-        Ok(Some(Driver { _lock: lock }))
     }
 }
 
@@ -1195,42 +1152,6 @@ mod tests {
         let _next = Driver::take(&s.0, REPO)
             .unwrap()
             .expect("the driver, its holder gone");
-    }
-
-    /// The settings-take-up spec's "A driver's lock handed over": the
-    /// descriptor handed is left open across a start, the lock taken up
-    /// from it is not, the driver reads as live throughout, and once the
-    /// lock taken up is dropped a new driver takes it; a descriptor of
-    /// another file is no driver (135; design D4, D6).
-    #[test]
-    fn a_driver_handed_its_lock_holds_it() {
-        use nix::fcntl::{fcntl, FcntlArg, FdFlag};
-        use std::os::fd::{AsFd, BorrowedFd};
-        let closed_on_start = |fd: BorrowedFd| {
-            FdFlag::from_bits_truncate(fcntl(fd, FcntlArg::F_GETFD).unwrap())
-                .contains(FdFlag::FD_CLOEXEC)
-        };
-        let s = Scratch::new("driver-handed");
-        let driver = Driver::take(&s.0, REPO).unwrap().expect("the driver");
-        let handed = driver.hand_over().unwrap();
-        assert!(!closed_on_start(handed.as_fd()));
-        drop(driver);
-        assert!(driver_live(&s.0, REPO));
-        let adopted = Driver::adopt(handed, &s.0, REPO)
-            .unwrap()
-            .expect("the driver handed over");
-        assert!(closed_on_start(adopted._lock.as_fd()));
-        assert!(driver_live(&s.0, REPO));
-        drop(adopted);
-        assert!(soon(|| !driver_live(&s.0, REPO)));
-        let _next = Driver::take(&s.0, REPO)
-            .unwrap()
-            .expect("the driver, the one handed over dropped");
-
-        let other = s.0.join("other");
-        std::fs::write(&other, "").unwrap();
-        let fd = OwnedFd::from(File::open(&other).unwrap());
-        assert!(Driver::adopt(fd, &s.0, REPO).unwrap().is_none());
     }
 
     /// A probe's shared lock is no driver: a run that meets one tries
