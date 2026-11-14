@@ -270,18 +270,24 @@ impl Tasks {
 
     /// The look at `repository`, where none is under way and, unless
     /// `beside` a task, no task runs for it, its reading marked as it
-    /// begins and ends (D16).
+    /// begins and ends (D16). Its reading begins as the look is taken,
+    /// under the lock that shows it under way, so a look read as under way
+    /// has begun: a command that tells of a change while it is under way
+    /// has it read again, however late its thread starts (D15).
     fn look_at(&self, repository: &Path, beside: bool) {
-        if self.0.stopping.load(Ordering::SeqCst)
-            || (!beside && self.holds(repository))
-            || !locked(&self.0.looking).insert(repository.to_path_buf())
-        {
+        if self.0.stopping.load(Ordering::SeqCst) || (!beside && self.holds(repository)) {
             return;
+        }
+        {
+            let mut looking = locked(&self.0.looking);
+            if !looking.insert(repository.to_path_buf()) {
+                return;
+            }
+            self.begin_reading(repository);
         }
         let tasks = self.clone();
         let repository = repository.to_path_buf();
         std::thread::spawn(move || {
-            tasks.begin_reading(&repository);
             let in_play = tasks.0.in_play.clone();
             let looked =
                 std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| in_play(&repository)))
