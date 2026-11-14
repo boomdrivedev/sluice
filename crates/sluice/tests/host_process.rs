@@ -1551,10 +1551,15 @@ fn a_status_reads_only_the_results_it_asks_for() {
 fn the_host_process_keeps_its_repositories_across_a_new_binding() {
     let marks = support::Scratch::new("host-rebind-marks");
     let go = marks.path().join("go");
+    // The run waits for the mark, which each wait below bounds, or for the
+    // test's marks to go; its limit is no part of what is tested, and under
+    // load the take-up between its start and the mark may outlast a minute.
     let policy = format!(
-        "[tests]\nrunner = \"command\"\ncommand = \"while [ ! -f {} ]; do sleep 0.1; done\"\n\n\
-         [branches.main]\ntimeout = \"1m\"\n",
-        go.display()
+        "[tests]\nrunner = \"command\"\n\
+         command = \"while [ ! -f {} ] && [ -d {} ]; do sleep 0.1; done\"\n\n\
+         [branches.main]\ntimeout = \"10m\"\n",
+        go.display(),
+        marks.path().display()
     );
     let d = OnDisk::new("host-rebind", &policy);
     let config = d.config.path().join("sluice/config.toml");
@@ -1664,11 +1669,19 @@ fn a_submit_during_a_hand_over_reaches_the_successor() {
 #[test]
 fn a_successor_that_does_not_start_leaves_the_host_process_as_it_was() {
     let marks = support::Scratch::new("host-no-successor-marks");
-    let go = marks.path().join("go");
+    let (began, go) = (marks.path().join("began"), marks.path().join("go"));
+    // The run marks that its check began, then waits for the mark, which
+    // each wait below bounds, or for the test's marks to go. Its limit is
+    // no part of what is tested: the hand-over tried between its start and
+    // the mark waits ten seconds for a successor after its tasks end their
+    // passes, and under load a minute may pass before the mark.
     let policy = format!(
-        "[tests]\nrunner = \"command\"\ncommand = \"while [ ! -f {} ]; do sleep 0.1; done\"\n\n\
-         [branches.main]\ntimeout = \"1m\"\n",
-        go.display()
+        "[tests]\nrunner = \"command\"\n\
+         command = \"touch {}; while [ ! -f {} ] && [ -d {} ]; do sleep 0.1; done\"\n\n\
+         [branches.main]\ntimeout = \"10m\"\n",
+        began.display(),
+        go.display(),
+        marks.path().display()
     );
     let d = OnDisk::new("host-no-successor", &policy);
     settings(&d, "[telemetry]\nservice = \"one\"\n");
@@ -1691,6 +1704,12 @@ fn a_successor_that_does_not_start_leaves_the_host_process_as_it_was() {
     within(60, "#1 is under test", || {
         state(&d, d.repo.dir(), id) == "testing"
     });
+    // The round marks #1 testing before it makes the run's place and
+    // starts its supervisor from the host process's own executable, so the
+    // copy is replaced only once the run's check has begun: replaced
+    // sooner, under load, the supervisor started from it exits at once and
+    // #1 fails.
+    within(60, "#1's check begins", || began.exists());
     std::fs::remove_file(&copy).unwrap();
     std::fs::write(&copy, "#!/bin/sh\nexit 0\n").unwrap();
     use std::os::unix::fs::PermissionsExt;
@@ -1724,6 +1743,24 @@ fn a_successor_that_does_not_start_leaves_the_host_process_as_it_was() {
         warned[0]
     );
     std::fs::write(&go, "").unwrap();
-    within(60, "#1 lands", || state(&d, d.repo.dir(), id) == "landed");
+    let until = Instant::now() + Duration::from_secs(60);
+    loop {
+        let now = state(&d, d.repo.dir(), id);
+        if now == "landed" {
+            break;
+        }
+        let status = d
+            .command(d.repo.dir())
+            .args(["status", "main", "--json"])
+            .output()
+            .unwrap();
+        assert!(
+            Instant::now() < until,
+            "#1 lands: {now} after 60s\n{}\n{}",
+            text(&status),
+            said()
+        );
+        std::thread::sleep(Duration::from_millis(100));
+    }
     assert_eq!(answering(&d), Some(first), "{}", said());
 }
