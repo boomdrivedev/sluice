@@ -863,10 +863,12 @@ impl IntakeCause {
 }
 
 /// What one intake pass did (design D26): whether the branch takes pull
-/// requests, and each cause it met.
+/// requests, whether the pass asked the forge for them, and each cause it
+/// met.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct Intake {
     pub takes: bool,
+    pub asked: bool,
     pub causes: Vec<IntakeCause>,
 }
 
@@ -1028,7 +1030,7 @@ impl PullRequests for () {
 /// was said on stderr as the wait began.
 fn intake(
     pulls: &dyn PullRequests,
-    seams: Seams<'_>,
+    s: &Sluice<'_>,
     clock: &dyn Clock,
     branch: &str,
     json: bool,
@@ -1039,24 +1041,17 @@ fn intake(
         static SAID: std::cell::Cell<Option<chrono::DateTime<chrono::Utc>>> =
             const { std::cell::Cell::new(None) };
     }
-    let e = match pulls.intake(seams, clock, branch) {
-        Ok(i) => {
-            return Intaken {
-                causes: i.causes,
-                limited: None,
-            }
-        }
+    let e = match pulls.intake(s.seams(), clock, branch) {
+        Ok(i) => return Intaken::noted(s, branch, i.asked, i.causes),
         Err(e) => e,
     };
     // 128 (design D26): a pass that failed whole met one cause, its list.
     let Some(limited) = retry::limited(&e) else {
-        return Intaken {
-            causes: vec![IntakeCause {
-                asked: format!("{branch}'s pull requests"),
-                said: format!("{e:#}"),
-            }],
-            limited: None,
-        };
+        let causes = vec![IntakeCause {
+            asked: format!("{branch}'s pull requests"),
+            said: format!("{e:#}"),
+        }];
+        return Intaken::noted(s, branch, true, causes);
     };
     let waited = e.downcast_ref::<retry::Spent>().is_some();
     if !waited && SAID.get() != Some(limited.until) {
@@ -1068,18 +1063,67 @@ fn intake(
     }
     Intaken {
         causes: Vec::new(),
+        logged: Vec::new(),
         limited: Some(e),
     }
 }
 
-/// What [`intake`] met (design D26): each cause, which its caller says or
-/// notes, and a spent allowance, said once for its pause.
+/// What [`intake`] met (design D26, D27): each cause, which a step and a
+/// submit say; those whose lines its note wrote to the branch's log, which
+/// a pass says in the host process's log; and a spent allowance, said once
+/// for its pause.
 struct Intaken {
     causes: Vec<IntakeCause>,
+    logged: Vec<IntakeCause>,
     limited: Option<anyhow::Error>,
 }
 
 impl Intaken {
+    /// 133, rule core.28 (design D27): `causes`, an intake pass's of
+    /// `branch`, noted in this host's refusal of its intake, each logged
+    /// once; a pass that `asked` the forge and met none ends the refusal,
+    /// and one that asked nothing leaves it as it stands. A note that fails
+    /// is warned of, and logs nothing.
+    fn noted(s: &Sluice<'_>, branch: &str, asked: bool, causes: Vec<IntakeCause>) -> Intaken {
+        let remote = s.remote_of(branch).ok().flatten().unwrap_or_default();
+        let noted = match (causes.is_empty(), asked) {
+            (true, false) => Ok(Vec::new()),
+            (true, true) => s.note_intake_read(branch).map(|_| Vec::new()),
+            (false, _) => {
+                let read: Vec<sluice_seams::ReadRefused> = causes
+                    .iter()
+                    .map(|c| sluice_seams::ReadRefused {
+                        remote: remote.clone(),
+                        asked: c.asked.clone(),
+                        said: c.said.clone(),
+                        note: None,
+                    })
+                    .collect();
+                s.note_intake_refused(branch, &read)
+            }
+        };
+        let logged = match noted {
+            Ok(logged) => logged
+                .into_iter()
+                .map(|r| IntakeCause {
+                    asked: r.asked,
+                    said: r.said,
+                })
+                .collect(),
+            Err(e) => {
+                telemetry::warn(&format!(
+                    "sluice: warning: keeping {branch}'s intake refusal: {e:#}"
+                ));
+                Vec::new()
+            }
+        };
+        Intaken {
+            causes,
+            logged,
+            limited: None,
+        }
+    }
+
     /// Each cause, said on stderr as a warning: a submit's own first
     /// intake's (design D26).
     fn say(&self, branch: &str) {
@@ -5087,7 +5131,7 @@ fn submit_pull(
         if first && !mode.waits() {
             // The user, 2026-10-28: a submit that does not wait fails at
             // once on a spent allowance, naming when it ends (134).
-            let intaken = intake(pulls, seams, clock, branch, json, out);
+            let intaken = intake(pulls, s, clock, branch, json, out);
             intaken.say(branch);
             match intaken.limited {
                 Some(e) if no_wait => return Err(e),
@@ -5498,7 +5542,7 @@ fn submit_pull_group(
         // 135: as `submit_pull`, the first pass's intake the submit's own,
         // every other sluice's host process's.
         if first {
-            let intaken = intake(pulls, seams, clock, branch, json, out);
+            let intaken = intake(pulls, s, clock, branch, json, out);
             intaken.say(branch);
             match intaken.limited {
                 Some(e) if no_wait => return Err(e),

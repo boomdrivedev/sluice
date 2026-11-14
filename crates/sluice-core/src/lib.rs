@@ -425,6 +425,18 @@ impl<'a> Sluice<'a> {
         self.seams.state.keep_refusal(branch, bytes.as_deref())
     }
 
+    /// The remote `branch`'s table names, read from its policy at its
+    /// revision as the host holds it, whatever the table refuses (core.27).
+    pub fn remote_of(&self, branch: &str) -> Result<Option<String>> {
+        let Some(rev) = self.seams.branch.held(branch)? else {
+            return Ok(None);
+        };
+        match self.policy_at(&rev)? {
+            Some(policy) => policy.remote_of(branch),
+            None => Ok(None),
+        }
+    }
+
     /// 133 (design D27): this host's refusal of `branch`'s intake, as the
     /// records seam keeps it beside its refusal of the remote.
     pub fn intake_refusal(&self, branch: &str) -> Result<Option<Refusal>> {
@@ -478,7 +490,13 @@ impl<'a> Sluice<'a> {
         };
         let before = unlogged(&r);
         self.keep_intake_refusal(branch, Some(&r))?;
-        self.write_intake_lines(branch)?;
+        // A write that fails leaves the lines for the next write (73).
+        if let Err(e) = self.write_intake_lines(branch) {
+            tracing::warn!(
+                sluice.branch = branch,
+                "writing the intake refusal's lines failed: {e:#}"
+            );
+        }
         let after = self
             .intake_refusal(branch)?
             .map(|r| unlogged(&r))

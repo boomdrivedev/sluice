@@ -318,8 +318,10 @@ pub struct Pulls {
     /// This host as its peers name it, and its lease (72, 73, 137).
     peer: sluice_core::Peer,
     /// 128 (design D26): each cause the intake pass under way met, handed
-    /// back by [`crate::PullRequests::intake`], printed by none of it.
+    /// back by [`crate::PullRequests::intake`], printed by none of it, and
+    /// whether it asked the forge for the branch's pull requests.
     causes: RefCell<Vec<crate::IntakeCause>>,
+    asked: std::cell::Cell<bool>,
     /// The host that keeps each branch and takes its pull requests in, by
     /// branch, as this process's last intake found it, where that is
     /// another host.
@@ -437,6 +439,7 @@ impl Pulls {
             default_policy: RefCell::default(),
             peer,
             causes: RefCell::default(),
+            asked: std::cell::Cell::new(false),
             away: RefCell::default(),
             kept_across: RefCell::default(),
         }
@@ -731,6 +734,7 @@ impl Pulls {
         self.away.borrow_mut().remove(branch);
         let at_tip = kept.tip.as_deref() == Some(t.tip.0.as_str());
         let still = at_tip && kept.version == Some(version);
+        self.asked.set(true);
         let listed = forge.listed(&t.repo, branch)?;
         let (pulls, changed) = (listed.pulls, listed.changed);
         let mut status = s.status(branch)?;
@@ -2919,10 +2923,12 @@ impl crate::PullRequests for Pulls {
             .keeping(&self.policies)
             .as_peer(self.peer.clone());
         self.causes.borrow_mut().clear();
+        self.asked.set(false);
         let takes = self.take_in(&s, clock, branch);
         let causes = std::mem::take(&mut *self.causes.borrow_mut());
         Ok(crate::Intake {
             takes: takes?,
+            asked: self.asked.get(),
             causes,
         })
     }

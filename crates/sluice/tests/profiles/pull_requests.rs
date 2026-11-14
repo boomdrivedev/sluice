@@ -1409,6 +1409,60 @@ fn output_posted_as_asked_and_scrubbed() {
     assert!(r.contains("[redacted]") && !r.contains("ghp_"), "{r}");
 }
 
+impl OnGitHub {
+    /// What sluice's host process said in this host's state: its log and
+    /// the log of the process before it.
+    fn host_log(&self) -> String {
+        let host = self.state.path().join("sluice/host");
+        ["log.1", "log"]
+            .iter()
+            .map(|f| std::fs::read_to_string(host.join(f)).unwrap_or_default())
+            .collect()
+    }
+}
+
+/// 133, rule core.28 (design D27): GitHub serves no head for a pull
+/// request; the host process's passes say the cause once in its log, and
+/// main's log holds its `read-refused` once, marked `intake`; a host
+/// process started afresh says nothing of it again.
+#[test]
+fn a_standing_intake_failure_is_said_once_for_each_cause_and_host() {
+    let g = OnGitHub::new("pr-intake-once", "");
+    g.named("a", "");
+    let (n, _) = g.by_hand("unit/headless", &[("h.txt", Some("h\n"))], false);
+    g.no_head(n);
+    g.on_main();
+    let line = format!("sluice: warning: taking in main's pull requests: pull/{n}: ");
+    let logged = |g: &OnGitHub| -> usize {
+        g.log()
+            .into_iter()
+            .filter(|l| l["event"] == "read-refused" && l["intake"] == true)
+            .filter(|l| l["asked"] == format!("pull/{n}").as_str())
+            .count()
+    };
+    let mut said = String::new();
+    for _ in 0..2 {
+        g.discovery_passes();
+        let out = g.skipping(g.repo.dir(), &["run", "--rounds", "3"]);
+        assert!(out.status.success(), "{}", text(&out));
+        said.push_str(&text(&out));
+    }
+    assert_eq!(
+        g.host_log().matches(&line).count(),
+        1,
+        "{}\n{said}\n{:?}",
+        g.host_log(),
+        g.log()
+    );
+    assert_eq!(logged(&g), 1);
+    support::kill_host_process(&mut g.command(env!("CARGO_BIN_EXE_sluice"), g.repo.dir()));
+    g.discovery_passes();
+    let out = g.skipping(g.repo.dir(), &["run", "--rounds", "2"]);
+    assert!(out.status.success(), "{}", text(&out));
+    assert_eq!(g.host_log().matches(&line).count(), 1, "{}", g.host_log());
+    assert_eq!(logged(&g), 1);
+}
+
 /// 128 (design D26): GitHub serves no head for a pull request; `sluice
 /// step` says on stderr what its intake met, `sluice: warning: taking in
 /// main's pull requests: pull/<n>: ...`, every step, its own intake
@@ -1542,11 +1596,11 @@ fn a_failed_list_ends_intake_and_the_queue_still_lands() {
     );
 }
 
-/// deneb, 2026-11-05: GitHub renamed the repository, and its old address,
-/// which the remote still names, finds no installation of the app. A
-/// running driver says so with what to do once, never every pass: its
-/// intake on stderr, `main`'s round on stdout, and the refused read once
-/// in `main`'s log, in GitHub's words (133; rules core.28, core.29).
+/// 133, rule core.28 (design D27): GitHub no longer finds the app's
+/// installation on the repository, as when it was renamed; the host
+/// process's passes say the round's refusal once, with what to do, and
+/// once main's records can be written again its log holds the intake's
+/// cause once, marked `intake`, beside the round's own `read-refused`.
 #[test]
 fn a_repository_github_no_longer_finds_is_said_once_with_what_to_do() {
     let g = OnGitHub::new("pr-renamed", "");
@@ -1559,35 +1613,47 @@ fn a_repository_github_no_longer_finds_is_said_once_with_what_to_do() {
         usize::MAX,
         github::Trouble::Status(404),
     );
+    // A host process started afresh, which holds no token bought before.
+    support::kill_host_process(&mut g.command(env!("CARGO_BIN_EXE_sluice"), g.repo.dir()));
     g.discovery_passes();
+    g.on_main();
     let out = g.skipping(g.repo.dir(), &["run", "--rounds", "3"]);
     let stdout = String::from_utf8_lossy(&out.stdout);
-    let stderr = String::from_utf8_lossy(&out.stderr);
     let said = "GET /repos/o/r/installation: 404 Not Found";
     let todo = format!(
         "GitHub finds no installation of app {} on o/r: if the repository was renamed or \
          transferred, point the remote that names it at its new address",
         github::APP
     );
-    let intake = "sluice: warning: taking in main's pull requests: ";
-    assert_eq!(stderr.matches(intake).count(), 1, "{}", text(&out));
-    let warned = &stderr[stderr.find(intake).unwrap()..];
-    assert!(
-        warned.contains(&format!("{said}\n{todo}")),
-        "{}",
-        text(&out)
-    );
     let passed = "main could not be read, passed by: ";
-    assert_eq!(stdout.matches(passed).count(), 1, "{}", text(&out));
+    assert_eq!(
+        stdout.matches(passed).count(),
+        1,
+        "{}\n{}\n{:?}",
+        text(&out),
+        g.host_log(),
+        g.log()
+    );
     assert_eq!(stdout.matches(&todo).count(), 1, "{}", text(&out));
+    // Main's records are on its remote, which cannot be written while
+    // GitHub gives no token: both refusals are kept on the host until it
+    // can be, and then written once each.
+    g.gh.calm();
+    g.discovery_passes();
+    let out = g.skipping(g.repo.dir(), &["run", "--rounds", "2"]);
+    assert!(out.status.success(), "{}", text(&out));
     let refused: Vec<Value> = g
         .log()
         .into_iter()
         .filter(|l| l["event"] == "read-refused")
         .collect();
-    assert_eq!(refused.len(), 1, "{refused:?}");
-    assert_eq!(refused[0]["asked"], "refs/heads/main");
-    assert_eq!(refused[0]["said"], said);
+    let (theirs, ours): (Vec<&Value>, Vec<&Value>) =
+        refused.iter().partition(|l| l["intake"] == true);
+    assert_eq!(theirs.len(), 1, "{refused:?}");
+    assert_eq!(theirs[0]["asked"], "main's pull requests", "{refused:?}");
+    let words = theirs[0]["said"].as_str().unwrap();
+    assert!(words.contains(said) && words.contains(&todo), "{words}");
+    assert_eq!(ours.len(), 1, "{refused:?}");
 }
 
 // ---------------------------------------------------------------------------
