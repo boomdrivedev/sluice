@@ -438,6 +438,9 @@ pub struct Status {
     /// writes were to sluice's copy of it, for the words after them
     /// (design D5). Read only while any stand, and `false` while none do.
     pub on_remote: bool,
+    /// Record 0122 (design D11): where its queue lives, and its move while
+    /// one is written; `None` for records with no home yet.
+    pub home: Option<crate::overview::HomeView>,
 }
 
 /// 133: what this host's rounds of a branch could not read of its remote,
@@ -1591,7 +1594,9 @@ impl Sluice<'_> {
         let on_remote =
             !refused_writes.is_empty() && self.seams.branch.copy(branch)? != HostCopy::Itself;
         let chain = line.order(at.as_ref(), true).chain;
+        let home = crate::overview::HomeView::of(&line);
         Ok(Status {
+            home,
             branch: branch.into(),
             at,
             gone,

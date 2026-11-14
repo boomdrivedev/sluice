@@ -322,3 +322,87 @@ fn a_held_status_asks_no_remote() {
     assert!(h.w().fetches() + h.w().state_reads() > fetches + reads);
     assert!(h.sluice().holding().round(BRANCH).is_err());
 }
+
+/// satisfies: record 0122, 26 (design D11); the queue-home spec's "A move
+/// waiting": the overview's branch and a branch's status name its home, `in
+/// this host's own files` and `on origin`, and, while a move is written,
+/// where it goes, since when, and how many combinations under test it
+/// waits for.
+#[test]
+fn the_overview_names_each_branchs_home_and_its_move() {
+    use sluice_core::overview::{HomeView, MovingView};
+    let unsigned = sluice_conformance::policy(false, "fail", 4);
+    let signed = unsigned.replace(
+        "trust = [\"open\", \"sandbox\", \"container\"]\n",
+        "trust = [\"box\"]\nremote = \"origin\"\n",
+    ) + "\n[signers.box]\nssh = \"box ssh-ed25519 AAAA\"\n";
+    let home_of = |h: &Harness| {
+        let s = h.sluice();
+        let view = s
+            .overview(None)
+            .unwrap()
+            .into_iter()
+            .find(|b| b.branch == BRANCH)
+            .expect("the overview lists the branch");
+        let status = s.status(BRANCH).unwrap().home;
+        assert_eq!(
+            view.home, status,
+            "the overview and the status say one home"
+        );
+        view.home.expect("a home")
+    };
+
+    let h = Harness::new(&unsigned);
+    h.w().hold_runs(true);
+    h.work(
+        "unit/p",
+        "agent-p",
+        &[(".config/sluice.toml", Some(&signed))],
+    );
+    let p = h.submit("unit/p");
+    let at = h.w().work(&h.sub(p).head, &[("a/lib", Some("a2"))]);
+    h.w().session("unit/a", "agent-a", &at);
+    h.submit("unit/a");
+    h.step();
+    let here = home_of(&h);
+    assert_eq!(
+        here,
+        HomeView {
+            at: "here".into(),
+            moving: None
+        }
+    );
+    assert_eq!(here.line(), "in this host's own files");
+    let first = h
+        .doc()
+        .candidates
+        .iter()
+        .find(|c| c.submissions == [p])
+        .unwrap()
+        .revision
+        .clone();
+    h.w().complete(&first);
+    h.step();
+    h.step();
+    let moving = home_of(&h);
+    let since = match &moving.moving {
+        Some(MovingView { to, since, waiting }) => {
+            assert_eq!((to.as_str(), *waiting), ("origin", 1));
+            since.clone()
+        }
+        None => panic!("no move: {moving:?}"),
+    };
+    assert_eq!(
+        moving.line(),
+        format!("moving to origin since {since}, waiting for 1 combination under test")
+    );
+    let v = serde_json::to_value(&moving).unwrap();
+    assert_eq!(v["at"], "here");
+    assert_eq!(v["moving"]["to"], "origin");
+
+    let h = Harness::new(&signed);
+    h.work("unit/a", "agent-a", &[("a/lib", Some("a2"))]);
+    h.submit("unit/a");
+    let origin = home_of(&h);
+    assert_eq!(origin.line(), "on origin");
+}

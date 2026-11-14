@@ -6107,6 +6107,10 @@ fn write_status(
             status.testing
         )?;
     }
+    // Record 0122 (design D11): where its queue lives, and its move.
+    if let Some(home) = &status.home {
+        writeln!(out, "its queue is {}", home.line())?;
+    }
     match pusher {
         None => {}
         Some(Pusher {
@@ -6329,6 +6333,7 @@ fn status_json(status: &Status, submissions: &[Submission]) -> Result<serde_json
         "held_checkouts": held_checkouts,
         "copy": status.copy,
         "refused_writes": status.refused_writes,
+        "home": status.home,
     });
     if let Some(refused) = &status.refused {
         json["refused"] = serde_json::json!(refused);
