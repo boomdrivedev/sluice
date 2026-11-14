@@ -1352,3 +1352,85 @@ fn a_status_during_a_long_round_answers_at_once() {
     let err = String::from_utf8_lossy(&out.stderr);
     assert!(!err.contains("host process"), "{err}");
 }
+
+/// 69, 129 (design D17): with the results log holding results of two
+/// hundred other combinations, `sluice status <n> --json` for a submission
+/// whose combination has three shows those three, and the command reads no
+/// line of the results log itself: lines rewritten in place after the host
+/// process's index read them are still answered as that index read them.
+#[test]
+fn a_status_reads_only_the_results_it_asks_for() {
+    let d = OnDisk::new("host-asks", POLICY);
+    let dir = d.session("a");
+    let id = queued_live(&d, &dir);
+    within(60, "the submission lands", || {
+        state(&d, d.repo.dir(), id) == "landed"
+    });
+    // One host process answers every status after, its index kept.
+    let repository = d.repository(d.repo.dir());
+    let _kept = d
+        .client(d.repo.dir())
+        .follow(Path::new(&repository), FollowKind::Wait)
+        .expect("the host process");
+    let status = || {
+        let out = d
+            .command(d.repo.dir())
+            .env("SLUICE_ROUND_SLEEP", "record")
+            .args(["status", &id.to_string(), "--json"])
+            .output()
+            .unwrap();
+        assert!(out.status.success(), "{}", text(&out));
+        assert!(!text(&out).contains("reads them itself"), "{}", text(&out));
+        serde_json::from_slice::<serde_json::Value>(&out.stdout).unwrap()
+    };
+    let tasks = |doc: &serde_json::Value| -> BTreeSet<String> {
+        doc["checks"]
+            .as_array()
+            .unwrap_or_else(|| panic!("checks in {doc}"))
+            .iter()
+            .map(|c| c["task"].as_str().unwrap().to_string())
+            .collect()
+    };
+    let doc = status();
+    let combination = doc["tested"]["combination"]
+        .as_str()
+        .unwrap_or_else(|| panic!("a combination in {doc}"))
+        .to_string();
+    let own = tasks(&doc);
+    assert_eq!(own.len(), 1, "{doc}");
+
+    let line = |task: &str, combination: &str| {
+        format!(
+            "{{\"at\":\"2026-11-13T00:00:00Z\",\"kind\":\"ran\",\"task\":\"{task}\",\
+             \"hash\":\"h-{task}\",\"outcome\":\"pass\",\"branch\":\"main\",\
+             \"combination\":\"{combination}\"}}\n"
+        )
+    };
+    let mut more = String::new();
+    for i in 0..200 {
+        more.push_str(&line("other:check", &format!("{i:040x}")));
+    }
+    more.push_str(&line("b:check", &combination));
+    more.push_str(&line("c:check", &combination));
+    let log = d.repo.dir().join(".git/sluice/results.jsonl");
+    std::fs::OpenOptions::new()
+        .append(true)
+        .open(&log)
+        .unwrap()
+        .write_all(more.as_bytes())
+        .unwrap();
+    let mut three = own.clone();
+    three.extend(["b:check".to_string(), "c:check".to_string()]);
+    assert_eq!(tasks(&status()), three);
+
+    // Rewritten in place, its length and file the same: a command reading
+    // the log itself would read `q:check`.
+    let bytes = std::fs::read(&log).unwrap();
+    let rewritten = String::from_utf8(bytes)
+        .unwrap()
+        .replace("b:check", "q:check");
+    let mut f = std::fs::OpenOptions::new().write(true).open(&log).unwrap();
+    f.write_all(rewritten.as_bytes()).unwrap();
+    drop(f);
+    assert_eq!(tasks(&status()), three);
+}
