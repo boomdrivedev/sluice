@@ -888,10 +888,11 @@ pub trait PullRequests {
     /// (128; design D26).
     fn intake(&self, seams: Seams<'_>, clock: &dyn Clock, branch: &str) -> Result<Intake>;
 
-    /// 137: the host that keeps `branch` and takes its pull requests in, as
-    /// this process's last intake found it, where that is another host.
-    fn elsewhere(&self, _branch: &str) -> Option<String> {
-        None
+    /// 137 (design D25): whether another host keeps `branch` on its remote
+    /// and takes its pull requests in, as this process last found it, by
+    /// its intake or by following a request into it.
+    fn elsewhere(&self, _branch: &str) -> bool {
+        false
     }
 
     /// Open the pull request from `head`'s branch into `branch`, or update
@@ -5300,7 +5301,7 @@ fn submit_pull(
                 // again only when it changes.
                 there = pulls
                     .elsewhere(branch)
-                    .map(|_| There { taken_in_by, queue });
+                    .then_some(There { taken_in_by, queue });
                 if let (false, Some(t)) = (json, &there) {
                     let line = t.line(number, branch);
                     if said_there.as_ref() != Some(&line) {
@@ -5586,7 +5587,7 @@ fn submit_pull_group(
                     // 137, design D5: as `submit_pull`'s.
                     there[i] = pulls
                         .elsewhere(branch)
-                        .map(|_| There { taken_in_by, queue });
+                        .then_some(There { taken_in_by, queue });
                     if let (false, Some(t)) = (json, &there[i]) {
                         let line = t.line(o.number, branch);
                         if said_there[i].as_ref() != Some(&line) {

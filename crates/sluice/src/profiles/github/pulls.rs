@@ -322,10 +322,11 @@ pub struct Pulls {
     /// whether it asked the forge for the branch's pull requests.
     causes: RefCell<Vec<crate::IntakeCause>>,
     asked: std::cell::Cell<bool>,
-    /// The host that keeps each branch and takes its pull requests in, by
-    /// branch, as this process's last intake found it, where that is
-    /// another host.
-    away: RefCell<BTreeMap<String, String>>,
+    /// Each branch another host keeps on its remote and takes the pull
+    /// requests of in, with that host where its records name one, as this
+    /// process last found it, by its intake or by following a request into
+    /// it (137; design D25).
+    away: RefCell<BTreeMap<String, Option<String>>>,
     /// 137, design D5: what this process's reader's documents last carried
     /// of the pull requests into each branch the host follows, by branch,
     /// read again only once the kept file or the mark moved.
@@ -723,9 +724,9 @@ impl Pulls {
         match self.takes(s, &t, branch)? {
             Taking::Here => {}
             Taking::Elsewhere(host) => {
-                match host {
-                    Some(host) => self.away.borrow_mut().insert(branch.to_string(), host),
-                    None => self.away.borrow_mut().remove(branch),
+                match t.signed {
+                    true => self.away.borrow_mut().insert(branch.to_string(), host),
+                    false => self.away.borrow_mut().remove(branch),
                 };
                 self.register(&t.repo, &s.status(branch)?.submissions);
                 return Ok(true);
@@ -2933,8 +2934,8 @@ impl crate::PullRequests for Pulls {
         })
     }
 
-    fn elsewhere(&self, branch: &str) -> Option<String> {
-        self.away.borrow().get(branch).cloned()
+    fn elsewhere(&self, branch: &str) -> bool {
+        self.away.borrow().contains_key(branch)
     }
 
     fn open(
@@ -3029,9 +3030,20 @@ impl crate::PullRequests for Pulls {
         // 136: GitHub is asked about the request no more often than once
         // in a quarter of the host's interval; between, what it last said.
         let now = clock.now();
-        let away = self.away.borrow().get(branch).cloned();
-        if let Some(host) = away {
-            return self.follow_across(forge, &t, branch, n, now, &host);
+        // 137 (design D25): a branch another host keeps on its remote, as
+        // its records name their lead, is followed by GitHub's word and
+        // sluice's check on the request's head at the host's one pace,
+        // naming that host; a wait runs no intake to find it so.
+        match self.kept_elsewhere(&s, &t, branch)? {
+            Some(keeper) => {
+                self.away
+                    .borrow_mut()
+                    .insert(branch.to_string(), keeper.clone());
+                return self.follow_across(forge, &t, branch, n, now, keeper.as_deref());
+            }
+            None => {
+                self.away.borrow_mut().remove(branch);
+            }
         }
         let fresh = self
             .seen
@@ -3159,8 +3171,13 @@ impl crate::PullRequests for Pulls {
 /// check says, with the queue it carries and its words beneath, the first
 /// line, which says the same as the queue, left out (design D2, D5); no
 /// check is open and `waiting`. Its `taken_in_by` is left for the caller,
-/// which reads the mark.
-fn as_its_check_says(posting: Option<Posting>, head: &str, draft: bool, host: &str) -> Followed {
+/// which reads the branch's records for the host that keeps it.
+fn as_its_check_says(
+    posting: Option<Posting>,
+    head: &str,
+    draft: bool,
+    host: Option<&str>,
+) -> Followed {
     let open = |title: String, lines: Vec<String>, queue: Option<Queue>| Followed::Open {
         title,
         lines,
@@ -3187,7 +3204,10 @@ fn as_its_check_says(posting: Option<Posting>, head: &str, draft: bool, host: &s
         Told::SentBack { conflict } => sent_back(conflict, posting),
         Told::Held if draft => sent_back(false, posting),
         Told::Held => open(
-            format!("waiting to be taken in by {host}"),
+            match host {
+                Some(host) => format!("waiting to be taken in by {host}"),
+                None => "waiting to be taken in".into(),
+            },
             Vec::new(),
             queue,
         ),
@@ -3231,7 +3251,7 @@ fn landed_as_it_says(posting: Option<Posting>, head: &str, draft: bool) -> Follo
 /// 0096).
 fn sent_back_or_held(posting: Option<Posting>, head: &str) -> bool {
     matches!(
-        as_its_check_says(posting, head, true, ""),
+        as_its_check_says(posting, head, true, None),
         Followed::SentBack { .. }
     )
 }
@@ -3254,7 +3274,7 @@ impl Pulls {
         branch: &str,
         n: u64,
         now: DateTime<Utc>,
-        host: &str,
+        host: Option<&str>,
     ) -> Result<Followed> {
         let repo = &t.repo;
         let Some(f) = self.read_followed(forge, repo, branch, n, now)? else {
@@ -3273,7 +3293,7 @@ impl Pulls {
         match &mut followed {
             Followed::Landed { .. } | Followed::Closed => self.unfollow(repo, branch, &[n]),
             Followed::Open { taken_in_by, .. } => {
-                *taken_in_by = Some(TakenInBy {
+                *taken_in_by = host.map(|host| TakenInBy {
                     host: host.to_string(),
                 });
             }
@@ -3388,9 +3408,10 @@ impl Pulls {
 
     /// 137, design D5: a row for each of `follows` into `branch` whose
     /// submission this host's queue does not hold at its head, as `read`
-    /// gives it from what was kept of it, and the numbers of those found
-    /// merged or closed, which are shown `landed` or `closed without
-    /// landing`. "Held" is the request's latest submission here at its
+    /// gives it from what was kept of it, and the numbers to follow no
+    /// longer: those the queue holds at their head, and those found merged
+    /// or closed, which are shown `landed` or `closed without landing`.
+    /// "Held" is the request's latest submission here at its
     /// head, in any state, past one this host handed over.
     fn across_rows(
         &self,
@@ -3404,11 +3425,15 @@ impl Pulls {
         let held = |n: u64, head: &str| latest.get(&place(n)).is_some_and(|e| e.head.0 == head);
         let (mut rows, mut gone) = (Vec::new(), Vec::new());
         for (n, kept) in follows {
+            // 137: one the branch's queue holds at its head is followed no
+            // longer; the queue shows it.
             if held(n, &kept.head) {
+                gone.push(n);
                 continue;
             }
             let f = read(n, kept);
             if held(n, &f.head) {
+                gone.push(n);
                 continue;
             }
             // Design D6: the check's fields decide over its words.
@@ -3442,14 +3467,28 @@ impl Pulls {
     /// does yet; `None` where the branch takes none, its records are each
     /// host's own, or this host keeps it.
     fn away_from(&self, s: &Sluice<'_>, branch: &str) -> Result<Option<(Target, Option<String>)>> {
-        let Some(t) = self.target(s, branch)?.filter(|t| t.signed) else {
+        let Some(t) = self.target(s, branch)? else {
             return Ok(None);
         };
-        let lead = s.lead_of(branch)?;
-        if lead.as_deref() == Some(self.peer.name.as_str()) {
+        Ok(self.kept_elsewhere(s, &t, branch)?.map(|lead| (t, lead)))
+    }
+
+    /// 137 (design D25): where `t`'s branch's records are on its remote
+    /// and this host does not keep it, the host those records name as
+    /// keeping it, as this host last fetched them, `None` where none does
+    /// yet; `None` (the outer) where this host keeps it or each host keeps
+    /// its own. Read with nothing written, so a wait may ask it.
+    fn kept_elsewhere(
+        &self,
+        s: &Sluice<'_>,
+        t: &Target,
+        branch: &str,
+    ) -> Result<Option<Option<String>>> {
+        if !t.signed {
             return Ok(None);
         }
-        Ok(Some((t, lead)))
+        let lead = s.lead_of(branch)?;
+        Ok((lead.as_deref() != Some(self.peer.name.as_str())).then_some(lead))
     }
 
     /// 137, design D3: follow `numbers` into `branch` no longer, writing
@@ -4905,7 +4944,7 @@ mod tests {
             posting.clone(),
             "h",
             draft,
-            "b",
+            Some("b"),
         ) {
             Followed::SentBack {
                 conflict,
@@ -4999,7 +5038,7 @@ mod tests {
             Some(queued("main", &[], on_b(Some("queued"))).posting),
             "h",
             false,
-            "b",
+            Some("b"),
         ) {
             Followed::Open { lines, queue, .. } => {
                 assert_eq!(
