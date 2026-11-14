@@ -43,7 +43,7 @@ use sluice_core::overview::{in_queue, BranchView, CandidateView, Held};
 use sluice_core::records::{Beside, BranchHold, CopyBehind, Event, FailedTask, State, Submission};
 use sluice_core::{
     Accepted, AmendRefusal, Clock, Collect, CopyDiffers, Forecast, Forecasted, GroupRequest,
-    Lookup, Owed, Requester, Seams, Several, Sluice, Status, Step, SubmitHead, SubmitRefusal,
+    Lookup, Owed, Requester, Seams, Several, Sluice, Status, SubmitHead, SubmitRefusal,
     SubmitRequest, Unread, WithdrawRefusal, Withdrew,
 };
 use sluice_seams::{Decided, Outcome, Rev, SessionPlace, Submitter};
@@ -1809,44 +1809,28 @@ pub fn run(
             json,
         } => confirm(&s, &keys, who.is_some(), &worktree, json, out),
         Command::Step { branch, json } => {
-            intake(pulls, seams, clock, &branch, Taker::Step, json, out);
-            let round = s.round(&branch)?;
-            exec::tell_abandoned(out, json, &round.released)?;
-            preview::tell_dropped(out, json, &round.previews)?;
-            exec::tell_releases(out, json, &round.releases)?;
-            if json {
-                let outcome = match round.step {
-                    Step::Stepped => "stepped",
-                    Step::Busy => "busy",
-                    Step::Led => "led",
-                    Step::Contended => "contended",
-                    Step::Held => "held",
-                };
-                let mut doc = serde_json::json!({
-                    "branch": branch,
-                    "outcome": outcome,
-                    "released": exec::abandoned_json(&round.released),
-                    "previews_released": preview::dropped_json(&round.previews),
-                    "releases": exec::releases_json(&round.releases),
-                });
-                if let Some(hold) = &round.held {
-                    doc["held"] = held_json(hold);
+            // Rule core.14 (design D10): the host process's round of the
+            // branch, between its passes, printed as a step prints it.
+            let stepped = host.host_process().step(&here, &branch)?;
+            // 128; design D26: every warning its round's intake met, each
+            // step, on stderr.
+            let warnings = stepped["warnings"].as_array().cloned().unwrap_or_default();
+            for w in warnings.iter().filter_map(|w| w.as_str()) {
+                telemetry::warn(&format!("sluice: warning: {w}"));
+            }
+            let said = stepped["said"].as_array().cloned().unwrap_or_default();
+            for line in said.iter().filter_map(|l| l.as_str()) {
+                if json {
+                    eprintln!("{line}");
+                } else {
+                    writeln!(out, "{line}")?;
                 }
-                writeln!(out, "{doc}")?;
-                return Ok(0);
             }
-            if let Some(hold) = &round.held {
-                writeln!(out, "{}", held_line(&branch, hold))?;
-                return Ok(0);
+            if json {
+                writeln!(out, "{}", stepped["document"])?;
+            } else {
+                writeln!(out, "{}", stepped["line"].as_str().unwrap_or_default())?;
             }
-            let word = match round.step {
-                Step::Stepped => "stepped",
-                Step::Busy => "busy: another round holds the lock",
-                Step::Led => "led: another host keeps the branch, and its lease has not passed",
-                Step::Contended => "contended: the records moved; nothing done",
-                Step::Held => "held",
-            };
-            writeln!(out, "{branch}: {word}")?;
             Ok(0)
         }
         Command::Run { rounds } => {

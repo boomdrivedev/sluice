@@ -844,3 +844,40 @@ fn a_wait_says_a_rounds_failure_once_and_goes_on() {
         .count();
     assert_eq!(failures, 1, "{err}");
 }
+
+/// host-process, "A step with a submission queued": `sluice step` asks the
+/// host process for one round of the branch, which runs there, and prints
+/// its document (rule core.14; design D10).
+#[test]
+fn a_step_is_the_host_processs_round() {
+    let d = OnDisk::new("host-step", POLICY);
+    let id = queued(&d, "a");
+    let host = answering(&d).expect("the host process the submit started");
+    let child = d
+        .command(d.repo.dir())
+        .env("SLUICE_ROUND_SLEEP", "record")
+        .args(["step", "main", "--json"])
+        .stdout(std::process::Stdio::piped())
+        .spawn()
+        .unwrap();
+    let step = child.id();
+    let out = child.wait_with_output().unwrap();
+    assert!(out.status.success(), "{}", text(&out));
+    let lines: Vec<&str> = std::str::from_utf8(&out.stdout).unwrap().lines().collect();
+    assert_eq!(lines.len(), 1, "one document: {lines:?}");
+    let doc: serde_json::Value = serde_json::from_str(lines[0]).unwrap();
+    assert_eq!(doc["outcome"], "stepped", "{doc}");
+    assert_eq!(doc["branch"], "main", "{doc}");
+    assert_eq!(state(&d, d.repo.dir(), id), "testing");
+    let starts = d.git.parented();
+    assert!(
+        starts
+            .iter()
+            .any(|(p, a)| *p == host && a.contains("worktree add")),
+        "the round ran in the host process: {starts:?}"
+    );
+    assert!(
+        !starts.iter().any(|(p, a)| *p == step && a_rounds(a)),
+        "the step ran none of it: {starts:?}"
+    );
+}
