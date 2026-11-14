@@ -47,6 +47,61 @@ struct OnGitHub {
     state: Scratch,
     gh: github::GitHub,
     _files: Scratch,
+    /// The `[signing]` table of host `b`, whose signer the policy names
+    /// beside this host's `a` (C.6; design D28).
+    b_signing: String,
+}
+
+/// `policy` naming signers `a` and `b` by `keys`, and each branch's own
+/// table trusting both, so every branch with a remote keeps its records
+/// there (C.6; 78; design D28). A policy that names signers already is
+/// left as it is.
+fn signed(policy: &str, keys: &[ssh_key::PrivateKey; 2]) -> String {
+    if policy.contains("[signers.") {
+        return policy.to_string();
+    }
+    let line =
+        |p: &str, k: &ssh_key::PrivateKey| format!("{p} {}", k.public_key().to_openssh().unwrap());
+    let signers = format!(
+        "[signers.a]\nssh = \"{}\"\n\n[signers.b]\nssh = \"{}\"\n\n",
+        line("a", &keys[0]),
+        line("b", &keys[1])
+    );
+    let lines: Vec<&str> = policy.lines().collect();
+    let mut out = String::new();
+    let mut named = false;
+    for (i, l) in lines.iter().enumerate() {
+        let table = l.starts_with("[branches.") && !l.ends_with(".pull_requests]");
+        if l.starts_with("[branches.") && !named {
+            out.push_str(&signers);
+            named = true;
+        }
+        out.push_str(l);
+        out.push('\n');
+        if table {
+            let own = lines[i + 1..]
+                .iter()
+                .take_while(|n| !n.starts_with('['))
+                .any(|n| n.starts_with("trust"));
+            if !own {
+                out.push_str("trust = [\"a\", \"b\"]\n");
+            }
+        }
+    }
+    out
+}
+
+/// The `[signing]` table of signer `name`, its key `key` written to `dir`.
+fn signing(name: &str, key: &ssh_key::PrivateKey, dir: &Path) -> String {
+    let path = dir.join(format!("{name}.signing"));
+    key.write_openssh_file(&path, ssh_key::LineEnding::LF)
+        .unwrap();
+    use std::os::unix::fs::PermissionsExt;
+    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).unwrap();
+    format!(
+        "[signing]\nsigner = \"{name}\"\nkey = {:?}\n",
+        path.display().to_string()
+    )
 }
 
 impl OnGitHub {
@@ -101,9 +156,18 @@ impl OnGitHub {
     }
 
     /// `main` on GitHub under `policy`, its tree holding `files` beside it.
+    /// The policy names signers `a` and `b`, with keys made for the
+    /// fixture, and this host signs as `a`, so every branch with a remote
+    /// keeps its records there and this host keeps `main` (C.6; 137;
+    /// design D28).
     fn with(name: &str, policy: &str, files: &[(&str, &str)]) -> OnGitHub {
+        use ssh_key::{Algorithm, PrivateKey};
+        let keys = [
+            PrivateKey::random(&mut rand_core::OsRng, Algorithm::Ed25519).unwrap(),
+            PrivateKey::random(&mut rand_core::OsRng, Algorithm::Ed25519).unwrap(),
+        ];
         let repo = Repo::new(name);
-        repo.write(".config/sluice.toml", policy);
+        repo.write(".config/sluice.toml", &signed(policy, &keys));
         for (path, content) in files {
             repo.write(path, content);
         }
@@ -128,12 +192,14 @@ impl OnGitHub {
         std::fs::write(
             dir.join("config.toml"),
             format!(
-                "[runs]\nmax = 2\n\n[forge]\napp_id = {}\nkey = {:?}\n",
+                "{}\n[runs]\nmax = 2\n\n[forge]\napp_id = {}\nkey = {:?}\n",
+                signing("a", &keys[0], &dir),
                 github::APP,
                 key.display().to_string()
             ),
         )
         .unwrap();
+        let b_signing = signing("b", &keys[1], &dir);
         let files = Scratch::new(&format!("{name}-github"));
         let gh = github::GitHub::start(&github::file(files.path()), Some(bare.path()));
         OnGitHub {
@@ -143,9 +209,13 @@ impl OnGitHub {
             state: Scratch::new(&format!("{name}-state")),
             gh,
             _files: files,
+            b_signing,
         }
     }
 
+    /// `program` in `dir`, this setup's host. The host process its
+    /// commands start passes only when asked, so the rounds that run are
+    /// the ones the test's commands ask for (design D14).
     fn command(&self, program: &str, dir: &Path) -> Command {
         let bin = Path::new(env!("CARGO_BIN_EXE_sluice")).parent().unwrap();
         let path = format!("{}:{}", bin.display(), std::env::var("PATH").unwrap());
@@ -153,6 +223,7 @@ impl OnGitHub {
         support::isolated(&mut c)
             .current_dir(dir)
             .env("PATH", path)
+            .env("SLUICE_ROUND_SLEEP", "record")
             .env("XDG_CONFIG_HOME", self.config.path())
             .env("XDG_STATE_HOME", self.state.path())
             .env("SLUICE_FORGE_API", self.gh.url())
@@ -203,11 +274,15 @@ impl OnGitHub {
         }
     }
 
-    /// This host's log of `main`, a document a line.
+    /// `main`'s log, a document a line, as its records on the remote hold
+    /// it (C.6).
     fn log(&self) -> Vec<Value> {
-        let path = self.repo.dir().join(".git/sluice/main/log.jsonl");
-        std::fs::read_to_string(path)
-            .unwrap_or_default()
+        let out = Command::new("git")
+            .args(["--git-dir", self.bare.path().to_str().unwrap()])
+            .args(["show", "refs/sluice/state/main:log.jsonl"])
+            .output()
+            .unwrap();
+        String::from_utf8_lossy(&out.stdout)
             .lines()
             .map(|l| serde_json::from_str(l).unwrap())
             .collect()
@@ -4735,13 +4810,15 @@ fn passes_between_discoveries_start_no_git_and_ask_github_nothing() {
             .collect();
         (git.starts()[starts..].to_vec(), asked)
     };
-    // The driver's first start pushes the host's intake mark, which its
-    // next start, within a third of the lease, renews never (137).
     run("1");
     let lists = g.lists();
     let (one, asked_one) = run("1");
     let (six, asked_six) = run("6");
-    assert_eq!(six.len(), one.len(), "one: {one:?}; six: {six:?}");
+    // Main's records are on its remote: each pass asks it once, and starts
+    // nothing else (129).
+    let fetches = |s: &[String]| s.iter().filter(|a| a.contains(" fetch ")).count();
+    assert_eq!(six.len(), one.len() + 5, "one: {one:?}; six: {six:?}");
+    assert_eq!(fetches(&six), fetches(&one) + 5, "{six:?}");
     assert_eq!(g.lists(), lists + 2, "asked at each run's first pass alone");
     for call in &asked_six {
         assert!(
@@ -5007,24 +5084,38 @@ struct Other<'a> {
 }
 
 impl OnGitHub {
-    /// Lines put first in this host's config: its `[peers]` table, or its
-    /// `[signing]`, ahead of the `[forge]` table later lines are added to.
-    fn config_first(&self, lines: &str) {
+    /// This host is called `name` among its peers, with `lines` more in
+    /// its `[peers]` table, in place of a `[peers]` table it has.
+    fn named(&self, name: &str, lines: &str) {
         let path = self.config.path().join("sluice/config.toml");
         let text = std::fs::read_to_string(&path).unwrap();
-        std::fs::write(&path, format!("{lines}\n{text}")).unwrap();
-    }
-
-    /// This host is called `name` among its peers, with `lines` more in
-    /// its `[peers]` table.
-    fn named(&self, name: &str, lines: &str) {
-        self.config_first(&format!("[peers]\nname = \"{name}\"\n{lines}"));
+        let text = match text.find("[peers]\n") {
+            Some(at) => {
+                let rest = &text[at + "[peers]\n".len()..];
+                let end = rest
+                    .find("\n[")
+                    .map_or(text.len(), |e| at + "[peers]\n".len() + e + 1);
+                format!("{}{}", &text[..at], &text[end..])
+            }
+            None => text,
+        };
+        std::fs::write(
+            &path,
+            format!("[peers]\nname = \"{name}\"\n{lines}\n{text}"),
+        )
+        .unwrap();
     }
 
     /// Another host, called `name` among its peers with `lines` more in its
     /// `[peers]` table, and `config` first in its config, over the same
-    /// remote and GitHub.
+    /// remote and GitHub. Host `b` signs as the policy's signer `b` where
+    /// `config` names no `[signing]` (design D28).
     fn other(&self, name: &str, lines: &str, config: &str) -> Other<'_> {
+        let config = match (name, config.contains("[signing]")) {
+            ("b", false) => format!("{}\n{config}", self.b_signing),
+            _ => config.to_string(),
+        };
+        let config = config.as_str();
         let repo = Repo::clone_of(self.bare.path(), &format!("{name}-host"));
         repo.git(&["remote", "set-url", "origin", "https://github.com/o/r.git"]);
         repo.git(&[
@@ -5120,6 +5211,7 @@ impl OnGitHub {
 }
 
 impl Other<'_> {
+    /// As [`OnGitHub::command`], on this host.
     fn command(&self, program: &str, dir: &Path) -> Command {
         let bin = Path::new(env!("CARGO_BIN_EXE_sluice")).parent().unwrap();
         let path = format!("{}:{}", bin.display(), std::env::var("PATH").unwrap());
@@ -5127,6 +5219,7 @@ impl Other<'_> {
         support::isolated(&mut c)
             .current_dir(dir)
             .env("PATH", path)
+            .env("SLUICE_ROUND_SLEEP", "record")
             .env("XDG_CONFIG_HOME", self.config.path())
             .env("XDG_STATE_HOME", self.state.path())
             .env("SLUICE_FORGE_API", self.g.gh.url())
@@ -5243,42 +5336,13 @@ fn records_on_each_host_one_host_asks() {
 /// no round of main.
 #[test]
 fn records_on_the_remote_only_the_lead_asks() {
-    use ssh_key::{Algorithm, LineEnding, PrivateKey};
-    let keys = [
-        PrivateKey::random(&mut rand_core::OsRng, Algorithm::Ed25519).unwrap(),
-        PrivateKey::random(&mut rand_core::OsRng, Algorithm::Ed25519).unwrap(),
-    ];
-    let line = |p: &str, k: &PrivateKey| format!("{p} {}", k.public_key().to_openssh().unwrap());
-    let g = OnGitHub::with(
-        "intake-signed",
-        &format!(
-            "[tests]\nrunner = \"command\"\ncommand = \"sh check.sh\"\n\n\
-             [signers.a]\nssh = \"{}\"\n\n[signers.b]\nssh = \"{}\"\n\n\
-             [branches.main]\nremote = \"origin\"\ntimeout = \"1m\"\ntrust = [\"a\", \"b\"]\n\n\
-             [branches.main.pull_requests]\n",
-            line("a", &keys[0]),
-            line("b", &keys[1])
-        ),
-        &[("check.sh", CHECK)],
-    );
-    let signing = |name: &str, key: &PrivateKey, dir: &Path| {
-        let path = dir.join(format!("{name}.signing"));
-        key.write_openssh_file(&path, LineEnding::LF).unwrap();
-        use std::os::unix::fs::PermissionsExt;
-        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).unwrap();
-        format!(
-            "[signing]\nsigner = \"{name}\"\nkey = {:?}\n",
-            path.display().to_string()
-        )
-    };
-    g.config_first(&signing("a", &keys[0], g.config.path()));
+    let g = OnGitHub::new("intake-signed", "");
     g.named("a", "");
     // Slow, so the submission is still under test when B waits on it.
     let (n, _) = g.by_hand("unit/signed", &[("slow", Some("s\n"))], false);
     g.step();
     let id = g.of(n)[0]["id"].as_u64().unwrap().to_string();
-    let keys_dir = Scratch::new("intake-signed-b-key");
-    let b = g.other("b", "", &signing("b", &keys[1], keys_dir.path()));
+    let b = g.other("b", "", "");
     let lists = g.lists();
     let out = b.skipping(b.repo.dir(), &["wait", &id, "--timeout", "30s"]);
     assert_eq!(out.status.code(), Some(sluice::WAITING), "{}", text(&out));
