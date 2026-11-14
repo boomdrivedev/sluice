@@ -466,7 +466,8 @@ fn a_round_carries_its_hosts_submissions_home_before_it_reads_the_branch() {
         Some(HERE)
     );
     assert!(h.w().file_in(HERE, BRANCH, "submissions/7.json").is_some());
-    assert_eq!(h.sub(7).state, State::Queued);
+    let state = |host: &str, id: u64| on(&h, host).state(id).unwrap().map(|s| s.state);
+    assert_eq!(state("a", 7), Some(State::Queued));
     assert!(
         h.w()
             .file_in("origin", BRANCH, "submissions/8.json")
@@ -481,7 +482,7 @@ fn a_round_carries_its_hosts_submissions_home_before_it_reads_the_branch() {
         .w()
         .file_in("origin", BRANCH, "submissions/8.json")
         .is_none());
-    assert_eq!(h.sub(8).state, State::Queued);
+    assert_eq!(state("b", 8), Some(State::Queued));
     let first = h.events().into_iter().next();
     assert_eq!(
         first,

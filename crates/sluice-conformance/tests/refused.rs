@@ -179,7 +179,9 @@ fn words_that_change_and_change_back_log_one_line_each() {
     assert_eq!(kept(&h).unwrap().rounds, 9);
 }
 
-/// satisfies: 133
+/// satisfies: 133; record 0122 (design D2): a branch in the hosts' own
+/// files has one home on each host, so each host's refusals are logged in
+/// its own, once, with its own count of rounds.
 #[test]
 fn two_hosts_refused_log_their_own() {
     let (h, _) = queued();
@@ -192,16 +194,10 @@ fn two_hosts_refused_log_their_own() {
             assert!(round_on(&h, host).is_err());
         }
     }
-    let lines: Vec<Event> = refusal_lines(&h).into_iter().map(|(_, e)| e).collect();
-    assert_eq!(
-        lines,
-        [
-            refused("build-1", &branch_ref(), NOT_FOUND),
-            refused("build-2", &branch_ref(), NOT_FOUND),
-        ]
-    );
     for host in ["build-1", "build-2"] {
         h.w().be_host(host);
+        let lines: Vec<Event> = refusal_lines(&h).into_iter().map(|(_, e)| e).collect();
+        assert_eq!(lines, [refused(host, &branch_ref(), NOT_FOUND)]);
         assert_eq!(kept(&h).unwrap().rounds, 3);
     }
 }
