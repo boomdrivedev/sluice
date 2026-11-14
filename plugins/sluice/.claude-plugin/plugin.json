@@ -1,6 +1,6 @@
 {
   "name": "sluice",
-  "version": "0.0.0",
+  "version": "0.95.1",
   "description": "Set sluice up in a repository, submit work and read verdicts, run tests and previews, and lay out a repository as a bare repo with worktrees.",
   "author": { "name": "agentplot" },
   "homepage": "https://agentplot.github.io/sluice/guides/claude-code/",

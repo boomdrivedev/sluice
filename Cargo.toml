@@ -12,7 +12,7 @@ members = [
 # main gives 0.0.0. A release's tag names a release commit that writes the
 # release's version here and into every file that carries sluice's
 # (set-version.sh), and root:versions holds them equal (record 0111).
-version = "0.0.0"
+version = "0.95.1"
 edition = "2021"
 license = "MIT"
 

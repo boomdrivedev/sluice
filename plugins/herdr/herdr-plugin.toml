@@ -1,6 +1,6 @@
 id = "agentplot.sluice"
 name = "sluice"
-version = "0.0.0"
+version = "0.95.1"
 min_herdr_version = "0.9.3"
 description = "sluice's merge queue beside your agents: a status popup, toasts when a submission lands or is blamed, a line on each agent's row, and the queue in the tab bar."
 platforms = ["linux", "macos"]

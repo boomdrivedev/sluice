@@ -1,6 +1,6 @@
 {
   "name": "sluice-board",
-  "version": "0.0.0",
+  "version": "0.95.1",
   "description": "sluice's queue inside a Claude Code session: a band above the prompt, a /sluice pane, a status line, and a turn that delivers an idle session its submission's outcome.",
   "author": { "name": "agentplot" },
   "homepage": "https://agentplot.github.io/sluice/guides/claude-code/",
