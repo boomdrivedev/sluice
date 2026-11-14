@@ -280,6 +280,9 @@ struct Inner {
     /// What each such ask was answered: whether the room was there.
     probed: Vec<bool>,
     host_limit: Option<usize>,
+    /// The hosts with no room for a run of their own, whatever the limit
+    /// (design D8 of `a-queues-home-is-written-in-its-records`).
+    full: BTreeSet<String>,
     /// Other repositories' runs going on each host, by host (71).
     other_runs: BTreeMap<String, usize>,
     /// Parts of each host's bound held and not yet started, by host and
@@ -1093,6 +1096,15 @@ impl World {
 
     pub fn host_limit(&self, limit: usize) {
         self.0.borrow_mut().host_limit = Some(limit);
+    }
+
+    /// From now, this world's host has no room for a run: its bound is 0,
+    /// whatever another host's is, as a lead that leaves its branch's runs
+    /// to other hosts has.
+    pub fn no_room(&self) {
+        let mut inner = self.0.borrow_mut();
+        let host = inner.host.clone();
+        inner.full.insert(host);
     }
 
     /// From now, `n` runs of other repositories go on this world's host,
@@ -2658,7 +2670,11 @@ impl Tests for FakeTests {
     }
 
     fn bound(&self) -> Result<usize> {
-        Ok(self.0 .0.borrow().host_limit.unwrap_or(usize::MAX))
+        let inner = self.0 .0.borrow();
+        if inner.full.contains(&inner.host) {
+            return Ok(0);
+        }
+        Ok(inner.host_limit.unwrap_or(usize::MAX))
     }
 
     /// 71 (record 0087): a part while the parts held and the runs going
@@ -2670,7 +2686,11 @@ impl Tests for FakeTests {
             return Ok(None);
         }
         let running = FakeTests::count(&inner);
-        if running.total() >= inner.host_limit.unwrap_or(usize::MAX) {
+        let bound = match inner.full.contains(&inner.host) {
+            true => 0,
+            false => inner.host_limit.unwrap_or(usize::MAX),
+        };
+        if running.total() >= bound {
             return Ok(None);
         }
         let host = inner.host.clone();

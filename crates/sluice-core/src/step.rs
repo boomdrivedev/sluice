@@ -318,9 +318,19 @@ impl Sluice<'_> {
     /// does, or when the instance that does has written nothing for the
     /// lease by this host's own observation and there is work to do.
     /// Taking is a write (62), after which the former lead's next write is
-    /// refused. A branch in this host's own files has no lead. Intake asks
-    /// it too, to take a branch's pull requests in only where this
-    /// instance keeps the branch (137).
+    /// refused. Intake asks it too, to take a branch's pull requests in
+    /// only where this instance keeps the branch (137).
+    ///
+    /// Record 0122, 137, record 0093 as amended 2026-11-08 (design D8): the
+    /// home decides first. A queue open in this host's own files is this
+    /// host's, with no lead. A remote home is taken or kept only by an
+    /// instance the rules at the branch's revision accept: it signs as a
+    /// signer they trust, and the records say they list the key it signs
+    /// with; where they name no signer, as for a branch coming home, any
+    /// instance may lead it, through the lease, so one carries its queue
+    /// home. An instance they do not accept never writes itself as lead,
+    /// and a lead they no longer accept keeps nothing from its next round,
+    /// so an accepted one takes the branch once the lease passes (73).
     pub fn keeps(&self, branch: &str) -> Result<bool> {
         let line = self.read_line(branch)?;
         // 133: the round's first read of the records, answered from what was
@@ -328,16 +338,20 @@ impl Sluice<'_> {
         if let Some(refused) = self.seams.state.stale(branch) {
             return Err(refused.into());
         }
-        // Record 0122 (design D8): a queue open in this host's own files is
-        // this host's, whatever the policy at its head names.
         if line.home.as_ref().is_some_and(|h| h.at == HERE) {
             return Ok(true);
         }
         let Some(tip) = self.seams.branch.read(branch)? else {
             return Ok(true);
         };
-        if !self.rules_at(branch, &tip)?.is_some_and(|r| r.signed) {
+        let rules = self.rules_at(branch, &tip)?;
+        let signed = rules.as_ref().is_some_and(|r| r.signed);
+        // Records with no home yet go where the rules at the head send them.
+        if line.home.is_none() && !signed {
             return Ok(true);
+        }
+        if signed && !self.accepted(branch, &tip, rules.as_ref())? {
+            return Ok(false);
         }
         let me = self.peer.name.clone();
         let from = match &line.doc.lead {
@@ -363,8 +377,25 @@ impl Sluice<'_> {
         let mut taken = line;
         taken.doc.lead = Some(me.clone());
         let now = self.now();
+        taken.doc.kept = Some(now.clone());
         taken.log(&now, Event::Took { by: me, from });
         Ok(matches!(self.write(&taken)?, Written::Written(_)))
+    }
+
+    /// 137, record 0093 as amended 2026-11-08 (design D8): whether the
+    /// rules at `tip`, a branch whose records are on its remote, accept this
+    /// instance: it signs as a signer they trust, and the records say they
+    /// list the key it signs with ([`Sluice::key_listed`]).
+    fn accepted(&self, branch: &str, tip: &Rev, rules: Option<&Rules>) -> Result<bool> {
+        let Some(rules) = rules else {
+            return Ok(false);
+        };
+        let trusted = self
+            .peer
+            .signer
+            .as_ref()
+            .is_some_and(|s| rules.claims.contains_key(s));
+        Ok(trusted && self.key_listed(branch, tip, rules)?)
     }
 
     // -----------------------------------------------------------------------
@@ -3042,15 +3073,23 @@ impl Sluice<'_> {
                 .iter()
                 .position(|r| self.claimable(r, home, rules, listed, unmet));
             // A candidate this host would run starts only with room held
-            // for it.
+            // for it. Design D8 (75): on a branch whose records are on its
+            // remote, a lead with no room opens it all the same, its runs
+            // open to every host the branch accepts.
             let part = match mine {
+                Some(_) if full && rules.signed => None,
                 Some(_) if full => break,
                 Some(_) => match self.seams.tests.hold(RunKind::Queue)? {
                     Some(part) => Some(part),
+                    None if rules.signed => {
+                        full = true;
+                        None
+                    }
                     None => break,
                 },
                 None => None,
             };
+            let mine = mine.filter(|_| part.is_some() || !rules.signed);
             let place = match mine {
                 Some(i) => {
                     let place = self.next_place(line);
