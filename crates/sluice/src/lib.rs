@@ -888,6 +888,17 @@ pub trait PullRequests {
     /// (128; design D26).
     fn intake(&self, seams: Seams<'_>, clock: &dyn Clock, branch: &str) -> Result<Intake>;
 
+    /// After a round of `branch` that stepped: each pull request a submit
+    /// opened whose submission that round sent back is marked a draft and
+    /// shown held for the next submit, before any follower reads the pass,
+    /// with nothing asked of the forge: the requests as this pass's intake
+    /// read them, and what the host keeps of them (120, 136; rule core.32;
+    /// design D5). Each cause it met, printing none of them (128; design
+    /// D26).
+    fn settle(&self, _seams: Seams<'_>, _clock: &dyn Clock, _branch: &str) -> Result<Intake> {
+        Ok(Intake::default())
+    }
+
     /// 137 (design D25): whether another host keeps `branch` on its remote
     /// and takes its pull requests in, as this process last found it, by
     /// its intake or by following a request into it.
@@ -1066,6 +1077,29 @@ fn intake(
         causes: Vec::new(),
         logged: Vec::new(),
         limited: Some(e),
+    }
+}
+
+/// After a round of `branch` that stepped, what it sent back of a pull
+/// request shown on it, a submit's request marked a draft, with nothing
+/// asked of the forge (120, 136; design D5): each cause it met noted as an
+/// intake's are, ending none. A spent allowance is said by the next
+/// intake, which meets it first.
+fn settle(pulls: &dyn PullRequests, s: &Sluice<'_>, clock: &dyn Clock, branch: &str) -> Intaken {
+    match pulls.settle(s.seams(), clock, branch) {
+        Ok(i) => Intaken::noted(s, branch, false, i.causes),
+        Err(e) if retry::limited(&e).is_some() => Intaken {
+            causes: Vec::new(),
+            logged: Vec::new(),
+            limited: Some(e),
+        },
+        Err(e) => {
+            let causes = vec![IntakeCause {
+                asked: format!("{branch}'s pull requests"),
+                said: format!("{e:#}"),
+            }];
+            Intaken::noted(s, branch, false, causes)
+        }
     }
 }
 

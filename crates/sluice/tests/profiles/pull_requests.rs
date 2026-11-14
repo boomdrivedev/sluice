@@ -6035,10 +6035,14 @@ fn landed_on_another_host() {
     took_nothing_in(&g, &b, n);
 }
 
-/// request-intake-host, "Blamed on another host": B's round blames the
-/// pull request, sluice's check on its head concludes as a failure naming
-/// the blamed check, and A's wait exits as a failed submission does,
-/// naming what the check names.
+/// request-intake-host, "Blamed on another host": B's round blames a pull
+/// request a person opened from A's worktree's branch, which no submit
+/// holds, so sluice's check on its head concludes as a failure naming the
+/// blamed check, and A's wait exits as a failed submission does, naming
+/// what the check names. A submit's request B blames is held in the pass
+/// that blamed it, its check saying it waits for the next submit, which a
+/// wait reads by its draft mark (`held_then_marked_ready_waits_to_be_taken_in`;
+/// 120, 137; design D5).
 #[test]
 fn blamed_on_another_host() {
     let g = OnGitHub::new("intake-blamed", "");
@@ -6046,26 +6050,31 @@ fn blamed_on_another_host() {
     let b = g.other("b", "", "");
     b.run("1");
     let w = g.session("blamed", &[("broken", "b\n")]);
-    let out = g.wt_submit(&w, &["--no-wait"]);
-    assert_eq!(out.status.code(), Some(0), "{}", text(&out));
-    let pull = g.pull_from("unit/blamed");
+    g.repo
+        .git(&["push", "-q", "origin", "unit/blamed:refs/heads/unit/blamed"]);
+    let head = github::rev(g.bare.path(), "refs/heads/unit/blamed").unwrap();
+    let n =
+        g.gh.forge
+            .open_by("person", "main", "unit/blamed", &head, false, None)
+            .unwrap();
     let until = Instant::now() + Duration::from_secs(60);
-    while !b
-        .of(pull.number)
-        .first()
-        .is_some_and(|s| s["state"] == "failed")
-    {
+    let blamed = || {
+        b.of(n).first().is_some_and(|s| s["state"] == "failed")
+            && g.posted(&head).is_some_and(|p| p.1.starts_with("failed: "))
+    };
+    while !blamed() {
         assert!(
             Instant::now() < until,
-            "B never blamed it: {:?}",
-            b.of(pull.number)
+            "B never blamed it: {:?}, {:?}",
+            b.of(n),
+            g.posted(&head)
         );
         b.discovery_passes();
-        b.run("2");
+        b.run("1");
     }
     let out = g.skipping(&w, &["wait", "main", "--timeout", "1m"]);
     assert_eq!(out.status.code(), Some(sluice::FAILED), "{}", text(&out));
-    let said = g.posted(&pull.head).unwrap().1;
+    let said = g.posted(&head).unwrap().1;
     assert!(said.starts_with("failed: "), "{said}");
     assert!(text(&out).contains(&said), "{}", text(&out));
 }

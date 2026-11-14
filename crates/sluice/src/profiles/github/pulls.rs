@@ -912,6 +912,129 @@ impl Pulls {
         Ok(true)
     }
 
+    /// 120, 136 (design D5): after a round of `branch`, each pull request
+    /// a submit opened whose submission the round sent back, failed or in
+    /// conflict, marked a draft and shown held for the next submit, as the
+    /// next intake would show it, before any follower reads the pass. What
+    /// the round sent back is told by the entry the host keeps of each
+    /// request, which this pass's intake wrote, against its submission now;
+    /// the request is the one intake last listed, at that submission's
+    /// head. Nothing is asked of GitHub: no list, no query and no read of
+    /// one request, its timeline but where the host keeps none, so a round
+    /// that sent nothing back costs nothing (rule core.32). Its outcome
+    /// and comment are the round's delivery's (50, 51), and a request
+    /// opened by hand, which no submit holds, keeps them as they are
+    /// posted. When the request was last asked for, at which revision and
+    /// which version of the records, stands, so the next intake asks as it
+    /// would have.
+    fn settle_in(&self, s: &Sluice<'_>, branch: &str) -> Result<()> {
+        if self.away.borrow().contains_key(branch) {
+            return Ok(());
+        }
+        let Some(t) = self.target(s, branch)? else {
+            return Ok(());
+        };
+        let Some(_lock) = self.lock(branch)? else {
+            return Ok(());
+        };
+        let kept = self.kept.readings(&t.repo, branch);
+        let queued: Vec<(u64, u64)> = kept
+            .requests
+            .iter()
+            .filter_map(|(n, r)| {
+                let (id, word) = r.entry.as_ref()?;
+                let out = [
+                    State::Landed,
+                    State::Withdrawn,
+                    State::Failed,
+                    State::Conflict,
+                ]
+                .iter()
+                .any(|x| x.word() == word);
+                (!out).then_some((*n, *id))
+            })
+            .collect();
+        if queued.is_empty() {
+            return Ok(());
+        }
+        let places: Vec<String> = queued.iter().map(|(n, _)| place(*n)).collect();
+        let latest = self.latest_of(s, branch, &places)?;
+        let mut sent_back: Vec<(Pull, Submission)> = Vec::new();
+        for (n, id) in &queued {
+            let Some(e) = latest.get(&place(*n)) else {
+                continue;
+            };
+            if e.id != *id || !matches!(e.state, State::Failed | State::Conflict) {
+                continue;
+            }
+            let pull = self.known.borrow().get(&place(*n)).map(|k| k.pull.clone());
+            if let Some(p) = pull.filter(|p| p.head == e.head.0 && submits(p).is_some()) {
+                sent_back.push((p, e.clone()));
+            }
+        }
+        if sent_back.is_empty() {
+            return Ok(());
+        }
+        let forge = self.forge(branch)?;
+        let status = s.status(branch)?;
+        let log = Line::read_log(&s.seams().state.read(branch)?)?;
+        let names = names(&status.submissions);
+        let mut read: BTreeMap<u64, Reading> = BTreeMap::new();
+        for (p, e) in &sent_back {
+            let mut r = kept.requests.get(&p.number).cloned().unwrap_or_default();
+            let held = is_held(p, Some(e), &log, || {
+                timeline(forge, &t.repo, p.number, &mut r)
+            });
+            let held = match held {
+                Ok(held) => held,
+                Err(e) => {
+                    self.met(&place(p.number), format!("{e:#}"));
+                    continue;
+                }
+            };
+            if !held {
+                continue;
+            }
+            if !p.draft {
+                match forge.set_draft(&t.repo, p.number, true) {
+                    Ok(()) => r.draft = true,
+                    Err(e) => self.met(
+                        &place(p.number),
+                        format!(
+                            "it waits for the next submit, and GitHub would not mark it a draft: \
+                             {e:#}"
+                        ),
+                    ),
+                }
+            }
+            let queue = queue_at(&self.peer.name, Some(e), &status);
+            let shown = waiting(branch, submits(p), &[NEXT_SUBMIT.to_string()], None, queue);
+            let report = s.verdict_of(branch, e.id)?;
+            let showed = self.show_report(
+                forge,
+                &t.repo,
+                p.number,
+                &p.head,
+                t.conditions.log_lines,
+                &names,
+                shown,
+                report.as_ref(),
+                &mut r,
+            );
+            if let Err(e) = showed {
+                self.met(&place(p.number), format!("{e:#}"));
+            }
+            r.entry = entry(Some(e));
+            read.insert(p.number, r);
+        }
+        if read.is_empty() {
+            return Ok(());
+        }
+        self.kept.change_readings(&t.repo, branch, |kept| {
+            kept.requests.extend(read);
+        })
+    }
+
     /// 136: keep what this pass asked and read of `branch`'s pull
     /// requests: when it asked, at the branch's revision and its records'
     /// version as they stand once intake wrote, so its own submissions and
@@ -2944,6 +3067,25 @@ impl crate::PullRequests for Pulls {
         Ok(crate::Intake {
             takes: takes?,
             asked: self.asked.get(),
+            causes,
+        })
+    }
+
+    fn settle(&self, seams: Seams<'_>, clock: &dyn Clock, branch: &str) -> Result<crate::Intake> {
+        let memo = ReadOnce {
+            branch: seams.branch,
+            read: RefCell::default(),
+        };
+        let s = Sluice::new(once(seams, &memo), clock)
+            .keeping(&self.policies)
+            .as_peer(self.peer.clone());
+        self.causes.borrow_mut().clear();
+        let settled = self.settle_in(&s, branch);
+        let causes = std::mem::take(&mut *self.causes.borrow_mut());
+        settled?;
+        Ok(crate::Intake {
+            takes: true,
+            asked: false,
             causes,
         })
     }

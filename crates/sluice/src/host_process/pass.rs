@@ -173,12 +173,11 @@ pub fn pass(
             }
         };
         if let Some(round) = round {
-            // 120, 128: what the round decided of a pull request is posted
-            // on it, a request sent back marked a draft, before any
-            // follower reads the pass: intake again, which asks nothing
-            // where the round left the records as they were.
+            // 120, 128, 136 (design D5): a submit's pull request the round
+            // sent back is marked a draft and shown held before any
+            // follower reads the pass, with nothing asked of the forge.
             if round.step == Step::Stepped {
-                let again = crate::intake(pulls, s, clock, branch, false, &mut out);
+                let again = crate::settle(pulls, s, clock, branch);
                 for c in &again.logged {
                     telemetry::warn(&format!("sluice: warning: {}", c.line(branch)));
                 }
@@ -253,8 +252,9 @@ pub fn in_play(s: &Sluice<'_>) -> bool {
 
 /// `sluice step`'s round of `branch`, as the host process runs it between
 /// its passes (rule core.14; design D10): the remote's one ask, its intake
-/// as today, then the round, then intake again where the round stepped,
-/// as a pass's are, so a step reads each signer's runs as a pass does,
+/// as today, then the round, then what the round sent back of a pull
+/// request shown where it stepped, as a pass's are, so a step reads each
+/// signer's runs as a pass does,
 /// answered as the document `sluice step --json` prints, with what the
 /// round said beside it, each warning its intakes met, once each, which
 /// the step prints on stderr (128; design D26), and the line a step prints
@@ -281,7 +281,7 @@ pub fn step(
     );
     let round = s.round(branch)?;
     if round.step == Step::Stepped {
-        for c in &crate::intake(pulls, s, clock, branch, false, &mut said).causes {
+        for c in &crate::settle(pulls, s, clock, branch).causes {
             let line = c.line(branch);
             if !warnings.contains(&line) {
                 warnings.push(line);
