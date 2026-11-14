@@ -3938,6 +3938,14 @@ impl Reading {
     /// Read `sub` again, and its branch's part of the overview, from the
     /// reader's document; with no whole overview to read it says nothing
     /// new.
+    ///
+    /// Record 0122 (design D6): the submission is followed in the home it
+    /// was last read in. Where the document's queue no longer holds it, or
+    /// holds another submission under its number, as when a move closed
+    /// that home and carried it to another, its record is read again by
+    /// number, which follows the closed home's pointer to the submission
+    /// under the number it has now; it is never another's, and what carried
+    /// it is never worked out here.
     fn read(&mut self, s: &Sluice<'_>, sub: &mut Submission) -> Result<()> {
         let (id, branch) = (sub.id, sub.branch.clone());
         // The reader's read that failed is no whole document either: the
@@ -3949,7 +3957,8 @@ impl Reading {
         let held = self
             .view
             .as_ref()
-            .and_then(|v| v.submissions.iter().find(|x| x.id == id));
+            .and_then(|v| v.submissions.iter().find(|x| x.id == id))
+            .filter(|x| sluice_core::home::same_work(x, sub));
         match held {
             // In the queue: the overview's record is its record.
             Some(x) => *sub = x.clone(),

@@ -821,3 +821,63 @@ fn a_signed_record_is_verified_once() {
         .sum();
     assert_eq!(verified, records, "{log}");
 }
+
+/// satisfies: record 0122, 26, rule core.48 (design D5, D6); the
+/// submission-wait spec's "The queue moves while a wait follows" and
+/// "Carried under another number": host b's own queue of `main` holds #1
+/// while `main`'s policy names no signers; a landing brings signers and
+/// `remote = "origin"`, and host a, with no records of its own, has #1 on
+/// origin. `sluice wait 1 --json` on b follows b's #1 as b's host process
+/// moves the queue, which carries it to origin as #2: the wait follows #2,
+/// never origin's own #1, until it lands, exits 0, and its document is
+/// #2's record naming `was` 1 and `carried_from` this host's own files.
+#[test]
+fn a_wait_follows_its_submission_to_its_queues_new_home() {
+    let (ka, kb) = (
+        PrivateKey::random(&mut rand_core::OsRng, Algorithm::Ed25519).unwrap(),
+        PrivateKey::random(&mut rand_core::OsRng, Algorithm::Ed25519).unwrap(),
+    );
+    let unsigned = "[tests]\nrunner = \"command\"\ncommand = \"true\"\n\n\
+                    [branches.main]\ntimeout = \"1m\"\nremote = \"origin\"\n";
+    let a = Repo::new("homes-wait-a");
+    a.write(".config/sluice.toml", unsigned);
+    a.git(&["add", "-A"]);
+    a.git(&["commit", "-q", "-m", "sluice's policy"]);
+    let origin = a.bare_origin();
+    let b = Repo::clone_of(origin.path(), "homes-wait-b");
+    let host_a = Host::new(a, "homes-wait-a", "a", &ka);
+    let host_b = Host::new(b, "homes-wait-b", "b", &kb);
+
+    let own = host_b.submit("y");
+    assert_eq!(own, 1);
+    assert!(refs_under(&origin, "refs/sluice/state/").is_empty());
+    // A landing brings signers and origin; b fetches it.
+    let signed = format!(
+        "[tests]\nrunner = \"command\"\ncommand = \"true\"\n\n\
+         [signers.a]\nssh = \"{}\"\n\n[signers.b]\nssh = \"{}\"\n\n\
+         [branches.main]\ntimeout = \"1m\"\nremote = \"origin\"\ntrust = [\"a\", \"b\"]\n",
+        line("a", &ka),
+        line("b", &kb)
+    );
+    host_a.repo.push_change(".config/sluice.toml", &signed);
+    host_b.repo.git(&["fetch", "-q", "origin"]);
+    let theirs = host_a.submit("x");
+    assert_eq!(theirs, 1, "origin's own #1");
+    assert!(refs_under(&origin, "refs/sluice/state/").contains("refs/sluice/state/main"));
+
+    let out = host_b
+        .command(host_b.repo.dir())
+        .args(["wait", "1", "--json", "--timeout", "90s"])
+        .output()
+        .unwrap();
+    assert!(out.status.success(), "{}", text(&out));
+    let doc: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert_eq!(doc["state"], "landed", "{doc}");
+    assert_eq!(doc["was"], 1, "{doc}");
+    assert_eq!(doc["carried_from"], "here", "{doc}");
+    assert_ne!(doc["id"], 1, "never origin's own #1: {doc}");
+    assert_eq!(doc["from"]["worktree"], "unit/y", "{doc}");
+    let now = doc["id"].as_u64().unwrap();
+    assert_eq!(host_b.state_of(now), "landed");
+    host_b.host_process_ended();
+}
