@@ -194,7 +194,10 @@ pub fn pass(
     // document, in the words it was refused with (133), and the pass goes
     // on. Ctrl-C reaching the git a read runs is no failure of the queues'.
     if let Some(lead) = reader {
-        let doc = overview::read_held(s, host, clock, Follows::Kept(pulls), &mut kept.asked)
+        // 137 (design D16, D25): the pass reads each request this host
+        // follows into a branch it does not keep, as it falls due at the
+        // host's one bound.
+        let doc = overview::read_held(s, host, clock, Follows::Asked(pulls), &mut kept.asked)
             .unwrap_or_else(|e| told::document(Kind::Internal, &format!("{e:#}"), &[]));
         report.no_sluice = no_sluice(&doc);
         let doc = overview::ticked(doc, tick);

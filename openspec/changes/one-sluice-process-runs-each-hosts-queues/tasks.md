@@ -135,7 +135,7 @@ they describe.
 
 ## 9. What goes
 
-- [ ] 9.1 `reader::Driver`, `driver_live` and `Drives` are used only where the host process takes `.driver` and reads an older sluice's lock (D7); `HostCount::admit` is called only by `Room`; `Command::Run`'s loop, `drive` and `Driving`'s driving, the wait's intake and `exec.rs`'s and `preview.rs`'s `session_capacity` loops are gone, and nothing they used is left dead (135; core.31). True when `cargo clippy -p sluice --all-targets --features tools -- -D warnings` passes.
+- [x] 9.1 `reader::Driver`, `driver_live` and `Drives` are used only where the host process takes `.driver` and reads an older sluice's lock (D7); `HostCount::admit` is called only by `Room`; `Command::Run`'s loop, `drive` and `Driving`'s driving, the wait's intake and `exec.rs`'s and `preview.rs`'s `session_capacity` loops are gone, and nothing they used is left dead (135; core.31). True when `cargo clippy -p sluice --all-targets --features tools -- -D warnings` passes.
 
 ## 10. The specs reconcile
 

@@ -37,22 +37,10 @@ pub enum Follows<'a> {
     Kept(&'a dyn PullRequests),
 }
 
-/// Every branch's part, and the whole document as `--json` prints it:
-/// each remote that keeps branches' records asked once, first, and every
-/// branch read as the host holds it since (129), with the pull requests
-/// into it the host follows, read as `follows` says (137).
-pub fn document(
-    s: &Sluice<'_>,
-    host: &dyn Host,
-    clock: &dyn Clock,
-    follows: Follows<'_>,
-) -> Result<(Vec<BranchView>, serde_json::Value)> {
-    s.seams().state.refresh()?;
-    document_held(s, host, clock, follows)
-}
-
-/// As [`document`], asking no remote: every branch read as the host holds
-/// it since the last ask (129).
+/// Every branch's part, and the whole document as `--json` prints it,
+/// asking no remote: every branch read as the host holds it since the last
+/// ask (129), with the pull requests into it the host follows, read as
+/// `follows` says (137).
 fn document_held(
     s: &Sluice<'_>,
     host: &dyn Host,

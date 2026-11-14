@@ -298,37 +298,6 @@ pub fn read(here: &Here<'_, '_>, afresh: bool) -> Option<Reading> {
     }
 }
 
-/// 135 (design D14): a command that moves no queue itself, `sluice
-/// status`, `sluice overview` or the home view, reaches the host process
-/// where one answers; where none answers, it reads whether anything is in
-/// play as an idle tick reads it, with no process started, and starts one
-/// only where something is, so a host process that crashed or slept is
-/// started again by the next command of sluice's. What it could not reach
-/// is said on stderr, and the command's answer stands. The process that
-/// answers, with its room, where one does.
-pub fn reach_if_in_play(here: &Here<'_, '_>) -> Option<(Named, RoomView)> {
-    note(here);
-    let process = here.host.host_process();
-    match process.room(here) {
-        Ok(Some(answered)) => return Some(answered),
-        Ok(None) => {}
-        Err(e) => {
-            crate::telemetry::warn(&format!("sluice: warning: {e:#}"));
-            return None;
-        }
-    }
-    if !super::pass::in_play(here.s) {
-        return None;
-    }
-    if let Err(e) = process.reach(here) {
-        crate::telemetry::warn(&format!(
-            "sluice: warning: sluice's host process could not be started, so nothing moves the queue until a command of sluice's starts it: {e:#}"
-        ));
-        return None;
-    }
-    process.room(here).ok().flatten()
-}
-
 /// A watch's, a wait's or `sluice run`'s part in following the host
 /// process (129; design D7, D9, D11): it asks a pass at each of its ticks
 /// where passes are taken only when asked, keeps a follow open otherwise,
