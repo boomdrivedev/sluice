@@ -1836,6 +1836,16 @@ pub enum Written {
 /// The branch's lock, held until dropped (ADR 0005; rule core.14).
 pub trait Guard {}
 
+/// Record 0122 (design D3, D4): what a carry of a branch's queue moved: the
+/// home it carried to, `here` for the host's own files or a remote's name,
+/// and each live submission by the number it had and the number it has
+/// there; no home where it owed nothing and wrote nothing.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct Carried {
+    pub to: Option<String>,
+    pub numbers: BTreeMap<u64, u64>,
+}
+
 pub trait State {
     /// The branch's lock, or `None` when another step holds it.
     fn lock<'a>(&'a self, branch: &str) -> Result<Option<Box<dyn Guard + 'a>>>;
@@ -1982,6 +1992,23 @@ pub trait State {
     /// run's claim reached this host (record 0118).
     fn fetch_candidate(&self, _branch: &str, _id: &str) -> Result<()> {
         Ok(())
+    }
+
+    /// Record 0122 (design D3, D4; C.6): carry what of `branch`'s queue
+    /// this host owes a move, the caller holding the branch's lock. Where
+    /// the home the branch is routed to is moving, which only the round
+    /// that keeps it asks, every live submission goes to the home the move
+    /// names, with its number and state and the owed deliveries, the new
+    /// home is opened naming where it came from, and the old one is closed
+    /// with its pointer; a branch coming home from a remote carries only
+    /// the submissions this host made into its own files. Where the home is
+    /// not moving, the submissions this host made left in a remote home
+    /// closed toward the hosts' own files are carried into its own. Each
+    /// write reads its target first and writes only what is not there, so a
+    /// carry already made writes nothing more, and one stopped between its
+    /// writes is finished by the next.
+    fn carry(&self, _branch: &str) -> Result<Carried> {
+        Ok(Carried::default())
     }
 
     /// The submissions this host had queued on the branch in its own

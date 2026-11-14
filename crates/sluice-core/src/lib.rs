@@ -8,6 +8,7 @@
 
 pub mod branches;
 pub mod equip;
+pub mod home;
 pub mod line;
 pub mod notice;
 pub mod ops;

@@ -15,14 +15,18 @@ use std::rc::Rc;
 
 use anyhow::{anyhow, bail, Result};
 use chrono::{DateTime, Duration as Span, TimeZone, Utc};
+use sluice_core::home::{HomeStore, Owed};
+use sluice_core::policy::POLICY_PATH;
+use sluice_core::records::{HomeDoc, HomeState, HERE, HOME_FILE};
 use sluice_core::{Clock, Seams, Sluice};
 use sluice_seams::{
-    Adopted, AtBound, Branch, Changes, CheckedOut, Checkout, Delivery, Driver, Enforced, Equip,
-    EquipStep, Equipped, Formed, GoneRelease, Guard, HostCopy, HostRun, KeptOutTask, LandingCommit,
-    LastResult, Moved, Network, NotRun, Notification, Outcome, Part, Place, PreviewPlace, Progress,
-    Proof, ReadRefused, Reading, Reads, ReleaseFailure, ReleasePolicy, Released, ResultAsk, Rev,
-    RunHandle, RunKind, RunReport, RunRequest, Running, Session, SessionPlace, Settings, Snapshot,
-    Source, State, Submitter, TaskLog, TaskProgress, TaskResult, Tests, Unanswered, Written,
+    Adopted, AtBound, Branch, Carried, Changes, CheckedOut, Checkout, Delivery, Driver, Enforced,
+    Equip, EquipStep, Equipped, Formed, GoneRelease, Guard, HostCopy, HostRun, KeptOutTask,
+    LandingCommit, LastResult, Moved, Network, NotRun, Notification, Outcome, Part, Place,
+    PreviewPlace, Progress, Proof, ReadRefused, Reading, Reads, ReleaseFailure, ReleasePolicy,
+    Released, ResultAsk, Rev, RunHandle, RunKind, RunReport, RunRequest, Running, Session,
+    SessionPlace, Settings, Snapshot, Source, State, Submitter, TaskLog, TaskProgress, TaskResult,
+    Tests, Unanswered, Written,
 };
 
 /// A tree: path to content.
@@ -105,7 +109,12 @@ impl RunState {
 struct Line {
     version: u64,
     files: BTreeMap<String, Vec<u8>>,
-    locked: bool,
+}
+
+/// Record 0122 (design D2): the name a host's own files go by among the
+/// fakes' homes; a remote's home goes by the remote's name.
+fn own_home(host: &str) -> String {
+    format!("here@{host}")
 }
 
 #[derive(Default)]
@@ -381,7 +390,18 @@ struct Inner {
     undelivered: Vec<Notification>,
     crash_notify: bool,
     // the records
-    lines: BTreeMap<String, Line>,
+    /// Each branch's records in each of its homes, by home and branch: a
+    /// host's own files as [`own_home`] names them, a remote's by its name
+    /// (record 0122; design D1).
+    lines: BTreeMap<(String, String), Line>,
+    /// The branches whose lock is held, one lock a branch on the host
+    /// (rule core.14), whichever home its records are in.
+    locks: BTreeSet<String>,
+    /// How many carries wrote anything (record 0122; design D3).
+    carries: usize,
+    /// The next carry stops after its target's write, before it closes
+    /// the home it carried from (59).
+    stop_carry: bool,
     /// Each branch's candidates' tasks, kept beside its records.
     progress: BTreeMap<String, BTreeMap<String, Vec<TaskProgress>>>,
     results: Vec<u8>,
@@ -1973,28 +1993,192 @@ impl World {
         self.0.borrow_mut().next_id = n;
     }
 
-    /// A branch's record file as written.
+    /// A branch's record file as written, in the home this host's reads
+    /// of it are routed to (record 0122; design D2).
     pub fn file(&self, branch: &str, path: &str) -> Option<String> {
-        self.0
-            .borrow()
-            .lines
-            .get(branch)
-            .and_then(|l| l.files.get(path))
-            .map(|b| String::from_utf8(b.clone()).expect("records are text"))
+        self.files(branch)
+            .remove(path)
+            .map(|b| String::from_utf8(b).expect("records are text"))
     }
 
-    /// Every file of a branch's records, as written.
+    /// Every file of a branch's records, as written, in the home this
+    /// host's reads of it are routed to.
     pub fn files(&self, branch: &str) -> BTreeMap<String, Vec<u8>> {
-        self.0
-            .borrow()
+        let inner = self.0.borrow();
+        let Ok(home) = World::route(&inner, branch) else {
+            return BTreeMap::new();
+        };
+        inner
             .lines
-            .get(branch)
+            .get(&(home, branch.to_string()))
             .map(|l| l.files.clone())
             .unwrap_or_default()
     }
 
     pub fn version(&self, branch: &str) -> u64 {
-        self.0.borrow().lines.get(branch).map_or(0, |l| l.version)
+        let inner = self.0.borrow();
+        World::route(&inner, branch)
+            .ok()
+            .and_then(|home| inner.lines.get(&(home, branch.to_string())))
+            .map_or(0, |l| l.version)
+    }
+
+    /// Record 0122 (design D1): a branch's record file as written in the
+    /// home `home`, `here` for this host's own files or a remote's name.
+    pub fn file_in(&self, home: &str, branch: &str, path: &str) -> Option<String> {
+        let inner = self.0.borrow();
+        let key = (World::home_key(&inner, home), branch.to_string());
+        inner
+            .lines
+            .get(&key)
+            .and_then(|l| l.files.get(path))
+            .map(|b| String::from_utf8(b.clone()).expect("records are text"))
+    }
+
+    /// Record 0122 (design D1): `branch`'s home document in `home`, as
+    /// written; `None` where that home holds none.
+    pub fn home_in(&self, home: &str, branch: &str) -> Option<HomeDoc> {
+        let text = self.file_in(home, branch, HOME_FILE)?;
+        Some(serde_json::from_str(&text).expect("a home document reads"))
+    }
+
+    /// Record 0122 (design D1): put `doc` as `branch`'s home document in
+    /// `home`, as a host that wrote it would have, moving no version.
+    pub fn put_home(&self, home: &str, branch: &str, doc: &HomeDoc) {
+        let mut inner = self.0.borrow_mut();
+        let key = (World::home_key(&inner, home), branch.to_string());
+        let line = inner.lines.entry(key).or_default();
+        line.files
+            .insert(HOME_FILE.into(), sluice_core::records::to_document(doc));
+    }
+
+    /// Record 0122 (design D3): how many carries wrote anything.
+    pub fn carries(&self) -> usize {
+        self.0.borrow().carries
+    }
+
+    /// Record 0122 (59): the next carry stops after its target's write,
+    /// before it closes the home it carried from, as a process stopped
+    /// there would.
+    pub fn stop_next_carry(&self) {
+        self.0.borrow_mut().stop_carry = true;
+    }
+
+    /// 51, record 0122 (design D4): the session in `worktree` submits as
+    /// made on `host`, as a session's driver names the host it ran on.
+    pub fn from_host(&self, worktree: &str, host: &str) {
+        let mut inner = self.0.borrow_mut();
+        let session = inner
+            .worktrees
+            .get_mut(worktree)
+            .unwrap_or_else(|| panic!("no session in {worktree}"));
+        session.from.host = Some(host.into());
+    }
+
+    /// Design D2: the home document the first write into the home keyed
+    /// `key` writes, where it holds none and the write puts none: open,
+    /// naming the home and the branch's head, whose policy chose it.
+    fn opened_home(inner: &Inner, key: &str, branch: &str, changes: &Changes) -> Option<Vec<u8>> {
+        let holds = inner
+            .lines
+            .get(&(key.to_string(), branch.to_string()))
+            .is_some_and(|l| l.files.contains_key(HOME_FILE));
+        if holds || changes.put.contains_key(HOME_FILE) {
+            return None;
+        }
+        let at = match key.starts_with("here@") {
+            true => HERE,
+            false => key,
+        };
+        let doc = HomeDoc::open(at, inner.refs.get(branch).cloned());
+        Some(sluice_core::records::to_document(&doc))
+    }
+
+    /// The key of the home `home` names, as this host reads it.
+    fn home_key(inner: &Inner, home: &str) -> String {
+        match home {
+            HERE => own_home(&inner.host),
+            remote => remote.to_string(),
+        }
+    }
+
+    /// `branch`'s home document in the home keyed `key`, as written.
+    fn home_at(inner: &Inner, key: &str, branch: &str) -> Option<HomeDoc> {
+        let bytes = inner
+            .lines
+            .get(&(key.to_string(), branch.to_string()))?
+            .files
+            .get(HOME_FILE)?;
+        serde_json::from_slice(bytes).ok()
+    }
+
+    /// Record 0122 (design D2): the home `branch`'s records are read and
+    /// written in, by this host: its own `home.json`, open or moving, then
+    /// closed to the home its pointer names; where it has none, a remote's
+    /// that is open or moving; where none holds a home, the policy at the
+    /// branch's head, a remote it names with signers, its own files
+    /// otherwise. A remote home closed toward the hosts' own files routes
+    /// to this host's own. This host's own home open while a remote's that
+    /// came from this host's own files is live refuses the branch, naming
+    /// both (26).
+    fn route(inner: &Inner, branch: &str) -> Result<String> {
+        let own = own_home(&inner.host);
+        let remotes: BTreeSet<String> = inner
+            .lines
+            .keys()
+            .filter(|(h, b)| b == branch && !h.starts_with("here@"))
+            .map(|(h, _)| h.clone())
+            .collect();
+        let remote_live = |r: &str| World::home_at(inner, r, branch).filter(HomeDoc::is_live);
+        if let Some(home) = World::home_at(inner, &own, branch) {
+            match home.state {
+                HomeState::Open => {
+                    for r in &remotes {
+                        let split = remote_live(r).is_some_and(|h| {
+                            h.came_from.as_ref().is_some_and(|c| {
+                                c.home == HERE && c.host.as_deref() == Some(inner.host.as_str())
+                            })
+                        });
+                        if split {
+                            return Err(sluice_core::home::two_homes(branch, HERE, r));
+                        }
+                    }
+                    return Ok(own);
+                }
+                HomeState::Moving => return Ok(own),
+                HomeState::Closed => {
+                    let to = home.closed_to().unwrap_or(HERE).to_string();
+                    if to == HERE {
+                        return Ok(own);
+                    }
+                    return Ok(match World::home_at(inner, &to, branch) {
+                        Some(r) if r.closed_to() == Some(HERE) => own,
+                        _ => to,
+                    });
+                }
+            }
+        }
+        for r in &remotes {
+            match World::home_at(inner, r, branch) {
+                Some(h) if h.is_live() => return Ok(r.clone()),
+                Some(h) if h.closed_to() == Some(HERE) => return Ok(own),
+                _ => {}
+            }
+        }
+        Ok(World::named_at_head(inner, branch).unwrap_or(own))
+    }
+
+    /// Design D2: the remote the policy at `branch`'s head keeps its
+    /// records on, signers and a `remote` named for it; `None` for the
+    /// host's own files, or where no policy there reads.
+    fn named_at_head(inner: &Inner, branch: &str) -> Option<String> {
+        let tip = inner.refs.get(branch)?;
+        let text = inner.commits.get(tip)?.tree.get(POLICY_PATH)?;
+        let policy = sluice_core::policy::Policy::parse(text).ok()?;
+        if policy.signers.is_empty() {
+            return None;
+        }
+        policy.remote_of(branch).ok().flatten()
     }
 
     pub fn results_log(&self) -> String {
@@ -2040,12 +2224,11 @@ impl World {
     }
 
     pub fn hold_lock(&self, branch: &str, held: bool) {
-        self.0
-            .borrow_mut()
-            .lines
-            .entry(branch.into())
-            .or_default()
-            .locked = held;
+        let mut inner = self.0.borrow_mut();
+        match held {
+            true => inner.locks.insert(branch.into()),
+            false => inner.locks.remove(branch),
+        };
     }
 }
 
@@ -3273,6 +3456,92 @@ impl Drop for FakeGuard<'_> {
     }
 }
 
+/// Record 0122 (design D3): one home of a branch in the fakes' records,
+/// keyed as [`World::route`] keys it, for the core's carry.
+struct FakeHome<'a> {
+    world: &'a World,
+    key: String,
+    branch: String,
+}
+
+impl HomeStore for FakeHome<'_> {
+    fn name(&self) -> String {
+        match self.key.starts_with("here@") {
+            true => HERE.into(),
+            false => self.key.clone(),
+        }
+    }
+
+    fn read(&self) -> Result<Snapshot> {
+        let inner = self.world.0.borrow();
+        Ok(
+            match inner.lines.get(&(self.key.clone(), self.branch.clone())) {
+                Some(l) => Snapshot {
+                    version: l.version,
+                    files: l
+                        .files
+                        .iter()
+                        .filter(|(p, _)| *p != "version" && finished_name(p).is_none())
+                        .map(|(p, b)| (p.clone(), b.clone()))
+                        .collect(),
+                },
+                None => Snapshot::default(),
+            },
+        )
+    }
+
+    fn read_finished(&self, name: &str) -> Result<Option<Vec<u8>>> {
+        let inner = self.world.0.borrow();
+        Ok(inner
+            .lines
+            .get(&(self.key.clone(), self.branch.clone()))
+            .and_then(|l| {
+                l.files
+                    .get(&format!("{}/{name}", sluice_seams::FINISHED))
+                    .cloned()
+            }))
+    }
+
+    fn write(&self, read_at: u64, changes: Changes) -> Result<Written> {
+        let mut inner = self.world.0.borrow_mut();
+        let line = inner
+            .lines
+            .entry((self.key.clone(), self.branch.clone()))
+            .or_default();
+        if line.version != read_at {
+            return Ok(Written::Refused);
+        }
+        for (path, bytes) in changes.put {
+            line.files.insert(path, bytes);
+        }
+        for (path, bytes) in changes.append {
+            line.files.entry(path).or_default().extend(bytes);
+        }
+        for path in changes.remove {
+            line.files.remove(&path);
+        }
+        line.version += 1;
+        let v = line.version;
+        line.files
+            .insert("version".into(), format!("{v}\n").into_bytes());
+        Ok(Written::Written(v))
+    }
+
+    /// The fakes number every home from one count.
+    fn raise_past(&self, number: u64) -> Result<()> {
+        let mut inner = self.world.0.borrow_mut();
+        inner.next_id = inner.next_id.max(number + 1);
+        Ok(())
+    }
+
+    fn next_number(&self) -> Result<u64> {
+        let mut inner = self.world.0.borrow_mut();
+        let id = inner.next_id;
+        inner.next_id += 1;
+        Ok(id)
+    }
+}
+
 /// The name of `path` under the finished records, if it is one of them.
 fn finished_name(path: &str) -> Option<&str> {
     path.strip_prefix(sluice_seams::FINISHED)?.strip_prefix('/')
@@ -3352,11 +3621,10 @@ impl State for FakeState {
 
     fn lock<'a>(&'a self, branch: &str) -> Result<Option<Box<dyn Guard + 'a>>> {
         let mut inner = self.0 .0.borrow_mut();
-        let line = inner.lines.entry(branch.into()).or_default();
-        if line.locked {
+        World::route(&inner, branch)?;
+        if !inner.locks.insert(branch.into()) {
             return Ok(None);
         }
-        line.locked = true;
         Ok(Some(Box::new(FakeGuard {
             world: &self.0,
             branch: branch.into(),
@@ -3390,13 +3658,14 @@ impl State for FakeState {
         if let Some(said) = inner.failed_state.get(branch) {
             bail!("{said}");
         }
+        let key = (World::route(&inner, branch)?, branch.to_string());
         if let Some(said) = World::state_refused(&inner, branch) {
             // 80: answered from what was last read, when there is any.
-            if !inner.lines.get(branch).is_some_and(|l| l.version > 0) {
+            if !inner.lines.get(&key).is_some_and(|l| l.version > 0) {
                 return Err(World::refused(format!("refs/sluice/state/{branch}"), &said));
             }
         }
-        Ok(match inner.lines.get(branch) {
+        Ok(match inner.lines.get(&key) {
             Some(l) => Snapshot {
                 version: l.version,
                 files: l
@@ -3419,9 +3688,10 @@ impl State for FakeState {
         if let Some(said) = inner.failed_state.get(branch) {
             bail!("{said}");
         }
+        let key = (World::route(&inner, branch)?, branch.to_string());
         Ok(inner
             .lines
-            .get(branch)
+            .get(&key)
             .map(|l| {
                 l.files
                     .iter()
@@ -3444,16 +3714,24 @@ impl State for FakeState {
         if interfere {
             inner.interfere -= 1;
         }
-        let line = inner.lines.entry(branch.into()).or_default();
         // As the real records: a write needs the branch's lock.
-        if !line.locked {
+        if !inner.locks.contains(branch) {
             bail!("writing {branch}'s records without holding its lock");
         }
+        let home = World::route(&inner, branch)?;
+        let opened = World::opened_home(&inner, &home, branch, &changes);
+        let line = inner.lines.entry((home, branch.into())).or_default();
         if interfere {
             line.version += 1;
         }
         if line.version != read_at {
             return Ok(Written::Refused);
+        }
+        // Design D2: the first write into a home that holds no home
+        // document writes it, open, naming the home and the revision whose
+        // policy chose it.
+        if let Some(doc) = opened {
+            line.files.insert(HOME_FILE.into(), doc);
         }
         for (path, bytes) in changes.put {
             line.files.insert(path, bytes);
@@ -3476,12 +3754,16 @@ impl State for FakeState {
         if let Some(said) = &inner.failed_list {
             bail!("{said}");
         }
-        Ok(inner
+        let own = own_home(&inner.host);
+        let mut all: Vec<String> = inner
             .lines
             .iter()
-            .filter(|(_, l)| l.version > 0)
-            .map(|(b, _)| b.clone())
-            .collect())
+            .filter(|((h, _), l)| l.version > 0 && (*h == own || !h.starts_with("here@")))
+            .map(|((_, b), _)| b.clone())
+            .collect();
+        all.sort();
+        all.dedup();
+        Ok(all)
     }
 
     fn publish_head(&self, _branch: &str, head: &Rev) -> Result<()> {
@@ -3598,6 +3880,67 @@ impl State for FakeState {
         Ok(())
     }
 
+    /// Record 0122 (design D3, D4): as the records binding carries, by the
+    /// core's one carry, between this host's own home and the remote's.
+    fn carry(&self, branch: &str) -> Result<Carried> {
+        let inner = self.0 .0.borrow();
+        if !inner.locks.contains(branch) {
+            bail!("carrying {branch}'s records without holding its lock");
+        }
+        let me = inner.host.clone();
+        let own = own_home(&me);
+        let routed = World::route(&inner, branch)?;
+        let home = World::home_at(&inner, &routed, branch);
+        let (from, to, owed) = match home.as_ref().and_then(HomeDoc::moving_to) {
+            Some(to) => {
+                let to = World::home_key(&inner, to);
+                let owed = match to == own {
+                    true => Owed::Mine,
+                    false => Owed::All,
+                };
+                (routed.clone(), to, owed)
+            }
+            None => {
+                // Not moving: what this host made, left in a remote home
+                // closed toward the hosts' own files.
+                let remote = inner
+                    .lines
+                    .keys()
+                    .filter(|(h, b)| b == branch && !h.starts_with("here@"))
+                    .map(|(h, _)| h.clone())
+                    .find(|r| {
+                        World::home_at(&inner, r, branch)
+                            .is_some_and(|h| h.closed_to() == Some(HERE))
+                    });
+                match remote {
+                    Some(r) if routed == own => (r, own.clone(), Owed::Mine),
+                    _ => return Ok(Carried::default()),
+                }
+            }
+        };
+        let chosen_at = inner.refs.get(branch).cloned();
+        drop(inner);
+        let source = FakeHome {
+            world: &self.0,
+            key: from,
+            branch: branch.into(),
+        };
+        let target = FakeHome {
+            world: &self.0,
+            key: to,
+            branch: branch.into(),
+        };
+        let stop = || -> Result<()> {
+            let mut inner = self.0 .0.borrow_mut();
+            inner.carries += 1;
+            if std::mem::take(&mut inner.stop_carry) {
+                bail!("stopped after carrying {branch}'s queue, before closing its home");
+            }
+            Ok(())
+        };
+        sluice_core::home::carry(branch, &source, &target, &me, owed, chosen_at, &stop)
+    }
+
     fn allocate_id(&self, _branch: &str) -> Result<u64> {
         let mut inner = self.0 .0.borrow_mut();
         let id = inner.next_id;
@@ -3682,7 +4025,7 @@ impl State for FakeState {
     ) -> Result<()> {
         let mut inner = self.0 .0.borrow_mut();
         // As a round's: kept under the branch's lock (rule core.14).
-        if !inner.lines.get(branch).is_some_and(|l| l.locked) {
+        if !inner.locks.contains(branch) {
             bail!("keeping {branch}'s tasks without holding its lock");
         }
         let kept = inner.progress.entry(branch.into()).or_default();
@@ -3710,6 +4053,275 @@ impl Clock for FakeClock {
 mod tests {
     use super::*;
     use sluice_seams::Decided;
+
+    const SIGNED: &str = "[tests]\nrunner = \"fake\"\n\n[checkout]\n\n\
+        [branches.\"bolt/*\"]\nrequired = [\"#gate\"]\nremote = \"origin\"\n\
+        trust = [\"box\"]\n\n[signers.box]\nssh = \"box ssh-ed25519 AAAA\"\n";
+    const UNSIGNED: &str = "[tests]\nrunner = \"fake\"\n\n[checkout]\n\n\
+        [branches.\"bolt/*\"]\nrequired = [\"#gate\"]\ntrust = [\"open\"]\n";
+
+    /// A submission's document, `id` made on `host` from `worktree`.
+    fn submission(id: u64, worktree: &str, host: &str) -> Vec<u8> {
+        format!(
+            "{{\"schema\":\"sluice/submission@1\",\"id\":{id},\"branch\":\"bolt/x\",\
+             \"head\":\"h{worktree}\",\"from\":{{\"agent\":\"a\",\"worktree\":\"{worktree}\",\
+             \"host\":\"{host}\"}},\"submitted\":\"t\",\"after\":[],\"priority\":0,\
+             \"attempt\":1,\"state\":\"queued\"}}"
+        )
+        .into_bytes()
+    }
+
+    /// Write `files` into `bolt/x`'s records wherever they are routed.
+    fn put(f: &Fakes, files: &[(String, Vec<u8>)]) -> Written {
+        let _lock = f.state.lock("bolt/x").unwrap().unwrap();
+        let read = f.state.read("bolt/x").unwrap();
+        let changes = Changes {
+            put: files.iter().cloned().collect(),
+            ..Changes::default()
+        };
+        f.state.write("bolt/x", read.version, changes).unwrap()
+    }
+
+    fn line(f: &Fakes) -> sluice_core::line::Line {
+        sluice_core::line::Line::load("bolt/x", f.state.read("bolt/x").unwrap()).unwrap()
+    }
+
+    /// Record 0122 (design D1, D2): a branch with no home anywhere is
+    /// routed by the policy at its head, and its first write writes the
+    /// home that policy chose; once it has a home, the records are read
+    /// where its `home.json` says, this host's own first, a closed one by
+    /// its pointer, whatever the policy at the head names; and this host's
+    /// own home open beside a remote's that came from it refuses the branch,
+    /// naming both.
+    #[test]
+    fn a_fake_branch_is_read_in_the_home_its_records_name() {
+        let f = Fakes::new();
+        let made = f.world.init("bolt/x", &[(POLICY_PATH, UNSIGNED)]);
+        put(
+            &f,
+            &[(
+                "submissions/1.json".into(),
+                submission(1, "unit/a", "fake-host"),
+            )],
+        );
+        let own = f
+            .world
+            .home_in(HERE, "bolt/x")
+            .expect("its first write wrote it");
+        assert_eq!((own.at.as_str(), own.state), (HERE, HomeState::Open));
+        assert_eq!(own.chosen_at, Some(made));
+        assert!(f.world.home_in("origin", "bolt/x").is_none());
+
+        // A policy naming the remote moves no reading.
+        f.world
+            .hand_commit("bolt/x", &[(POLICY_PATH, Some(SIGNED))]);
+        assert!(line(&f).subs.contains_key(&1));
+        put(
+            &f,
+            &[(
+                "submissions/2.json".into(),
+                submission(2, "unit/b", "fake-host"),
+            )],
+        );
+        assert!(f
+            .world
+            .file_in("origin", "bolt/x", "submissions/2.json")
+            .is_none());
+        assert_eq!(line(&f).subs.len(), 2);
+
+        // Closed toward origin, it is read on origin.
+        let mut closed = own.clone();
+        closed.state = HomeState::Closed;
+        closed.closed = Some(sluice_core::records::Closed {
+            to: "origin".into(),
+            carried: BTreeMap::new(),
+        });
+        f.world.put_home(HERE, "bolt/x", &closed);
+        f.world
+            .put_home("origin", "bolt/x", &HomeDoc::open("origin", None));
+        assert!(line(&f).subs.is_empty());
+        put(
+            &f,
+            &[(
+                "submissions/3.json".into(),
+                submission(3, "unit/c", "fake-host"),
+            )],
+        );
+        assert!(f
+            .world
+            .file_in("origin", "bolt/x", "submissions/3.json")
+            .is_some());
+
+        // Another host with no records of it finds it on origin.
+        f.world.be_host("other");
+        assert_eq!(line(&f).subs.keys().copied().collect::<Vec<_>>(), [3]);
+        // Origin closed toward the hosts' own files: each host's own.
+        let mut home = HomeDoc::open("origin", None);
+        home.state = HomeState::Closed;
+        home.closed = Some(sluice_core::records::Closed {
+            to: HERE.into(),
+            carried: BTreeMap::new(),
+        });
+        f.world.put_home("origin", "bolt/x", &home);
+        assert!(line(&f).subs.is_empty());
+        f.world.be_host("fake-host");
+        assert_eq!(line(&f).subs.len(), 2, "this host's own home again");
+
+        // Own open, beside a live origin home that came from it.
+        let mut split = HomeDoc::open("origin", None);
+        split.came_from = Some(sluice_core::records::CameFrom {
+            home: HERE.into(),
+            host: Some("fake-host".into()),
+            carried: BTreeMap::new(),
+        });
+        f.world.put_home("origin", "bolt/x", &split);
+        f.world.put_home(HERE, "bolt/x", &own);
+        let refused = f.state.read("bolt/x").unwrap_err().to_string();
+        assert!(
+            refused.contains("this host's own files") && refused.contains("origin"),
+            "{refused}"
+        );
+        assert!(f.state.lock("bolt/x").is_err());
+
+        // A branch with no home anywhere, signers and a remote at its head.
+        let f = Fakes::new();
+        f.world.init("bolt/x", &[(POLICY_PATH, SIGNED)]);
+        put(
+            &f,
+            &[(
+                "submissions/1.json".into(),
+                submission(1, "unit/a", "fake-host"),
+            )],
+        );
+        assert_eq!(
+            f.world.home_in("origin", "bolt/x").map(|h| h.at),
+            Some("origin".to_string())
+        );
+        assert!(f.world.home_in(HERE, "bolt/x").is_none());
+    }
+
+    /// Record 0122 (design D3 to D5): a carry moves a moving home's live
+    /// submissions to the home it names under their numbers, the next where
+    /// the target holds one, opens it naming where it came from and closes
+    /// the old one with its pointer; a carry stopped after its first write
+    /// is closed by the next, which carries nothing twice; and a branch
+    /// coming home carries only this host's own.
+    #[test]
+    fn a_fake_carry_moves_the_live_records_once() {
+        let f = Fakes::new();
+        f.world.init("bolt/x", &[(POLICY_PATH, UNSIGNED)]);
+        put(
+            &f,
+            &[
+                (
+                    "submissions/52.json".into(),
+                    submission(52, "unit/a", "fake-host"),
+                ),
+                (
+                    "submissions/53.json".into(),
+                    submission(53, "unit/b", "fake-host"),
+                ),
+            ],
+        );
+        // Origin's branch already holds a #53, another host's.
+        f.world
+            .put_home("origin", "bolt/x", &HomeDoc::open("origin", None));
+        {
+            let mut inner = f.world.0.borrow_mut();
+            let line = inner
+                .lines
+                .entry(("origin".into(), "bolt/x".into()))
+                .or_default();
+            line.files.insert(
+                "submissions/53.json".into(),
+                submission(53, "unit/z", "other"),
+            );
+            line.version = 1;
+            inner.next_id = 60;
+        }
+        let mut moving = f.world.home_in(HERE, "bolt/x").unwrap();
+        moving.state = HomeState::Moving;
+        moving.moving = Some(sluice_core::records::Moving {
+            to: "origin".into(),
+            chosen_at: None,
+            since: "t".into(),
+        });
+        f.world.put_home(HERE, "bolt/x", &moving);
+        f.world.stop_next_carry();
+        {
+            let _lock = f.state.lock("bolt/x").unwrap().unwrap();
+            assert!(
+                f.state.carry("bolt/x").is_err(),
+                "stopped after its first write"
+            );
+        }
+        assert_eq!(f.world.carries(), 1);
+        assert_eq!(
+            f.world.home_in(HERE, "bolt/x").unwrap().state,
+            HomeState::Moving
+        );
+        let carried = {
+            let _lock = f.state.lock("bolt/x").unwrap().unwrap();
+            f.state.carry("bolt/x").unwrap()
+        };
+        assert_eq!(carried.to.as_deref(), Some("origin"));
+        assert_eq!(carried.numbers, BTreeMap::from([(52, 52), (53, 60)]));
+        let origin: Vec<u64> = line(&f).subs.keys().copied().collect();
+        assert_eq!(origin, [52, 53, 60], "each carried once");
+        let sixty = line(&f).subs[&60].clone();
+        assert_eq!(
+            (sixty.was, sixty.carried_from.as_deref()),
+            (Some(53), Some(HERE))
+        );
+        let own = f.world.home_in(HERE, "bolt/x").unwrap();
+        assert_eq!(own.closed_to(), Some("origin"));
+        assert_eq!(own.closed.unwrap().carried[&53].number, 60);
+        assert!(f
+            .world
+            .file_in(HERE, "bolt/x", "submissions/52.json")
+            .is_none());
+        // Origin was open: its own home stands as it was.
+        assert_eq!(f.world.home_in("origin", "bolt/x").unwrap().came_from, None);
+        // A carry made writes nothing more.
+        let again = {
+            let _lock = f.state.lock("bolt/x").unwrap().unwrap();
+            f.state.carry("bolt/x").unwrap()
+        };
+        assert_eq!(again, Carried::default());
+        assert_eq!(f.world.carries(), 2);
+
+        // Coming home: origin moving to the hosts' own files, as its lead
+        // writes it; the lead takes its own, another host its own after.
+        let mut home = f.world.home_in("origin", "bolt/x").unwrap();
+        home.state = HomeState::Moving;
+        home.moving = Some(sluice_core::records::Moving {
+            to: HERE.into(),
+            chosen_at: None,
+            since: "t".into(),
+        });
+        f.world.put_home("origin", "bolt/x", &home);
+        f.world.be_host("other");
+        let lead = {
+            let _lock = f.state.lock("bolt/x").unwrap().unwrap();
+            f.state.carry("bolt/x").unwrap()
+        };
+        assert_eq!(lead.numbers, BTreeMap::from([(53, 53)]));
+        let here = f.world.home_in(HERE, "bolt/x").unwrap();
+        assert_eq!(here.came_from.unwrap().home, "origin");
+        assert_eq!(line(&f).subs.keys().copied().collect::<Vec<_>>(), [53]);
+        f.world.be_host("fake-host");
+        let mine = {
+            let _lock = f.state.lock("bolt/x").unwrap().unwrap();
+            f.state.carry("bolt/x").unwrap()
+        };
+        assert_eq!(mine.numbers, BTreeMap::from([(52, 52), (60, 60)]));
+        assert_eq!(line(&f).subs.keys().copied().collect::<Vec<_>>(), [52, 60]);
+        let origin = f.world.home_in("origin", "bolt/x").unwrap();
+        let carried = origin.closed.unwrap().carried;
+        assert_eq!(carried[&53].host.as_deref(), Some("other"));
+        assert_eq!(carried[&60].host.as_deref(), Some("fake-host"));
+        assert_eq!(f.world.carries(), 4);
+    }
 
     /// Record 0114: the records give the number `numbers_from` sets next,
     /// and count on from it, so a test can make two branches hold one.
