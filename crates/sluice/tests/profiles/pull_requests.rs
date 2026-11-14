@@ -161,13 +161,38 @@ impl OnGitHub {
     /// keeps its records there and this host keeps `main` (C.6; 137;
     /// design D28).
     fn with(name: &str, policy: &str, files: &[(&str, &str)]) -> OnGitHub {
+        OnGitHub::kept_as(name, policy, files, true)
+    }
+
+    /// `main` on GitHub taking pull requests under a policy that names no
+    /// signers, so its records are each host's own and main is refused
+    /// alone (137; design D22).
+    fn unkept(name: &str, extra: &str) -> OnGitHub {
+        OnGitHub::kept_as(
+            name,
+            &format!(
+                "[tests]\nrunner = \"command\"\ncommand = \"sh check.sh\"\n\n\
+                 [branches.main]\nremote = \"origin\"\ntimeout = \"1m\"\n\n\
+                 [branches.main.pull_requests]\n{extra}"
+            ),
+            &[("check.sh", CHECK)],
+            false,
+        )
+    }
+
+    /// [`OnGitHub::with`], the policy naming signers where `signers` says.
+    fn kept_as(name: &str, policy: &str, files: &[(&str, &str)], signers: bool) -> OnGitHub {
         use ssh_key::{Algorithm, PrivateKey};
         let keys = [
             PrivateKey::random(&mut rand_core::OsRng, Algorithm::Ed25519).unwrap(),
             PrivateKey::random(&mut rand_core::OsRng, Algorithm::Ed25519).unwrap(),
         ];
         let repo = Repo::new(name);
-        repo.write(".config/sluice.toml", &signed(policy, &keys));
+        let policy = match signers {
+            true => signed(policy, &keys),
+            false => policy.to_string(),
+        };
+        repo.write(".config/sluice.toml", &policy);
         for (path, content) in files {
             repo.write(path, content);
         }
@@ -5272,22 +5297,41 @@ impl Other<'_> {
     }
 }
 
-/// request-intake-host, "Records on each host": host A's `sluice run`
-/// holds main's intake mark, and host B's `sluice run` asks GitHub nothing
-/// about main's open pull requests and takes nothing in.
+/// pull-request-intake, "Records each host keeps" (137, 56, S64; design
+/// D22): main takes pull requests and the policy names no signers, so main
+/// is refused alone, in the refusal's words: a submit to it exits 2 with
+/// nothing pushed and nothing opened, a step and a status say it, and
+/// GitHub is asked nothing of main's pull requests. Main has no records
+/// here, so the overview lists nothing of it.
 #[test]
-fn records_on_each_host_one_host_asks() {
-    let g = OnGitHub::new("intake-each", "");
-    g.named("a", "");
-    let (n, _) = g.by_hand("unit/each", &[("e.txt", Some("e\n"))], false);
-    g.on_main();
-    let out = g.skipping(g.repo.dir(), &["run", "--rounds", "1"]);
-    assert!(out.status.success(), "{}", text(&out));
-    let b = g.other("b", "", "");
-    let lists = g.lists();
-    let said = b.run("5");
-    assert_eq!(g.lists(), lists, "{said}");
-    assert!(b.of(n).is_empty(), "{said}");
+fn pull_requests_need_records_on_the_remote() {
+    let g = OnGitHub::unkept("intake-unkept", "");
+    let words = "main takes pull requests, which only the host that keeps it on origin takes \
+                 in, and its records are each host's own: name [signers] so they are kept on \
+                 origin (137)";
+    g.by_hand("unit/each", &[("e.txt", Some("e\n"))], false);
+    let w = g.session("refused", &[("r.txt", "r\n")]);
+    let out = g
+        .command(env!("CARGO_BIN_EXE_sluice"), &w)
+        .args(["submit", "main", "--no-wait"])
+        .output()
+        .unwrap();
+    assert_eq!(out.status.code(), Some(sluice::CONFLICT), "{}", text(&out));
+    assert!(text(&out).contains(words), "{}", text(&out));
+    assert!(
+        g.gh.forge.by_ref("unit/refused").unwrap().is_none(),
+        "nothing opened"
+    );
+    assert_eq!(
+        github::rev(g.bare.path(), "refs/heads/unit/refused"),
+        None,
+        "nothing pushed"
+    );
+    let said = g.sluice(&["step", "main"]);
+    assert!(text(&said).contains(words), "{}", text(&said));
+    let status = g.sluice(&["status", "main"]);
+    assert!(text(&status).contains(words), "{}", text(&status));
+    assert_eq!(g.lists(), 0, "GitHub was asked nothing of main's list");
 }
 
 /// request-intake-host, "Records on the remote": another host keeps main,
@@ -5574,15 +5618,15 @@ fn a_host_that_stopped_passes_main_on_after_its_lease() {
     assert_eq!(b.of(m).len(), 1, "B takes main's pull requests in: {said}");
 }
 
-/// request-intake-host, "A worktree's submission stays": host A, without
-/// the mark, has a submission to `bolt/x` from one of its worktrees, and
-/// its rounds advance it as before.
+/// pull-request-intake, "A refused main" (137, 56, S64; design D22): main
+/// is refused for taking pull requests on records each host keeps, and a
+/// worktree's submission to `bolt/x`, which takes none, lands as before.
 #[test]
-fn a_worktrees_submission_stays() {
-    let g = OnGitHub::with_bolt("intake-bolt");
-    g.named("a", "");
-    let b = g.other("b", "", "");
-    b.run("1");
+fn a_refused_main_leaves_a_bolt_landing() {
+    let g = OnGitHub::unkept("intake-bolt", BOLTS);
+    g.repo.git(&["branch", "bolt/x", "main"]);
+    g.repo
+        .git(&["push", "-q", "origin", "bolt/x:refs/heads/bolt/x"]);
     let w = g.session("bolted", &[("b.txt", "b\n")]);
     let out = g
         .command(env!("CARGO_BIN_EXE_sluice"), &w)
@@ -5590,7 +5634,6 @@ fn a_worktrees_submission_stays() {
         .output()
         .unwrap();
     assert!(out.status.success(), "{}", text(&out));
-    g.step();
     let until = Instant::now() + Duration::from_secs(60);
     loop {
         let out = g.sluice(&["step", "bolt/x"]);

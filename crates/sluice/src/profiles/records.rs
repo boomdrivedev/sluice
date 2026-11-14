@@ -233,12 +233,10 @@ impl Records {
             return Ok(known.as_ref().map(|r| self.remotes.borrow()[r].clone()));
         }
         let routed = match self.branches.policy_of(branch)? {
-            Some((_, policy)) if !policy.signers.is_empty() => {
-                match policy.rules_for(branch)?.and_then(|r| r.remote.clone()) {
-                    Some(remote) => Some(self.open(&remote)?),
-                    None => None,
-                }
-            }
+            Some((_, policy)) if !policy.signers.is_empty() => match policy.remote_of(branch)? {
+                Some(remote) => Some(self.open(&remote)?),
+                None => None,
+            },
             _ => None,
         };
         self.routes.borrow_mut().insert(

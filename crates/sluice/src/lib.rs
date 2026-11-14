@@ -1492,6 +1492,16 @@ pub fn run(
                 writeln!(out, "sluice submit: {why}")?;
                 return Ok(USAGE);
             }
+            // 137 (design D22): a branch that takes pull requests on records
+            // each host keeps is refused, before anything is pushed or
+            // opened.
+            if let Err(e) = takes_pulls(&s, &branch) {
+                if let Some(refused) = no_intake(&e) {
+                    let text = format!("refused: {refused}");
+                    told::tell(out, json, Kind::Refused, &text, &[])?;
+                    return Ok(CONFLICT);
+                }
+            }
             if worktree.len() > 1 {
                 let req = GroupRequest {
                     branch,
@@ -4580,6 +4590,13 @@ fn delivering<'s, 'a>(
 
 /// Whether `branch`, at its revision, takes its work as pull requests
 /// (C.7 `pull_requests`).
+/// 137 (design D22): the refusal of a branch that takes pull requests on
+/// records each host keeps, where `e` is one.
+fn no_intake(e: &anyhow::Error) -> Option<&sluice_core::policy::NoIntake> {
+    e.chain()
+        .find_map(|c| c.downcast_ref::<sluice_core::policy::NoIntake>())
+}
+
 fn takes_pulls(s: &Sluice<'_>, branch: &str) -> Result<bool> {
     let Some(tip) = s.seams().branch.read(branch)? else {
         return Ok(false);

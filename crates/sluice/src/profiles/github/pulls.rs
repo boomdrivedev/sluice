@@ -2882,13 +2882,15 @@ impl crate::PullRequests for Pulls {
         );
         names.sort();
         names.dedup();
+        // A branch refused alone, one taking pull requests on records each
+        // host keeps among them, is passed by: its round and its status say
+        // its refusal (137; design D22).
         let mut out = Vec::new();
         for n in names {
-            if policy
-                .rules_for(&n)?
-                .is_some_and(|r| r.pull_requests.is_some())
-            {
-                out.push(n);
+            if let Ok(Some(r)) = policy.rules_for(&n) {
+                if r.pull_requests.is_some() {
+                    out.push(n);
+                }
             }
         }
         Ok(out)
