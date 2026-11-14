@@ -3918,7 +3918,10 @@ impl State for FakeState {
                 }
             }
         };
-        let chosen_at = inner.refs.get(branch).cloned();
+        let chosen_at = home
+            .as_ref()
+            .and_then(|h| h.moving.as_ref())
+            .and_then(|m| m.chosen_at.clone());
         let now = inner.now.to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
         drop(inner);
         let source = FakeHome {

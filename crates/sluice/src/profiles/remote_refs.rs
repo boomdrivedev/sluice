@@ -1217,6 +1217,12 @@ impl State for RemoteRefs {
             return Ok(Written::Refused);
         }
         self.read.borrow_mut().remove(branch);
+        // Record 0122 (design D2): the state this write left is the state
+        // this host holds of the remote, so what it reads with no fetch,
+        // the home among it, is what it wrote.
+        self.pushed
+            .local()
+            .write_ref(&self.fetched(&name), &Rev(commit.clone()))?;
         // 82: a submission moved to the finished records has left sluice,
         // and its head with it.
         let prefix = format!("{FINISHED}/");

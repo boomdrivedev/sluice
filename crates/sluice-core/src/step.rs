@@ -258,6 +258,24 @@ impl Sluice<'_> {
         round: &tracing::Span,
         releases: &mut Vec<ReleaseOutcome>,
     ) -> Result<Step> {
+        // Record 0122, C.6 (design D4): before the branch is read, what this
+        // host owes a move is carried, wherever its home is not moving: the
+        // submissions it made left in a remote home closed toward the hosts'
+        // own files come into its own the first time a round of its own
+        // reads that home. A moving home is carried only by the round that
+        // keeps it, once nothing is under test ([`Sluice::decide`]). As
+        // there, a round that carries does nothing more: the next reads the
+        // branch where its queue is now.
+        let held = self.seams.state.read_held(branch)?;
+        let moving = match held.files.get(crate::records::HOME_FILE) {
+            Some(bytes) => serde_json::from_slice::<crate::records::HomeDoc>(bytes)
+                .is_ok_and(|h| h.state == HomeState::Moving),
+            None => false,
+        };
+        if !moving && self.seams.state.carry(branch)?.to.is_some() {
+            round.record("sluice.step", "carried");
+            return Ok(Step::Stepped);
+        }
         if !self.keeps(branch)? {
             // 75: another instance keeps the branch; this one takes, runs
             // and reports runs of its own.

@@ -424,3 +424,83 @@ fn a_submit_racing_the_carry_is_written_in_the_new_home() {
     assert!(world.file_in("origin", BRANCH, &file).is_some());
     assert_eq!(h.sub(c).state, State::Queued);
 }
+
+/// Instance `name`, on its own host, signing as `box`.
+fn on<'a>(h: &'a Harness, name: &str) -> sluice_core::Sluice<'a> {
+    h.w().be_host(name);
+    h.sluice().as_peer(Peer {
+        name: name.into(),
+        signer: Some("box".into()),
+        ..Peer::default()
+    })
+}
+
+/// satisfies: record 0122, 26, C.6 (design D4); the queue-home spec's "Two
+/// hosts' submissions come home": `bolt/x` open on origin with #7 made on
+/// host a and #8 on host b; a landing brings a policy naming no signers and
+/// nothing is under test. a's round closes origin's home toward the hosts'
+/// own files carrying #7 into a's own; b's next round carries #8 into b's
+/// own before it reads the branch, and origin's home names each submission
+/// and the host that took it.
+#[test]
+fn a_round_carries_its_hosts_submissions_home_before_it_reads_the_branch() {
+    let h = Harness::new(&signed());
+    h.w().signs_as("box");
+    h.w().numbers_from(7);
+    for (host, worktree) in [("a", "unit/a"), ("b", "unit/b")] {
+        h.w().be_host(host);
+        let file = if host == "a" { "a/lib" } else { "b/lib" };
+        h.work(worktree, &format!("agent-{host}"), &[(file, Some("2"))]);
+        h.w().from_host(worktree, host);
+        h.submit(worktree);
+    }
+    let origin = h.w().home_in("origin", BRANCH).expect("open on origin");
+    assert_eq!(origin.state, HomeState::Open);
+    h.w()
+        .hand_commit(BRANCH, &[(".config/sluice.toml", Some(&unsigned()))]);
+
+    on(&h, "a").step(BRANCH).unwrap();
+    h.w().be_host("a");
+    assert_eq!(
+        h.w().home_in("origin", BRANCH).unwrap().closed_to(),
+        Some(HERE)
+    );
+    assert!(h.w().file_in(HERE, BRANCH, "submissions/7.json").is_some());
+    assert_eq!(h.sub(7).state, State::Queued);
+    assert!(
+        h.w()
+            .file_in("origin", BRANCH, "submissions/8.json")
+            .is_some(),
+        "b's, left for b"
+    );
+
+    on(&h, "b").step(BRANCH).unwrap();
+    h.w().be_host("b");
+    assert!(h.w().file_in(HERE, BRANCH, "submissions/8.json").is_some());
+    assert!(h
+        .w()
+        .file_in("origin", BRANCH, "submissions/8.json")
+        .is_none());
+    assert_eq!(h.sub(8).state, State::Queued);
+    let first = h.events().into_iter().next();
+    assert_eq!(
+        first,
+        Some(Event::Carried {
+            to: HERE.into(),
+            numbers: [(8, 8)].into(),
+        }),
+        "carried before the round read the branch"
+    );
+    let carried = h
+        .w()
+        .home_in("origin", BRANCH)
+        .unwrap()
+        .closed
+        .unwrap()
+        .carried;
+    let by: Vec<(u64, u64, Option<String>)> = carried
+        .into_iter()
+        .map(|(n, t)| (n, t.number, t.host))
+        .collect();
+    assert_eq!(by, [(7, 7, Some("a".into())), (8, 8, Some("b".into()))]);
+}

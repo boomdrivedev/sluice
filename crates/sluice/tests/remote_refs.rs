@@ -1752,3 +1752,128 @@ fn a_carry_stopped_after_the_remote_was_written_is_closed_by_the_next() {
     assert_eq!(own.home.unwrap().closed_to(), Some("origin"));
     assert!(own.subs.is_empty());
 }
+
+/// Submission `id` on `main` made on `host`, written through `r` as a
+/// submit writes it.
+fn submit_from(r: &sluice::profiles::records::Records, id: u64, host: &str) {
+    let _g = r.wait_lock("main").unwrap();
+    let at = r.read("main").unwrap().version;
+    let doc = carried_doc(id, "queued").replace("host-a", host);
+    let written = r
+        .write(
+            "main",
+            at,
+            put(&[(&format!("submissions/{id}.json"), &doc)]),
+        )
+        .unwrap();
+    assert!(matches!(written, Written::Written(_)));
+}
+
+/// satisfies: record 0122, 26, C.6 at e966dcb (design D4, D5); the
+/// queue-home spec's "Two hosts' submissions come home": `main` open on
+/// origin with #7 made on host-a and #8 on host-b, two clones of one bare
+/// remote; a landing brings a policy naming no signers and host-a's round,
+/// leading, writes the move home. Host-a's carry takes #7 into its own
+/// files and closes origin's home toward the hosts' own; host-b's next
+/// carry takes #8 into its own, writing its pointer on origin, and owes
+/// nothing after.
+#[test]
+fn a_branch_comes_home_each_host_taking_its_own_submissions() {
+    use sluice_core::line::Line;
+    use sluice_core::records::{HomeState, Moving, HERE};
+    let (a, bare) = signed_main("rr-home-coming");
+    let b = Repo::clone_of(bare.path(), "rr-home-coming-b");
+    let ra = records(&a).as_host("host-a");
+    let rb = records(&b).as_host("host-b");
+    submit_from(&ra, ra.allocate_id("main").unwrap(), "host-a");
+    rb.refresh().unwrap();
+    submit_from(&rb, rb.allocate_id("main").unwrap(), "host-b");
+    let theirs = host(&a, None);
+    let both: Vec<u64> = Line::load("main", theirs.read("main").unwrap())
+        .unwrap()
+        .subs
+        .keys()
+        .copied()
+        .collect();
+    assert_eq!(both, [1, 2]);
+
+    // A landing drops the signers; host-a's round writes the move home.
+    a.push_change(
+        ".config/sluice.toml",
+        "[branches.main]\nremote = \"origin\"\n",
+    );
+    b.git(&["pull", "-q", "--ff-only"]);
+    {
+        let _g = ra.wait_lock("main").unwrap();
+        let mut line = Line::load("main", ra.read("main").unwrap()).unwrap();
+        let home = line.home.as_mut().unwrap();
+        home.state = HomeState::Moving;
+        home.moving = Some(Moving {
+            to: HERE.into(),
+            chosen_at: Some(Rev::new(&a.rev("main"))),
+            since: "2026-11-14T10:00:00Z".into(),
+        });
+        assert!(matches!(
+            ra.write("main", line.version, line.changes()).unwrap(),
+            Written::Written(_)
+        ));
+    }
+    ra.next_pass();
+    let lead = carry_main(&ra);
+    assert_eq!(lead.to.as_deref(), Some(HERE));
+    assert_eq!(lead.numbers, BTreeMap::from([(1, 1)]));
+    let own_a = Line::load(
+        "main",
+        LocalFiles::new(&a.dir().join(".git")).read("main").unwrap(),
+    )
+    .unwrap();
+    assert_eq!(own_a.subs.keys().copied().collect::<Vec<_>>(), [1]);
+    assert_eq!(own_a.home.as_ref().unwrap().state, HomeState::Open);
+    assert_eq!(own_a.home.unwrap().came_from.unwrap().home, "origin");
+    let origin = Line::load("main", theirs.read("main").unwrap()).unwrap();
+    assert_eq!(origin.home.as_ref().unwrap().closed_to(), Some(HERE));
+    assert_eq!(
+        origin.subs.keys().copied().collect::<Vec<_>>(),
+        [2],
+        "host-b's, left for it"
+    );
+
+    // Host-b's round reads the closed home and takes its own.
+    rb.refresh().unwrap();
+    rb.next_pass();
+    assert!(rb.route("main").unwrap().is_none(), "the hosts' own files");
+    let mine = carry_main(&rb);
+    assert_eq!(mine.numbers, BTreeMap::from([(2, 2)]));
+    let own_b = Line::load(
+        "main",
+        LocalFiles::new(&b.dir().join(".git")).read("main").unwrap(),
+    )
+    .unwrap();
+    assert_eq!(own_b.subs.keys().copied().collect::<Vec<_>>(), [2]);
+    assert_eq!(own_b.subs[&2].state.word(), "queued");
+    let origin = Line::load("main", theirs.read("main").unwrap()).unwrap();
+    assert!(origin.subs.is_empty());
+    let by: Vec<(u64, u64, Option<String>)> = origin
+        .home
+        .unwrap()
+        .closed
+        .unwrap()
+        .carried
+        .into_iter()
+        .map(|(n, t)| (n, t.number, t.host))
+        .collect();
+    assert_eq!(
+        by,
+        [(1, 1, Some("host-a".into())), (2, 2, Some("host-b".into()))]
+    );
+    let written = theirs.read("main").unwrap().version;
+    rb.next_pass();
+    assert_eq!(
+        carry_main(&rb),
+        sluice_seams::Carried::default(),
+        "owes nothing"
+    );
+    ra.next_pass();
+    assert_eq!(carry_main(&ra), sluice_seams::Carried::default());
+    assert_eq!(theirs.read("main").unwrap().version, written);
+}
