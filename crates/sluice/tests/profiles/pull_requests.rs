@@ -5272,6 +5272,41 @@ fn the_host_that_keeps_main_takes_its_requests_in() {
     assert_eq!(g.of(n).len(), 1, "{}", text(&out));
 }
 
+/// request-intake-host, "An older mark": a mark an older sluice left on
+/// the remote names host C, and the host that keeps main takes `#12` in
+/// all the same, reading nothing of the mark and fetching it nowhere
+/// (design D23).
+#[test]
+fn an_older_mark_is_read_by_nothing() {
+    let g = OnGitHub::new("intake-older-mark", "");
+    g.named("a", "");
+    let tree = g
+        .repo
+        .git(&["hash-object", "-t", "tree", "-w", "/dev/null"]);
+    let said = "{\"host\":\"c\",\"holder\":\"driver\",\"sluice\":\"0.90.0\"}";
+    let commit = g.repo.git(&["commit-tree", &tree, "-m", said]);
+    g.repo.git(&[
+        "push",
+        "-q",
+        "origin",
+        &format!("{commit}:refs/sluice/intake/main"),
+    ]);
+    let (n, _) = g.by_hand("unit/older", &[("o.txt", Some("o\n"))], false);
+    g.step();
+    assert_eq!(g.lead().as_deref(), Some("a"));
+    assert_eq!(g.of(n).len(), 1, "taken in");
+    assert_eq!(g.of(n)[0]["from"]["worktree"], format!("pull/{n}"));
+    let fetched = g
+        .repo
+        .git(&["for-each-ref", "refs/sluice-fetched/origin/intake/"]);
+    assert_eq!(fetched, "", "the mark is fetched nowhere");
+    assert_eq!(
+        github::rev(g.bare.path(), "refs/sluice/intake/main").as_deref(),
+        Some(commit.as_str()),
+        "nor deleted"
+    );
+}
+
 /// request-intake-host, "Another host keeps it": host B's pass keeps
 /// main, and host A's step takes nothing in and asks GitHub nothing of
 /// main's open pull requests (137; design D21).
