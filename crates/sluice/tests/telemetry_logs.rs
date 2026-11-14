@@ -155,13 +155,7 @@ impl PullRequests for Unreadable {
         Ok(Vec::new())
     }
 
-    fn intake(
-        &self,
-        _: Seams<'_>,
-        _: &dyn Clock,
-        _: &str,
-        _: sluice::Taker,
-    ) -> anyhow::Result<bool> {
+    fn intake(&self, _: Seams<'_>, _: &dyn Clock, _: &str) -> anyhow::Result<bool> {
         anyhow::bail!("the forge refused ghp_0123456789abcdefghijABCDEFGHIJ012345")
     }
 

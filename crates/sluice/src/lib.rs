@@ -842,31 +842,6 @@ pub enum Followed {
     Closed,
 }
 
-/// 137: which process takes a branch's pull requests in, for its intake
-/// mark: `sluice run`, the host's driver, which pushes the mark when it
-/// starts; a wait on a host where no driver lives, which pushes it where
-/// none stands and lets it go when it ends; or a step, a submit that does
-/// not wait, or a wait's first pass beside a live driver, which pushes
-/// none.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum Taker {
-    Driver,
-    Wait,
-    Step,
-}
-
-/// 137: lets go of the intake marks a wait holds when the wait ends, at
-/// every exit, Ctrl-C's among them.
-struct LetGo<'a>(Option<&'a dyn PullRequests>);
-
-impl Drop for LetGo<'_> {
-    fn drop(&mut self) {
-        if let Some(pulls) = self.0 {
-            pulls.let_go();
-        }
-    }
-}
-
 /// A branch whose work arrives as pull requests on its remote (C.5 pull
 /// request, C.7 `pull_requests`): the driver that takes them into its
 /// queue and opens them for `submit`.
@@ -877,25 +852,16 @@ pub trait PullRequests {
     fn branches(&self, seams: Seams<'_>) -> Result<Vec<String>>;
 
     /// Before a round of `branch`: submit each pull request ready, withdraw
-    /// each changed, and post each one's state, where this host takes the
-    /// branch's pull requests in as `taker` (137). `false` for a branch
-    /// that takes no pull requests.
-    fn intake(
-        &self,
-        seams: Seams<'_>,
-        clock: &dyn Clock,
-        branch: &str,
-        taker: Taker,
-    ) -> Result<bool>;
+    /// each changed, and post each one's state, where this host keeps the
+    /// branch on its remote (137; design D21). `false` for a branch that
+    /// takes no pull requests.
+    fn intake(&self, seams: Seams<'_>, clock: &dyn Clock, branch: &str) -> Result<bool>;
 
-    /// 137: the host that takes `branch`'s pull requests in, as this
-    /// process's last intake found it, where that is another host.
+    /// 137: the host that keeps `branch` and takes its pull requests in, as
+    /// this process's last intake found it, where that is another host.
     fn elsewhere(&self, _branch: &str) -> Option<String> {
         None
     }
-
-    /// 137: let go of the intake marks this process holds as a wait.
-    fn let_go(&self) {}
 
     /// Open the pull request from `head`'s branch into `branch`, or update
     /// the one open, and mark it ready; `subject`, the submitter's line
@@ -998,7 +964,7 @@ impl PullRequests for () {
         Ok(Vec::new())
     }
 
-    fn intake(&self, _: Seams<'_>, _: &dyn Clock, _: &str, _: Taker) -> Result<bool> {
+    fn intake(&self, _: Seams<'_>, _: &dyn Clock, _: &str) -> Result<bool> {
         Ok(false)
     }
 
@@ -1036,7 +1002,6 @@ fn intake(
     seams: Seams<'_>,
     clock: &dyn Clock,
     branch: &str,
-    taker: Taker,
     json: bool,
     out: &mut dyn Write,
 ) -> Option<anyhow::Error> {
@@ -1048,7 +1013,7 @@ fn intake(
         static FAILED: std::cell::RefCell<BTreeMap<String, String>> =
             std::cell::RefCell::default();
     }
-    let e = match pulls.intake(seams, clock, branch, taker) {
+    let e = match pulls.intake(seams, clock, branch) {
         Ok(_) => {
             FAILED.with_borrow_mut(|f| f.remove(branch));
             return None;
@@ -5041,7 +5006,6 @@ fn submit_pull(
     let mut taken: Option<u64> = None;
     let mut first = true;
     // 137: a wait lets go of the intake mark it holds when it ends.
-    let _let_go = LetGo(Some(pulls));
     let here = host_process::Here {
         s,
         host,
@@ -5056,7 +5020,7 @@ fn submit_pull(
         if first && !mode.waits() {
             // The user, 2026-10-28: a submit that does not wait fails at
             // once on a spent allowance, naming when it ends (134).
-            match intake(pulls, seams, clock, branch, Taker::Step, json, out) {
+            match intake(pulls, seams, clock, branch, json, out) {
                 Some(e) if no_wait => return Err(e),
                 Some(_) if INTERRUPTED.load(Ordering::SeqCst) => return Ok(STOPPED),
                 _ => {}
@@ -5454,7 +5418,6 @@ fn submit_pull_group(
     let again = format!("sluice wait {branch}");
     let mut first = true;
     // 137: a wait lets go of the intake mark it holds when it ends.
-    let _let_go = LetGo(Some(pulls));
     let here = host_process::Here {
         s,
         host,
@@ -5466,7 +5429,7 @@ fn submit_pull_group(
         // 135: as `submit_pull`, the first pass's intake the submit's own,
         // every other sluice's host process's.
         if first {
-            match intake(pulls, seams, clock, branch, Taker::Step, json, out) {
+            match intake(pulls, seams, clock, branch, json, out) {
                 Some(e) if no_wait => return Err(e),
                 Some(_) if INTERRUPTED.load(Ordering::SeqCst) => break 'wait Some(STOPPED),
                 _ => {}
