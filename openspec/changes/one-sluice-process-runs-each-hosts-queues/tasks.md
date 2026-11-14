@@ -139,5 +139,5 @@ they describe.
 
 ## 10. The specs reconcile
 
-- [ ] 10.1 The change validates strictly (CLAUDE.md, Specs). True when `openspec validate one-sluice-process-runs-each-hosts-queues --strict --no-interactive` passes, with the openspec `devenv.nix` pins.
-- [ ] 10.2 Archived in a scratch copy of `openspec/` outside the tree, the change leaves every spec valid, `host-process` and `place-ports` created, and every other open change valid (CLAUDE.md, Specs). True when `openspec archive one-sluice-process-runs-each-hosts-queues --yes && openspec validate --all --strict --no-interactive` passes in that scratch copy, with the openspec `devenv.nix` pins.
+- [x] 10.1 The change validates strictly (CLAUDE.md, Specs). True when `openspec validate one-sluice-process-runs-each-hosts-queues --strict --no-interactive` passes, with the openspec `devenv.nix` pins.
+- [x] 10.2 Archived in a scratch copy of `openspec/` outside the tree, the change leaves every spec valid, `host-process` and `place-ports` created, and every other open change valid (CLAUDE.md, Specs). True when `openspec archive one-sluice-process-runs-each-hosts-queues --yes && openspec validate --all --strict --no-interactive` passes in that scratch copy, with the openspec `devenv.nix` pins.
