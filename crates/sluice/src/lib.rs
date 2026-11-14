@@ -11,6 +11,7 @@ pub mod exec;
 pub mod hand_over;
 pub mod home;
 pub mod host_count;
+pub mod host_process;
 pub mod host_settings;
 pub mod identity;
 pub mod instance;
