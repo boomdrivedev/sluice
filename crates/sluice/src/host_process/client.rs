@@ -283,15 +283,17 @@ impl Client {
         }
     }
 
-    /// A reading of `repository`, once one is current, started where none
-    /// answers (D16): waited for the round's retry bound and a tick, then
-    /// answered as not current, the command reading as the host holds it.
-    pub fn read(&self, repository: &Path) -> Result<Reading> {
+    /// A reading of `repository`, once one is current, or with `afresh`
+    /// once one begun after the ask ends, started where none answers
+    /// (D16): waited for the round's retry bound and a tick, then answered
+    /// as not current, the command reading as the host holds it.
+    pub fn read(&self, repository: &Path, afresh: bool) -> Result<Reading> {
         let mut c = self.reach()?;
         send(
             &mut c.writer,
             &Request::Read {
                 repository: repository.to_path_buf(),
+                afresh,
             },
         )?;
         let wait = super::read_for() + super::READ_TICK;

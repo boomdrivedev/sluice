@@ -61,8 +61,14 @@ pub enum Request {
     },
     /// A pass of the repository now, answered once it ends (D14).
     Pass { repository: PathBuf },
-    /// Answered once a reading of the repository is current (D16).
-    Read { repository: PathBuf },
+    /// Answered once a reading of the repository is current (D16); with
+    /// `afresh`, once a reading begun after the ask ends, as a forecast's
+    /// second ask has it.
+    Read {
+        repository: PathBuf,
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        afresh: bool,
+    },
     /// A session's or a preview's room, the connection kept while it
     /// waits and while it is held (D12).
     Hold {

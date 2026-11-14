@@ -852,16 +852,21 @@ impl Sluice<'_> {
         branch: &str,
         after: &[u64],
     ) -> Result<Result<Forecasted, SubmitRefusal>> {
-        let Some(head) = self.seams.branch.read(from)? else {
+        let Some(head) = self.branch_read(from)? else {
+            if self.held {
+                return Err(crate::Unheld(format!("a revision of {from}")).into());
+            }
             return Ok(Err(SubmitRefusal::NoHead(from.into())));
         };
         self.forecast_head(&head, from, branch, after)
     }
 
     /// 64, 65, 47a: the forecast of `head` on the branch as a round reads
-    /// it. `own` is the work the head is, as its driver names it:
-    /// submissions of it are left out, as a submission of it would
-    /// withdraw them (67).
+    /// it, or, where this sluice reads held, as the host holds it since the
+    /// host process's last reading, with nothing fetched: what the host
+    /// lacks of it is then [`crate::Unheld`] (129; design D16). `own` is
+    /// the work the head is, as its driver names it: submissions of it are
+    /// left out, as a submission of it would withdraw them (67).
     pub fn forecast_head(
         &self,
         head: &Rev,
@@ -869,7 +874,10 @@ impl Sluice<'_> {
         branch: &str,
         after: &[u64],
     ) -> Result<Result<Forecasted, SubmitRefusal>> {
-        let Some(tip) = self.seams.branch.read(branch)? else {
+        let Some(tip) = self.branch_read(branch)? else {
+            if self.held {
+                return Err(crate::Unheld(format!("a revision of {branch}")).into());
+            }
             return Ok(Err(SubmitRefusal::NoBranch));
         };
         if self.rules_at(branch, &tip)?.is_none() {
@@ -940,6 +948,13 @@ impl Sluice<'_> {
         let line = self.read_line(branch)?;
         let queue = Queue::from_line(&line, tip);
         if self.lacks(&queue)? {
+            // 129 (design D16): a forecast read held fetches nothing.
+            if self.held {
+                return Err(crate::Unheld(format!(
+                    "the work queued on {branch}, or a combination formed on it"
+                ))
+                .into());
+            }
             self.seams.state.fetch_heads(branch)?;
             self.seams.state.fetch_candidates(branch)?;
         }

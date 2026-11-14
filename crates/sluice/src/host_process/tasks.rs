@@ -298,8 +298,16 @@ impl Tasks {
     /// at most, then answering with the reading as it stands. Where passes
     /// are taken only when asked, a reading that is not current is read by
     /// the look, which runs no round, so a test's rounds stay those its
-    /// commands ask for (D14).
-    pub fn read(&self, repository: &Path, tick: Duration, within: Duration) -> Reading {
+    /// commands ask for (D14). With `afresh`, no reading is current but one
+    /// begun after the ask: a forecast's second ask, where the first
+    /// reading lacked what it forms from.
+    pub fn read(
+        &self,
+        repository: &Path,
+        tick: Duration,
+        within: Duration,
+        afresh: bool,
+    ) -> Reading {
         let asked = Instant::now();
         let marks = || {
             locked(&self.0.readings)
@@ -308,7 +316,7 @@ impl Tasks {
                 .unwrap_or_default()
         };
         let now = marks();
-        if now.current(asked, tick) {
+        if !afresh && now.current(asked, tick) {
             return now.answer(true);
         }
         if self.0.asked_only.load(Ordering::SeqCst) {
@@ -968,7 +976,7 @@ mod tests {
         let (tick, within) = (Duration::from_millis(500), Duration::from_secs(5));
 
         // No reading: the look reads now, and its refusal is named.
-        let read = tasks.read(&repo, tick, within);
+        let read = tasks.read(&repo, tick, within, false);
         assert!(read.current && read.ended.is_some(), "{read:?}");
         assert_eq!(
             read.refused.as_deref(),
@@ -977,18 +985,18 @@ mod tests {
         assert_eq!(looks.load(Ordering::SeqCst), 1);
         // One ended within its tick: at once, nothing read again.
         let began = Instant::now();
-        assert!(tasks.read(&repo, tick, within).current);
+        assert!(tasks.read(&repo, tick, within, false).current);
         assert!(began.elapsed() < Duration::from_millis(50));
         assert_eq!(looks.load(Ordering::SeqCst), 1);
         // Past its tick: read again.
         std::thread::sleep(tick);
-        assert!(tasks.read(&repo, tick, within).current);
+        assert!(tasks.read(&repo, tick, within, false).current);
         assert_eq!(looks.load(Ordering::SeqCst), 2);
 
         // With a task running, its next pass is the reading.
         let _held = tasks.handle(&repo).follow(FollowKind::Wait);
         std::thread::sleep(tick);
-        let read = tasks.read(&repo, tick, within);
+        let read = tasks.read(&repo, tick, within, false);
         assert!(read.current, "{read:?}");
         assert_eq!(read.refused, None);
         assert_eq!(passes.load(Ordering::SeqCst), 1);
@@ -998,10 +1006,15 @@ mod tests {
         // task holds the repository.
         let asked = Tasks::new(body, in_play).passes_when_asked();
         let _task = asked.handle(&repo).follow(FollowKind::Wait);
-        let read = asked.read(&repo, tick, within);
+        let read = asked.read(&repo, tick, within, false);
         assert!(read.current && read.ended.is_some(), "{read:?}");
         assert_eq!(passes.load(Ordering::SeqCst), 1, "no pass was run");
         assert_eq!(looks.load(Ordering::SeqCst), 3);
+        // Asked afresh, it reads again though its reading is current.
+        assert!(asked.read(&repo, tick, within, false).current);
+        assert_eq!(looks.load(Ordering::SeqCst), 3);
+        assert!(asked.read(&repo, tick, within, true).current);
+        assert_eq!(looks.load(Ordering::SeqCst), 4);
     }
 
     /// `check` holds within ten seconds.

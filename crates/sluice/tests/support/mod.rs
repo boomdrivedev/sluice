@@ -801,6 +801,7 @@ impl sluice::host_process::HostProcess for FakeProcess {
     fn read(
         &self,
         here: &sluice::host_process::Here<'_, '_>,
+        _: bool,
     ) -> anyhow::Result<sluice::host_process::protocol::Reading> {
         Ok(sluice::host_process::protocol::Reading {
             current: true,

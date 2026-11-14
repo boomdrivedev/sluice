@@ -1435,22 +1435,26 @@ pub fn run(
         _ => s,
     };
     // 129 (design D16): a one-shot read, a status in each form, a one-shot
-    // overview and the home view, asks sluice's host process for a reading
-    // of the repository current within its tick, starting it where none
-    // answers, and then reads every branch as the host holds it, fetching
-    // nothing of its own.
-    let one_shot = matches!(
-        &cli.command,
-        None | Some(Command::Status { .. }) | Some(Command::Overview { watch: false, .. })
-    );
+    // overview, the home view and a forecast where no reader keeps its
+    // tick, asks sluice's host process for a reading of the repository
+    // current within its tick, starting it where none answers, and then
+    // reads every branch as the host holds it, fetching nothing of its own.
+    let one_shot = match &cli.command {
+        None | Some(Command::Status { .. }) | Some(Command::Overview { watch: false, .. }) => true,
+        Some(Command::Submit { check: true, .. }) => !reader_keeps_tick(host),
+        _ => false,
+    };
     let s = match one_shot {
         true => {
-            host_process::ask::read(&host_process::Here {
-                s: &s,
-                host,
-                pulls,
-                clock,
-            });
+            host_process::ask::read(
+                &host_process::Here {
+                    s: &s,
+                    host,
+                    pulls,
+                    clock,
+                },
+                false,
+            );
             s.holding()
         }
         false => s,
@@ -1571,8 +1575,7 @@ pub fn run(
             let subject = subject.into_iter().next();
             if check {
                 return forecast(
-                    &s,
-                    host,
+                    &here,
                     pushers,
                     &worktree,
                     head.as_deref(),
@@ -2553,14 +2556,26 @@ fn refusal_next(r: &SubmitRefusal, branch: &str) -> Vec<String> {
     }
 }
 
+/// Whether the host's reader of this repository keeps its tick, its
+/// document current (64, 129). A reader this cannot look for is none.
+fn reader_keeps_tick(host: &dyn exec::Host) -> bool {
+    let now = std::time::SystemTime::now();
+    host.readers()
+        .and_then(|dir| reader::current(&dir, &host.repository()?, now))
+        .is_ok_and(|doc| doc.is_some())
+}
+
 /// 64, 124, 129: `sluice submit --check`: formed on the branch and its
 /// queue as the host's live reader last read them, asking the remote
 /// nothing, where that reader keeps its tick and its read holds all the
-/// forecast forms from; otherwise read as a round reads them.
+/// forecast forms from. Where none does, the host process's reading was
+/// asked for and the forecast forms on every branch as the host holds it
+/// since, fetching nothing; where the host lacks what it forms from, it
+/// asks a reading afresh once, and what is still lacking is a read it
+/// could not make, exit 3 (design D16).
 #[allow(clippy::too_many_arguments)]
 fn forecast(
-    s: &Sluice<'_>,
-    host: &dyn exec::Host,
+    here: &host_process::Here<'_, '_>,
     pushers: &dyn Pushers,
     worktree: &str,
     from: Option<&str>,
@@ -2569,12 +2584,31 @@ fn forecast(
     json: bool,
     out: &mut dyn Write,
 ) -> Result<i32> {
-    let got = match forecast_read(s, host, worktree, from, branch, after)? {
-        Some(got) => got,
-        None => match from {
-            Some(from) => s.forecast_branch(from, branch, after)?,
-            None => s.forecast(worktree, branch, after)?,
-        },
+    let (s, host) = (here.s, here.host);
+    let formed = || -> Result<Result<Forecasted, SubmitRefusal>> {
+        Ok(
+            match forecast_read(s, host, worktree, from, branch, after)? {
+                Some(got) => got,
+                None => match from {
+                    Some(from) => s.forecast_branch(from, branch, after)?,
+                    None => s.forecast(worktree, branch, after)?,
+                },
+            },
+        )
+    };
+    let got = match formed() {
+        Err(e) if e.downcast_ref::<sluice_core::Unheld>().is_some() => {
+            host_process::ask::read(here, true);
+            formed().map_err(|e| match e.downcast_ref::<sluice_core::Unheld>() {
+                Some(unheld) => {
+                    anyhow::anyhow!(
+                        "could not read what a forecast of {branch} forms from: {unheld}"
+                    )
+                }
+                None => e,
+            })?
+        }
+        got => got?,
     };
     let f = match got {
         Ok(f) => f,
@@ -2632,7 +2666,10 @@ fn forecast_read(
     if let Some(head) = branch_in(&doc, from).and_then(|v| v.revision) {
         return s.forecast_read(&view, &head, from, after);
     }
-    let Some(head) = s.seams().branch.read(from)? else {
+    let Some(head) = s.branch_read(from)? else {
+        if s.is_held() {
+            return Err(sluice_core::Unheld(format!("a revision of {from}")).into());
+        }
         return Ok(Some(Err(SubmitRefusal::NoHead(from.into()))));
     };
     Ok(Some(match s.forecast_read(&view, &head, from, after)? {

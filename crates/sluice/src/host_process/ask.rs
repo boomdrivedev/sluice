@@ -77,9 +77,10 @@ pub trait HostProcess {
     /// A pass of the repository now, once it ends (D14).
     fn pass(&self, here: &Here<'_, '_>) -> Result<Report>;
 
-    /// A reading of the repository, once one is current, the host process
-    /// started where none answers (D16).
-    fn read(&self, here: &Here<'_, '_>) -> Result<Reading>;
+    /// A reading of the repository, once one is current, or with `afresh`
+    /// once one begun after the ask ends, the host process started where
+    /// none answers (D16).
+    fn read(&self, here: &Here<'_, '_>, afresh: bool) -> Result<Reading>;
 
     /// Follow the repository's passes as `kind`.
     fn follow<'a>(
@@ -154,8 +155,8 @@ impl HostProcess for Socketed {
         self.client()?.pass(&here.repository()?)
     }
 
-    fn read(&self, here: &Here<'_, '_>) -> Result<Reading> {
-        self.client()?.read(&here.repository()?)
+    fn read(&self, here: &Here<'_, '_>, afresh: bool) -> Result<Reading> {
+        self.client()?.read(&here.repository()?, afresh)
     }
 
     fn follow<'a>(
@@ -266,9 +267,10 @@ pub fn note(here: &Here<'_, '_>) {
 /// when the host process last read the repository where it says, and the
 /// command reads the records as the host holds them all the same. A
 /// current reading whose ask a remote refused says so in the remote's
-/// words (133), the records read as last fetched.
-pub fn read(here: &Here<'_, '_>) -> Option<Reading> {
-    match here.host.host_process().read(here) {
+/// words (133), the records read as last fetched. With `afresh`, the
+/// reading is one begun after the ask.
+pub fn read(here: &Here<'_, '_>, afresh: bool) -> Option<Reading> {
+    match here.host.host_process().read(here, afresh) {
         Ok(r) if r.current => {
             if let Some(words) = &r.refused {
                 crate::telemetry::warn(&format!(
@@ -449,7 +451,7 @@ impl HostProcess for Inside {
         ))
     }
 
-    fn read(&self, _: &Here<'_, '_>) -> Result<Reading> {
+    fn read(&self, _: &Here<'_, '_>, _: bool) -> Result<Reading> {
         Err(anyhow!(
             "a reading is asked of the host process, not from within it"
         ))

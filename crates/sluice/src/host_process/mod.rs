@@ -518,9 +518,11 @@ fn answer(hosting: &Arc<Hosting>, stream: UnixStream) -> Result<()> {
             &mut writer,
             &mut reader,
         ),
-        Request::Read { repository } => {
+        Request::Read { repository, afresh } => {
             note(hosting, &repository);
-            let reading = hosting.tasks.read(&repository, READ_TICK, read_for());
+            let reading = hosting
+                .tasks
+                .read(&repository, READ_TICK, read_for(), afresh);
             send(&mut writer, &Answer::Read(reading))
         }
         Request::Room => send(&mut writer, &Answer::Room(view(hosting)?)),

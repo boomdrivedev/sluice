@@ -76,6 +76,26 @@ pub struct Seams<'a> {
     pub state: &'a dyn State,
 }
 
+/// 64, 129 (design D16): what a forecast read as the host holds the
+/// repository could not form from, since the host process's reading did not
+/// bring it to the host: the branch, a revision of it, or work queued on
+/// it. A forecast asks a reading afresh once and, where this is still so,
+/// says it as a read it could not make.
+#[derive(Debug)]
+pub struct Unheld(pub String);
+
+impl std::fmt::Display for Unheld {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "the host process's reading did not bring {} to this host",
+            self.0
+        )
+    }
+}
+
+impl std::error::Error for Unheld {}
+
 pub struct Sluice<'a> {
     seams: Seams<'a>,
     clock: &'a dyn Clock,
@@ -266,17 +286,24 @@ impl<'a> Sluice<'a> {
     /// The branch's revision: as the host holds it, with no fetch, where
     /// this sluice reads held, and read as a round reads it otherwise (129;
     /// design D16).
-    fn branch_read(&self, branch: &str) -> Result<Option<Rev>> {
+    pub fn branch_read(&self, branch: &str) -> Result<Option<Rev>> {
         match self.held {
             true => self.seams.branch.held(branch),
             false => self.seams.branch.read(branch),
         }
     }
 
+    /// Whether it reads every branch as the host holds it (129; design
+    /// D16).
+    pub fn is_held(&self) -> bool {
+        self.held
+    }
+
     /// The same sluice, reading every branch as the host holds it since the
     /// host process's last ask, asking no remote: a one-shot read's, once
     /// the host process's reading is current (129; design D16). A round
-    /// refuses to run under it.
+    /// refuses to run under it, and its binding asks no remote from here
+    /// on.
     pub fn holding(self) -> Self {
         self.seams.state.hold();
         Sluice { held: true, ..self }

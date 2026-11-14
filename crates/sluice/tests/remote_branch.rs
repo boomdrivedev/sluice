@@ -1816,11 +1816,42 @@ fn a_forecast_beside_a_current_reader_asks_the_remote_nothing() {
     assert_eq!(remote_calls(&trace), Vec::<String>::new());
 }
 
-/// 64, 124: with no reader on this host, a forecast reads `main` as a
-/// round does: the work another host submitted to it, which this host
-/// does not hold, is fetched, and the forecast is formed against it.
+/// 64, 129 (design D16): with no host process running and `main` on
+/// origin moved past what this host holds, a forecast starts the host
+/// process, forms on `main` as that process's first reading fetched it,
+/// and asks origin nothing itself.
 #[test]
-fn a_forecast_with_no_reader_fetches_another_hosts_work() {
+fn a_forecast_with_no_host_process_starts_it_and_fetches_nothing() {
+    let s = Setup::signed("forecast-no-host");
+    let other = Repo::clone_of(s.origin.path(), "forecast-no-host-b");
+    let moved = other.push_change("theirs.txt", "theirs\n");
+    assert_ne!(
+        s.repo.rev("origin/main"),
+        moved,
+        "this host holds it already"
+    );
+    support::kill_host_process(&mut s.command(s.repo.dir()));
+
+    let mine = worktree(&s, "a", "main", &[("mine.txt", "mine\n")]);
+    let trace = s.seen.path().join("trace");
+    let out = s
+        .command(&mine)
+        .args(["submit", "main", "--check", "--json"])
+        .env("GIT_TRACE", &trace)
+        .output()
+        .unwrap();
+    assert_eq!(out.status.code(), Some(sluice::LANDED), "{}", text(&out));
+    let v: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert_eq!(v["onto"], moved.as_str(), "{v}");
+    assert_eq!(remote_calls(&trace), Vec::<String>::new());
+}
+
+/// 64, 124, 129 (design D16): with no reader on this host, a forecast has
+/// the host process read `main`: the work another host submitted to it,
+/// which this host did not hold, is fetched by that reading, and the
+/// forecast, asking the remote nothing itself, is formed against it.
+#[test]
+fn a_forecast_with_no_reader_has_the_host_process_fetch_another_hosts_work() {
     let s = Setup::signed("forecast-other-host");
     let other = Repo::clone_of(s.origin.path(), "forecast-other-host-b");
     let config = Scratch::new("forecast-other-host-b-config");
@@ -1869,9 +1900,11 @@ fn a_forecast_with_no_reader_fetches_another_hosts_work() {
     );
 
     let mine = worktree(&s, "a", "main", &[("shared.txt", "a's\n")]);
+    let trace = s.seen.path().join("trace");
     let out = s
         .command(&mine)
         .args(["submit", "main", "--check", "--json"])
+        .env("GIT_TRACE", &trace)
         .output()
         .unwrap();
     assert_eq!(out.status.code(), Some(sluice::CONFLICT), "{}", text(&out));
@@ -1883,6 +1916,7 @@ fn a_forecast_with_no_reader_fetches_another_hosts_work() {
         serde_json::json!(["shared.txt"]),
         "{v}"
     );
+    assert_eq!(remote_calls(&trace), Vec::<String>::new());
 }
 
 /// A branch whose policy this sluice refuses is refused alone (26, S64).
