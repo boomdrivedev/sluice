@@ -29,6 +29,7 @@ pub mod environment;
 pub mod index;
 pub mod pass;
 pub mod protocol;
+pub mod results;
 pub mod room;
 pub mod tasks;
 
