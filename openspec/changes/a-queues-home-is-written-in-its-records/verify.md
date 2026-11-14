@@ -1,137 +1,150 @@
 # Verify: a-queues-home-is-written-in-its-records
 
-Verified on `change/a-queues-home-is-written-in-its-records` at `661118f0`,
+Verified on `change/a-queues-home-is-written-in-its-records` at `9be7d303`,
 cut from `bolt/sluice-is-refactored-and-runs-on-pools` (merge base
 `d6d11623`; the bolt has since gained only `6558679a`, a policy key, and its
 landing), on 2026-11-14 with sluice 0.93.2.
 
 ## Outcome
 
-**Not ready to archive.** The bolt's gate passes whole. But the change breaks
-four tests of the tools tier, `cli:tools`, which `#check-tools` (main's gate)
-runs when the bolt merges onto main. All four pass at the merge base, and all
-four fail again when rerun once at `661118f0`, so the change causes them;
-they are not flakes. Every task is ticked. Every scenario's test passes.
+**Ready to archive.** The bolt's gate passes whole, and so does the tools
+tier that main's gate adds. Every one of the 27 tasks is ticked, and its
+check passes. Every scenario of the four delta specs has a test that
+passes, and `openspec validate --strict` finds the change valid.
 
 ## Whole checks
 
-`sluice exec bolt/sluice-is-refactored-and-runs-on-pools`, the bolt's gate
-`#check-fast` (S66), run once at `661118f0`. It exited 0 with 12 tasks passed
-and recorded 12 results under their keys for `661118f`:
+`sluice exec bolt/sluice-is-refactored-and-runs-on-pools` ran the bolt's
+gate, `#check-fast` (S66), once at `9be7d303`. It exited 0 with 12 tasks
+passed, and recorded 12 results under their keys for `9be7d30`:
 
 | Task | Outcome |
 |---|---|
 | site:prose, site:rules, nix:typecheck, root:adrs, root:changes | passed |
 | root:format, root:lint | passed |
-| core:test, fakes:test, seams:test | passed |
-| conformance:test (`homes`, `peers`, `reading` and every other target) | passed |
-| cli:test (`--test cli`: 223 passed, 0 failed) | passed |
+| core:test (164), fakes:test (17), seams:test (5) | passed |
+| conformance:test (every target, `homes`, `peers` and `reading` among them) | passed |
+| cli:test (`--test cli`: 223 passed, 0 failed; every other target whole) | passed |
 
 moon warned on each task that it could not package task outputs into
-`.moon/cache/outputs/` under the place. Each pass was recorded all the same,
+`.moon/cache/outputs/` under the place. It recorded each pass all the same,
 and nothing in this change touches that.
 
 ## The tools tier
 
-`#check-fast` runs no test built with `--features tools`. Its `remote_refs`,
-`peers` and `pull_requests` targets ran zero tests. But the checks of tasks
-1.4, 1.5, 2.4, 2.5, 3.2 and 4.4 are tests of that tier. So they were run
-through sluice against the bolt: first `--test remote_refs --test peers
---test pull_requests`, then, since cargo stops at the first binary that
-fails, every other target of `cli:tools` with `--no-fail-fast`.
+`#check-fast` runs no test built with `--features tools`, but the checks of
+tasks 1.4 to 1.6, 2.4, 2.5, 3.2, 4.4, 4.6 and 4.7 are tests of that tier.
+So `cli:tools`' own command ran once through sluice against the bolt, with
+`--no-fail-fast`:
+`sluice exec bolt/sluice-is-refactored-and-runs-on-pools -- cargo test -p sluice --features tools --no-fail-fast --test instance … --test overview_watch -- --skip sandbox`.
+It exited 0, with 664 tests passed and none failed:
 
-Every test a task names passed there:
+| Target | Passed |
+|---|---|
+| conformance | 60 |
+| equip_tools | 7 |
+| exec | 17 (3 sandbox tests skipped) |
+| forge | 48 |
+| instance | 12 |
+| landed | 1 |
+| local_refs | 17 |
+| moon | 32 (3 sandbox tests skipped), and 1 more |
+| overview_watch | 10 |
+| peers | 13 |
+| places | 47 |
+| previews_tools | 10 |
+| protect | 28 |
+| pull_requests | 157 |
+| pushed_refs | 53 |
+| remote_branch | 34 |
+| remote_refs | 37 |
+| stack | 3 (1 sandbox test skipped) |
+| worktrunk | 77 |
 
-- `remote_refs`: 37 passed. These include 1.4's three tests, 1.5's, 2.4's
-  three and 2.5's.
-- `peers`: `a_wait_follows_its_submission_to_its_queues_new_home` (3.2)
-  passed.
-- `pull_requests`: `a_host_the_branch_does_not_accept_takes_no_request_in`
-  (4.4) passed.
-- Every other target of the tier passed whole: `instance`, `local_refs`,
-  `pushed_refs`, `forge`, `moon`, `places`, `worktrunk`, `protect`,
-  `conformance`, `stack`, `exec`, `previews_tools`, `equip_tools`, `landed`
-  and `overview_watch`.
+Each test a tools-tier task names passed there:
 
-Four tests failed. Each passes at `d6d11623` in a worktree of that commit
-and fails again at `661118f0`, both run once through sluice:
-
-### A. Tests whose leading host D8 no longer accepts
-
-The code is as design D8 has it. These tests still expect an unaccepted host
-to lead or take requests in, as the conformance tests 4.2 rewrote did:
-
-- **`peers.rs` `a_run_is_claimed_and_run_by_the_other_host`**
-  (crates/sluice/tests/peers.rs:213). Host `a` signs as `a` under
-  `trust = ["b"]`. `Sluice::keeps` (crates/sluice-core/src/step.rs:353) now
-  reads `a` as not accepted, so `a`'s `sluice step main` opens no
-  combination. The assertion that `refs/sluice/combinations/main/` exists
-  fails. The test means to show that a run is claimed and run by the host
-  that does not lead (75, 82, 78). 4.2's way would keep that: a lead the
-  branch accepts that has no room.
-- **`pull_requests.rs` `the_keeper_and_the_check_name_different_hosts`**
-  (crates/sluice/tests/profiles/pull_requests.rs:6600). Host `c`, made by
-  `g.other("c", "", "")`, has no `[signing]` table, so D8 and 4.4 have it
-  take none of `main`'s requests in. The test still expects
-  `taken_in_by: {host: "c"}`. It panics first, in `follow_due`
-  (pull_requests.rs:6109): `sluice/forge/follows/o/r/main.json` does not
-  exist (`No such file or directory`), so host A never wrote a follow of the
-  request.
-
-### B. Behaviour the change regressed
-
-- **`remote_branch.rs` `an_idle_branch_on_a_remote_is_passed_over_with_no_git`**
-  (crates/sluice/tests/remote_branch.rs:2119). This breaks the reader-tick
-  rule (129, core.31). With nothing queued, `sluice run --rounds 6` starts 8
-  git processes where `--rounds 1` starts 3. Each pass after the first runs
-  another `fetch … origin +refs/sluice/hosts/*:refs/sluice-fetched/origin/hosts/*`.
-  An idle branch on a remote now fetches every pass.
-- **`remote_branch.rs` `a_policy_refused_on_the_remote_is_cleared_by_a_push`**
-  (crates/sluice/tests/remote_branch.rs:1486). This breaks 124 and 56
-  (record 0069). Origin's `bolt/x` and this host's own copy both hold a
-  refused `[[checkout.cache]]` policy. The round is refused as it should be,
-  naming the branch, the revision and the table, and it runs nothing. But
-  afterwards this host's own `bolt/x` is no longer at the refused revision,
-  so the round moved something it must not.
+- 1.4: `a_branchs_home_is_read_from_its_records_not_its_policy`,
+  `a_host_with_no_records_of_a_branch_finds_its_home_on_the_remote` and
+  `two_open_homes_refuse_the_branch_naming_both`.
+- 1.5: `the_first_write_writes_the_home_its_policy_chose`.
+- 1.6: `remote_branch.rs`'s `an_idle_branch_on_a_remote_is_passed_over_with_no_git`,
+  which the change leaves as it is at the base, with 1.4's, 1.5's and 2.5's
+  home tests.
+- 2.4: `a_hosts_queue_moves_to_its_remote_with_its_numbers`,
+  `a_number_the_remote_holds_is_carried_under_the_next` and
+  `a_carry_stopped_after_the_remote_was_written_is_closed_by_the_next`.
+- 2.5: `a_branch_comes_home_each_host_taking_its_own_submissions`.
+- 3.2: `a_wait_follows_its_submission_to_its_queues_new_home`.
+- 4.4: `a_host_the_branch_does_not_accept_takes_no_request_in`.
+- 4.6: `remote_branch.rs`'s `a_policy_refused_on_the_remote_is_cleared_by_a_push`,
+  which the change leaves as it is at the base.
+- 4.7: `peers.rs`'s `a_run_is_claimed_and_run_by_the_other_host`, whose lead
+  is trusted but its signer may claim only a system the gate does not ask
+  for (79), and `pull_requests.rs`'s
+  `the_keeper_and_the_check_name_different_hosts`, whose host C signs as
+  `b`.
 
 ## Tasks
 
-All 23 tasks in `tasks.md` are ticked, 3.3 and 5.5 among them, and each test
-a task names exists where the task says. Each one passed in the run that
-holds it:
+All 27 tasks in `tasks.md` are ticked, and each test a task names exists
+where the task says. Each one passed in the run that holds it:
 
-- In `#check-fast`, all 33 tests of 1.1 to 1.3, 2.1 to 2.3, 2.5's
-  conformance half, 3.1, 3.3, 4.1, 4.3, 4.5, 5.1 and 5.5.
-- In the tools run, all 10 tests of 1.4, 1.5, 2.4, 2.5, 3.2 and 4.4.
+- In `#check-fast`, the 33 tests of 1.1 to 1.3, 2.1 to 2.3, 2.5's
+  conformance half, 3.1, 3.3, 4.1, 4.3, 4.5, 5.1 and 5.5, and 4.6's
+  `--test homes --test peers` whole.
+- In the tools run, the 14 tests of 1.4 to 1.6, 2.4, 2.5, 3.2, 4.4, 4.6
+  and 4.7.
 
-The left-behind design 2.6 removes is gone: no `migrate`, `left_behind`,
-`forget_left_behind`, `adopt_left_behind`, `leave_behind` or
-`sluice-remote/moved/` remains (the `left_behind` in
-`tests/profiles/places.rs` is a place's, unrelated), and `root:lint` passes.
-5.2 to 5.4 hold, by `site:prose`, `root:adrs` and `site:rules`.
+2.6, 5.2, 5.3 and 5.4 hold by `root:lint`, `site:prose`, `root:adrs` and
+`site:rules`, each passed in the gate.
+
+The two code fixes behind 1.6 and 4.6 are as their tasks say:
+
+- `Records::held_home` (`crates/sluice/src/profiles/records.rs`) reads a
+  remote's `home.json` through `remote_refs::fetched_home`, from the ref
+  this host last fetched, with no profile of the remote opened (129; rule
+  core.31).
+- `Sluice::keeps` (`crates/sluice-core/src/step.rs`) reads the rules at the
+  branch's revision before it answers for a home in this host's own files,
+  so a refused policy refuses the round first (124, 56; record 0069; rule
+  core.15).
 
 ## Specs
 
-`openspec validate a-queues-home-is-written-in-its-records --strict`: valid.
-Each scenario of `queue-home`, `submission-wait`, `peer-lead` and
-`remote-records` maps to the tests its tasks name, and every one of those
-tests passes. That includes "A move waiting", which the status line `its
-queue is …` (crates/sluice/src/lib.rs:6112) and `--json`'s `home` give. The
-four failing tests above belong to no scenario of this change. They are
-older behaviour the change was to keep (A's, by rewriting them as 4.2 did
-the conformance tests; B's, by leaving it as it was).
+`openspec validate a-queues-home-is-written-in-its-records --strict` finds
+the change valid. The MODIFIED and REMOVED requirements of `peer-lead` and
+`remote-records` name requirements `openspec/specs/` holds, and `queue-home`
+is a new capability. Each scenario maps to a test that passed:
 
-## What goes back to the code stage
+| Spec: scenario | Test |
+|---|---|
+| queue-home: The first submission writes the home; A branch with no signers | `the_first_write_writes_the_home_its_policy_chose` (both cases) |
+| queue-home: A policy that names another home does not move the reading | `a_branchs_home_is_read_from_its_records_not_its_policy` |
+| queue-home: A host with no records of the branch | `a_host_with_no_records_of_a_branch_finds_its_home_on_the_remote` |
+| queue-home: Two open homes | `two_open_homes_refuse_the_branch_naming_both` |
+| queue-home: A move waits for a combination under test | `a_policy_naming_another_home_writes_a_move_and_opens_no_combination`, `a_move_waits_for_the_combination_under_test` |
+| queue-home: The policy names the open home again | `a_policy_naming_the_open_home_again_ends_the_move` |
+| queue-home: A host's queue moves to origin | `a_move_carries_every_live_submission_with_its_number_and_state`, `a_hosts_queue_moves_to_its_remote_with_its_numbers` |
+| queue-home: A submit racing the carry | `a_submit_racing_the_carry_is_written_in_the_new_home`, `a_submission_made_while_moving_is_carried` |
+| queue-home: Stopped after the new home was written | `a_move_stopped_after_the_new_home_was_written_is_closed_by_the_next_round`, `a_carry_stopped_after_the_remote_was_written_is_closed_by_the_next` |
+| queue-home: Two hosts' submissions come home | `a_branch_comes_home_each_host_taking_its_own_submissions`, `a_round_carries_its_hosts_submissions_home_before_it_reads_the_branch` |
+| queue-home: A host that has not come back | `a_submission_left_for_its_host_says_it_waits_for_it` |
+| queue-home: Numbers past the remote's count | `a_hosts_queue_moves_to_its_remote_with_its_numbers` |
+| queue-home: Two hosts each held #52 | `a_number_the_remote_holds_is_carried_under_the_next`, `a_status_of_a_carried_number_names_the_number_it_has_now` |
+| queue-home: A submission landed before the move | `a_submission_finished_before_the_move_is_read_in_the_closed_home` |
+| queue-home: A host's settings name a lead; A policy names how a branch runs | `no_host_setting_chooses_how_a_queue_runs`, `no_policy_key_chooses_how_a_queue_runs` |
+| queue-home: A move waiting | `the_overview_names_each_branchs_home_and_its_move`, and 5.5's status tests |
+| submission-wait: The queue moves while a wait follows; Carried under another number | `a_wait_follows_its_submission_to_its_queues_new_home` |
+| peer-lead: The former lead stops after a takeover; A lead that went quiet; Clocks that disagree | `a_quiet_lead_is_taken_after_the_lease_by_the_takers_own_observation`, `a_lead_that_writes_keeps_the_branch` (conformance `peers`) |
+| peer-lead: A lead the branch no longer accepts | `a_lead_the_branch_no_longer_accepts_is_taken_after_the_lease` |
+| peer-lead: A session host submits to a bolt held on origin | `a_host_whose_signature_the_branch_does_not_accept_never_leads` |
+| peer-lead: A host with an unlisted key | `a_host_with_an_unlisted_key_never_leads`, `a_host_the_branch_does_not_accept_takes_no_request_in` |
+| peer-lead: A bolt whose signers went | `any_host_leads_a_remote_home_whose_policy_names_no_signer` |
+| peer-lead: A run longer than the lease | `a_lead_keeps_its_branch_through_a_run_longer_than_the_lease` |
+| peer-lead: Nothing live | `a_lead_with_no_live_run_writes_nothing_to_keep_it` |
+| remote-records: Signers move the state to the remote; No signers, no change | `the_first_write_writes_the_home_its_policy_chose` |
 
-Make the four tests pass, then run
-`sluice exec bolt/sluice-is-refactored-and-runs-on-pools` again, together
-with the tools targets
-`cargo test -p sluice --features tools --test peers --test pull_requests --test remote_branch`
-run through sluice against the bolt, before this change is verified and
-archived:
-
-- Rewrite A's two tests for D8, each with a lead or an intake host the
-  branch accepts, keeping what they show.
-- Fix B's two regressions in the code: an idle branch on a remote fetches
-  nothing after its first pass, and a round refused on the policy moves
-  neither the remote's branch nor this host's own copy.
+The REMOVED requirement's code is gone. No `migrate`, `left_behind`,
+`forget_left_behind`, `adopt_left_behind`, `leave_behind` or
+`sluice-remote/moved/` remains (the `left_behind` in
+`tests/profiles/places.rs` is a place's, unrelated), and `root:lint` passes.
