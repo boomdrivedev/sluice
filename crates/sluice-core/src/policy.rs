@@ -1198,39 +1198,42 @@ hold = "5m"
         assert_eq!(main.systems_of("cli:build").len(), 3);
     }
 
-    /// sluice's own policy reads, and gates as section 9 says: bolt
-    /// branches on the fast tier from any run or the cache, `main` on
-    /// every tier from sandboxed or confined runs only, deepest first,
-    /// landed on `origin`, taking its work as pull requests that wait on
-    /// nothing beyond the gate.
+    /// sluice's own policy reads, and gates as section 9 says: its one
+    /// signer deneb's key, signing as `sessions`, never confined; bolt
+    /// branches on the fast tier and `main` on every tier from runs that
+    /// signer signed, both kept on `origin`; `main` deepest first, taking
+    /// its work as pull requests that wait on nothing beyond the gate,
+    /// which the host that keeps it takes in (137).
     #[test]
     fn sluices_own_policy_reads() {
         let p = Policy::parse(include_str!("../../../.config/sluice.toml")).unwrap();
         assert_eq!(p.limits.executor.as_deref(), Some("sandbox"));
         assert_eq!(p.limits.network, Some(Network::Localhost));
         assert!(p.checkout.is_empty(), "{:?}", p.checkout);
+        assert_eq!(p.signers.keys().collect::<Vec<_>>(), ["sessions"]);
+        let sessions = &p.signers["sessions"];
+        assert_eq!(sessions.identity.0, "ssh");
+        assert!(
+            matches!(&sessions.identity.1, Setting::Text(line) if line.starts_with("deneb ssh-ed25519 ")),
+            "{:?}",
+            sessions.identity
+        );
+        assert!(!sessions.confined && sessions.systems.is_none());
         let bolt = p.rules_for("bolt/x").unwrap().unwrap();
         assert_eq!(bolt.required, ["#check-fast"]);
-        assert!(bolt.satisfiable_by("sandbox") && !bolt.trusts("cache"));
+        assert!(bolt.signed && !bolt.confined);
+        assert_eq!(bolt.trust, ["sessions"]);
+        assert!(bolt.trusts_signed("sessions", false, None));
         assert_eq!(bolt.remote.as_deref(), Some("origin"));
         assert_eq!(bolt.pull_requests, None);
-        // 137 (design D22): main takes pull requests and the policy names
-        // no [signers], so main is refused alone until it names them, which
-        // is ops' to choose; its remote still reads for routing.
-        match p.rules_for("main") {
-            Ok(Some(main)) => {
-                assert_eq!(main.required, ["#check-fast", "#check-tools", "#check-e2e"]);
-                assert!(main.batch && main.satisfiable_by("sandbox") && !main.trusts("cache"));
-                assert_eq!(main.remote.as_deref(), Some("origin"));
-                assert_eq!(main.pull_requests, Some(PullRequests::default()));
-                assert!(main.signed, "main names [signers] once it reads");
-            }
-            Ok(None) => panic!("main has no table"),
-            Err(e) => {
-                assert!(e.downcast_ref::<NoIntake>().is_some(), "{e:#}");
-                assert!(format!("{e:#}").contains("[signers]"), "{e:#}");
-            }
-        }
+        let main = p.rules_for("main").unwrap().unwrap();
+        assert_eq!(main.required, ["#check-fast", "#check-tools", "#check-e2e"]);
+        assert!(main.batch && main.signed && !main.confined && !main.unkept);
+        assert_eq!(main.trust, ["sessions"]);
+        assert!(main.trusts_signed("sessions", false, None));
+        assert!(!main.trusts_signed("box", true, None));
+        assert_eq!(main.remote.as_deref(), Some("origin"));
+        assert_eq!(main.pull_requests, Some(PullRequests::default()));
         assert_eq!(p.remote_of("main").unwrap().as_deref(), Some("origin"));
         assert!(p.rules_for("unit/x").unwrap().is_none());
     }
