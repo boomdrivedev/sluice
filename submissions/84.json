@@ -1,0 +1,33 @@
+{
+  "schema": "sluice/submission@1",
+  "id": 84,
+  "branch": "bolt/sluice-is-refactored-and-runs-on-pools",
+  "head": "ca0bef7c82c0520ee8b3516b48cd3655efef3d08",
+  "from": {
+    "agent": "change/a-queues-home-is-written-in-its-records",
+    "worktree": "change/a-queues-home-is-written-in-its-records",
+    "path": "/Users/chuck/.local/share/flume/places/2db1db6f889b/change--a-queues-home-is-written-in-its-records",
+    "host": "deneb"
+  },
+  "submitted": "2026-11-14T17:45:50Z",
+  "after": [],
+  "priority": 0,
+  "attempt": 1,
+  "state": "failed",
+  "tested": {
+    "combination": "a69270e6dd4994bec4e196525ea33b5a6a570e70",
+    "on": "74deef0080873586919a85a9dd5c71c836b1058e",
+    "submissions": [
+      84
+    ]
+  },
+  "result": "failed",
+  "failed": [
+    {
+      "task": "root:format",
+      "hash": "3d50a85e054234e7f9602c3880f1f5338c7ebc29b54c5a4494930f95dd50a762",
+      "log": "/Users/chuck/.local/share/boomdrive/repositories/boomdrivedev/sluice/sluice.git/sluice-remote/origin/.logs/bolt/sluice-is-refactored-and-runs-on-pools/c3/root:format.log",
+      "unsigned": "root:format: .claude/settings.json is not in the tree"
+    }
+  ]
+}

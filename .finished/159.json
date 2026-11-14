@@ -1,0 +1,26 @@
+{
+  "schema": "sluice/submission@1",
+  "id": 159,
+  "branch": "bolt/sluice-is-refactored-and-runs-on-pools",
+  "head": "68d4ba525f23165eb41d7ebdd17c5987ec148a39",
+  "from": {
+    "agent": "change/one-sluice-process-runs-each-hosts-queues",
+    "worktree": "change/one-sluice-process-runs-each-hosts-queues",
+    "path": "/Users/chuck/.local/share/flume/places/2db1db6f889b/change--one-sluice-process-runs-each-hosts-queues",
+    "host": "deneb"
+  },
+  "submitted": "2026-11-14T13:00:41Z",
+  "after": [],
+  "priority": 0,
+  "attempt": 1,
+  "state": "landed",
+  "tested": {
+    "combination": "f5f211a9f01ea35def3cf0bbc3dbc540dcf3ca26",
+    "on": "7ce112b426e451ad5d713cce2c9d7aea706ca66f",
+    "submissions": [
+      159
+    ]
+  },
+  "result": "passed",
+  "landed_as": "d6d116232e0c32e36817b4ebdf051815275a192b"
+}

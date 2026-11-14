@@ -1,0 +1,16 @@
+{
+  "schema": "sluice/branch@1",
+  "branch": "bolt/sluice-is-refactored-and-runs-on-pools",
+  "log": "sluice/log@1",
+  "base": "74deef0080873586919a85a9dd5c71c836b1058e",
+  "verified": false,
+  "window": 2,
+  "next_place": 4,
+  "next_candidate": 4,
+  "candidates": [],
+  "landing": null,
+  "release": [],
+  "outbox": [],
+  "lead": "deneb",
+  "landed": "74deef0080873586919a85a9dd5c71c836b1058e"
+}
