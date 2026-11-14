@@ -101,6 +101,9 @@ pub trait HostProcess {
 #[derive(Default)]
 pub struct Socketed {
     client: std::cell::OnceCell<Result<Client, String>>,
+    /// Whether the process last followed passes only when asked, as its
+    /// `hello` said (design D14).
+    mode: std::cell::Cell<Option<bool>>,
 }
 
 impl Socketed {
@@ -113,8 +116,10 @@ impl Socketed {
 }
 
 impl HostProcess for Socketed {
+    /// As the process this command last followed said of itself, else as
+    /// this command's own setting says (design D14).
     fn asked_only(&self) -> bool {
-        super::asked_only()
+        self.mode.get().unwrap_or_else(super::asked_only)
     }
 
     fn note(&self, here: &Here<'_, '_>) -> Result<()> {
@@ -151,6 +156,7 @@ impl HostProcess for Socketed {
         kind: FollowKind,
     ) -> Result<Box<dyn Following + 'a>> {
         let c = self.client()?.follow(&here.repository()?, kind)?;
+        self.mode.set(Some(c.named.asked_only));
         Ok(Box::new(Followed(c)))
     }
 

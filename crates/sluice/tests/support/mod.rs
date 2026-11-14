@@ -846,6 +846,7 @@ impl sluice::host_process::HostProcess for FakeProcess {
             version: here.host.version().to_string(),
             pid: std::process::id(),
             since: "2026-11-07T00:00:00Z".into(),
+            asked_only: true,
         };
         Ok(Some((named, view)))
     }

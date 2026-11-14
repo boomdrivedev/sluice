@@ -214,6 +214,7 @@ fn run_holding(paths: Paths, _lock: File) -> Result<i32> {
         version: crate::VERSION.to_string(),
         pid: std::process::id(),
         since: chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
+        asked_only: asked_only(),
     };
     let tmp = paths.dir.join(".version.tmp");
     std::fs::write(&tmp, serde_json::to_vec(&named)?)?;

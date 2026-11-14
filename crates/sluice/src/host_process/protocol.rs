@@ -27,6 +27,10 @@ pub struct Named {
     pub pid: u32,
     /// When it started, RFC 3339.
     pub since: String,
+    /// Whether it passes only when asked (design D14): a follower of it
+    /// asks a pass at each of its own ticks, whatever its own setting.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub asked_only: bool,
 }
 
 /// What follows the host process's passes of a repository (D7, D11).
