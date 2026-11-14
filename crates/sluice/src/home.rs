@@ -65,9 +65,20 @@ pub fn run(
     json: bool,
     out: &mut dyn Write,
 ) -> Result<i32> {
-    let branches = s.overview(host.default_branch()?.as_ref())?;
+    // 129 (design D16): from the reader's document of the host process's
+    // current reading, where its reader keeps its tick; otherwise from the
+    // records as the host holds them, asking no remote.
+    let (branches, room) = match crate::overview::reader_document(host) {
+        Some((branches, doc)) => match serde_json::from_value(doc["room"].clone()) {
+            Ok(room) => (branches, room),
+            Err(_) => (branches, s.room(host.reserved())?),
+        },
+        None => (
+            s.overview(host.default_branch()?.as_ref())?,
+            s.room(host.reserved())?,
+        ),
+    };
     let counts = counts(&branches);
-    let room = s.room(host.reserved())?;
     let held: Vec<String> = branches
         .iter()
         .map(|b| crate::overview::held_back(Some(&room), b))

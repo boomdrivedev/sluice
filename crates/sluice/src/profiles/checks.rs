@@ -280,34 +280,33 @@ impl Checks {
         self
     }
 
-    /// The same profile, counting the host's running checks under `dir`.
+    /// The same profile, counting the host's running checks under `dir`,
+    /// and, where it was bound with no room, holding its runs' parts of a
+    /// room over that count, as the host process holds its own: how a test
+    /// that starts runs in its own process stands for the host process
+    /// (design D12, D14).
     pub fn with_running(mut self, dir: PathBuf) -> Self {
-        self.running = Some(HostCount::new(dir));
+        let count = HostCount::new(dir);
+        if self.room.get().is_none() {
+            let room = Room::over(count.clone(), self.instance.bound, self.instance.reserved);
+            let _ = self.room.set(RoomHandle::Here(Shared::new(room)));
+        }
+        self.running = Some(count);
         self
     }
 
     /// The same profile, holding its runs' parts through `room`: the host
     /// process's own room, in the process that holds it (design D12).
-    pub fn with_room(self, room: RoomHandle) -> Self {
-        let _ = self.room.set(room);
+    pub fn with_room(mut self, room: RoomHandle) -> Self {
+        self.room = std::cell::OnceCell::from(room);
         self
     }
 
-    /// How its runs hold their parts: the handle it was bound with, else a
-    /// room of this process's own over the host's registry, so every
-    /// process on the host counts against one bound.
+    /// How its runs hold their parts: the handle it was bound with, else
+    /// the host process's room over its socket, so no process but the host
+    /// process decides a part by itself (design D12; task 4.2).
     fn room(&self) -> Result<&RoomHandle> {
-        if let Some(r) = self.room.get() {
-            return Ok(r);
-        }
-        let room = Room::over(
-            self.host_count()?,
-            self.instance.bound,
-            self.instance.reserved,
-        );
-        Ok(self
-            .room
-            .get_or_init(|| RoomHandle::Here(Shared::new(room))))
+        Ok(self.room.get_or_init(|| RoomHandle::Socket(None)))
     }
 
     /// The same profile, looking for the container engine at the unix
@@ -391,18 +390,43 @@ impl Checks {
 }
 
 /// How a profile reaches the host's room (design D12): the room itself, in
-/// the process that holds it.
+/// the process that holds it, and the host process's socket in any other.
 #[derive(Clone)]
 pub enum RoomHandle {
     Here(Shared),
+    /// The host process's room, asked over its socket through the client
+    /// given, else the host's own, the process started where none answers
+    /// (task 4.2).
+    Socket(Option<std::sync::Arc<crate::host_process::client::Client>>),
 }
 
 impl RoomHandle {
     /// A part of `kind` for a run of `repository`; `None` where the room
-    /// refuses it.
+    /// refuses it. Over the socket, the room's first answer decides: held,
+    /// the part is the connection, given back as it closes; waiting, the
+    /// room refuses it now and the ask is let go (71).
     fn hold(&self, kind: RunKind, repository: &Path) -> Result<Option<Part>> {
+        use crate::host_process::protocol::Answer;
         match self {
             RoomHandle::Here(shared) => shared.hold(kind, repository),
+            RoomHandle::Socket(client) => {
+                let mut c = match client {
+                    Some(client) => client.hold(kind, repository, "")?,
+                    None => {
+                        crate::host_process::client::Client::host()?.hold(kind, repository, "")?
+                    }
+                };
+                match c.next(Some(crate::host_process::read_for()))? {
+                    Some(Answer::Held) => {
+                        Ok(Some(Part::new(kind, crate::host_process::ask::Lent(c))))
+                    }
+                    Some(Answer::Waiting(_)) | None => Ok(None),
+                    Some(Answer::Error(e)) => Err(anyhow::anyhow!("{e}")),
+                    Some(other) => Err(anyhow::anyhow!(
+                        "sluice's host process answered {other:?} to a hold"
+                    )),
+                }
+            }
         }
     }
 }

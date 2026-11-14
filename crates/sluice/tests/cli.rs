@@ -2803,20 +2803,45 @@ fn watch_of_another_repository_leads() {
     assert_eq!(readers_doc_of(other), Some(doc));
 }
 
-/// 129: a one-shot overview reads the records itself, beside a live
-/// reader or with none, and never takes the reader's place.
+/// 129 (design D16): a one-shot overview beside a reader that keeps its
+/// tick prints that reader's document of its reading, its text rendered
+/// from it as the watch's is, though the host's records hold none of it;
+/// with no reader, the records as the host holds them. It never takes the
+/// reader's place or writes its document.
 #[test]
-fn one_shot_overview_reads_the_records_beside_a_reader() {
+fn a_one_shot_overview_beside_a_reader_prints_its_document() {
     let f = setup();
-    sluice(&f, &["overview", "--json"]);
+    let (_, out) = sluice(&f, &["overview", "--json"]);
+    assert_eq!(json(&out)["branches"], serde_json::json!([]));
     assert!(!readers_file(REPOSITORY, "lock").exists());
-    let doc = seven_testing();
+    let mut doc = seven_testing();
+    doc["tick"] = 3600.into();
     let _reader = reader_of(REPOSITORY, &doc);
     let (code, out) = sluice(&f, &["overview", "--json"]);
     assert_eq!(code, 0, "{out}");
-    assert_eq!(json(&out)["branches"], serde_json::json!([]));
-    let (_, text) = sluice(&f, &["overview"]);
-    assert_eq!(text, "no branch has records here\n");
+    assert_eq!(json(&out), doc);
+    let (code, text) = sluice(&f, &["overview"]);
+    assert_eq!(code, 0, "{text}");
+    assert!(
+        text.starts_with(&format!("{BRANCH} at ")) && text.contains("#7"),
+        "{text}"
+    );
+    assert_eq!(readers_doc(), Some(doc));
+}
+
+/// 129 (design D16): the home view beside a reader that keeps its tick
+/// counts the branches from that reader's document, though the host's
+/// records hold none of it.
+#[test]
+fn the_home_view_beside_a_reader_counts_from_its_document() {
+    let f = setup();
+    assert_eq!(home(&f, "nowhere")["branches"], serde_json::json!([]));
+    let mut doc = seven_testing();
+    doc["tick"] = 3600.into();
+    let _reader = reader_of(REPOSITORY, &doc);
+    let v = home(&f, "nowhere");
+    assert_eq!(v["branches"][0]["branch"], BRANCH, "{v}");
+    assert_eq!(v["branches"][0]["testing"], 1, "{v}");
     assert_eq!(readers_doc(), Some(doc));
 }
 

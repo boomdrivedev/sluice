@@ -294,6 +294,38 @@ fn a_repository_an_older_sluice_run_drives_is_left_to_it() {
     });
 }
 
+/// `host-process`'s "An older sluice run keeps the repository it drives"
+/// (135; design D7, D10): `sluice step` of a repository an older `sluice
+/// run` drives runs no round of it, saying that the older run drives it,
+/// and its submission stays queued for that run.
+#[test]
+fn a_step_of_a_repository_an_older_sluice_run_drives_runs_no_round() {
+    let d = OnDisk::new("host-older-step", POLICY);
+    let id = queued(&d, "a");
+    let a = d.repository(d.repo.dir());
+    let readers = d.state.path().join("sluice/readers");
+    let older = sluice::reader::Driver::take(&readers, &a)
+        .unwrap()
+        .expect("the older run's lock");
+    live_from_here(&d);
+    let out = d
+        .command(d.repo.dir())
+        .args(["step", "main"])
+        .output()
+        .unwrap();
+    assert!(!out.status.success(), "{}", text(&out));
+    assert!(
+        text(&out).contains(&format!(
+            "an older sluice run drives {a}, so sluice's host process runs no round of it while \
+             that run lives"
+        )),
+        "{}",
+        text(&out)
+    );
+    assert_eq!(state(&d, d.repo.dir(), id), "queued", "a is left to it");
+    drop(older);
+}
+
 /// 135 (design D6): the host process ends once its queues are empty and
 /// nothing follows it.
 #[test]
@@ -770,6 +802,28 @@ fn a_wait_follows_the_host_process_and_runs_no_round() {
     );
 }
 
+/// submission-wait, "Out of time as it starts" (1; design D9): beside a
+/// host process that passes on its own tick, a wait's first pass is the
+/// one its follow asked for, whatever its timeout: `--timeout 0s` finds
+/// its submission as that pass left it, under test, never as it was
+/// queued.
+#[test]
+fn a_waits_first_pass_beside_a_live_host_process_is_the_one_it_asked_for() {
+    let slow = "[tests]\nrunner = \"command\"\ncommand = \"sleep 20\"\n\n[branches.main]\ntimeout = \"1m\"\n";
+    let d = OnDisk::new("host-wait-first", slow);
+    let id = queued(&d, "a");
+    live_from_here(&d);
+    let out = d
+        .command(d.repo.dir())
+        .args(["wait", &id.to_string(), "--timeout", "0s", "--json"])
+        .output()
+        .unwrap();
+    assert_eq!(out.status.code(), Some(sluice::WAITING), "{}", text(&out));
+    let doc: serde_json::Value =
+        serde_json::from_slice(&out.stdout).unwrap_or_else(|_| panic!("{}", text(&out)));
+    assert_eq!(doc["state"], "testing", "{doc}");
+}
+
 /// overview-reader, "The host process is killed under a wait": the wait
 /// reaches it again at its next tick, starting it, and reports the outcome
 /// the new one decides (129).
@@ -903,6 +957,53 @@ fn agent(d: &OnDisk, name: &str, script: &str) -> std::process::Child {
         .stderr(std::process::Stdio::piped())
         .spawn()
         .unwrap()
+}
+
+/// Task 3.4 (design D12): a check profile in any process but the host
+/// process holds its runs' parts of the host process's room over its
+/// socket, deciding none by itself: with the host's bound at one, a second
+/// repository's hold is refused while the first holds the run, and held
+/// once the first gives its part back.
+#[test]
+fn a_profile_beside_the_host_process_holds_through_its_socket() {
+    use sluice::profiles::checks::{Checks, RoomHandle};
+    use sluice_seams::{RunKind, Tests};
+    let d = OnDisk::new("host-room-socket", POLICY);
+    bound(&d, 1);
+    let b = d.another("host-room-socket-b", POLICY);
+    let client = std::sync::Arc::new(d.client(d.repo.dir()));
+    let at = |dir: &Path| {
+        Checks::new(
+            Path::new(&d.repository(dir)),
+            std::path::PathBuf::from(env!("CARGO_BIN_EXE_sluice")),
+            sluice::instance::Instance {
+                bound: 1,
+                reserved: 0,
+                processors: 8,
+                forge: None,
+                signing: None,
+                peers: Default::default(),
+                systems: None,
+                caches: Vec::new(),
+                expire_after: sluice_core::EXPIRE_AFTER,
+                telemetry: None,
+            },
+        )
+        .with_room(RoomHandle::Socket(Some(client.clone())))
+    };
+    let (first, second) = (at(d.repo.dir()), at(b.dir()));
+    let part = first
+        .hold(RunKind::Queue)
+        .unwrap()
+        .expect("the host's one run");
+    assert!(
+        second.hold(RunKind::Queue).unwrap().is_none(),
+        "the host's one run is the first repository's"
+    );
+    drop(part);
+    within(10, "the run given back is the second repository's", || {
+        second.hold(RunKind::Queue).unwrap().is_some()
+    });
 }
 
 /// run-bound, "Turns on a bound of two" (150, S75; rule core.49; record

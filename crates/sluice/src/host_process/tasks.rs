@@ -98,6 +98,9 @@ struct Slot {
     id: u64,
     kind: FollowKind,
     tx: Sender<Report>,
+    /// Whether a pass began since it came: it is told only of such passes,
+    /// so its first report is of the pass it asked for (D9).
+    armed: bool,
 }
 
 type Followers = Arc<Mutex<Vec<Slot>>>;
@@ -434,23 +437,29 @@ impl Handle {
         let _ = self.jobs.send(Job::Wake);
     }
 
-    /// Follow the repository's passes while the follower lives.
+    /// Follow the repository's passes while the follower lives, told only
+    /// of passes begun after it came. A wait's or a watch's follow asks a
+    /// pass at once, so its first report is the host process's pass of
+    /// the repository as it stands when it began to follow, whatever its
+    /// timeout (D9); `sluice run` follows the passes as they come.
     pub fn follow(&self, kind: FollowKind) -> Follower {
         let (tx, rx) = mpsc::channel();
         let id = self.tasks.0.next.fetch_add(1, Ordering::SeqCst);
-        locked(&self.followers).push(Slot { id, kind, tx });
-        // Its first tick may be a second rather than three.
-        self.wake_if(kind == FollowKind::Watch);
+        locked(&self.followers).push(Slot {
+            id,
+            kind,
+            tx,
+            armed: false,
+        });
+        // Under passes when asked, its follower asks its own (D14).
+        let asked_only = self.tasks.0.asked_only.load(Ordering::SeqCst);
+        if !asked_only && matches!(kind, FollowKind::Wait | FollowKind::Watch) {
+            self.wake();
+        }
         Follower {
             rx,
             followers: self.followers.clone(),
             id,
-        }
-    }
-
-    fn wake_if(&self, wake: bool) {
-        if wake {
-            self.wake();
         }
     }
 }
@@ -512,9 +521,10 @@ impl Inbox {
         !locked(&self.followers).is_empty()
     }
 
-    /// Tell every follower of `report`.
+    /// Tell every follower that came before the pass began of `report`;
+    /// one that came since waits for the next (D9).
     pub fn tell(&self, report: &Report) {
-        locked(&self.followers).retain(|s| s.tx.send(report.clone()).is_ok());
+        locked(&self.followers).retain(|s| !s.armed || s.tx.send(report.clone()).is_ok());
     }
 
     /// Whether the host process is ending.
@@ -563,6 +573,9 @@ impl Inbox {
 
     /// Its repository's reading begins now: a pass begins (D7, D16).
     pub fn begin_reading(&self) {
+        for s in locked(&self.followers).iter_mut() {
+            s.armed = true;
+        }
         self.tasks.begin_reading(&self.repository);
     }
 
@@ -778,9 +791,19 @@ fn repository(inbox: Inbox, room: Shared, asked_only: bool, named: Named, settin
                 let _ = reply.send(report);
             }
             Some(Job::Step(branch, reply)) => {
-                let _ = reply.send(
-                    pass::step(&s, &*bound.pulls, clock, &branch).map_err(|e| format!("{e:#}")),
-                );
+                // D7: an older `sluice run` that drives the repository keeps
+                // its rounds while it lives, a step's among them.
+                let answer = match task.drives() {
+                    true => {
+                        pass::step(&s, &*bound.pulls, clock, &branch).map_err(|e| format!("{e:#}"))
+                    }
+                    false => Err(format!(
+                        "an older sluice run drives {}, so sluice's host process runs no round of \
+                         it while that run lives",
+                        task.repository
+                    )),
+                };
+                let _ = reply.send(answer);
                 task.in_play = pass::in_play(&s);
             }
             Some(Job::Wake) if !asked_only => {
@@ -848,6 +871,15 @@ impl Task {
         report
     }
 
+    /// Whether it drives the repository, its driver's lock taken where no
+    /// older `sluice run` holds it (D7).
+    fn drives(&mut self) -> bool {
+        if self.driver.is_none() {
+            self.driver = Driver::try_take(&self.readers, &self.repository).unwrap_or(None);
+        }
+        self.driver.is_some()
+    }
+
     /// One pass, as the repository's driver and reader on the host; none
     /// while an older `sluice run` drives it or an older reader reads it,
     /// which it follows (D7).
@@ -858,10 +890,7 @@ impl Task {
         clock: &dyn Clock,
         tick: Duration,
     ) -> Result<Report, String> {
-        if self.driver.is_none() {
-            self.driver = Driver::try_take(&self.readers, &self.repository).unwrap_or(None);
-        }
-        if self.driver.is_none() {
+        if !self.drives() {
             if !self.said_driven {
                 log(&format!(
                     "sluice host: {}: an older sluice run drives it; this process follows it",
@@ -1112,13 +1141,17 @@ mod tests {
         assert!(tasks.read(&repo, tick, within, false).current);
         assert_eq!(looks.load(Ordering::SeqCst), 2);
 
-        // With a task running, its next pass is the reading.
+        // With a task running, its next pass is the reading: a wait's
+        // follow asks a pass of its own first (D9).
         let _held = tasks.handle(&repo).follow(FollowKind::Wait);
+        soon("the follow's own pass", || {
+            passes.load(Ordering::SeqCst) == 1
+        });
         std::thread::sleep(tick);
         let read = tasks.read(&repo, tick, within, false);
         assert!(read.current, "{read:?}");
         assert_eq!(read.refused, None);
-        assert_eq!(passes.load(Ordering::SeqCst), 1);
+        assert_eq!(passes.load(Ordering::SeqCst), 2);
         assert_eq!(looks.load(Ordering::SeqCst), 2);
 
         // Under passes when asked, a look reads, running no pass, though a
@@ -1127,7 +1160,7 @@ mod tests {
         let _task = asked.handle(&repo).follow(FollowKind::Wait);
         let read = asked.read(&repo, tick, within, false);
         assert!(read.current && read.ended.is_some(), "{read:?}");
-        assert_eq!(passes.load(Ordering::SeqCst), 1, "no pass was run");
+        assert_eq!(passes.load(Ordering::SeqCst), 2, "no pass was run");
         assert_eq!(looks.load(Ordering::SeqCst), 3);
         // Asked afresh, it reads again though its reading is current.
         assert!(asked.read(&repo, tick, within, false).current);

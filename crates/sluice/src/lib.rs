@@ -3786,17 +3786,21 @@ fn wait_on(
                 return Ok(undecided(STOPPED, &reading));
             }
         }
-        first = false;
         // 129: what the last read kept by revision and this one does not
         // use is forgotten.
         s.next_pass();
         waiting.host.next_pass();
-        let reports = follower.tick(&here);
+        // D9: its first tick is the pass its follow asked for, ended.
+        let reports = match first {
+            true => follower.first(&here, host_process::read_for()),
+            false => follower.tick(&here),
+        };
         tell_released(&reports, &branch, waiting.json, out)?;
         let failed = reports
             .into_iter()
             .filter_map(|r| r.failed.get(&branch).cloned())
             .next_back();
+        first = false;
         if INTERRUPTED.load(Ordering::SeqCst) {
             return Ok(undecided(STOPPED, &reading));
         }

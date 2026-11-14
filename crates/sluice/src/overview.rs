@@ -237,9 +237,14 @@ pub fn run(
 ) -> Result<i32> {
     if !watch {
         // 129 (design D16): once the host process's reading is current, the
-        // records as the host holds them, asking no remote, and the pull
-        // requests it follows as the host last kept them.
-        let (branches, doc) = document_held(s, host, clock, Follows::Kept(pulls))?;
+        // reader's document of that reading, the text rendered from it as
+        // the watch's is; where no reader keeps its tick, the records as
+        // the host holds them, asking no remote, and the pull requests it
+        // follows as the host last kept them.
+        let (branches, doc) = match reader_document(host) {
+            Some(read) => read,
+            None => document_held(s, host, clock, Follows::Kept(pulls))?,
+        };
         if json {
             writeln!(out, "{}", serde_json::to_string_pretty(&doc)?)?;
         } else {
@@ -268,12 +273,18 @@ pub fn run(
     // changes: what reads the lines finds what happened by comparing
     // `recent`.
     let mut last: Option<serde_json::Value> = None;
+    // D9: its first read is of the host process's pass its follow asked
+    // for, never a document an earlier reader left.
+    let mut first = true;
     // 129: it ends only when stopped, when its output is closed, when its
     // repository is gone, or where the repository has no sluice; anything
     // else that fails is tried again at the next tick, which is its cadence
     // and no retry (rule core.29).
     loop {
-        follower.tick(&here);
+        match std::mem::replace(&mut first, false) {
+            true => follower.first(&here, crate::host_process::read_for()),
+            false => follower.tick(&here),
+        };
         if INTERRUPTED.load(Ordering::SeqCst) {
             return Ok(STOPPED);
         }
@@ -305,6 +316,23 @@ pub fn run(
             return Ok(STOPPED);
         }
     }
+}
+
+/// 129 (design D16): the reader's document of the repository while its
+/// reader keeps its tick, with every branch's part read back from it, as a
+/// one-shot overview and the home view print it; `None` where no reader
+/// keeps its tick, its document is a read it could not make, or a branch's
+/// part cannot be read back.
+pub(crate) fn reader_document(host: &dyn Host) -> Option<(Vec<BranchView>, serde_json::Value)> {
+    let (readers, repository) = (host.readers().ok()?, host.repository().ok()?);
+    let doc =
+        crate::reader::current(&readers, &repository, std::time::SystemTime::now()).ok()??;
+    let branches = doc["branches"]
+        .as_array()?
+        .iter()
+        .map(|b| serde_json::from_value::<BranchView>(b.clone()).ok())
+        .collect::<Option<Vec<_>>>()?;
+    Some((branches, doc))
 }
 
 /// `doc` as a reader writes it: naming its tick, the pause between its

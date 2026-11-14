@@ -334,6 +334,29 @@ impl<'a> Follower<'a> {
         }
     }
 
+    /// The first tick of a wait or a watch: the host process's pass its
+    /// follow asked for, waited for up to `wait`, then any reports after
+    /// it; where passes are taken only when asked, a pass asked first, as
+    /// at every tick (D9, D14). A follow that could not be opened, or that
+    /// tells nothing within `wait`, leaves the follower reading the
+    /// document as it stands.
+    pub fn first(&mut self, here: &Here<'a, '_>, wait: Duration) -> Vec<Report> {
+        if self.process.asked_only() {
+            return self.tick(here);
+        }
+        self.reach(here);
+        let mut reports = Vec::new();
+        if let Some(f) = self.following.as_mut() {
+            match f.next(wait) {
+                Ok(Some(r)) => reports.push(r),
+                Ok(None) => {}
+                Err(_) => self.following = None,
+            }
+        }
+        reports.extend(self.tick(here));
+        reports
+    }
+
     /// One tick: a pass asked first where passes are taken only when
     /// asked; the reports of the passes since the last tick.
     pub fn tick(&mut self, here: &Here<'a, '_>) -> Vec<Report> {
