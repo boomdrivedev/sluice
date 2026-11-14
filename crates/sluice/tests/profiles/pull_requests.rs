@@ -5522,6 +5522,27 @@ fn the_host_that_keeps_main_takes_its_requests_in() {
     assert_eq!(g.of(n).len(), 1, "{}", text(&out));
 }
 
+/// satisfies: 137, record 0093 as amended 2026-11-08, record 0122
+/// (design D8): host c signs as no signer main's policy names, so main does
+/// not accept it: its pass takes none of main's pull requests in, writes
+/// no lead and follows the request as a host that does not keep main;
+/// host a, which main accepts, takes it in at its next pass.
+#[test]
+fn a_host_the_branch_does_not_accept_takes_no_request_in() {
+    let g = OnGitHub::new("intake-unaccepted", "");
+    g.named("a", "");
+    let (n, _) = g.by_hand("unit/unaccepted", &[("u.txt", Some("u\n"))], false);
+    let c = g.other("c", "", "");
+    c.run("1");
+    assert_eq!(g.lead(), None, "c writes no lead");
+    assert!(c.of(n).is_empty(), "c takes nothing in");
+    g.on_main();
+    let out = g.skipping(g.repo.dir(), &["run", "--rounds", "1"]);
+    assert!(out.status.success(), "{}", text(&out));
+    assert_eq!(g.lead().as_deref(), Some("a"), "{}", text(&out));
+    assert_eq!(g.of(n).len(), 1, "{}", text(&out));
+}
+
 /// request-intake-host, "An older mark": a mark an older sluice left on
 /// the remote names host C, and the host that keeps main takes `#12` in
 /// all the same, reading nothing of the mark and fetching it nowhere
