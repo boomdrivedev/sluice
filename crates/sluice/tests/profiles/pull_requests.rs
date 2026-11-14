@@ -5006,8 +5006,10 @@ fn nothing_moved_asks_once_a_minute() {
 
 /// reader-tick, "A branch that takes pull requests between discoveries":
 /// none open and the host's interval a minute, six passes of `sluice run`
-/// within it start git exactly as often as one, and ask GitHub nothing
-/// after the first (129, 136).
+/// within it start git in the run exactly as often as one, and ask GitHub
+/// nothing after the first (129, 136). The passes are the host process's,
+/// which the run follows (135): its starts are counted apart, whichever
+/// command started it.
 #[test]
 fn passes_between_discoveries_start_no_git_and_ask_github_nothing() {
     let g = OnGitHub::new("pr-idle-ticks", "");
@@ -5017,25 +5019,34 @@ fn passes_between_discoveries_start_no_git_and_ask_github_nothing() {
     let run = |rounds: &str| -> (Vec<String>, Vec<(String, String)>) {
         g.discovery_passes();
         let (starts, calls) = (git.count(), g.gh.fake.requests().len());
-        let out = git
+        let child = git
             .on(&mut g.command(env!("CARGO_BIN_EXE_sluice"), g.repo.dir()))
             .env("SLUICE_ROUND_SLEEP", "record")
             .args(["run", "--rounds", rounds])
-            .output()
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
             .unwrap();
+        let pid = child.id();
+        let out = child.wait_with_output().unwrap();
         assert!(out.status.success(), "{}", text(&out));
         let asked = g.gh.fake.requests()[calls..]
             .iter()
             .map(|r| (r.method.clone(), r.path.clone()))
             .collect();
-        (git.starts()[starts..].to_vec(), asked)
+        let own = git.parented()[starts..]
+            .iter()
+            .filter(|(parent, _)| *parent == pid)
+            .map(|(_, args)| args.clone())
+            .collect();
+        (own, asked)
     };
     run("1");
     let lists = g.lists();
     let (one, asked_one) = run("1");
     let (six, asked_six) = run("6");
-    // The passes are the host process's, which the run follows: six of
-    // them start no git in the run beyond what one does (129, 135).
+    // Six of the host process's passes start no git in the run beyond
+    // what one does (129, 135).
     let fetches = |s: &[String]| s.iter().filter(|a| a.contains(" fetch ")).count();
     assert_eq!(six.len(), one.len(), "one: {one:?}; six: {six:?}");
     assert_eq!(fetches(&six), fetches(&one), "{six:?}");
