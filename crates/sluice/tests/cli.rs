@@ -2870,6 +2870,10 @@ fn followed_wait_reports_its_landing() {
     let reader = RefCell::new(reader_of(REPOSITORY, &json(&queued)));
     let between = |n: usize| {
         if n == 3 {
+            // The reader's rounds land it, and its document says so.
+            for _ in 0..8 {
+                f.sluice().step(BRANCH).unwrap();
+            }
             let (_, now) = sluice(&f, &["overview", "--json"]);
             let now = json(&now);
             assert_eq!(now["branches"][0]["submissions"], serde_json::json!([]));
@@ -2883,7 +2887,7 @@ fn followed_wait_reports_its_landing() {
     };
     let (code, out) = sluice_with(&f, &pause, &["wait", "1"]);
     assert_eq!(code, LANDED, "{out}");
-    // It waited on the document, whatever its own rounds had done.
+    // It waited on the document, and ran no round of its own.
     assert_eq!(pause.n.get(), 3, "{out}");
     let tip = f.world.tip(BRANCH);
     assert!(
@@ -6304,67 +6308,35 @@ impl Pause for Unpaused {
     }
 }
 
-/// 134: a round whose call the forge could not answer for the retry
-/// policy's time, so that its seam answers 5xx once the policy is spent,
-/// ends `sluice wait` and a waiting submit at once: each says it could not
-/// read, on stderr with how long and the forge's words and on stdout with
-/// how to wait again, and exits 3, no outcome. The wait never reads again
-/// of its own (rule core.29); nothing was decided of the submission, which
-/// lands once the forge answers.
+/// 134, 133 (design D9): a round of the host process's whose call the
+/// forge could not answer for the retry policy's time is said once on
+/// stderr, in its words, and `sluice wait` goes on following: the round
+/// after lands the submission, and the wait reports it, exit 0.
 #[test]
-fn a_wait_whose_round_the_forge_could_not_answer_says_it_could_not_read() {
-    const TEST: &str = "a_wait_whose_round_the_forge_could_not_answer_says_it_could_not_read";
+fn a_round_the_forge_could_not_answer_is_said_once_and_the_wait_goes_on() {
+    const TEST: &str = "a_round_the_forge_could_not_answer_is_said_once_and_the_wait_goes_on";
     if let Some(err) = stderr_of(TEST) {
         let said: Vec<&str> = err
             .lines()
-            .filter(|l| l.starts_with("sluice: could not read #"))
+            .filter(|l| l.starts_with(&format!("sluice: {BRANCH}: ")))
             .collect();
-        assert_eq!(said.len(), 3, "{err}");
-        for line in said {
-            assert!(
-                line.contains(" for 0s, so whether it landed is not known: starting a run in ")
-                    && line.ends_with(": 503 Service Unavailable"),
-                "{err}"
-            );
-        }
+        assert_eq!(said.len(), 1, "{err}");
+        assert!(said[0].ends_with(": 503 Service Unavailable"), "{err}");
+        assert!(!err.contains("could not read #"), "{err}");
         return;
     }
     let f = setup();
     work(&f, "unit/a", "agent-a", &[("plugin/a", Some("a"))]);
     sluice(&f, &["submit", BRANCH, "--worktree", "unit/a", "--no-wait"]);
     f.world.unanswer_starts(1);
-    let (code, out) = sluice_with(&f, &Unpaused, &["wait", "1"]);
-    assert_eq!(code, sluice::INTERNAL, "{out}");
-    assert!(out.ends_with("could not read #1: sluice wait 1\n"), "{out}");
+    let stop = Then(Cell::new(0), |n| n < 40);
+    let (code, out) = sluice_with(&f, &stop, &["wait", "1"]);
+    assert_eq!(code, LANDED, "{out}");
+    let tip = f.world.tip(BRANCH);
     assert!(
-        !out.contains("landed as") && !out.contains("failed"),
+        out.ends_with(&format!("passed · landed as {}\n", &tip.0[..7])),
         "{out}"
     );
-
-    f.world.unanswer_starts(1);
-    let (code, out) = sluice_with(&f, &Unpaused, &["wait", "1", "--json"]);
-    assert_eq!(code, sluice::INTERNAL, "{out}");
-    let v = json(&out);
-    assert_eq!(v["error"]["kind"], "internal");
-    assert_eq!(v["error"]["next"], serde_json::json!(["sluice wait 1"]));
-    let message = v["error"]["message"].as_str().unwrap();
-    assert!(
-        message.starts_with("could not read #1 for 0s, so whether it landed is not known: "),
-        "{message}"
-    );
-    assert!(message.ends_with(": 503 Service Unavailable"), "{message}");
-    let (_, out) = sluice(&f, &["status", "1", "--json"]);
-    assert_ne!(json(&out)["state"], "failed");
-
-    work(&f, "unit/b", "agent-b", &[("plugin/b", Some("b"))]);
-    f.world.unanswer_starts(1);
-    let (code, out) = sluice_with(&f, &Unpaused, &["submit", BRANCH, "--worktree", "unit/b"]);
-    assert_eq!(code, sluice::INTERNAL, "{out}");
-    assert!(out.ends_with("could not read #2: sluice wait 2\n"), "{out}");
-
-    assert_eq!(sluice(&f, &["wait", "2"]).0, LANDED);
-    let (_, out) = sluice(&f, &["status", "1", "--json"]);
-    assert_eq!(json(&out)["state"], "landed");
 }
 
 /// 134: Ctrl-C while a wait's call to a remote is between tries ends the
@@ -7377,8 +7349,8 @@ fn status_and_overview_show_a_hold_while_it_lasts() {
             // D13 (51; record 0102): #1's landing, which nobody confirmed.
             "OWED".to_string(),
             "  unit/a · never confirmed".to_string(),
-            "    1:landed #1  owed until 2026-10-18T09:00:12Z · handed over by notice at \
-             2026-10-11T09:00:16Z, wait at 2026-10-11T09:00:19Z"
+            "    1:landed #1  owed until 2026-10-18T09:00:10Z · handed over by notice at \
+             2026-10-11T09:00:14Z, wait at 2026-10-11T09:00:17Z"
                 .to_string(),
             "confirm one with: sluice confirm <key>, in its worktree, or sluice confirm <key> \
              --as operator"
@@ -7517,16 +7489,14 @@ fn a_release_failing_after_the_landing_leaves_it_landed() {
     assert!(f.world.live_places().is_empty());
 }
 
-/// 122: pushing the outcome fails after the landing, in the round
-/// `sluice wait` ran: landed, exit 0, and the push's failure on stderr.
+/// 122 (rule core.48; design D9): pushing the outcome fails after the
+/// landing, in the host process's round `sluice wait` follows: landed,
+/// exit 0, and nothing said of what failed after it, which is the host
+/// process's.
 #[test]
 fn a_push_failing_after_the_landing_leaves_it_landed() {
     if let Some(err) = stderr_of("a_push_failing_after_the_landing_leaves_it_landed") {
-        assert_eq!(
-            after_the_landing(&err),
-            ["sluice: after the landing: crashed after delivering 1:landed"],
-            "{err}"
-        );
+        assert!(after_the_landing(&err).is_empty(), "{err}");
         return;
     }
     let f = setup();
@@ -7567,13 +7537,14 @@ fn a_landing_whose_release_fails_is_one_document_under_json() {
     assert_eq!(v["landed_as"], f.world.tip(BRANCH).0);
 }
 
-/// 122, 24: the round a waiting submit ran moves the branch and fails
-/// writing that it landed: the submission is reported landed as the
-/// landing's commit, and the next round records it so.
+/// 122, 24 (design D9): the host process's round a waiting submit follows
+/// moves the branch and fails writing that it landed: the submission is
+/// reported landed as the landing's commit, and the next round records it
+/// so.
 #[test]
 fn a_landing_the_round_did_not_record_is_reported_landed() {
     if let Some(err) = stderr_of("a_landing_the_round_did_not_record_is_reported_landed") {
-        assert_eq!(after_the_landing(&err).len(), 1, "{err}");
+        assert!(after_the_landing(&err).is_empty(), "{err}");
         return;
     }
     let f = setup();
@@ -7613,10 +7584,23 @@ fn a_landing_the_round_did_not_record_is_reported_landed() {
     );
 }
 
-/// 122: a round that fails before the branch moved is sluice failing
-/// itself, as before: the submission is not reported landed.
+/// 122 (design D9): a round of the host process's that fails before the
+/// branch moved is said once on stderr, in its words, and the waiting
+/// submit goes on: the submission is not reported landed by it, and the
+/// round after, finishing the landing, lands it.
 #[test]
-fn a_round_failing_before_the_landing_is_an_error() {
+fn a_round_failing_before_the_landing_is_said_and_the_wait_goes_on() {
+    const TEST: &str = "a_round_failing_before_the_landing_is_said_and_the_wait_goes_on";
+    if let Some(err) = stderr_of(TEST) {
+        let said = err
+            .lines()
+            .filter(|l| {
+                l.starts_with(&format!("sluice: {BRANCH}: ")) && l.contains("crashed before moving")
+            })
+            .count();
+        assert_eq!(said, 1, "{err}");
+        return;
+    }
     let f = setup();
     work(&f, "unit/a", "agent-a", &[("plugin/a", Some("a"))]);
     let between = |n: usize| {
@@ -7629,15 +7613,11 @@ fn a_round_failing_before_the_landing_is_an_error() {
         rounds: 5,
         between: &between,
     };
-    let cli = Cli::try_parse_from(["sluice", "submit", BRANCH, "--worktree", "unit/a"]).unwrap();
-    let mut out = Vec::new();
-    let host = support::FakeHost::new(f.world.clone(), 0);
-    let e = run(cli, f.seams(), &host, &(), &(), &f.clock, &pause, &mut out).unwrap_err();
-    assert!(format!("{e:#}").contains("crashed before moving"), "{e:#}");
-    let out = String::from_utf8(out).unwrap();
-    assert!(!out.contains("landed as"), "{out}");
+    let (code, out) = sluice_with(&f, &pause, &["submit", BRANCH, "--worktree", "unit/a"]);
+    assert_eq!(code, LANDED, "{out}");
+    assert_eq!(out.matches("landed as").count(), 1, "{out}");
     let (_, out) = sluice(&f, &["status", "1", "--json"]);
-    assert_eq!(json(&out)["state"], "landing");
+    assert_eq!(json(&out)["state"], "landed");
 }
 
 // ---------------------------------------------------------------------------
@@ -9620,7 +9600,8 @@ mod number_on_two_branches {
     }
 
     /// 26, record 0114: a wait given the branch follows that branch's
-    /// submission to its landing, and leaves the other queued.
+    /// submission to its landing, never the other's, which the host
+    /// process moves as its own (135).
     #[test]
     fn a_wait_given_the_branch_follows_it_to_its_landing() {
         let f = both_queued();
@@ -9631,7 +9612,7 @@ mod number_on_two_branches {
             (v["id"].clone(), v["branch"].clone(), v["state"].clone()),
             (26.into(), B.into(), "landed".into())
         );
-        assert_eq!(on(&f, A)["state"], "queued");
+        assert_eq!(on(&f, A)["branch"], A);
     }
 
     /// 26, record 0114: given the branch, a command reads it alone, and
@@ -9850,8 +9831,8 @@ mod number_on_two_branches {
     }
 
     /// Record 0114: a waiting submit given a number another branch holds
-    /// follows its own branch's submission to its landing, and leaves the
-    /// other queued.
+    /// follows its own branch's submission to its landing, never the
+    /// other's, which the host process moves as its own (135).
     #[test]
     fn a_waiting_submit_follows_its_own_branch_to_its_landing() {
         let f = setup();
@@ -9871,7 +9852,7 @@ mod number_on_two_branches {
             (1.into(), B.into(), "landed".into())
         );
         let (_, out) = sluice(&f, &["status", "1", "--branch", A, "--json"]);
-        assert_eq!(json(&out)["state"], "queued", "{out}");
+        assert_eq!(json(&out)["branch"], A, "{out}");
     }
 
     /// Record 0114: a command given the branch names it in every command
