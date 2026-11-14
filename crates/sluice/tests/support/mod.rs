@@ -157,7 +157,8 @@ impl Drop for Scratch {
 }
 
 /// A git that counts its starts (129): a directory holding a `git` script
-/// that appends its arguments, one line per start, to a log, then runs the
+/// that appends the pid of the process that started it and its arguments,
+/// one line per start, to a log, then runs the
 /// git found on the path when it was made, by its absolute path. A test
 /// puts the directory first on the path of the sluice it starts, and
 /// every other isolation stays.
@@ -178,7 +179,7 @@ impl CountingGit {
         std::fs::write(
             &script,
             format!(
-                "#!/bin/sh\nprintf '%s\\n' \"$*\" >> '{}'\nexec '{}' \"$@\"\n",
+                "#!/bin/sh\nprintf '%s\\t%s\\n' \"$PPID\" \"$*\" >> '{}'\nexec '{}' \"$@\"\n",
                 scratch.path().join("log").display(),
                 real.display()
             ),
@@ -206,10 +207,19 @@ impl CountingGit {
 
     /// Each start so far, its arguments as one line.
     pub fn starts(&self) -> Vec<String> {
+        self.parented().into_iter().map(|(_, args)| args).collect()
+    }
+
+    /// Each start so far: the pid of the process that started it, and its
+    /// arguments as one line.
+    pub fn parented(&self) -> Vec<(u32, String)> {
         std::fs::read_to_string(self.scratch.path().join("log"))
             .unwrap_or_default()
             .lines()
-            .map(str::to_string)
+            .map(|l| match l.split_once('\t') {
+                Some((pid, args)) => (pid.parse().unwrap_or(0), args.to_string()),
+                None => (0, l.to_string()),
+            })
             .collect()
     }
 

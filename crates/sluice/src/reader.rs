@@ -339,6 +339,18 @@ impl Lead {
 }
 
 impl Follow {
+    /// A follower of `repository`'s reader among the readers in `dir`,
+    /// which never takes the reader's lock or its lease: a watch's or a
+    /// wait's, sluice's host process being the reader (129, 135; rule
+    /// core.25).
+    pub fn of(dir: &Path, repository: &str, version: &str) -> Follow {
+        Follow {
+            files: Files::of(dir, repository),
+            version: version.to_string(),
+            lease: None,
+        }
+    }
+
     /// The reader's document; `None` while there is no whole one, as when
     /// the reader has only just started.
     pub fn read(&self) -> Option<Value> {

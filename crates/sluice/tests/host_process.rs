@@ -730,3 +730,117 @@ fn a_run_holds_nothing_of_the_command_that_started_the_host_process() {
     let cwd = String::from_utf8_lossy(&cwd.stdout);
     assert!(cwd.lines().any(|l| l == "n/"), "{cwd}");
 }
+
+/// What a round of a combination's runs git for: its checkout, its
+/// landing's commit and the branch's move.
+fn a_rounds(args: &str) -> bool {
+    ["worktree add", "commit-tree", "update-ref", "merge-tree"]
+        .iter()
+        .any(|r| args.contains(r))
+}
+
+/// submission-wait, "It lands": the wait follows the host process, which
+/// runs the rounds; the wait runs none (135, 129; rule core.31; design D9).
+#[test]
+fn a_wait_follows_the_host_process_and_runs_no_round() {
+    let d = OnDisk::new("host-wait-follows", POLICY);
+    let id = queued(&d, "a");
+    let host = answering(&d).expect("the host process the submit started");
+    let child = d
+        .command(d.repo.dir())
+        .env("SLUICE_ROUND_SLEEP", "record")
+        .args(["wait", &id.to_string()])
+        .stdout(std::process::Stdio::piped())
+        .spawn()
+        .unwrap();
+    let wait = child.id();
+    let out = child.wait_with_output().unwrap();
+    assert!(out.status.success(), "{}", text(&out));
+    assert!(text(&out).contains("passed · landed as "), "{}", text(&out));
+    let starts = d.git.parented();
+    let own: Vec<&String> = starts
+        .iter()
+        .filter(|(p, args)| *p == wait && a_rounds(args))
+        .map(|(_, a)| a)
+        .collect();
+    assert!(own.is_empty(), "the wait ran a round: {own:?}");
+    assert!(
+        starts.iter().any(|(p, args)| *p == host && a_rounds(args)),
+        "the host process ran them: {starts:?}"
+    );
+}
+
+/// overview-reader, "The host process is killed under a wait": the wait
+/// reaches it again at its next tick, starting it, and reports the outcome
+/// the new one decides (129).
+#[test]
+fn a_wait_starts_a_killed_host_process_again() {
+    let slow = "[tests]\nrunner = \"command\"\ncommand = \"sleep 3\"\n\n[branches.main]\ntimeout = \"1m\"\n";
+    let d = OnDisk::new("host-wait-killed", slow);
+    let id = queued(&d, "a");
+    let first = answering(&d).expect("the host process the submit started");
+    let child = d
+        .command(d.repo.dir())
+        .env("SLUICE_ROUND_SLEEP", "record")
+        .args(["wait", &id.to_string()])
+        .stdout(std::process::Stdio::piped())
+        .spawn()
+        .unwrap();
+    within(30, "the combination is under test", || {
+        state(&d, d.repo.dir(), id) == "testing"
+    });
+    kill(first);
+    let out = child.wait_with_output().unwrap();
+    assert!(out.status.success(), "{}", text(&out));
+    assert!(text(&out).contains("passed · landed as "), "{}", text(&out));
+    let again = answering(&d);
+    assert!(again.is_none_or(|p| p != first), "{again:?}");
+}
+
+/// submission-wait, "The branch cannot be read for a while": a round of
+/// the host process's that fails is said once on stderr in its words, and
+/// the wait goes on to the landing (133; design D9).
+#[test]
+fn a_wait_says_a_rounds_failure_once_and_goes_on() {
+    use std::io::Read;
+    let d = OnDisk::new("host-wait-fails", POLICY);
+    let id = queued(&d, "a");
+    let by_hand = |content: &str| {
+        d.repo.write(".config/sluice.toml", content);
+        d.repo.git(&[
+            "-c",
+            "core.hooksPath=/dev/null",
+            "commit",
+            "-q",
+            "-am",
+            "the policy by hand",
+        ]);
+    };
+    by_hand(&format!("{POLICY}bogus = 1\n"));
+    let mut child = d
+        .command(d.repo.dir())
+        .env("SLUICE_ROUND_SLEEP", "record")
+        .args(["wait", &id.to_string()])
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .unwrap();
+    let mut stderr = child.stderr.take().unwrap();
+    let said = std::thread::spawn(move || {
+        let mut all = String::new();
+        let _ = stderr.read_to_string(&mut all);
+        all
+    });
+    // Its rounds fail with the same words for a while.
+    std::thread::sleep(Duration::from_secs(3));
+    by_hand(POLICY);
+    let out = child.wait_with_output().unwrap();
+    let err = said.join().unwrap();
+    assert!(out.status.success(), "{}{err}", text(&out));
+    assert!(text(&out).contains("passed · landed as "), "{}", text(&out));
+    let failures = err
+        .lines()
+        .filter(|l| l.starts_with("sluice: main: main's policy: "))
+        .count();
+    assert_eq!(failures, 1, "{err}");
+}
