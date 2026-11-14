@@ -1441,6 +1441,9 @@ pub fn run(
         clock,
     };
     let Some(command) = cli.command else {
+        // 135 (design D15): the host process, started where work is in play
+        // and none answers.
+        host_process::ask::reach_if_in_play(&here);
         return home::run(&s, host, &cli.worktree, cli.json, out);
     };
     // 135 (design D4): the repository, where it has sluice, listed for the
@@ -1450,6 +1453,14 @@ pub fn run(
         Command::Exec { .. } | Command::Preview { .. } | Command::Equip { .. }
     ) {
         host_process::ask::note(&here);
+    }
+    // 135 (design D15): a status or a one-shot overview reaches the host
+    // process, starting it where work is in play and none answers.
+    if matches!(
+        command,
+        Command::Status { .. } | Command::Overview { watch: false, .. }
+    ) {
+        host_process::ask::reach_if_in_play(&here);
     }
     // 135 (design D15): what changes a queue tells the host process,
     // starting it where none answers.

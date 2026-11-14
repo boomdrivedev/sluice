@@ -992,6 +992,48 @@ fn an_agents_check_stopped_while_it_waits_is_counted_nowhere() {
     }
 }
 
+/// `sluice status main` through the binary, the host process it may start
+/// passing at its own tick.
+fn status_live(d: &OnDisk) {
+    let out = d
+        .command(d.repo.dir())
+        .args(["status", "main"])
+        .output()
+        .unwrap();
+    assert!(out.status.success(), "{}", text(&out));
+}
+
+/// host-process, "Killed while a combination is under test" (135, S10): a
+/// run outlives the host process killed under it; the one a status starts
+/// reads its result from the run, runs no check again, and lands it.
+#[test]
+fn a_killed_host_process_loses_nothing() {
+    let marks = support::Scratch::new("host-killed-marks");
+    let ran = marks.path().join("ran");
+    let done = marks.path().join("done");
+    let policy = format!(
+        "[tests]\nrunner = \"command\"\ncommand = \"echo run >> '{}'; sleep 3; touch '{}'\"\n\n[branches.main]\ntimeout = \"1m\"\n",
+        ran.display(),
+        done.display()
+    );
+    let d = OnDisk::new("host-killed-run", &policy);
+    let dir = d.session("a");
+    let id = queued_live(&d, &dir);
+    within(30, "the combination's checks run", || ran.exists());
+    // Once its round has recorded the run started: a run marked starting
+    // that a stopped round left is opened again (S10).
+    std::thread::sleep(Duration::from_secs(1));
+    kill(answering(&d).expect("the host process runs"));
+    within(30, "the checks end, outliving it", || done.exists());
+    within(10, "it is gone", || answering(&d).is_none());
+    status_live(&d);
+    within(60, "the submission lands", || {
+        state(&d, d.repo.dir(), id) == "landed"
+    });
+    let runs = std::fs::read_to_string(&ran).unwrap();
+    assert_eq!(runs.lines().count(), 1, "no check ran again: {runs}");
+}
+
 /// host-process, "The overview names the host process and the runs
 /// waiting" (150; design D12): `host_process` is the process that answers,
 /// its version, pid and start, and null where none answers.
