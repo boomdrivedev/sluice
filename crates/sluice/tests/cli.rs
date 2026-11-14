@@ -4415,6 +4415,58 @@ fn exec_waits_for_a_combinations_run() {
     );
 }
 
+/// host-process, "A session's check waits behind a combination" (150;
+/// design D12): the overview's room names the runs waiting by kind and
+/// whose turn the next contested run is, and its host process; `sluice
+/// status` with no target says the same room.
+#[test]
+fn the_overview_names_the_runs_waiting_and_the_turn() {
+    let f = one_queued();
+    f.world.host_limit(1);
+    f.world.hold_runs(true);
+    sluice(&f, &["step", BRANCH]);
+    assert_eq!(f.world.started().len(), 1, "the combination's run holds it");
+    work(
+        &f,
+        "unit/a",
+        "agent-a",
+        &[("plugin/lib/plan.py", Some("p2"))],
+    );
+    let seen = RefCell::new(None);
+    let said = RefCell::new(String::new());
+    let pause = Then(Cell::new(0), |n| {
+        match n {
+            1 => {
+                *seen.borrow_mut() = Some(overview_doc(&f, 0));
+                *said.borrow_mut() = sluice(&f, &["status"]).1;
+            }
+            2 => {
+                f.world.hold_runs(false);
+                f.world.complete_all();
+                sluice(&f, &["step", BRANCH]);
+            }
+            _ => {}
+        }
+        true
+    });
+    let (code, out) = exec_with(&f, 0, &pause, &[BRANCH, "--worktree", "unit/a"]);
+    assert_eq!(code, LANDED, "{out}");
+    let doc = seen.into_inner().expect("read while the check waited");
+    assert_eq!(
+        doc["room"]["waiting"],
+        serde_json::json!({ "queue": 0, "sessions": 1 }),
+        "{doc}"
+    );
+    assert_eq!(doc["room"]["turn"], "queue", "{doc}");
+    assert_eq!(doc["host_process"]["pid"], std::process::id(), "{doc}");
+    assert_eq!(doc["host_process"]["version"], sluice::VERSION, "{doc}");
+    let said = said.into_inner();
+    assert!(
+        said.contains("host: 1 of 1 runs · 1 queue · waiting: 1 agent\n"),
+        "{said}"
+    );
+}
+
 /// 71: a start the check seam refuses at the host's bound, another
 /// repository's run having taken the last one after the count was read,
 /// waits as one the count refused, says so once, and starts on the next

@@ -98,6 +98,7 @@ fn document_held(
     }
     let previews: Vec<serde_json::Value> = s.previews()?.iter().map(preview_json).collect();
     let hosts = s.hosts()?;
+    let (room, process) = room_and_process(s, host, clock)?;
     let doc = serde_json::json!({
         "schema": OVERVIEW_SCHEMA,
         "host": host.name(),
@@ -107,9 +108,89 @@ fn document_held(
         "sessions": sessions,
         "previews": previews,
         "hosts": hosts,
-        "room": s.room(host.reserved())?,
+        "room": room,
+        "host_process": process,
     });
     Ok((branches, doc))
+}
+
+/// 71, 150 (record 0123; design D12, D13): the host's room as the overview
+/// gives it, the runs waiting by kind, whose turn the next contested run
+/// is and each repository's runs under test and waiting beside the count,
+/// and sluice's host process, `{version, pid, since}`, both read from the
+/// host process where one answers: where none does, nothing waits and the
+/// process is `null`.
+pub(crate) fn room_and_process(
+    s: &Sluice<'_>,
+    host: &dyn Host,
+    clock: &dyn Clock,
+) -> Result<(serde_json::Value, serde_json::Value)> {
+    let mut room = serde_json::to_value(s.room(host.reserved())?)?;
+    let here = crate::host_process::Here {
+        s,
+        host,
+        pulls: &(),
+        clock,
+    };
+    let answered = host.host_process().room(&here).unwrap_or(None);
+    Ok(match answered {
+        Some((named, view)) => {
+            room["waiting"] = serde_json::to_value(view.waiting)?;
+            room["turn"] = serde_json::to_value(view.turn)?;
+            room["repositories"] = serde_json::to_value(&view.repositories)?;
+            let process = serde_json::json!({
+                "version": named.version,
+                "pid": named.pid,
+                "since": named.since,
+            });
+            (room, process)
+        }
+        None => {
+            room["waiting"] = serde_json::json!({ "queue": 0, "sessions": 0 });
+            room["turn"] = "queue".into();
+            room["repositories"] = serde_json::json!({});
+            (room, serde_json::Value::Null)
+        }
+    })
+}
+
+/// The host's room on one line, as the overview, the home view and
+/// `sluice status` say it, from the room as the overview gives it; `None`
+/// while nothing runs or waits.
+pub(crate) fn room_line(room: &serde_json::Value) -> Option<String> {
+    let n = |v: &serde_json::Value| v.as_u64().unwrap_or(0);
+    let (queue, sessions) = (n(&room["queue"]), n(&room["sessions"]));
+    let waiting = &room["waiting"];
+    let (wq, ws) = (n(&waiting["queue"]), n(&waiting["sessions"]));
+    if queue + sessions + wq + ws == 0 {
+        return None;
+    }
+    let mut line = format!("host: {} of {} runs", queue + sessions, n(&room["bound"]));
+    if queue > 0 {
+        line.push_str(&format!(" · {queue} queue"));
+    }
+    match sessions {
+        0 => {}
+        1 => line.push_str(" · 1 agent"),
+        n => line.push_str(&format!(" · {n} agents")),
+    }
+    if wq + ws > 0 {
+        let mut waits = Vec::new();
+        if wq > 0 {
+            waits.push(format!(
+                "{wq} combination{}",
+                if wq == 1 { "" } else { "s" }
+            ));
+        }
+        if ws > 0 {
+            waits.push(format!("{ws} agent{}", if ws == 1 { "" } else { "s" }));
+        }
+        line.push_str(&format!(" · waiting: {}", waits.join(", ")));
+        if room["turn"] == "sessions" {
+            line.push_str(" · an agent's next");
+        }
+    }
+    Some(line)
 }
 
 /// 137, design D5: each branch's pull requests the host follows and
@@ -415,16 +496,7 @@ fn write_overview(
             run["started"].as_str().unwrap_or("")
         )?;
     }
-    if let Some(r) = room.filter(|r| r.queue + r.sessions > 0) {
-        let mut line = format!("host: {} of {} runs", r.queue + r.sessions, r.bound);
-        if r.queue > 0 {
-            line.push_str(&format!(" · {} queue", r.queue));
-        }
-        match r.sessions {
-            0 => {}
-            1 => line.push_str(" · 1 agent"),
-            n => line.push_str(&format!(" · {n} agents")),
-        }
+    if let Some(line) = room_line(&doc["room"]) {
         writeln!(out, "{line}")?;
     }
     let held = sessions.iter().filter(|w| w.get("ports").is_some()).count();

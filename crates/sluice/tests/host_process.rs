@@ -991,3 +991,39 @@ fn an_agents_check_stopped_while_it_waits_is_counted_nowhere() {
         assert!(out.status.success(), "{}", text(&out));
     }
 }
+
+/// host-process, "The overview names the host process and the runs
+/// waiting" (150; design D12): `host_process` is the process that answers,
+/// its version, pid and start, and null where none answers.
+#[test]
+fn the_overview_names_the_host_process() {
+    let d = OnDisk::new("host-overview", POLICY);
+    let overview = |d: &OnDisk| {
+        let out = d
+            .command(d.repo.dir())
+            .env("SLUICE_ROUND_SLEEP", "record")
+            .args(["overview", "--json"])
+            .output()
+            .unwrap();
+        assert!(out.status.success(), "{}", text(&out));
+        serde_json::from_slice::<serde_json::Value>(&out.stdout).unwrap()
+    };
+    assert_eq!(overview(&d)["host_process"], serde_json::Value::Null);
+    let repository = d.repository(d.repo.dir());
+    let follow = d
+        .client(d.repo.dir())
+        .follow(Path::new(&repository), FollowKind::Wait)
+        .unwrap();
+    let doc = overview(&d);
+    assert_eq!(doc["host_process"]["pid"], follow.named.pid, "{doc}");
+    assert_eq!(doc["host_process"]["version"], sluice::VERSION, "{doc}");
+    assert!(doc["host_process"]["since"].is_string(), "{doc}");
+    assert_eq!(
+        doc["room"]["waiting"],
+        serde_json::json!({ "queue": 0, "sessions": 0 }),
+        "{doc}"
+    );
+    assert_eq!(doc["room"]["turn"], "queue", "{doc}");
+    // The host's name stays where it was.
+    assert!(doc["host"].is_string(), "{doc}");
+}

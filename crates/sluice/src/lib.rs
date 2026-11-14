@@ -1769,17 +1769,24 @@ pub fn run(
         } => {
             let places = s.session_places()?;
             let held = s.held()?;
+            // 71, 150 (design D12): the host's room, as the overview has it.
+            let (room, process) = overview::room_and_process(&s, host, clock)?;
             if json {
                 writeln!(
                     out,
                     "{}",
                     serde_json::to_string_pretty(&serde_json::json!({
                         "worktrees": sessions_json(&places, &held),
+                        "room": room,
+                        "host_process": process,
                     }))?
                 )?;
             } else {
                 write_worktrees(&places, out)?;
                 write_held(&held, out)?;
+                if let Some(line) = overview::room_line(&room) {
+                    writeln!(out, "{line}")?;
+                }
             }
             Ok(0)
         }
