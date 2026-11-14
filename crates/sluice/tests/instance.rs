@@ -452,16 +452,27 @@ mod bound {
         (s, file)
     }
 
-    /// The settings-take-up spec's "The bound grows while a run is kept
-    /// running", "The first run keeps its cores" and "The run says what it
-    /// took up" (135; record 0107; rule core.54): the bound written from
-    /// one to two while the first combination's run goes is taken up before
-    /// the next pass, whose run starts beside the first with half the
-    /// cores, while the first keeps all of them; both land, and the take-up
-    /// is said once. Each run holds for up to four passes, so the second
-    /// starts beside the first even on a loaded host.
+    /// What sluice's host process said in `s`'s state, its log and the
+    /// log of the process before it.
+    fn host_log(s: &Setup) -> String {
+        let host = s.state.path().join("sluice/host");
+        ["log.1", "log"]
+            .iter()
+            .map(|f| std::fs::read_to_string(host.join(f)).unwrap_or_default())
+            .collect()
+    }
+
+    /// The settings-take-up spec's "The bound grows while the host process
+    /// runs", "The first run keeps its cores" and "The host process says
+    /// what it took up" (135; record 0107; rule core.54; design D19): the
+    /// bound written from one to two while the first combination's run
+    /// goes is taken up by sluice's host process between its passes, and
+    /// its next pass's run starts beside the first with half the cores,
+    /// while the first keeps all of them; both land, and the take-up is
+    /// said once in its log. Each run holds for up to twelve seconds, so
+    /// the second starts beside the first even on a loaded host.
     #[test]
-    fn a_run_takes_up_a_changed_bound_at_its_next_pass() {
+    fn the_host_process_takes_up_a_changed_bound_at_its_next_pass() {
         let seen = Scratch::new("instance-take-up-seen");
         let (s, file) = two_queued("take-up", |file| {
             check_writing(seen.path(), file, &["[runs]", "max = 2"], 60)
@@ -476,21 +487,22 @@ mod bound {
         assert!(out.status.success(), "{said}");
 
         let processors = std::thread::available_parallelism().map_or(1, |n| n.get());
+        let log = host_log(&s);
         assert_eq!(
             starts(seen.path()),
             [(1, processors), (2, (processors / 2).max(1))],
-            "{said}"
+            "{said}{log}"
         );
-        assert_eq!(states(&s, "bolt/a"), ["landed", "landed"], "{said}");
+        assert_eq!(states(&s, "bolt/a"), ["landed", "landed"], "{said}{log}");
         let took = format!(
             "sluice: took up the host's settings in {}: [runs] changed",
             file.display()
         );
-        assert_eq!(said.matches(&took).count(), 1, "{said}");
+        assert_eq!(log.matches(&took).count(), 1, "{log}");
         assert_eq!(
-            said.matches("took up the host's settings in").count(),
+            log.matches("took up the host's settings in").count(),
             1,
-            "{said}"
+            "{log}"
         );
     }
 

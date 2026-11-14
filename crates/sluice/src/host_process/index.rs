@@ -129,14 +129,17 @@ pub fn has_sluice(repository: &Path) -> Result<bool> {
 /// last fetched. A repository whose directory is gone has none. The ask is
 /// a round's, which passes a spent allowance by rather than waiting it out
 /// (rule core.29).
-pub fn in_play(repository: &Path) -> Result<super::tasks::Looked> {
+pub fn in_play(
+    repository: &Path,
+    instance: crate::instance::Instance,
+) -> Result<super::tasks::Looked> {
     if !repository.is_dir() {
         return Ok(super::tasks::Looked::default());
     }
     let bound = Bound::open_with(
         repository,
         std::env::current_exe()?,
-        crate::instance::Instance::from_file(None, 1)?,
+        instance,
         Rc::new(crate::retry::Policy::round().recording_where_set()),
     )?;
     // A refusal leaves the branches as last fetched, as a pass's ask does,

@@ -38,11 +38,13 @@ use std::io::{BufReader, ErrorKind, Read};
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
-use std::sync::Arc;
+use std::sync::{mpsc, Arc};
 use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result};
 
+use crate::exec::Host;
+use crate::host_settings::{HostSettings, Look};
 use crate::instance::Instance;
 use crate::profiles::places::{repository_key, user_scratch, USER_SCRATCH_VAR};
 pub use ask::{Following, Here, Holding, Holds, HostProcess, Socketed};
@@ -195,6 +197,9 @@ pub(crate) struct Hosting {
     /// Its folder, `host/`, as it found it when it started: the device and
     /// inode, so a folder made again at that path is not its own.
     pub folder: (u64, u64),
+    /// The host's settings it holds, which every binding it makes is of
+    /// (record 0107; design D19).
+    pub settings: Arc<tasks::Settings>,
 }
 
 impl Hosting {
@@ -247,16 +252,21 @@ fn run_holding(paths: Paths, _lock: File) -> Result<i32> {
             .with_context(|| format!("reading {}", paths.dir.display()))?;
         (m.dev(), m.ino())
     };
-    let instance = Instance::read()?;
+    // Record 0107 (design D19): the host's settings, held with the sign of
+    // their file, which it looks at between its ticks.
+    let host_settings = HostSettings::read()?;
+    let instance = host_settings.held().clone();
+    let settings = tasks::Settings::new(instance.clone());
     let room = Shared::new(Room::over(
         crate::host_count::HostCount::host()?,
         instance.bound,
         instance.reserved,
     ));
+    let looked_with = settings.clone();
     let tasks = tasks::Tasks::new(
-        tasks::repository_body(room.clone(), asked_only(), named.clone()),
-        Arc::new(|r: &Path| {
-            index::in_play(r).unwrap_or(tasks::Looked {
+        tasks::repository_body(room.clone(), asked_only(), named.clone(), settings.clone()),
+        Arc::new(move |r: &Path| {
+            index::in_play(r, looked_with.instance()).unwrap_or(tasks::Looked {
                 in_play: true,
                 refused: None,
             })
@@ -277,6 +287,7 @@ fn run_holding(paths: Paths, _lock: File) -> Result<i32> {
         connections: AtomicUsize::new(0),
         stopping: AtomicBool::new(false),
         folder,
+        settings,
     });
     log(&format!(
         "sluice host {} started, pid {}{}",
@@ -305,7 +316,7 @@ fn run_holding(paths: Paths, _lock: File) -> Result<i32> {
     for repository in index.list().unwrap_or_default() {
         hosting.tasks.look(&repository);
     }
-    let code = serve(&hosting, &listener);
+    let code = serve(&hosting, &listener, TakeUp::new(host_settings));
     let _ = std::fs::remove_file(&hosting.paths.socket);
     log(&format!("sluice host {} ends", hosting.named.pid));
     code
@@ -329,9 +340,133 @@ fn take_log(paths: &Paths) -> Result<()> {
     Ok(())
 }
 
+/// How often it looks at the host's settings file's sign (record 0107;
+/// design D19): its entries alone, no process started and no git read
+/// (rule core.31).
+const SETTINGS_LOOK: Duration = Duration::from_secs(1);
+
+/// The host's settings as its main loop looks at them, and a change being
+/// bound on a thread of its own (record 0107; rule core.54; design D19).
+struct TakeUp {
+    settings: HostSettings,
+    looked: Instant,
+    /// A change being bound: its settings, the tables it moves, and the
+    /// answer of the thread binding it.
+    binding: Option<(
+        Instance,
+        Vec<&'static str>,
+        mpsc::Receiver<Result<(), String>>,
+    )>,
+}
+
+impl TakeUp {
+    fn new(settings: HostSettings) -> TakeUp {
+        TakeUp {
+            settings,
+            looked: Instant::now(),
+            binding: None,
+        }
+    }
+
+    /// The settings file, as its log names it.
+    fn file(&self) -> String {
+        self.settings
+            .path()
+            .map(|p| p.display().to_string())
+            .unwrap_or_default()
+    }
+
+    /// Between ticks, never within a pass: a change found bound on a
+    /// thread of its own against the repositories it holds, the host's
+    /// systems checked, then held for every task's next pass and the
+    /// room's next admission, said once in its log. A file gone,
+    /// unreadable or refused, or settings that do not bind, leave it on
+    /// what it holds, said once by the sign kept (design D19).
+    fn look(&mut self, hosting: &Hosting) {
+        if let Some((_, _, answer)) = &self.binding {
+            let bound = match answer.try_recv() {
+                Ok(bound) => bound,
+                Err(mpsc::TryRecvError::Empty) => return,
+                Err(mpsc::TryRecvError::Disconnected) => {
+                    Err("binding them stopped short".to_string())
+                }
+            };
+            let (instance, tables, _) = self.binding.take().expect("a change being bound");
+            match bound {
+                Ok(()) => {
+                    hosting
+                        .room
+                        .lock()
+                        .bounds(instance.bound, instance.reserved);
+                    hosting.settings.take_up(instance.clone());
+                    self.settings.accept(instance);
+                    log(&format!(
+                        "sluice: took up the host's settings in {}: {} changed",
+                        self.file(),
+                        tables.join(", ")
+                    ));
+                }
+                Err(why) => self.refused(&why),
+            }
+            return;
+        }
+        if self.looked.elapsed() < SETTINGS_LOOK {
+            return;
+        }
+        self.looked = Instant::now();
+        match self.settings.look() {
+            Look::Same => {}
+            Look::Refused(why) => self.refused(&why),
+            Look::Changed(instance, _text) => {
+                let tables = self.settings.held().changed_tables(&instance);
+                let mut repositories = hosting.tasks.held();
+                if repositories.is_empty() {
+                    repositories = hosting.paths.index().list().unwrap_or_default();
+                }
+                let (tx, rx) = mpsc::channel();
+                let checked = instance.clone();
+                std::thread::spawn(move || {
+                    let _ = tx.send(binds(&checked, &repositories).map_err(|e| format!("{e:#}")));
+                });
+                self.binding = Some((instance, tables, rx));
+            }
+        }
+    }
+
+    fn refused(&self, why: &str) {
+        log(&format!(
+            "sluice: warning: {} is refused, so the host process keeps the settings it holds \
+             until the file changes: {why}",
+            self.file()
+        ));
+    }
+}
+
+/// Whether `instance` binds: sluice's identity on the forge where it names
+/// one, and each of `repositories` bound with it, the host's systems
+/// checked against its policies (87; design D19).
+fn binds(instance: &Instance, repositories: &[PathBuf]) -> Result<()> {
+    let retry = std::rc::Rc::new(crate::retry::Policy::round().recording_where_set());
+    if let Some(forge) = &instance.forge {
+        crate::profiles::github::App::open(forge, retry.clone())?;
+    }
+    for r in repositories {
+        let bound = crate::profiles::Bound::open_with(
+            &tasks::open_dir(r),
+            std::env::current_exe()?,
+            instance.clone(),
+            retry.clone(),
+        )?;
+        sluice_core::Sluice::new(bound.seams(), &sluice_core::SystemClock)
+            .as_peer(bound.peer())
+            .check_host_systems()?;
+    }
+    Ok(())
+}
+
 /// Accept connections, each answered on a thread of its own, until the
-/// process should end (design D6, D8).
-fn serve(hosting: &Arc<Hosting>, listener: &UnixListener) -> Result<i32> {
+/// process should end (design D6, D8, D19).
+fn serve(hosting: &Arc<Hosting>, listener: &UnixListener, mut take_up: TakeUp) -> Result<i32> {
     let mut looked = Instant::now();
     let mut scanned = Instant::now();
     loop {
@@ -349,6 +484,7 @@ fn serve(hosting: &Arc<Hosting>, listener: &UnixListener) -> Result<i32> {
             hosting.stopping.store(true, Ordering::SeqCst);
         }
         if !hosting.stopping.load(Ordering::SeqCst) {
+            take_up.look(hosting);
             hosting.tasks.tick();
             // D13: a run that ended since the last look frees its part for
             // the repository it is owed to.
@@ -531,7 +667,7 @@ fn answer(hosting: &Arc<Hosting>, stream: UnixStream) -> Result<()> {
             branch,
             wants,
         } => {
-            let answer = match results_of(&repository, &branch, &wants) {
+            let answer = match results_of(hosting, &repository, &branch, &wants) {
                 Ok(lines) => Answer::Results(String::from_utf8_lossy(&lines).into_owned()),
                 Err(e) => Answer::Error(format!("{e:#}")),
             };
@@ -553,9 +689,16 @@ fn answer(hosting: &Arc<Hosting>, stream: UnixStream) -> Result<()> {
 /// from the host process's index, on the connection's own thread and with
 /// no wait on the repository's task: its binding reads every remote as the
 /// last ask fetched it (design D17).
-fn results_of(repository: &Path, branch: &str, ask: &sluice_seams::ResultAsk) -> Result<Vec<u8>> {
-    let bound = crate::profiles::Bound::open(
+fn results_of(
+    hosting: &Hosting,
+    repository: &Path,
+    branch: &str,
+    ask: &sluice_seams::ResultAsk,
+) -> Result<Vec<u8>> {
+    let bound = crate::profiles::Bound::open_with(
         &tasks::open_dir(repository),
+        std::env::current_exe()?,
+        hosting.settings.instance(),
         std::rc::Rc::new(crate::retry::Policy::round().recording_where_set()),
     )?;
     let state = bound

@@ -26,6 +26,7 @@ use super::pass::{self, Kept, Report};
 use super::protocol::{FollowKind, Named, Reading};
 use super::room::Shared;
 use crate::exec::Host;
+use crate::instance::Instance;
 use crate::profiles::checks::RoomHandle;
 use crate::profiles::Bound;
 use crate::reader::{Driver, Drives, Reader};
@@ -366,6 +367,11 @@ impl Tasks {
         }
     }
 
+    /// The repositories a task runs for.
+    pub fn held(&self) -> Vec<PathBuf> {
+        locked(&self.0.running).keys().cloned().collect()
+    }
+
     /// Whether any task runs, one that panicked waits to start again, or
     /// the look is reading a repository.
     pub fn any(&self) -> bool {
@@ -561,11 +567,62 @@ impl Inbox {
     }
 }
 
+/// The host's settings as the host process holds them, and how many
+/// changes of them it took up: each repository's task binds afresh at the
+/// start of its next pass once the count moves, so no pass runs under two
+/// settings (135; record 0107; rules core.14, core.54; design D19).
+pub struct Settings {
+    taken: AtomicU64,
+    instance: Mutex<Instance>,
+}
+
+impl Settings {
+    pub fn new(instance: Instance) -> Arc<Settings> {
+        Arc::new(Settings {
+            taken: AtomicU64::new(0),
+            instance: Mutex::new(instance),
+        })
+    }
+
+    /// How many changes were taken up, and the settings held now.
+    pub fn current(&self) -> (u64, Instance) {
+        let instance = locked(&self.instance);
+        (self.taken.load(Ordering::SeqCst), instance.clone())
+    }
+
+    /// The settings held now.
+    pub fn instance(&self) -> Instance {
+        locked(&self.instance).clone()
+    }
+
+    /// Hold `instance`, a change taken up, which every task binds at the
+    /// start of its next pass.
+    pub fn take_up(&self, instance: Instance) {
+        let mut held = locked(&self.instance);
+        *held = instance;
+        self.taken.fetch_add(1, Ordering::SeqCst);
+    }
+}
+
 /// The body of a repository's task in the host process: its own binding,
-/// holding its parts of `room`, passing at its tick or, when `asked_only`,
-/// at each ask (design D5, D14).
-pub fn repository_body(room: Shared, asked_only: bool, named: Named) -> Body {
-    Arc::new(move |inbox: Inbox| repository(inbox, room.clone(), asked_only, named.clone()))
+/// of the host's settings as `settings` holds them, holding its parts of
+/// `room`, passing at its tick or, when `asked_only`, at each ask (design
+/// D5, D14, D19).
+pub fn repository_body(
+    room: Shared,
+    asked_only: bool,
+    named: Named,
+    settings: Arc<Settings>,
+) -> Body {
+    Arc::new(move |inbox: Inbox| {
+        repository(
+            inbox,
+            room.clone(),
+            asked_only,
+            named.clone(),
+            settings.clone(),
+        )
+    })
 }
 
 /// The folder a repository is bound from: its main worktree where its
@@ -584,12 +641,32 @@ fn tick(watched: bool) -> Duration {
     Duration::from_secs(if watched { 1 } else { 3 })
 }
 
-fn repository(inbox: Inbox, room: Shared, asked_only: bool, named: Named) {
+fn repository(inbox: Inbox, room: Shared, asked_only: bool, named: Named, settings: Arc<Settings>) {
     let common = inbox.repository.clone();
-    let bound = match Bound::open(
-        &open_dir(&common),
-        Rc::new(crate::retry::Policy::round().recording_where_set()),
-    ) {
+    // Its binding, of the settings `instance`: its parts held of the
+    // host's room, its results from the host process's index (design D12,
+    // D17).
+    let bind = |instance: Instance| -> anyhow::Result<Bound> {
+        let bound = Bound::open_with(
+            &open_dir(&common),
+            std::env::current_exe()?,
+            instance,
+            Rc::new(crate::retry::Policy::round().recording_where_set()),
+        )?;
+        Ok(Bound {
+            tests: bound.tests.with_room(RoomHandle::Here(room.clone())),
+            state: bound
+                .state
+                .reading_results(crate::profiles::records::ResultsFrom::Indexed),
+            host_process: Box::new(Inside {
+                room: room.clone(),
+                named: named.clone(),
+            }),
+            ..bound
+        })
+    };
+    let (mut taken, instance) = settings.current();
+    let mut bound = match bind(instance) {
         Ok(b) => b,
         Err(e) => {
             inbox.refuse(format!(
@@ -599,26 +676,15 @@ fn repository(inbox: Inbox, room: Shared, asked_only: bool, named: Named) {
             return;
         }
     };
-    let bound = Bound {
-        tests: bound.tests.with_room(RoomHandle::Here(room.clone())),
-        // Design D17: results from the host process's index.
-        state: bound
-            .state
-            .reading_results(crate::profiles::records::ResultsFrom::Indexed),
-        host_process: Box::new(Inside { room, named }),
-        ..bound
-    };
     // In a test's host process, a pass's time moves on by its tick as a
     // waiting command's does (design D14).
     let skipped = Skipped::new(tick(false));
     let clock: &dyn Clock = if asked_only { &skipped } else { &SystemClock };
-    // 129: each policy read, by revision, kept across the task's passes.
-    let policies = sluice_core::Policies::default();
-    let s = Sluice::new(bound.seams(), clock)
-        .as_peer(bound.peer())
-        .keeping(&policies);
+    // 129: each policy read, by revision, kept across the task's passes,
+    // and read once more under a binding made afresh (record 0107).
+    let mut policies = sluice_core::Policies::default();
     // 87: a host whose config names a system it is not claims no run here.
-    if let Err(e) = s.check_host_systems() {
+    if let Err(e) = sluice_of(&bound, &policies, clock).check_host_systems() {
         inbox.refuse(format!(
             "sluice host: {}: {e:#}; this host claims no run of it",
             common.display()
@@ -634,7 +700,7 @@ fn repository(inbox: Inbox, room: Shared, asked_only: bool, named: Named) {
         driver: None,
         reader: None,
         kept: Kept::default(),
-        in_play: pass::in_play(&s),
+        in_play: pass::in_play(&sluice_of(&bound, &policies, clock)),
         said_driven: false,
         readers,
         repository,
@@ -662,6 +728,37 @@ fn repository(inbox: Inbox, room: Shared, asked_only: bool, named: Named) {
         };
         let job = pending.take().or_else(|| inbox.next(wait));
         let due = !asked_only && last.is_none_or(|at| at.elapsed() >= every);
+        // D19: a pass, or a step, under settings the host process took up
+        // since this binding was made binds afresh first, its reader's
+        // lock, followers and parts kept, as `Task` and the room hold
+        // them. Settings that do not bind here leave it on its binding.
+        let passes = match &job {
+            Some(Job::Pass(_)) | Some(Job::Step(..)) => true,
+            Some(Job::Wake) => !asked_only,
+            None => due,
+        };
+        if passes {
+            let (now, instance) = settings.current();
+            if now != taken {
+                taken = now;
+                let fresh = bind(instance).and_then(|b| {
+                    sluice_of(&b, &sluice_core::Policies::default(), clock).check_host_systems()?;
+                    Ok(b)
+                });
+                match fresh {
+                    Ok(b) => {
+                        bound = b;
+                        policies = sluice_core::Policies::default();
+                    }
+                    Err(e) => log(&format!(
+                        "sluice host: {}: the host's settings taken up do not bind here, so it \
+                         keeps the settings it held: {e:#}",
+                        common.display()
+                    )),
+                }
+            }
+        }
+        let s = sluice_of(&bound, &policies, clock);
         match job {
             Some(Job::Pass(reply)) => {
                 let report = task.read(&inbox, &s, &bound, clock, every);
@@ -695,6 +792,7 @@ fn repository(inbox: Inbox, room: Shared, asked_only: bool, named: Named) {
             }
             None => {}
         }
+        drop(s);
         if !task.in_play && !inbox.followed() {
             match inbox.end_if_idle() {
                 Ok(()) => return,
@@ -702,6 +800,17 @@ fn repository(inbox: Inbox, room: Shared, asked_only: bool, named: Named) {
             }
         }
     }
+}
+
+/// A sluice over `bound`, as this host's peer, keeping `policies`.
+fn sluice_of<'a>(
+    bound: &'a Bound,
+    policies: &'a sluice_core::Policies,
+    clock: &'a dyn Clock,
+) -> Sluice<'a> {
+    Sluice::new(bound.seams(), clock)
+        .as_peer(bound.peer())
+        .keeping(policies)
 }
 
 /// What a repository's task holds between its passes.
