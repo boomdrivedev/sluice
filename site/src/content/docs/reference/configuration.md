@@ -168,7 +168,7 @@ share as [`[[caches]]`](#caches). The caches an earlier sluice saved in
 | key | values | meaning |
 |---|---|---|
 | `ports` | e.g. `["web", "db"]` | A port for each name, held for the checkout on this host and checked free, given to the tests as `SLUICE_PORT_WEB`, `SLUICE_PORT_DB` ([ADR 0016](/sluice/decisions/0016/)). An agent's worktree gets its ports on its first `sluice exec` and keeps them until `sluice release`. A preview gets a name for each as well, `SLUICE_NAME_WEB`. |
-| `ports_from` | a port, default `20000` | Where the blocks of ports begin. |
+| `ports_from` | a port, default `20000` | Where a checkout's ports are taken from: the lowest run of as many ports as `ports` names from here in which no port is held by another checkout on the host and each is free. A checkout keeps the ports it was given; a change here counts for checkouts made after it. |
 
 ## `[executor]`: what the tests may touch
 

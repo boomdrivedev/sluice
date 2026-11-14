@@ -34,9 +34,9 @@ readable with plain tools whether or not sluice is running.
                        what they couldn't read, since when, for how many rounds,
                        and which of it the log holds yet
   .places/<checkout>.json
-                       a checkout's record: its kind, path, branch, ports, the
-                       block of ports it holds on the host and, for a
-                       worktree, when its last run started and how it ended
+                       a checkout's record: its kind, path, branch, the ports
+                       it holds on the host, each name and its port, and, for
+                       a worktree, when its last run started and how it ended
   .places/<checkout>/  a candidate's checkout, made for its run and removed after
   .previews/<preview>.json
                        a preview's record: its branch, revision, ports, names,
@@ -147,7 +147,8 @@ every repository on the host and never pushed:
                        last of them to end removes the mark
   forge/intake/<owner>/<repository>/<branch>.waits/.lock
                        held while a wait's hold is made or let go
-  ports/<n>            a block of ports, naming the checkout that holds it
+  ports/.lock          held while a port is held or let go
+  ports/held/<port>    a port a checkout holds, naming the checkout's record
   readers/<repository>.lock
                        held by the repository's `sluice run`, or else by the
                        first watch or wait of it, for as long as it runs
@@ -204,7 +205,12 @@ this host takes it in. Nothing in `forge/` holds a token,
 and any file in it may be removed at any time: sluice then asks GitHub
 as if it had kept nothing.
 
-A block of ports is free again when the checkout named in it is gone.
+A port is free again when the checkout whose record its file names is
+gone, and a release lets go of each port its checkout's record names. A
+checkout's ports are taken when it is made, or a worktree's at its first
+run, and read from its record ever after, whatever its policy lists
+later. Files `ports/<n>`, which an earlier sluice held, are read by
+nothing and may be removed once no earlier sluice runs on the host.
 A file in `running/` counts against the bound while its `.hold` is held
 or its run is going. One whose run has ended, or whose starter stopped
 before the run began, holds nothing: the next run that starts removes
