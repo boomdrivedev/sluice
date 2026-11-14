@@ -9,29 +9,34 @@ running (72 to 74, 111).
 ## Requirements
 
 ### Requirement: A host keeps a branch only by writing its state
-Only the host named as the branch's lead in its state SHALL advance the
-branch. A host SHALL become the lead by a write to the branch's state
-naming it, and SHALL stop advancing the branch as soon as a write of its
-own is refused and the state it reads names another lead (72, 58).
+Only the host named as the branch's lead in its state SHALL advance a
+branch whose home is its remote. A host SHALL become the lead by a write
+to the branch's state naming it, SHALL keep it only by writing the
+branch's state, and SHALL stop advancing the branch as soon as a write of
+its own is refused and the state it reads names another lead (72, 58).
 
 #### Scenario: The former lead stops after a takeover
 - **WHEN** host B takes `main` from host A, and host A then tries to write `main`'s state
 - **THEN** host A's write is refused, host A reads host B as the lead, and host A advances `main` no more
 
 ### Requirement: Another host takes a branch after the lease
-A host with work to do on a branch SHALL take it once it has itself seen
-the branch's state unchanged for the lease. It SHALL measure the lease
-on its own clock from when it first read that version, never from a
-time another host wrote, and SHALL treat a stopped lead and a quiet one
-alike (73).
+A host with work to do on a branch, and whose signature the branch
+accepts, SHALL take it once it has itself seen the branch's state
+unchanged for the lease. It SHALL measure the lease on its own clock from
+when it first read that version, never from a time another host wrote,
+and SHALL treat a stopped lead and a quiet one alike (73, 137).
 
 #### Scenario: A lead that went quiet
-- **WHEN** `main`'s lead is alive but has written nothing for longer than the lease, and host B has a submission waiting on `main`
+- **WHEN** `main`'s lead is alive but has written nothing for longer than the lease, and host B, signing as a signer `main` trusts with a key its policy lists, has a submission waiting on `main`
 - **THEN** host B takes `main` and advances it
 
 #### Scenario: Clocks that disagree
 - **WHEN** host A's clock is an hour ahead of host B's
 - **THEN** host B takes `main` exactly one lease after it first saw `main`'s current version, whatever times host A wrote
+
+#### Scenario: A lead the branch no longer accepts
+- **WHEN** `main`'s lead is host A, a landing drops A's key from `main`'s policy, and host B, which `main` accepts, has a submission waiting
+- **THEN** host A writes nothing more as `main`'s lead, and host B takes `main` once it has seen the state stand for the lease
 
 ### Requirement: The lease and the sign-of-life bound are the host's settings
 The lease and the bound on a host's sign of life SHALL be set in the
@@ -79,3 +84,44 @@ reads it to advance the branch (59).
 #### Scenario: The wake is lost
 - **WHEN** a submission's wake fails to reach any host or pool
 - **THEN** the submission stays queued in `main`'s state, and the next `sluice run` or waiting `sluice submit` that reads `main` advances it
+
+### Requirement: A host whose signature the branch does not accept leads none of its rounds
+On a branch whose home is its remote and whose policy at its revision
+names signers, a host SHALL take or keep the lead only where that policy
+names the signer it signs as among those the gate trusts and lists the
+key it signs with. Any other host SHALL never write itself as the lead,
+SHALL take none of the branch's pull requests in and claim none of its
+runs, and SHALL submit and leave the queue to a host the branch accepts
+(137; record 0093 as amended 2026-11-08; 58, 72).
+
+#### Scenario: A session host submits to a bolt held on origin
+- **WHEN** `bolt/x`'s home is origin, its policy trusts only `box`, host S signs as no one, and S submits to `bolt/x` while no host leads it
+- **THEN** S writes its submission and no lead, S's rounds of `bolt/x` are led, and a host signing as `box` with its key listed takes the lead at its next round and tests the submission
+
+#### Scenario: A host with an unlisted key
+- **WHEN** host K signs as `box` with a key `bolt/x`'s policy does not list, and `bolt/x`'s lead has been quiet for longer than the lease
+- **THEN** K does not take `bolt/x`, and takes none of its pull requests in
+
+### Requirement: Any host may lead a remote home whose policy names no signer
+A remote home whose branch's policy at its revision names no signer
+SHALL be open to the lead of any host, one at a time through the lease,
+so its queue is carried home (queue-home; 72, 73).
+
+#### Scenario: A bolt whose signers went
+- **WHEN** `bolt/x`'s home is origin, a landing brings a policy naming no signers, and host S, which signs as no one, steps `bolt/x` while no host leads it
+- **THEN** S takes the lead of `bolt/x` and writes its move home
+
+### Requirement: The lead writes at least once a lease while a run is live
+While any run of a branch whose home is its remote is claimed or under
+test, or open on a combination under test, its lead SHALL write the
+branch's state at least once a lease, so no other host's lease passes
+while the lead is alive. A branch with no such run SHALL be written by
+its lead only for what its rounds change (72, 58).
+
+#### Scenario: A run longer than the lease
+- **WHEN** host A leads `bolt/x`, a combination's run on `bolt/x` takes 25 minutes against a five-minute lease, and host B, which `bolt/x` accepts, steps `bolt/x` every minute meanwhile
+- **THEN** B never takes `bolt/x`, the run's claim stands, and A lands the combination once its run passes
+
+#### Scenario: Nothing live
+- **WHEN** host A leads `bolt/x` and no run of it is claimed, under test or open
+- **THEN** A's rounds write nothing that changes nothing

@@ -9,13 +9,16 @@ them has to be running for the others to go on (80,
 ## Requirements
 
 ### Requirement: A policy with signers keeps a remote branch's state on the remote
-A branch whose policy names a `remote`, in a policy with a `[signers]`
-table, SHALL keep its state on that remote under `refs/sluice/`. A
-branch with no `remote`, or in a policy with no `[signers]`, SHALL keep
-its state in the host's own files exactly as today.
+A branch whose queue has no home, and whose policy at its head names a
+`remote` in a policy with a `[signers]` table, SHALL have its home on
+that remote, its state kept under `refs/sluice/`. A branch with no
+`remote`, or in a policy with no `[signers]`, SHALL have its home in the
+host's own files. Once a branch has a home, the home its records name
+SHALL be where its state is kept, whatever a later policy names, until a
+move takes it elsewhere (queue-home; record 0122).
 
 #### Scenario: Signers move the state to the remote
-- **WHEN** a policy has `[signers.box]` and `[branches.main] remote = "origin"`, and a submission is made to `main`
+- **WHEN** a policy has `[signers.box]` and `[branches.main] remote = "origin"`, `main` has no home yet, and a submission is made to `main`
 - **THEN** origin holds `refs/sluice/state/main`, and the host's own state files for `main` are not written
 
 #### Scenario: No signers, no change
@@ -85,16 +88,6 @@ not be refreshed.
 #### Scenario: The remote is unreachable
 - **WHEN** the remote cannot be reached
 - **THEN** `sluice status main` shows the state last fetched and says it could not refresh it
-
-### Requirement: Moving a branch's state to the remote keeps its queue
-When a branch's state first moves to the remote, the first host to lead
-it SHALL push its own queued submissions as the starting state. Every
-other host SHALL submit its own queued submissions again under new ids,
-and `sluice status` with an old id SHALL name the new one.
-
-#### Scenario: Two hosts each had a queue
-- **WHEN** hosts A and B each had submissions queued on `main` in their own files, and a landing adds `[signers]` to the policy
-- **THEN** every submission of both hosts is queued in `refs/sluice/state/main`, and `sluice status` on host B with an old id names its new id
 
 ### Requirement: A round that read the state last fetched advances nothing
 When a round's read of a branch's state on its remote could not be
