@@ -13,6 +13,8 @@ Status: accepted on 2026-11-12 by agentplot-design. It is the design agent's own
 
 Its half on a branch coming home is carried out by record 0122's move between homes, and its own unit is not built.
 
+Its routing half is replaced by record 0122, as built on 2026-11-14: a branch is routed by the home its records name in `home.json`, read by every process, and by the policy at its head only where no home holds its records anywhere.
+
 Sources: the statement's C.6, as amended on agentplot/blueprints's branch `design/sluice-a-branch-comes-home-when-its-signers-go` (`38b00d5`); record 0037; `crates/sluice/src/profiles/branches.rs` `policy_of` and `routing`, `crates/sluice/src/profiles/records.rs` `route`, `lock` and `migrate`, at `v0.78.1` and `a9edcd90`; agentplot-ops's and wldn-ops's readings of switchboard-kit on chuck-herdr-alpha, 2026-11-12.
 
 ## Context and problem statement
