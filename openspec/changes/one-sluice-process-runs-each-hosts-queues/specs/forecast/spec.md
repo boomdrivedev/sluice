@@ -7,18 +7,13 @@
 
 ### Requirement: A forecast with no current reader has the host process read
 
-Where no reader keeps its tick, or the reader's last read does not hold
-the branch read whole or a revision the forecast forms from, a forecast
-SHALL ask the host process for a current reading, starting it where none
+Where no reader keeps its tick, or its last read lacks the branch or a
+revision the forecast forms from, a forecast SHALL ask the host process for a current reading, starting it where none
 answers, and form on every branch as the host holds it since. Where the
 host still lacks a revision it forms from, it SHALL ask for a reading
-afresh once. A branch of which that reading, current and refused by no
-remote, brings no revision to the host, at its own ref or a remote's,
-SHALL be no branch, refused as a forecast refuses one with exit 2. What
-is still missing otherwise, work queued on the branch, a combination
-formed on it, or a branch where the reading was not current or a remote
-refused it, SHALL be said as a read it could not make, exit 3. It SHALL
-fetch nothing itself (64, 129; record 0093 as amended 2026-11-13).
+afresh once, and say what is still missing as a read it could not make,
+exit 3. It SHALL fetch nothing itself (64, 129; record 0093 as amended
+2026-11-13).
 
 #### Scenario: No reader on the host
 
@@ -41,14 +36,6 @@ fetch nothing itself (64, 129; record 0093 as amended 2026-11-13).
 - **THEN** `sluice submit main --check` forms on `main` and its records
   as the host holds them since the host process's reading, and fetches
   nothing itself
-
-#### Scenario: No such branch once the reading is current
-
-- **WHEN** the host process's reading afresh is current, and the host
-  holds no revision of `bolt/gone` at any ref
-- **THEN** `sluice submit main --check --head bolt/gone --json` prints an
-  error document whose message is `no branch bolt/gone to forecast`, and
-  exits 2
 
 #### Scenario: Work still missing after the reading afresh
 
@@ -80,3 +67,27 @@ as none (64, 129).
 #### Scenario: A reader in a slow read
 - **WHEN** the reader's last read ended a second before its next began, and that next read has run for twenty seconds
 - **THEN** a forecast takes the branch from the last read and fetches nothing
+
+## ADDED Requirements
+
+### Requirement: A branch a current reading brings no revision of is no branch
+
+A forecast whose reading afresh is current, refused by no remote, and
+brings no revision of the branch, or of `--head`'s branch, to the host,
+at its own ref or a remote's, SHALL refuse that branch as no branch,
+exit 2, as a forecast refuses a branch that does not exist (64).
+
+#### Scenario: No such branch once the reading is current
+
+- **WHEN** the host process's reading afresh is current, and the host
+  holds no revision of `bolt/gone` at any ref
+- **THEN** `sluice submit main --check --head bolt/gone --json` prints an
+  error document whose message is `no branch bolt/gone to forecast`, and
+  exits 2
+
+#### Scenario: A remote refused the reading
+
+- **WHEN** the host process's reading afresh could not ask `main`'s
+  remote, and the host holds no revision of `bolt/y` at any ref
+- **THEN** `sluice submit main --check --head bolt/y` says it could not
+  read what a forecast of `main` forms from, naming `bolt/y`, and exits 3
