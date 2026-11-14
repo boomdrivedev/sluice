@@ -74,6 +74,8 @@ pub type InPlay = Arc<dyn Fn(&Path) -> Looked + Send + Sync>;
 struct Marks {
     began: Option<Instant>,
     ended: Option<Instant>,
+    /// When the reading that last ended began.
+    ended_began: Option<Instant>,
     ended_at: Option<String>,
     refused: Option<String>,
     /// Whether the look made the last reading, which writes no reader's
@@ -98,6 +100,16 @@ impl Marks {
             (_, Some(e)) => now.saturating_duration_since(e) < tick,
             _ => false,
         }
+    }
+
+    /// Whether the reading that last ended ended at or after `asked` and
+    /// began after a command last told of a change, so it reads that
+    /// change (D15, D16).
+    fn read_since(&self, asked: Instant) -> bool {
+        self.ended.is_some_and(|e| e >= asked)
+            && self
+                .told
+                .is_none_or(|t| self.ended_began.is_some_and(|b| b >= t))
     }
 
     fn answer(&self, current: bool) -> Reading {
@@ -306,6 +318,7 @@ impl Tasks {
         let mut readings = locked(&self.0.readings);
         let marks = readings.entry(repository.to_path_buf()).or_default();
         marks.ended = Some(Instant::now());
+        marks.ended_began = marks.began;
         marks.ended_at =
             Some(chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true));
         marks.refused = refused;
@@ -326,13 +339,16 @@ impl Tasks {
     /// once a reading of it is current, one that ended within `tick`, or one
     /// under way that began within a tick of the last one's end. Where none
     /// is, it reads now, by its task's next pass where one runs and by the
-    /// look otherwise, and answers when that reading ends, waiting `within`
-    /// at most, then answering with the reading as it stands. Where passes
-    /// are taken only when asked, a reading that is not current is read by
-    /// the look, which runs no round, so a test's rounds stay those its
-    /// commands ask for (D14). With `afresh`, no reading is current but one
-    /// begun after the ask: a forecast's second ask, where the first
-    /// reading lacked what it forms from.
+    /// look otherwise, and answers when a reading that began after a
+    /// command last told of a change ends after the ask, waiting `within`
+    /// at most, then answering with the reading as it stands. A reading
+    /// under way when a command told of a change reads it again once that
+    /// reading ends, so a read after a submit reads what it changed (D15).
+    /// Where passes are taken only when asked, a reading that is not
+    /// current is read by the look, which runs no round, so a test's rounds
+    /// stay those its commands ask for (D14). With `afresh`, no reading is
+    /// current but one begun after the ask: a forecast's second ask, where
+    /// the first reading lacked what it forms from.
     pub fn read(
         &self,
         repository: &Path,
@@ -351,18 +367,31 @@ impl Tasks {
         if !afresh && now.current(asked, tick) {
             return now.answer(true);
         }
-        if self.0.asked_only.load(Ordering::SeqCst) {
-            self.look_at(repository, true);
-        } else if self.holds(repository) {
-            self.handle(repository).wake();
-        } else {
-            self.look_at(repository, false);
-        }
+        let reads = || {
+            if self.0.asked_only.load(Ordering::SeqCst) {
+                self.look_at(repository, true);
+            } else if self.holds(repository) {
+                self.handle(repository).wake();
+            } else {
+                self.look_at(repository, false);
+            }
+        };
+        reads();
         let until = asked + within;
+        // The reading under way at the ask, begun before a command told of
+        // a change, that ended and was read again.
+        let mut again: Option<Instant> = None;
         loop {
             let m = marks();
-            if m.ended.is_some_and(|e| e >= asked) {
+            if m.read_since(asked) {
                 return m.answer(true);
+            }
+            if m.ended.is_some_and(|e| e >= asked)
+                && again != m.ended_began
+                && !self.looking(repository)
+            {
+                again = m.ended_began;
+                reads();
             }
             if Instant::now() >= until {
                 return m.answer(false);
@@ -372,7 +401,7 @@ impl Tasks {
             if !self.holds(repository) && !self.looking(repository) {
                 std::thread::sleep(Duration::from_millis(20));
                 let m = marks();
-                if !m.ended.is_some_and(|e| e >= asked) && !self.looking(repository) {
+                if !m.read_since(asked) && !self.looking(repository) {
                     return m.answer(m.current(Instant::now(), tick));
                 }
             }
@@ -1248,6 +1277,40 @@ mod tests {
         // The look's reading began after the change: current, read once.
         assert!(tasks.read(&repo, tick, within, false).current);
         assert_eq!(looks.load(Ordering::SeqCst), 1);
+    }
+
+    /// 129 (design D15, D16): a look under way when a command told of a
+    /// change, the look a host process makes of its index as it starts,
+    /// that ends after a read was asked, is not that read's answer: the
+    /// read looks again once it ends, and answers from the look begun after
+    /// the change, so the next read is answered at once.
+    #[test]
+    fn a_reading_under_way_when_told_is_read_again() {
+        let repo = PathBuf::from("/host/under-way.git");
+        let looks = Arc::new(AtomicUsize::new(0));
+        let counted = looks.clone();
+        let body: Body = Arc::new(move |inbox: Inbox| loop {
+            if inbox.next(Duration::from_millis(20)).is_none() && inbox.end_if_idle().is_ok() {
+                return;
+            }
+        });
+        let in_play: InPlay = Arc::new(move |_: &Path| {
+            counted.fetch_add(1, Ordering::SeqCst);
+            std::thread::sleep(Duration::from_millis(200));
+            Looked::default()
+        });
+        let tasks = Tasks::new(body, in_play).passes_when_asked();
+        let (tick, within) = (Duration::from_secs(60), Duration::from_secs(5));
+        tasks.look(&repo);
+        soon("the look under way", || tasks.looking(&repo));
+        tasks.told(&repo);
+        let read = tasks.read(&repo, tick, within, false);
+        assert!(read.current && read.looked, "{read:?}");
+        assert_eq!(looks.load(Ordering::SeqCst), 2, "looked again once told");
+        let began = Instant::now();
+        assert!(tasks.read(&repo, tick, within, false).current);
+        assert!(began.elapsed() < Duration::from_millis(50));
+        assert_eq!(looks.load(Ordering::SeqCst), 2);
     }
 
     /// `check` holds within ten seconds.
