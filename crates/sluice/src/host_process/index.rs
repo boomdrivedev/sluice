@@ -148,6 +148,21 @@ pub fn in_play(
         .err()
         .map(|e| format!("{e:#}"));
     let s = sluice_core::Sluice::new(bound.seams(), &sluice_core::SystemClock);
+    // 137 (design D16, D25): the reading reads each pull request this host
+    // follows into a branch it does not keep, as each falls due at the
+    // host's one bound, so a status and the overview show it as fresh as
+    // that bound allows. A read that fails is warned of, and the request
+    // shown as last read.
+    if let Ok(branches) = crate::PullRequests::branches(&*bound.pulls, bound.seams()) {
+        for branch in branches {
+            let _ = crate::PullRequests::across(
+                &*bound.pulls,
+                bound.seams(),
+                &sluice_core::SystemClock,
+                &branch,
+            );
+        }
+    }
     Ok(super::tasks::Looked {
         in_play: super::pass::in_play(&s),
         refused,

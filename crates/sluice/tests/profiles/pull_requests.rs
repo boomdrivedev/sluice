@@ -5782,6 +5782,18 @@ fn a_wait_across_hosts_reads_at_its_pace() {
 }
 
 impl OnGitHub {
+    /// The host main's records on the remote name as keeping it (72, 137;
+    /// design D25); `None` where none does.
+    fn lead(&self) -> Option<String> {
+        let out = Command::new("git")
+            .args(["--git-dir", self.bare.path().to_str().unwrap()])
+            .args(["show", "refs/sluice/state/main:branch.json"])
+            .output()
+            .unwrap();
+        let doc: Value = serde_json::from_slice(&out.stdout).ok()?;
+        doc["lead"].as_str().map(str::to_string)
+    }
+
     /// The pull requests into `main` this host follows, by number, as its
     /// forge state keeps them (137); `null` where it keeps none.
     fn follows(&self) -> Value {
@@ -5793,8 +5805,8 @@ impl OnGitHub {
     }
 }
 
-/// request-intake-host, "Submitted here, taken in there": host B's `sluice
-/// run` holds main's intake mark, and `wt submit main --no-wait` on host A
+/// request-intake-host, "Submitted here, taken in there": host B keeps
+/// main, and `wt submit main --no-wait` on host A
 /// opens a pull request; A's follows name it at its head, and A's next
 /// round asks GitHub nothing of main's open pull requests.
 #[test]
@@ -5803,7 +5815,7 @@ fn submitted_here_taken_in_there() {
     g.named("a", "");
     let b = g.other("b", "", "");
     b.run("1");
-    assert_eq!(g.mark().unwrap().1["host"], "b");
+    assert_eq!(g.lead().as_deref(), Some("b"));
     let w = g.session("there", &[("t.txt", "t\n")]);
     let out = g.wt_submit(&w, &["--no-wait"]);
     assert_eq!(out.status.code(), Some(0), "{}", text(&out));
@@ -6124,7 +6136,7 @@ fn an_older_sluices_check_reads_by_its_words() {
 // ---------------------------------------------------------------------------
 
 impl OnGitHub {
-    /// Host B's `sluice run` holds main's intake mark, and this host, called
+    /// Host B keeps main, its pass having run first, and this host, called
     /// `a`, opened a pull request from its session `name` by `wt submit
     /// --no-wait`: the session's worktree, and the pull request.
     fn opened_here_held_by_b(
@@ -6193,7 +6205,7 @@ fn out_of_time_queued_on_the_other_host() {
     assert_eq!(doc["pull_request"], pull.number, "{doc}");
     assert_eq!(
         doc["taken_in_by"],
-        serde_json::json!({ "host": "b", "holder": "driver" }),
+        serde_json::json!({ "host": "b" }),
         "{doc}"
     );
     assert_eq!(doc["queue"]["submission"], 1406, "{doc}");
@@ -6229,7 +6241,7 @@ fn the_status_a_submit_reads_across_hosts() {
     );
     assert_eq!(
         doc["taken_in_by"],
-        serde_json::json!({ "host": "b", "holder": "driver" }),
+        serde_json::json!({ "host": "b" }),
         "{doc}"
     );
     assert_eq!(
@@ -6245,7 +6257,7 @@ fn the_status_a_submit_reads_across_hosts() {
 /// submission-wait, "Its words": `sluice wait main` on host A follows its
 /// pull request while host B holds it as submission 1406, with `discovery`
 /// at ten seconds, so each pass reads it again. It says once that the
-/// request is submission 1406 on `b`, taken in by `b`'s `sluice run`, and
+/// request is submission 1406 on `b`, taken in by `b`, and
 /// not again over the reads that find the same; once B holds it as 1407,
 /// it says so, once. The check's own first line, which says the same, is
 /// not said beside it.
@@ -6276,7 +6288,7 @@ fn a_waits_words_across_hosts() {
             std::thread::sleep(Duration::from_millis(200));
         }
     };
-    let first = format!("#{n} is submission 1406 on b, taken in by b's sluice run");
+    let first = format!("#{n} is submission 1406 on b, taken in by b");
     said_once(&first);
     // Two passes more, each reading the request and its check again.
     std::thread::sleep(Duration::from_secs(7));
@@ -6291,7 +6303,7 @@ fn a_waits_words_across_hosts() {
             &queued_on_b(1407),
         )
         .unwrap();
-    let next = format!("#{n} is submission 1407 on b, taken in by b's sluice run");
+    let next = format!("#{n} is submission 1407 on b, taken in by b");
     said_once(&next);
     let _ = wait.kill();
     let _ = wait.wait();
@@ -6302,17 +6314,16 @@ fn a_waits_words_across_hosts() {
     assert!(shown.contains("queued: next on main"), "{shown}");
 }
 
-/// submission-wait, "Not yet taken in": a wait on host B holds main's
-/// mark, and B's check on the head of host A's pull request says it needs
-/// one review; A's `sluice wait main --timeout 2s --json` exits 5, its
-/// queue not taken in and waiting for the review, and its mark held by a
-/// wait on B. Without `--json`, it says once that the request waits to be
-/// taken in by a wait on B.
+/// submission-wait, "Not yet taken in": host B keeps main, and B's check on
+/// the head of host A's pull request says it needs one review; A's `sluice
+/// wait main --timeout 2s --json` exits 5, its queue not taken in and
+/// waiting for the review, taken in by B. Without `--json`, it says once
+/// that the request waits to be taken in by B.
 #[test]
 fn not_yet_taken_in_across_hosts() {
     let g = OnGitHub::new("wait-there-untaken", "reviews = 1");
     g.named("a", "");
-    g.push_mark("b", "wait");
+    g.other("b", "", "").run("1");
     let w = g.session("untaken", &[("u.txt", "u\n")]);
     let out = g.wt_submit(&w, &["--no-wait"]);
     assert_eq!(out.status.code(), Some(0), "{}", text(&out));
@@ -6344,12 +6355,12 @@ fn not_yet_taken_in_across_hosts() {
     );
     assert_eq!(
         doc["taken_in_by"],
-        serde_json::json!({ "host": "b", "holder": "wait" }),
+        serde_json::json!({ "host": "b" }),
         "{doc}"
     );
     let out = g.skipping(&w, &["wait", "main", "--timeout", "2s"]);
     assert_eq!(out.status.code(), Some(sluice::WAITING), "{}", text(&out));
-    let line = format!("#{} waits to be taken in by a wait on b", pull.number);
+    let line = format!("#{} waits to be taken in by b", pull.number);
     assert_eq!(text(&out).matches(&line).count(), 1, "{}", text(&out));
 }
 
@@ -6414,7 +6425,7 @@ fn queued_on_the_other_host() {
     let doc = g.status_document();
     assert_eq!(
         doc["taken_in_by"],
-        serde_json::json!({ "host": "b", "holder": "driver" }),
+        serde_json::json!({ "host": "b" }),
         "{doc}"
     );
     let row = row_of(&doc, n);
@@ -6435,10 +6446,7 @@ fn queued_on_the_other_host() {
     );
     assert!(row["read_at"].is_string(), "{doc}");
     let said = g.status_words();
-    assert!(
-        said.contains("pull requests b takes in, by its sluice run:"),
-        "{said}"
-    );
+    assert!(said.contains("pull requests b takes in:"), "{said}");
     let line = format!(
         "#{n} {} · submission 1406 there · queued behind #10",
         pull.title
@@ -6447,15 +6455,15 @@ fn queued_on_the_other_host() {
     assert!(g.of(n).is_empty(), "A took nothing in");
 }
 
-/// request-intake-host, "Waiting for a review there": a wait on host B
-/// holds main's mark, and B's check on host A's pull request says it needs
-/// one review. `sluice status main` on A names B and a wait, and says the
-/// request waits to be taken in, needing 1 review.
+/// request-intake-host, "Waiting for a review there": host B keeps main,
+/// and B's check on host A's pull request says it needs one review.
+/// `sluice status main` on A names B, and says the request waits to be
+/// taken in, needing 1 review.
 #[test]
 fn waiting_for_a_review_there() {
     let g = OnGitHub::new("status-there-review", "reviews = 1");
     g.named("a", "");
-    g.push_mark("b", "wait");
+    g.other("b", "", "").run("1");
     let w = g.session("review", &[("r.txt", "r\n")]);
     let out = g.wt_submit(&w, &["--no-wait"]);
     assert_eq!(out.status.code(), Some(0), "{}", text(&out));
@@ -6477,10 +6485,7 @@ fn waiting_for_a_review_there() {
         ),
     );
     let said = g.status_words();
-    assert!(
-        said.contains("pull requests b takes in, by a wait on b:"),
-        "{said}"
-    );
+    assert!(said.contains("pull requests b takes in:"), "{said}");
     let line = format!(
         "#{n} {} · waiting to be taken in by b: needs 1 review",
         pull.title
@@ -6489,7 +6494,7 @@ fn waiting_for_a_review_there() {
     let doc = g.status_document();
     assert_eq!(
         doc["taken_in_by"],
-        serde_json::json!({ "host": "b", "holder": "wait" }),
+        serde_json::json!({ "host": "b" }),
         "{doc}"
     );
     let row = row_of(&doc, n);
@@ -6523,13 +6528,13 @@ fn no_check_on_its_head_yet() {
     assert!(said.contains(&line), "{said}");
 }
 
-/// request-intake-host, "The mark and the check name different hosts":
-/// host C's `sluice run` holds main's mark, while sluice's check on host
-/// A's pull request, posted by host B, still names submission 1406 there.
-/// `sluice status main --json` on A gives `taken_in_by` naming C and the
-/// request's queue naming B and 1406, and its words say both.
+/// request-intake-host, "The keeper and the check name different hosts":
+/// host C keeps main, while sluice's check on host A's pull request,
+/// posted by host B, still names submission 1406 there. `sluice status
+/// main --json` on A gives `taken_in_by` naming C and the request's queue
+/// naming B and 1406, and its words say both (design D25).
 #[test]
-fn the_mark_and_the_check_name_different_hosts() {
+fn the_keeper_and_the_check_name_different_hosts() {
     let g = OnGitHub::new("status-there-two-hosts", "");
     g.named("a", "");
     g.other("c", "", "").run("1");
@@ -6542,7 +6547,7 @@ fn the_mark_and_the_check_name_different_hosts() {
     let doc = g.status_document();
     assert_eq!(
         doc["taken_in_by"],
-        serde_json::json!({ "host": "c", "holder": "driver" }),
+        serde_json::json!({ "host": "c" }),
         "{doc}"
     );
     let row = row_of(&doc, n);
@@ -6552,10 +6557,7 @@ fn the_mark_and_the_check_name_different_hosts() {
         "{doc}"
     );
     let said = g.status_words();
-    assert!(
-        said.contains("pull requests c takes in, by its sluice run:"),
-        "{said}"
-    );
+    assert!(said.contains("pull requests c takes in:"), "{said}");
     let line = format!(
         "#{n} {} · submission 1406 on b · queued: next on main",
         pull.title
@@ -6618,7 +6620,7 @@ fn a_one_shot_overview_lists_requests_taken_in_elsewhere() {
     let main = main_of(&doc);
     assert_eq!(
         main["taken_in_by"],
-        serde_json::json!({ "host": "b", "holder": "driver" }),
+        serde_json::json!({ "host": "b" }),
         "{doc}"
     );
     let row = row_of(main, n);
@@ -6647,7 +6649,7 @@ fn a_one_shot_overview_lists_requests_taken_in_elsewhere() {
         .skip_while(|l| !l.starts_with("main "))
         .collect();
     let rows = format!(
-        "\n  pull requests b takes in, by its sluice run:\n    \
+        "\n  pull requests b takes in:\n    \
          #{n} {} · submission 1406 there · queued: next on main",
         pull.title
     );
@@ -6977,7 +6979,7 @@ fn run_again_marks_ready_a_draft_another_host_sent_back() {
     // (record 0095 D5).
     let waiting = serde_json::json!({
         "pull_request": n, "branch": "main", "state": "waiting to be taken in by b",
-        "taken_in_by": { "host": "b", "holder": "driver" },
+        "taken_in_by": { "host": "b" },
         "queue": {
             "host": "b", "taken_in": true, "submission": b.of(n)[0]["id"],
             "state": "failed", "ahead": [], "waits_for": ["the next submit"],
