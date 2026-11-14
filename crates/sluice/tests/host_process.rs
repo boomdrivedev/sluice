@@ -1495,3 +1495,57 @@ fn the_host_process_keeps_its_repositories_across_a_new_binding() {
     let said = std::fs::read_to_string(&log).unwrap();
     assert!(!said.contains("do not bind here"), "{said}");
 }
+
+/// The host's settings file in `d`'s config: written as `text`.
+fn settings(d: &OnDisk, text: &str) -> std::path::PathBuf {
+    let file = d.config.path().join("sluice/config.toml");
+    std::fs::create_dir_all(file.parent().unwrap()).unwrap();
+    let next = file.with_extension("next");
+    std::fs::write(&next, text).unwrap();
+    std::fs::rename(&next, &file).unwrap();
+    file
+}
+
+/// 135, record 0107 as amended 2026-11-13 (design D20): a submit made as
+/// the host process hands over for a changed `[telemetry]` reaches the
+/// successor, exactly one host process runs once the hand-over ends, and
+/// the submission lands with no other command moving it.
+#[test]
+fn a_submit_during_a_hand_over_reaches_the_successor() {
+    let d = OnDisk::new("host-hand-over-submit", POLICY);
+    settings(&d, "[telemetry]\nservice = \"one\"\n");
+    let dir = d.session("a");
+    let repository = d.repository(d.repo.dir());
+    live_from_here(&d);
+    // A host process that passes at its own tick, kept by a follow until
+    // it hands over.
+    let client = d.client(d.repo.dir());
+    let kept = client
+        .follow(Path::new(&repository), FollowKind::Wait)
+        .expect("a host process");
+    let first = kept.named.pid;
+    let log = client.paths().log();
+
+    settings(&d, "[telemetry]\nservice = \"two\"\n");
+    within(30, "the host process hands over", || {
+        std::fs::read_to_string(&log)
+            .unwrap_or_default()
+            .contains("takes up by handing its repositories to a fresh one")
+            || std::fs::read_to_string(client.paths().previous_log())
+                .unwrap_or_default()
+                .contains("takes up by handing its repositories to a fresh one")
+    });
+    let id = queued_live(&d, &dir);
+
+    within(15, "the first host process ends", || !alive(first));
+    let successor = answering(&d).expect("a host process answers");
+    assert_ne!(successor, first, "the successor answers");
+    within(60, "the submission lands", || {
+        state(&d, d.repo.dir(), id) == "landed"
+    });
+    assert_eq!(
+        answering(&d),
+        Some(successor),
+        "one host process throughout"
+    );
+}
