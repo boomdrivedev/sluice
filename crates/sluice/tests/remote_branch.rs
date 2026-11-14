@@ -142,10 +142,14 @@ impl Setup {
         }
     }
 
+    /// The binary in `dir`, this setup's host. The host process its
+    /// commands start passes only when asked, so the rounds that run are
+    /// the ones the test's commands ask for (design D14).
     fn command(&self, dir: &Path) -> Command {
         let mut c = Command::new(env!("CARGO_BIN_EXE_sluice"));
         support::isolated(&mut c)
             .current_dir(dir)
+            .env("SLUICE_ROUND_SLEEP", "record")
             .env("XDG_CONFIG_HOME", self.config.path())
             .env("XDG_STATE_HOME", self.state.path())
             .env_remove("SLUICE_AGENT")
@@ -628,10 +632,11 @@ fn events(log: &str, event: &str) -> Vec<serde_json::Value> {
         .collect()
 }
 
-/// 133: with the remote moved away, a waiting submit's round says why its
-/// fetch failed as before, and `main`'s log holds one `read-refused` line
-/// however many rounds are refused; once the remote is back, one round
-/// logs `read-again` with the rounds it counted.
+/// 133: with the remote moved away, a waiting submit says once on stderr
+/// why the host process's round could not fetch, and goes on following,
+/// so it is ended once it has (135; design D9); `main`'s log holds one
+/// `read-refused` line however many rounds are refused; once the remote
+/// is back, one round logs `read-again` with the rounds it counted.
 #[test]
 fn a_refused_fetch_is_logged_once_and_its_end_with_the_rounds() {
     let s = Setup::new("remote-refused", "origin");
@@ -650,13 +655,22 @@ fn a_refused_fetch_is_logged_once_and_its_end_with_the_rounds() {
     s.repo.git(&["-C", dir.to_str().unwrap(), "add", "-A"]);
     s.repo
         .git(&["-C", dir.to_str().unwrap(), "commit", "-q", "-m", "a"]);
-    let waiting = s
+    let mut waiting = s
         .command(&dir)
         .args(["submit", "main"])
-        .stdout(Stdio::piped())
+        .stdout(Stdio::null())
         .stderr(Stdio::piped())
         .spawn()
         .unwrap();
+    let stderr = std::io::BufReader::new(waiting.stderr.take().unwrap());
+    let (send, said) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        for line in std::io::BufRead::lines(stderr).map_while(Result::ok) {
+            if send.send(line).is_err() {
+                break;
+            }
+        }
+    });
     let deadline = Instant::now() + Duration::from_secs(60);
     while s.runs() == 0 {
         assert!(Instant::now() < deadline, "the check never started");
@@ -664,13 +678,20 @@ fn a_refused_fetch_is_logged_once_and_its_end_with_the_rounds() {
     }
     let aside = s.origin.path().with_extension("aside");
     std::fs::rename(s.origin.path(), &aside).unwrap();
-    let out = waiting.wait_with_output().unwrap();
-    assert!(!out.status.success());
-    assert!(
-        text(&out).contains("fetching main from origin failed"),
-        "{}",
-        text(&out)
-    );
+    let deadline = Instant::now() + Duration::from_secs(60);
+    let mut seen: Vec<String> = Vec::new();
+    while !seen
+        .iter()
+        .any(|l| l.contains("fetching main from origin failed"))
+    {
+        let left = deadline.saturating_duration_since(Instant::now());
+        match said.recv_timeout(left) {
+            Ok(line) => seen.push(line),
+            Err(_) => panic!("the waiting submit never said the round's failure: {seen:?}"),
+        }
+    }
+    let _ = waiting.kill();
+    let _ = waiting.wait();
     for _ in 0..3 {
         let out = s.sluice(&["step", "main"]);
         assert!(!out.status.success());

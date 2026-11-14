@@ -60,10 +60,14 @@ impl Host {
         }
     }
 
+    /// The binary in `dir`, this setup's host. The host process its
+    /// commands start passes only when asked, so the rounds that run are
+    /// the ones the test's commands ask for (design D14).
     fn command(&self, dir: &Path) -> Command {
         let mut c = Command::new(env!("CARGO_BIN_EXE_sluice"));
         support::isolated(&mut c)
             .current_dir(dir)
+            .env("SLUICE_ROUND_SLEEP", "record")
             .env("XDG_CONFIG_HOME", self.config.path())
             .env("XDG_STATE_HOME", self.state.path())
             .env_remove("SLUICE_AGENT")
@@ -114,6 +118,34 @@ impl Host {
         assert!(out.status.success(), "{}", text(&out));
         let v: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
         v["id"].as_u64().unwrap()
+    }
+
+    /// Until every host process its commands started has ended, as one
+    /// does once nothing is in play and nothing follows it, at most ten
+    /// seconds: its log names each start's pid ending (135; design D6).
+    fn host_process_ended(&self) {
+        let log = self.state.path().join("sluice/host/log");
+        let deadline = Instant::now() + Duration::from_secs(10);
+        loop {
+            let text = std::fs::read_to_string(&log).unwrap_or_default();
+            let started: Vec<&str> = text
+                .lines()
+                .filter_map(|l| l.split(" started, pid ").nth(1))
+                .filter_map(|rest| rest.split(';').next())
+                .collect();
+            let ended = |pid: &&str| {
+                text.lines()
+                    .any(|l| l.ends_with(&format!("sluice host {pid} ends")))
+            };
+            if started.iter().all(ended) {
+                return;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "a host process never ended: {text}"
+            );
+            std::thread::sleep(Duration::from_millis(100));
+        }
     }
 
     fn state_of(&self, id: u64) -> String {
@@ -540,12 +572,15 @@ fn asks(starts: &[String]) -> usize {
 }
 
 /// reader-tick, "Two branches' records on one remote": with nothing
-/// queued, each pass of `sluice run` after its first starts git once, for
-/// one fetch from origin (129).
+/// queued, each pass of the host process after its first starts git once,
+/// for one fetch from origin (129). Each `sluice run` starts a host process
+/// of its own, the last one having ended, so the two runs read alike at
+/// its start and differ by their passes alone (135).
 #[test]
 fn each_pass_asks_origin_once_for_both_branches() {
     let (host, _origin) = two_branches_landed("ticks-two");
     let run = |rounds: &str| -> Vec<String> {
+        host.host_process_ended();
         let before = host.git.count();
         let out = host
             .command(host.repo.dir())
