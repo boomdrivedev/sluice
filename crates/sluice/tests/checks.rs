@@ -1336,6 +1336,9 @@ fn sluice_in(dir: &std::path::Path, state: &Scratch, args: &[&str]) -> std::proc
     )))
     .args(args)
     .current_dir(dir)
+    // The host process its commands start passes only when asked, so the
+    // test's own steps decide its rounds (135; design D14).
+    .env("SLUICE_ROUND_SLEEP", "record")
     .env("XDG_CONFIG_HOME", state.path().join("config"))
     .env("XDG_STATE_HOME", state.path().join("state"))
     .env_remove("SLUICE_AGENT")
