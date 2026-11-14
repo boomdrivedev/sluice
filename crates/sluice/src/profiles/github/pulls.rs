@@ -317,6 +317,9 @@ pub struct Pulls {
     default_policy: RefCell<Option<(Rev, std::result::Result<Option<Policy>, String>)>>,
     /// This host as its peers name it, and its lease (72, 73, 137).
     peer: sluice_core::Peer,
+    /// 128 (design D26): each cause the intake pass under way met, handed
+    /// back by [`crate::PullRequests::intake`], printed by none of it.
+    causes: RefCell<Vec<crate::IntakeCause>>,
     /// The host that keeps each branch and takes its pull requests in, by
     /// branch, as this process's last intake found it, where that is
     /// another host.
@@ -389,6 +392,15 @@ enum Taking {
 }
 
 impl Pulls {
+    /// 128 (design D26): note a cause this intake pass met: what it asked
+    /// and the words it was refused with.
+    fn met(&self, asked: &str, said: String) {
+        self.causes.borrow_mut().push(crate::IntakeCause {
+            asked: asked.to_string(),
+            said,
+        });
+    }
+
     /// The pull requests of the repository whose git directory is `dir`
     /// and whose common directory is `common`, read and posted on
     /// `forge`, and fetched as `identity` where it has one, each fetch and
@@ -424,6 +436,7 @@ impl Pulls {
             policies: sluice_core::Policies::default(),
             default_policy: RefCell::default(),
             peer,
+            causes: RefCell::default(),
             away: RefCell::default(),
             kept_across: RefCell::default(),
         }
@@ -809,10 +822,13 @@ impl Pulls {
                     return Err(e);
                 }
                 // Refused otherwise: each is read alone this pass.
-                Err(e) => crate::telemetry::warn(&format!(
-                    "sluice: warning: taking in {branch}'s pull requests: GitHub refused the \
-                     query that reads them whole, so each is read alone this pass: {e:#}"
-                )),
+                Err(e) => self.met(
+                    &format!("{branch}'s pull requests"),
+                    format!(
+                        "GitHub refused the query that reads them whole, so each is read \
+                         alone this pass: {e:#}"
+                    ),
+                ),
             }
         }
         // 125: a group is taken whole, before any of it is considered alone.
@@ -884,10 +900,7 @@ impl Pulls {
             };
             match stepped {
                 Ok(None) => {}
-                Ok(Some(e)) | Err(e) => crate::telemetry::warn(&format!(
-                    "sluice: warning: taking in {branch}'s pull requests: {}: {e:#}",
-                    place(p.number)
-                )),
+                Ok(Some(e)) | Err(e) => self.met(&place(p.number), format!("{e:#}")),
             }
         }
         self.keep_readings(s, &t, branch, now, &open, work.into_inner())?;
@@ -1083,11 +1096,12 @@ impl Pulls {
         // refuses holds it all the same, and the next pass tries again.
         if held && !p.draft {
             if let Err(e) = forge.set_draft(&t.repo, p.number, true) {
-                crate::telemetry::warn(&format!(
-                    "sluice: warning: #{} waits for the next submit, and GitHub would not mark \
-                     it a draft: {e:#}",
-                    p.number
-                ));
+                self.met(
+                    &place(p.number),
+                    format!(
+                        "it waits for the next submit, and GitHub would not mark it a draft: {e:#}"
+                    ),
+                );
             }
         }
         // Who withdrew a hand-opened pull request, when it was someone
@@ -2896,7 +2910,7 @@ impl crate::PullRequests for Pulls {
         Ok(out)
     }
 
-    fn intake(&self, seams: Seams<'_>, clock: &dyn Clock, branch: &str) -> Result<bool> {
+    fn intake(&self, seams: Seams<'_>, clock: &dyn Clock, branch: &str) -> Result<crate::Intake> {
         let memo = ReadOnce {
             branch: seams.branch,
             read: RefCell::default(),
@@ -2904,8 +2918,13 @@ impl crate::PullRequests for Pulls {
         let s = Sluice::new(once(seams, &memo), clock)
             .keeping(&self.policies)
             .as_peer(self.peer.clone());
-        self.take_in(&s, clock, branch)
-            .with_context(|| format!("taking in {branch}'s pull requests"))
+        self.causes.borrow_mut().clear();
+        let takes = self.take_in(&s, clock, branch);
+        let causes = std::mem::take(&mut *self.causes.borrow_mut());
+        Ok(crate::Intake {
+            takes: takes?,
+            causes,
+        })
     }
 
     fn elsewhere(&self, branch: &str) -> Option<String> {

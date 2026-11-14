@@ -29,6 +29,25 @@ pub struct Kept {
     pub(crate) said: BTreeMap<String, Option<(Rev, Rev)>>,
     /// 26, 121: the words each branch passed by was last said with.
     pub(crate) passed: BTreeMap<String, String>,
+    /// 128 (design D26): the causes each branch's intake last met, as
+    /// said in the host process's log.
+    pub(crate) intake: BTreeMap<String, Vec<String>>,
+}
+
+impl Kept {
+    /// 128 (design D26): say in the host process's log each cause
+    /// `branch`'s intake met that its last pass did not.
+    pub(crate) fn say_intake(&mut self, branch: &str, causes: &[crate::IntakeCause]) {
+        let lines: Vec<String> = causes.iter().map(|c| c.line(branch)).collect();
+        let before = self.intake.get(branch).cloned().unwrap_or_default();
+        for line in lines.iter().filter(|l| !before.contains(l)) {
+            telemetry::warn(&format!("sluice: warning: {line}"));
+        }
+        match lines.is_empty() {
+            true => self.intake.remove(branch),
+            false => self.intake.insert(branch.to_string(), lines),
+        };
+    }
 }
 
 impl Kept {
@@ -42,6 +61,7 @@ impl Kept {
             asked: None,
             said,
             passed,
+            intake: BTreeMap::new(),
         }
     }
 
@@ -143,7 +163,8 @@ pub fn pass(
     branches.sort();
     branches.dedup();
     for branch in &branches {
-        crate::intake(pulls, seams, clock, branch, false, &mut out);
+        let intaken = crate::intake(pulls, seams, clock, branch, false, &mut out);
+        kept.say_intake(branch, &intaken.causes);
         // 26, rule core.14: a branch whose records' read or round fails is
         // that branch's alone; the pass goes on to every other branch. 129:
         // one with nothing in play costs the pass its records' read alone.
@@ -245,8 +266,13 @@ pub fn step(
     branch: &str,
 ) -> Result<serde_json::Value> {
     let mut said: Vec<u8> = Vec::new();
-    crate::intake(pulls, s.seams(), clock, branch, false, &mut said);
-    let warnings: Vec<String> = Vec::new();
+    // 128 (design D26): each cause its intake met, which the step prints
+    // on stderr, every step.
+    let warnings: Vec<String> = crate::intake(pulls, s.seams(), clock, branch, false, &mut said)
+        .causes
+        .iter()
+        .map(|c| c.line(branch))
+        .collect();
     let round = s.round(branch)?;
     exec::tell_abandoned(&mut said, false, &round.released)?;
     preview::tell_dropped(&mut said, false, &round.previews)?;

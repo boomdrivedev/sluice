@@ -1409,6 +1409,27 @@ fn output_posted_as_asked_and_scrubbed() {
     assert!(r.contains("[redacted]") && !r.contains("ghp_"), "{r}");
 }
 
+/// 128 (design D26): GitHub serves no head for a pull request; `sluice
+/// step` says on stderr what its intake met, `sluice: warning: taking in
+/// main's pull requests: pull/<n>: ...`, every step, its own intake
+/// printing nothing beside it.
+#[test]
+fn a_step_prints_what_its_intake_met() {
+    let g = OnGitHub::new("pr-step-warnings", "");
+    let (n, _) = g.by_hand("unit/headless", &[("h.txt", Some("h\n"))], false);
+    g.no_head(n);
+    let line = format!("sluice: warning: taking in main's pull requests: pull/{n}: ");
+    for _ in 0..2 {
+        g.discovery_passes();
+        let out = g.sluice(&["step", "main"]);
+        assert!(out.status.success(), "{}", text(&out));
+        let err = String::from_utf8_lossy(&out.stderr);
+        let said: Vec<&str> = err.lines().filter(|l| l.starts_with(&line)).collect();
+        assert_eq!(said.len(), 1, "{err}");
+        assert!(said[0].contains(&format!("pull/{n} has no head")), "{err}");
+    }
+}
+
 /// S63 (128): GitHub serves no head for one of two pull requests opened by
 /// hand, the one it lists first, whose branch is gone. Each round names it
 /// and that it has no head, and the other is submitted; once its branch is
