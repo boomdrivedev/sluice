@@ -141,16 +141,6 @@ every repository on the host and never pushed:
                        on its head, and when
   forge/follows/<owner>/<repository>/<branch>.lock
                        held while that file is written
-  forge/intake/<owner>/<repository>/<branch>.json
-                       the branch's intake mark as this host last saw it on
-                       the remote, when it first saw it there, and when it
-                       last pushed it
-  forge/intake/<owner>/<repository>/<branch>.waits/<process>.hold
-                       held by each wait on the host that reads the
-                       branch's pull requests, for as long as it runs: the
-                       last of them to end removes the mark
-  forge/intake/<owner>/<repository>/<branch>.waits/.lock
-                       held while a wait's hold is made or let go
   host/lock            held by sluice's host process for as long as it runs
   host/start.lock      held by a command starting the host process, and by
                        the process as it decides to end or hands over
@@ -689,9 +679,19 @@ this host's branch holds:
 {"schema":"sluice/log@1","event":"copy-levelled","host":"build-2","copy":"c43609b8e1"}
 ```
 
+An earlier sluice kept `forge/intake/` in the host's state, for a mark
+it pushed to the remote, `refs/sluice/intake/<branch>`. Nothing reads
+either now: the folder may be removed, and the mark deleted as the
+[pull requests guide](/sluice/guides/pull-requests/) says.
+
 `read-refused` is logged when a round can't read the branch, or its
-state, from the branch's remote. It names the host, the remote, the ref
-the round asked for and what git said, whole. It's logged once for each
+state, from the branch's remote, or when the host's intake can't ask
+GitHub for the branch's pull requests. It names the host, the remote, the
+ref the round asked for and what git said, whole; an intake's line adds
+`"intake": true`, names what it asked, `<branch>'s pull requests` or
+`pull/<n>`, and says what GitHub said, and its `read-again` is so marked
+too. An intake's lines are kept apart from the rounds', in `.intake/`,
+so a round that reads the remote again ends none of them. It's logged once for each
 ref and words while that host's rounds are refused, never once a round,
 and each host logs its own. The first round on that host that reads the
 remote again logs `read-again`. `since` is when the first round was

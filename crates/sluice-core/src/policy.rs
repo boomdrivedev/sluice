@@ -186,8 +186,8 @@ impl std::fmt::Display for NoIntake {
         write!(
             f,
             "{branch} takes pull requests, which only the host that keeps it on {remote} takes \
-             in, and its records are each host's own: name [signers] so they are kept on \
-             {remote} (137)"
+             in, and its state is each host's own: name [signers] in .config/sluice.toml so its \
+             state is kept on {remote} (137)"
         )
     }
 }
@@ -1258,8 +1258,8 @@ hold = "5m"
         assert_eq!(
             format!("{e:#}"),
             "main takes pull requests, which only the host that keeps it on origin takes in, \
-             and its records are each host's own: name [signers] so they are kept on origin \
-             (137)"
+             and its state is each host's own: name [signers] in .config/sluice.toml so its \
+             state is kept on origin (137)"
         );
         assert!(unkept.rules_for("bolt/x").unwrap().is_some());
         assert_eq!(unkept.remote_of("main").unwrap().as_deref(), Some("origin"));

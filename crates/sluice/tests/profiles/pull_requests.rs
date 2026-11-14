@@ -5433,8 +5433,8 @@ impl Other<'_> {
 fn pull_requests_need_records_on_the_remote() {
     let g = OnGitHub::unkept("intake-unkept", "");
     let words = "main takes pull requests, which only the host that keeps it on origin takes \
-                 in, and its records are each host's own: name [signers] so they are kept on \
-                 origin (137)";
+                 in, and its state is each host's own: name [signers] in .config/sluice.toml so \
+                 its state is kept on origin (137)";
     g.by_hand("unit/each", &[("e.txt", Some("e\n"))], false);
     let w = g.session("refused", &[("r.txt", "r\n")]);
     let out = g
