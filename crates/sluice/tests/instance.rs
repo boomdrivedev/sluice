@@ -656,16 +656,17 @@ mod bound {
         assert!(!log.contains("did not start"), "{log}");
     }
 
-    /// The settings-take-up spec's "Settings it would start afresh for that
-    /// do not bind" (135; record 0107; rule core.54; design D5): a change
-    /// of `[runs]`, `[forge]` and `[telemetry]` whose key holds no private
-    /// key leaves the run on all it holds, the bound of one among it, so
-    /// the second combination's run starts only once the first has ended,
-    /// with the cores the first had; both land, and the run says once the
-    /// file, the tables, that its settings do not bind and the key, with
-    /// nothing taken up and nothing started afresh.
+    /// The settings-take-up spec's "Settings it would hand over for that
+    /// do not bind" (135; record 0107 as amended 2026-11-13; rule core.54;
+    /// design D20): a change of `[runs]`, `[forge]` and `[telemetry]` whose
+    /// key holds no private key leaves sluice's host process on all it
+    /// holds, the bound of one among it, so the second combination's run
+    /// starts only once the first has ended, with the cores the first had;
+    /// both land, the same host process runs throughout, and its log says
+    /// once the file, the tables, that its settings do not bind and the
+    /// key, with nothing taken up and nothing handed over.
     #[test]
-    fn a_run_keeps_its_settings_when_a_change_it_starts_afresh_for_does_not_bind() {
+    fn the_host_process_keeps_its_settings_when_a_change_it_hands_over_for_does_not_bind() {
         use std::os::unix::fs::PermissionsExt;
         let seen = Scratch::new("instance-unbound-afresh-seen");
         let keys = Scratch::new("instance-unbound-afresh-key");
@@ -711,21 +712,25 @@ mod bound {
         // does not read: the status is read under the settings the run held.
         std::fs::write(&file, "[runs]\nmax = 1\n").unwrap();
         assert_eq!(states(&s, "bolt/a"), ["landed", "landed"], "{said}");
-        let refused: Vec<&str> = said
+        let log = host_log(&s);
+        let refused: Vec<&str> = log
             .lines()
-            .filter(|l| l.contains("which this sluice run takes up only by starting afresh"))
+            .filter(|l| l.contains("which the host process takes up only by handing over"))
             .collect();
-        assert_eq!(refused.len(), 1, "{said}");
+        assert_eq!(refused.len(), 1, "{log}");
         let words = format!(
-            "sluice: warning: {} changed [runs], [forge], [telemetry], which this sluice run \
-             takes up only by starting afresh, and its settings do not bind, so it keeps the \
+            "sluice: warning: {} changed [runs], [forge], [telemetry], which the host process \
+             takes up only by handing over, and its settings do not bind, so it keeps the \
              settings it holds until the file changes: ",
             file.display()
         );
-        assert!(refused[0].starts_with(&words), "{said}");
-        assert!(refused[0].contains(&key.display().to_string()), "{said}");
-        assert!(!said.contains("is refused"), "{said}");
-        assert!(!said.contains("took up"), "{said}");
+        assert!(refused[0].contains(&words), "{log}");
+        assert!(refused[0].contains(&key.display().to_string()), "{log}");
+        assert!(!log.contains("is refused"), "{log}");
+        assert!(!log.contains("took up"), "{log}");
+        assert!(!log.contains("handing its repositories"), "{log}");
+        let own = std::fs::read_to_string(s.state.path().join("sluice/host/log")).unwrap();
+        assert_eq!(started(&own).len(), 1, "one host process throughout: {own}");
     }
 
     /// 71: on a host that gives sluice all its cores, `[runs] cores = 2`
