@@ -1023,6 +1023,9 @@ fn s75_a_combination_starts_before_a_third_agents_check() {
     let d = OnDisk::new("host-s75", &policy);
     bound(&d, 2);
     let repository = d.repository(d.repo.dir());
+    // The overview that named the repository started a host process that
+    // passes only when asked (design D14, D16): this one passes on its own.
+    live_from_here(&d);
     let _follow = d
         .client(d.repo.dir())
         .follow(Path::new(&repository), FollowKind::Wait)

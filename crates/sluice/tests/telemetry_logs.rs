@@ -320,9 +320,14 @@ fn a_summary_says_where_the_output_is_kept_and_a_warning_is_sent_whole() {
         .filter(|r| r.severity_number() == Some(Severity::Warn))
         .collect();
     assert_eq!(warnings.len(), 1, "{records:?}");
+    // Design D10, D26: a step says each cause its round's intake met, as
+    // what it asked and the words it was refused with.
     assert_eq!(
         body(warnings[0]),
-        "sluice: warning: the forge refused [redacted]"
+        format!(
+            "sluice: warning: taking in {BRANCH}'s pull requests: {BRANCH}'s pull requests: \
+             the forge refused [redacted]"
+        )
     );
     telemetry.finish();
 }

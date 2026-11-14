@@ -1228,9 +1228,14 @@ impl State for RemoteRefs {
 
     /// Could-not-run-1 116: every result set aside on the remote, one file
     /// each under `refs/sluice/set-aside`. A set-aside only stops a result
-    /// counting, so any host that submits may add one.
+    /// counting, so any host that submits may add one. 129 (design D16):
+    /// held, as this host last fetched them, with no fetch.
     fn set_asides(&self) -> Result<Vec<u8>> {
-        let Some(commit) = self.fetch(SET_ASIDE)? else {
+        let commit = match self.held.get() {
+            true => self.pushed.read_ref(&self.fetched(SET_ASIDE))?.map(|r| r.0),
+            false => self.fetch(SET_ASIDE)?,
+        };
+        let Some(commit) = commit else {
             return Ok(Vec::new());
         };
         let mut bytes = Vec::new();
