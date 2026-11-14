@@ -32,13 +32,11 @@ pub mod words;
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::io::Write;
-use std::os::fd::OwnedFd;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 use anyhow::Result;
 use clap::{Parser, Subcommand};
-use reader::{Driver, Drives, Reader};
 use sluice_core::overview::{in_queue, BranchView, CandidateView, Held};
 use sluice_core::records::{Beside, BranchHold, CopyBehind, Event, FailedTask, State, Submission};
 use sluice_core::{
@@ -381,10 +379,12 @@ pub enum Command {
         #[arg(long)]
         json: bool,
     },
-    /// Rounds for every branch with a queue, until stopped.
-    #[command(after_help = "Examples:\n  $ sluice run\n  $ sluice run --rounds 1")]
+    /// Follow the host process's passes of the repository, printing each,
+    /// until stopped. Nothing needs it: sluice starts its own host
+    /// process, which moves every queue on the host (135).
+    #[command(hide = true)]
     Run {
-        /// Stop after this many rounds; a run whose last round passed a
+        /// Stop after this many passes; a run whose last pass passed a
         /// branch by exits 3, naming it.
         #[arg(long)]
         rounds: Option<usize>,
@@ -1304,211 +1304,117 @@ impl Cli {
     }
 }
 
-/// What `sluice run` carries from one pass to the next, whatever binding
-/// each pass runs under (135; design D3): the passes counted toward its
-/// `--rounds`, the repository's driver's lock and its reader (129),
-/// what its document last asked, whether it said that another run drives
-/// the repository, the holds and the refusals it said, the policies it
-/// read by revision (129; rule core.31), and whether the host's systems
-/// were checked (87).
-pub struct Driving {
+/// What a kept `sluice run`, a follower of sluice's host process, carries
+/// from one pass to the next (135; design D11): the passes it followed
+/// toward its `--rounds`, and whether it said that nothing needs it. It
+/// holds nothing its settings decide but its own telemetry.
+pub struct Following {
     rounds: Option<usize>,
-    /// The tick the reader's document names (64).
+    /// How long it waits for the host process's next pass.
     tick: Duration,
     n: usize,
-    checked: bool,
-    /// Where the host's readers keep their files, and the repository as
-    /// they name it.
-    place: Option<(std::path::PathBuf, String)>,
-    driver: Option<Driver>,
-    /// 135: the driver's lock handed over by the `sluice run` this one
-    /// started afresh from, adopted at the first pass before the lock
-    /// would be taken (design D4, D6).
-    handed: Option<OwnedFd>,
-    reader: Option<Reader>,
-    said_beside: bool,
-    /// 26, 121, 129: what its passes said and asked, so each thing is said
-    /// once while it stands.
-    kept: host_process::pass::Kept,
-    /// 129: each policy read, by revision, kept across passes and
-    /// bindings, since a policy at a revision is that revision's bytes.
-    policies: sluice_core::Policies,
+    told: bool,
 }
 
-impl Driving {
-    /// A `sluice run` that has driven no pass yet, ending after `rounds`
-    /// passes where it names a bound.
-    pub fn new(rounds: Option<usize>) -> Driving {
-        Driving {
+impl Following {
+    /// A `sluice run` that has followed no pass yet, ending after
+    /// `rounds` passes where it names a bound.
+    pub fn new(rounds: Option<usize>) -> Following {
+        Following {
             rounds,
             tick: tick(Some(&Command::Run { rounds })),
             n: 0,
-            checked: false,
-            place: None,
-            driver: None,
-            handed: None,
-            reader: None,
-            said_beside: false,
-            kept: host_process::pass::Kept::default(),
-            policies: sluice_core::Policies::default(),
+            told: false,
         }
     }
 
-    /// What this run hands to itself started afresh (135; record 0107;
-    /// design D4, D6): the passes counted, a duplicate of the driver's
-    /// lock left open across the start, and what it said. The driver is
-    /// kept, so a hand-over that cannot start still drives.
-    pub fn hand_over(&self) -> Result<Carried> {
-        Ok(Carried {
-            passes: self.n,
-            driver: self.driver.as_ref().map(Driver::hand_over).transpose()?,
-            said: self.kept.said().clone(),
-            passed: self.kept.passed().clone(),
-            said_beside: self.said_beside,
-        })
-    }
-
-    /// A `sluice run` started afresh from one that handed it `carried`,
-    /// ending once `rounds` passes, those already driven among them, where
-    /// it names a bound. Its first pass adopts the driver's lock carried
-    /// before it would take the lock, and it says again nothing the run
-    /// said (135; record 0107; design D4, D6).
-    pub fn handed(rounds: Option<usize>, carried: Carried) -> Driving {
-        Driving {
-            n: carried.passes,
-            handed: carried.driver,
-            kept: host_process::pass::Kept::handed(carried.said, carried.passed),
-            said_beside: carried.said_beside,
-            ..Driving::new(rounds)
+    /// A `sluice run` started afresh from one that handed it `doc`, ending
+    /// once `rounds` passes, those already followed among them, where it
+    /// names a bound; it says again nothing the run said (135; record
+    /// 0107; design D11).
+    pub fn handed(rounds: Option<usize>, doc: &hand_over::HandOver) -> Following {
+        Following {
+            n: doc.passes,
+            told: doc.told,
+            ..Following::new(rounds)
         }
     }
-}
 
-/// What a `sluice run` hands to itself started afresh, as [`Driving`]
-/// keeps it (135; record 0107; design D4, D6): the passes counted toward
-/// its `--rounds`, the driver's lock as a descriptor open across the
-/// start, where it held it, and the holds, the refusals and whether it
-/// said another run drives the repository, so none is said again.
-#[derive(Debug, Default)]
-pub struct Carried {
-    pub passes: usize,
-    pub driver: Option<OwnedFd>,
-    pub said: BTreeMap<String, Option<(Rev, Rev)>>,
-    pub passed: BTreeMap<String, String>,
-    pub said_beside: bool,
+    /// The passes followed toward `--rounds`.
+    pub fn passes(&self) -> usize {
+        self.n
+    }
+
+    /// Whether it said that nothing needs it.
+    pub fn told(&self) -> bool {
+        self.told
+    }
+
+    /// Its start, where it was not handed over: the host's systems checked
+    /// (87), and said once that nothing needs `sluice run` (design D11).
+    pub fn start(&mut self, s: &Sluice<'_>) -> Result<()> {
+        s.check_host_systems()?;
+        if !self.told {
+            telemetry::warn(
+                "sluice: sluice starts its own host process; nothing needs `sluice run`",
+            );
+            self.told = true;
+        }
+        Ok(())
+    }
+
+    /// One pass followed: the host process's next pass's report, asked of
+    /// it where passes are taken only when asked, its lines printed as a
+    /// pass of `sluice run` printed them (135; design D11). A follower
+    /// that could not reach the process, or was told no pass within its
+    /// tick, pauses and reaches it again at its next.
+    pub fn next<'a>(
+        &mut self,
+        here: &host_process::Here<'a, '_>,
+        follower: &mut host_process::ask::Follower<'a>,
+        pause: &dyn Pause,
+        out: &mut dyn Write,
+    ) -> Result<Driven> {
+        let Some(report) = follower.next(here, self.tick) else {
+            if INTERRUPTED.load(Ordering::SeqCst) || !pause.pause() {
+                return Ok(Driven::Ended(STOPPED));
+            }
+            return Ok(Driven::Next);
+        };
+        for line in &report.lines {
+            writeln!(out, "{line}")?;
+        }
+        out.flush()?;
+        self.n += 1;
+        if self.rounds.is_some_and(|r| self.n >= r) {
+            // 26: one line per branch, as `main` writes a failed step's,
+            // said whether or not stdout said it this pass.
+            for (branch, words) in &report.failed {
+                telemetry::error(&format!("sluice: {branch}: {words}"));
+            }
+            return Ok(Driven::Ended(if report.failed.is_empty() {
+                0
+            } else {
+                INTERNAL
+            }));
+        }
+        // Where passes are taken only when asked, the next is asked after
+        // the follower's own pause.
+        if here.host.host_process().asked_only() && !pause.pause() {
+            return Ok(Driven::Ended(STOPPED));
+        }
+        Ok(Driven::Next)
+    }
 }
 
 /// What a pass of `sluice run` ended with.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Driven {
-    /// It paused, and the next pass is due.
+    /// The next pass is due.
     Next,
     /// The run ends with this exit: its `--rounds` reached, or its pause
     /// stopped.
     Ended(i32),
-}
-
-/// One pass of `sluice run` over the repository the seams bind, and the
-/// pause after it (135; design D3): the host's systems checked before the
-/// first pass `driving` runs (87), then the repository's driver's lock
-/// taken or kept, every branch's round run and the reader's document
-/// written (129). Its caller may bind the repository afresh between two
-/// calls, and the next pass runs wholly under the new binding (rule
-/// core.54).
-pub fn drive(
-    driving: &mut Driving,
-    seams: Seams<'_>,
-    host: &dyn exec::Host,
-    pulls: &dyn PullRequests,
-    clock: &dyn Clock,
-    pause: &dyn Pause,
-    out: &mut dyn Write,
-) -> Result<Driven> {
-    let s = Sluice::new(seams, clock)
-        .as_peer(host.peer())
-        .keeping(&driving.policies);
-    if !driving.checked {
-        s.check_host_systems()?;
-        driving.checked = true;
-    }
-    // 135: the repository's one driver on the host, and so its reader
-    // (129): a run that finds another live drives nothing, and looks again
-    // at each pass.
-    let (readers, repository) = match &driving.place {
-        Some(place) => place.clone(),
-        None => {
-            let place = (host.readers()?, host.repository()?);
-            driving.place = Some(place.clone());
-            place
-        }
-    };
-    // 26: the branches this pass passed by, with their words; a
-    // bounded run whose last pass passed one by ends as a step
-    // of that branch would.
-    let mut failed: BTreeMap<String, String> = BTreeMap::new();
-    // 135: a run started afresh holds the lock it was handed, with no
-    // moment let go, where it is this repository's (design D4, D6).
-    if let Some(fd) = driving.handed.take() {
-        driving.driver = Driver::adopt(fd, &readers, &repository)?;
-    }
-    if driving.driver.is_none() {
-        driving.driver = Driver::take(&readers, &repository)?;
-    }
-    if driving.driver.is_some() {
-        // Its part in reading: it drives, so the place is its,
-        // whatever lease a newer watch holds, and it takes none. A
-        // lock it could not try leaves it following, as a watch.
-        match &mut driving.reader {
-            Some(r) => {
-                let _ = r.step(false, Drives::Itself);
-            }
-            None => {
-                driving.reader = Some(Reader::take_given(
-                    &readers,
-                    &repository,
-                    host.version(),
-                    Drives::Itself,
-                )?)
-            }
-        }
-        // 135 (design D5): the pass the host process runs, moved whole.
-        let lead = match &mut driving.reader {
-            Some(Reader::Lead(lead)) => Some(lead),
-            _ => None,
-        };
-        let report = host_process::pass::pass(
-            &s,
-            host,
-            pulls,
-            clock,
-            lead,
-            driving.tick,
-            &mut driving.kept,
-        )?;
-        for line in &report.lines {
-            writeln!(out, "{line}")?;
-        }
-        failed = report.failed;
-    } else if !driving.said_beside {
-        telemetry::warn(
-            "sluice: another sluice run drives this repository on this host; \
-             this one runs nothing while it does",
-        );
-        driving.said_beside = true;
-    }
-    driving.n += 1;
-    if driving.rounds.is_some_and(|r| driving.n >= r) {
-        // 26: one line per branch, as `main` writes a failed step's, said
-        // whether or not stdout said it this pass.
-        for (branch, words) in &failed {
-            telemetry::error(&format!("sluice: {branch}: {words}"));
-        }
-        return Ok(Driven::Ended(if failed.is_empty() { 0 } else { INTERNAL }));
-    }
-    if !pause.pause() {
-        return Ok(Driven::Ended(STOPPED));
-    }
-    Ok(Driven::Next)
 }
 
 /// Run one command; returns its exit code.
@@ -1834,11 +1740,15 @@ pub fn run(
             Ok(0)
         }
         Command::Run { rounds } => {
-            let mut driving = Driving::new(rounds);
+            // 135 (design D11): kept so a host's unit that runs it keeps
+            // working, as a follower of the host process, which moves every
+            // repository on the host; it runs no round itself.
+            let mut following = Following::new(rounds);
+            following.start(&s)?;
+            let mut follower =
+                host_process::ask::Follower::new(&here, host_process::protocol::FollowKind::Run);
             loop {
-                if let Driven::Ended(code) =
-                    drive(&mut driving, seams, host, pulls, clock, pause, out)?
-                {
+                if let Driven::Ended(code) = following.next(&here, &mut follower, pause, out)? {
                     return Ok(code);
                 }
             }
