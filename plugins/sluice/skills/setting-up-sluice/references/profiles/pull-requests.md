@@ -58,6 +58,11 @@ log_lines = 40               # optional: post the end of a failed test's output
   remote takes its pull requests in. Every other host asks GitHub nothing
   of them and withdraws nothing, and `sluice status` there shows the
   requests it follows, with the host that keeps the branch.
+- What the host that keeps the branch couldn't ask GitHub is said:
+  `sluice step` prints each on stderr, `sluice: warning: taking in main's
+  pull requests: pull/41: …`, every step, and `sluice status` says it above
+  the queue until a pass asks and meets nothing (`intake_refused` in
+  `--json`). The branch's log holds each cause once, marked `intake`.
 - sluice posts one check named `sluice` with the state (`waiting: …`,
   `queued behind …`, `testing …`, `failed: …`, `conflict: …`, `landed as …`)
   and comments when it sends one back.
