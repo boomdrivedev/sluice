@@ -903,7 +903,9 @@ impl OnGitHub {
 
 /// `sluice status` on a branch whose `remote` is GitHub's: with no
 /// `[forge]`, it says sluice has no identity of its own; with one, it
-/// names the app, whose token the fetch was made with.
+/// names the app. Neither fetches: a status reads the branch as the host
+/// holds it since the host process last asked the remote, and asks GitHub
+/// for no token of its own (129; design D16).
 #[cfg(feature = "tools")]
 #[test]
 fn status_says_who_pushes_the_branch() {
@@ -926,11 +928,7 @@ fn status_says_who_pushes_the_branch() {
         with.contains(&format!("pushed to origin as GitHub app {APP}")),
         "{with}"
     );
-    assert_eq!(
-        minted(&s.fake),
-        1,
-        "the fetch was made with the app's token"
-    );
+    assert_eq!(minted(&s.fake), 0, "a status fetches nothing of its own");
 }
 
 /// `sluice forge check main` exits 1 without `[forge]` or with a second
