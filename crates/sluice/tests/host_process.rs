@@ -881,3 +881,113 @@ fn a_step_is_the_host_processs_round() {
         "the step ran none of it: {starts:?}"
     );
 }
+
+/// This setup's host bound: `[runs] max` in its config.
+fn bound(d: &OnDisk, max: usize) {
+    let dir = d.config.path().join("sluice");
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(
+        dir.join("config.toml"),
+        format!("[runs]\nmax = {max}\nreserved = 0\n"),
+    )
+    .unwrap();
+}
+
+/// An agent's `sluice exec main -- sh -c <script>` in a session of its
+/// own, `name`, started now.
+fn agent(d: &OnDisk, name: &str, script: &str) -> std::process::Child {
+    let dir = d.session(name);
+    d.command(&dir)
+        .args(["exec", "main", "--", "sh", "-c", script])
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .unwrap()
+}
+
+/// run-bound, "Turns on a bound of two" (150, S75; rule core.49; record
+/// 0087): two agents' checks hold both runs, a third waits and a
+/// combination falls due; the combination takes the first run to end, and
+/// the third agent the second, while the combination's run goes on.
+#[test]
+fn s75_a_combination_starts_before_a_third_agents_check() {
+    let marks = support::Scratch::new("host-s75-marks");
+    let m = |name: &str| marks.path().join(name);
+    let policy = format!(
+        "[tests]\nrunner = \"command\"\ncommand = \"touch '{}'; sleep 15\"\n\n[branches.main]\ntimeout = \"2m\"\n",
+        m("q").display()
+    );
+    let d = OnDisk::new("host-s75", &policy);
+    bound(&d, 2);
+    let repository = d.repository(d.repo.dir());
+    let _follow = d
+        .client(d.repo.dir())
+        .follow(Path::new(&repository), FollowKind::Wait)
+        .unwrap();
+    let a = agent(&d, "a", &format!("touch '{}'; sleep 3", m("a").display()));
+    let b = agent(&d, "b", &format!("touch '{}'; sleep 9", m("b").display()));
+    within(30, "two agents' checks hold both runs", || {
+        m("a").exists() && m("b").exists()
+    });
+    let c = agent(&d, "c", &format!("touch '{}'", m("c").display()));
+    let id = queued_live(&d, &d.session("q"));
+    within(60, "the combination's run starts", || m("q").exists());
+    assert!(!m("c").exists(), "the third agent's check still waits");
+    within(60, "the third agent's check starts", || m("c").exists());
+    assert_eq!(
+        state(&d, d.repo.dir(), id),
+        "testing",
+        "while the combination's run goes on"
+    );
+    for agent in [a, b, c] {
+        let out = agent.wait_with_output().unwrap();
+        assert!(out.status.success(), "{}", text(&out));
+    }
+}
+
+/// run-bound, "An agent's check stopped while it waits" (150; rule
+/// core.49): an agent's `sluice exec` stopped with Ctrl-C while it waits
+/// is counted nowhere, and the next agent's check that waits starts in the
+/// next free run.
+#[test]
+fn an_agents_check_stopped_while_it_waits_is_counted_nowhere() {
+    let marks = support::Scratch::new("host-stopped-marks");
+    let m = |name: &str| marks.path().join(name);
+    let d = OnDisk::new("host-stopped", POLICY);
+    bound(&d, 1);
+    let repository = d.repository(d.repo.dir());
+    let _follow = d
+        .client(d.repo.dir())
+        .follow(Path::new(&repository), FollowKind::Wait)
+        .unwrap();
+    let a = agent(&d, "a", &format!("touch '{}'; sleep 5", m("a").display()));
+    within(30, "the first agent's check holds the run", || {
+        m("a").exists()
+    });
+    let b = agent(&d, "b", &format!("touch '{}'", m("b").display()));
+    let waiting = |d: &OnDisk| {
+        let out = d
+            .command(d.repo.dir())
+            .env("SLUICE_ROUND_SLEEP", "record")
+            .args(["overview", "--json"])
+            .output()
+            .unwrap();
+        let doc: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+        doc["room"]["waiting"]["sessions"].as_u64().unwrap_or(0)
+    };
+    within(20, "the second agent's check waits", || waiting(&d) == 1);
+    let _ = nix::sys::signal::kill(
+        nix::unistd::Pid::from_raw(b.id() as i32),
+        nix::sys::signal::Signal::SIGINT,
+    );
+    let out = b.wait_with_output().unwrap();
+    assert_eq!(out.status.code(), Some(sluice::STOPPED), "{}", text(&out));
+    within(10, "the stopped check waits no more", || waiting(&d) == 0);
+    let c = agent(&d, "c", &format!("touch '{}'", m("c").display()));
+    within(60, "the next agent's check starts", || m("c").exists());
+    assert!(!m("b").exists(), "the stopped one never ran");
+    for agent in [a, c] {
+        let out = agent.wait_with_output().unwrap();
+        assert!(out.status.success(), "{}", text(&out));
+    }
+}

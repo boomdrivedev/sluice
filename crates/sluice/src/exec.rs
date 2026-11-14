@@ -340,54 +340,72 @@ impl Exec<'_> {
             Some(c) => say(out, json, &format!("running {c}"))?,
         }
 
-        // 89, 91, 71: counted from the start to the end, against every
-        // repository's runs on the host, never in the part the reserve
-        // keeps for submissions' runs. The check seam admits the run; a
-        // start it refuses at the bound, another repository's run having
-        // taken the last one since the count was read, waits as one the
-        // count refused.
-        let mut told_waiting = false;
-        let (place, run) = loop {
-            let guard = seams.state.lock(&self.branch)?;
-            let part = match guard {
-                Some(_) => seams.tests.hold(sluice_seams::RunKind::Session)?,
-                None => None,
-            };
-            if let Some(part) = part {
-                match s.start_session(&plan, &worktree, &session.head, command.as_deref(), part) {
-                    Ok(started) => {
-                        let (place, run) = (started.place, started.run);
-                        let held = self.host.lock_sessions()?;
-                        self.host.begin_session(
-                            held.as_ref(),
-                            &SessionRun {
-                                worktree: worktree.clone(),
-                                place: place.name.clone(),
-                                branch: self.branch.clone(),
-                                pid: std::process::id(),
-                                started: self
-                                    .clock
-                                    .now()
-                                    .to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
-                                run_dir: self.host.run_dir(&run).unwrap_or_default(),
-                                command: command.clone(),
-                                tasks: Vec::new(),
-                            },
-                        )?;
-                        break (place, run);
+        // 89, 91, 71, 150 (rule core.49; design D12): its room asked of
+        // the host process, which holds the host's bound for every
+        // repository, waiting in its order while it says why; a start
+        // refused at the bound asks again. Ctrl-C gives the room or the
+        // wait back.
+        let here = crate::host_process::Here {
+            s,
+            host: self.host,
+            pulls: &(),
+            clock: self.clock,
+        };
+        let mut told = crate::host_process::room::Told::default();
+        let (place, run) = 'start: loop {
+            let mut holding =
+                self.host
+                    .host_process()
+                    .hold(&here, sluice_seams::RunKind::Session, &worktree)?;
+            let part = loop {
+                match holding.next(std::time::Duration::from_millis(100))? {
+                    Some(crate::host_process::Holds::Held(part)) => break part,
+                    Some(crate::host_process::Holds::Waiting(why)) => {
+                        if let Some(words) = told.first(why) {
+                            say(out, json, words)?;
+                        }
                     }
-                    Err(e) if e.downcast_ref::<AtBound>().is_some() => {}
-                    Err(e) => return Err(e),
+                    None => {}
                 }
-            }
-            drop(guard);
-            if !told_waiting {
-                say(out, json, "waiting: the host is at its bound")?;
-                told_waiting = true;
-            }
-            if !self.pause.pause() {
-                say(out, json, "stopped: nothing ran")?;
-                return Ok(STOPPED);
+                if !self.pause.pause() {
+                    say(out, json, "stopped: nothing ran")?;
+                    return Ok(STOPPED);
+                }
+            };
+            drop(holding);
+            let _guard = seams.state.wait_lock(&self.branch)?;
+            match s.start_session(&plan, &worktree, &session.head, command.as_deref(), part) {
+                Ok(started) => {
+                    let (place, run) = (started.place, started.run);
+                    let held = self.host.lock_sessions()?;
+                    self.host.begin_session(
+                        held.as_ref(),
+                        &SessionRun {
+                            worktree: worktree.clone(),
+                            place: place.name.clone(),
+                            branch: self.branch.clone(),
+                            pid: std::process::id(),
+                            started: self
+                                .clock
+                                .now()
+                                .to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
+                            run_dir: self.host.run_dir(&run).unwrap_or_default(),
+                            command: command.clone(),
+                            tasks: Vec::new(),
+                        },
+                    )?;
+                    break 'start (place, run);
+                }
+                Err(e) if e.downcast_ref::<AtBound>().is_some() => {
+                    if let Some(words) = told.first(crate::host_process::room::Why::AtBound) {
+                        say(out, json, words)?;
+                    }
+                    if !self.pause.pause() {
+                        say(out, json, "stopped: nothing ran")?;
+                        return Ok(STOPPED);
+                    }
+                }
+                Err(e) => return Err(e),
             }
         };
         let ports: Vec<(&String, &String)> = place

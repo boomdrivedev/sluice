@@ -407,21 +407,33 @@ impl RoomHandle {
     }
 }
 
-/// A part a start takes, as the room it was held of carries it (design
-/// D12): its run begins in a run directory, and its supervisor takes it.
+/// A part a start takes, as the room it was held of carries it: the room
+/// itself, or the host process's over the connection `sluice exec` or
+/// `sluice preview` held it on (design D12).
 enum Begun {
     Here(room::Holding),
+    Host(crate::host_process::ask::Lent, Option<(String, PathBuf)>),
 }
 
 impl Begun {
     fn of(part: Part) -> Option<Begun> {
-        part.take::<room::Holding>().ok().map(Begun::Here)
+        match part.take::<room::Holding>() {
+            Ok(h) => Some(Begun::Here(h)),
+            Err(part) => part
+                .take::<crate::host_process::ask::Lent>()
+                .ok()
+                .map(|l| Begun::Host(l, None)),
+        }
     }
 
     /// The run begins in `run_dir`, in the place `place`.
     fn begin(&mut self, place: &str, run_dir: &Path) -> Result<()> {
         match self {
             Begun::Here(h) => h.begin(place, run_dir),
+            Begun::Host(_, at) => {
+                *at = Some((place.to_string(), run_dir.to_path_buf()));
+                Ok(())
+            }
         }
     }
 
@@ -429,6 +441,12 @@ impl Begun {
     fn started(self) {
         match self {
             Begun::Here(h) => h.started(),
+            Begun::Host(lent, Some((place, run_dir))) => {
+                // A host process that ended meanwhile counts the run by its
+                // supervisor when the next one starts.
+                let _ = lent.started(&place, &run_dir);
+            }
+            Begun::Host(_, None) => {}
         }
     }
 }

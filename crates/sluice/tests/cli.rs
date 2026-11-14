@@ -4362,6 +4362,59 @@ fn exec_waits_for_room() {
     assert_eq!(f.world.started().len(), 1);
 }
 
+/// 150, S75 (record 0087; design D12): an agent's check waiting while a
+/// combination's run waits too says `a combination's run starts first`
+/// once the host has a free run, which the combination's run takes; the
+/// agent's check starts in the next run to come free.
+#[test]
+fn exec_waits_for_a_combinations_run() {
+    let f = setup();
+    f.world.host_limit(1);
+    f.world.hold_runs(true);
+    f.world.session_run("/w/other", true);
+    work(
+        &f,
+        "unit/a",
+        "agent-a",
+        &[("plugin/lib/plan.py", Some("p2"))],
+    );
+    work(&f, "unit/q", "agent-q", &[("plugin/q", Some("q"))]);
+    sluice(&f, &["submit", BRANCH, "--worktree", "unit/q", "--no-wait"]);
+    // The round finds the host full: the combination's run waits.
+    sluice(&f, &["step", BRANCH]);
+    assert!(f.world.started().is_empty());
+    let pause = Then(Cell::new(0), |n| {
+        match n {
+            1 => f.world.kill_session("/w/other"),
+            2 => {
+                // The combination's round asks for the free run, and takes it.
+                sluice(&f, &["step", BRANCH]);
+                assert_eq!(f.world.started().len(), 1, "the combination's run");
+            }
+            3 => {
+                // Runs end from now, the agent's own among them.
+                f.world.hold_runs(false);
+                f.world.complete_all();
+                sluice(&f, &["step", BRANCH]);
+            }
+            _ => {}
+        }
+        true
+    });
+    let (code, out) = exec_with(&f, 0, &pause, &[BRANCH, "--worktree", "unit/a"]);
+    assert_eq!(code, LANDED, "{out}");
+    assert!(out.contains("waiting: the host is at its bound\n"), "{out}");
+    assert!(
+        out.contains("waiting: a combination's run starts first\n"),
+        "{out}"
+    );
+    assert_eq!(
+        f.world.started().len(),
+        2,
+        "the combination's, then the agent's"
+    );
+}
+
 /// 71: a start the check seam refuses at the host's bound, another
 /// repository's run having taken the last one after the count was read,
 /// waits as one the count refused, says so once, and starts on the next
