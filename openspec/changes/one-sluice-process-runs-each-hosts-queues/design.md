@@ -203,10 +203,16 @@ index.
 The old bolt's D5. Each repository with work in play or a follower has
 a thread of its own, which opens its own `Bound` with the round's retry
 policy. The pass `drive` runs today moves into
-`host_process::pass::pass`, unchanged in what it does: the remote's one
-ask, the releases, the intake, a round of every branch in play, and the
-reader's document; it returns a report of what it printed and the
-branches it passed by. A refused policy or a slow fetch holds only its
+`host_process::pass::pass`: the remote's one ask, the releases, the
+intake, a round of every branch in play, the intake again of a branch
+whose round stepped, and the reader's document; it returns a report of
+what it printed and the branches it passed by. The intake after the
+round posts what the round decided on each pull request, a request sent
+back marked a draft, before the pass writes the document a follower
+reads, as the wait's own intake did once a round had run; it asks the
+forge nothing where the round left the branch and its records as they
+were (136). Not taken: the round before the intake, which takes a
+request's submission in a pass late. A refused policy or a slow fetch holds only its
 own thread (26). A panic is caught, logged with the repository, and the
 task started again at the next tick. A task ends once its repository has
 nothing in play and nothing follows it. It ticks every second while a
@@ -280,7 +286,11 @@ the document, is said once on stderr and the wait goes on. A wait
 reports a landing once its record says landed or its branch holds its
 work (core.48); what a round failed after the landing is in the host
 process's log and the branch's state, never the wait's exit, and exit 3
-is only for a read the wait itself could not make. A submit writes its
+is only for a read the wait itself could not make. A wait asks GitHub
+only for a pull request it follows, so that is the one read on which it
+meets a spent allowance and waits it out within its limit (134); a wait
+on a submission meets none, the host process's pass passing the forge's
+part by. A submit writes its
 entry as today, sends `serve`, and returns with `--no-wait` or waits as
 `sluice wait` does; `wt submit` is a waiting submit. `sluice overview
 --json --watch` follows as a wait does.
@@ -288,8 +298,10 @@ entry as today, sends `serve`, and returns with `--no-wait` or waits as
 ### D10. `sluice step` is the host process's round
 
 The old bolt's D10, with record 0103's D6. `Command::Step` sends `step`;
-the repository's task runs `s.round` on the branch between its own
-passes and answers the document today's `step --json` prints,
+the repository's task runs, between its own passes, the remote's one ask,
+the branch's intake, `s.round` and the intake again where the round
+stepped, as a pass does, so a step reads each signer's runs as a pass
+reads them (D17), and answers the document today's `step --json` prints,
 `outcome`, `released`, `previews_released`, `releases` and `held`, with
 `warnings`, each warning the round's intake met. The command prints the
 document under `--json` and otherwise the lines today's step prints,
@@ -436,7 +448,8 @@ before, a behaviour 135 removes kept behind a flag (core.12).
 
 - **`serve`, starting it where none answers:** a submit, waiting or
   not, by worktree, by name or by request; `withdraw`, `amend`,
-  `set-aside`, `branch create`, `branch accept`, and a `release` of a
+  `set-aside`, `branch create`, `branch accept`, `branch delete`, and a
+  `release` of a
   checkout or preview.
 - **`follow`:** `sluice wait`, a waiting submit, `wt submit`, `sluice
   overview --watch` and `sluice run`.
@@ -456,7 +469,10 @@ in each form, `sluice overview` without `--watch`, the home view and a
 forecast, sends `read {repository}`, starting the host process where
 none answers. The process answers once a reading of that repository is
 current: one that ended within its tick, or one under way that began
-within a tick of the last one's end (the forecast's rule of 64 today).
+within a tick of the last one's end (the forecast's rule of 64 today),
+and in either case one that began after the last `serve` a command sent
+for the repository (D15), so a read after a submit, a withdrawal or a
+branch made or removed reads what changed.
 Where it holds no current reading, because no task runs there or the
 task is idle between ticks, it reads now, by the look of D4 or the
 task's next pass, and answers when that reading ends; its answer names
@@ -470,8 +486,11 @@ The command then reads with nothing fetched:
 - **The overview and the home view** print from the reader's document
   of that reading, the text rendered from it as the watch's document is
   (`BranchView` is read back from it today, `branch_in`); where no
-  reader keeps its tick, as after a look, which writes no document, from
-  the records as the host holds them.
+  reader keeps its tick, or the look made the reading, which writes no
+  document, from the records as the host holds them. The `read` answer
+  says when the look made the reading (`looked`), so a document an
+  earlier pass wrote is never printed beside records the look read
+  since.
 - **A status**, in each form, reads with the core in held mode: every
   branch through `State::read_held`, as the host holds it since the host
   process's last ask, no `refresh`, the pull requests it follows as the

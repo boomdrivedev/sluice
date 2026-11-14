@@ -196,6 +196,23 @@ document (129; record 0093 as amended 2026-11-13; rule core.25).
 - **THEN** it answers at once from the records as the host holds them,
   with nothing fetched
 
+### Requirement: A one-shot read reads what a command changed
+
+A reading the host process began before a command of sluice's on the
+host last changed the repository's queues or branches SHALL NOT be
+current for a one-shot read. Where the reading a one-shot read is
+answered with was made by the host process's look, which writes no
+reader's document, the overview and the home view SHALL render the
+records as the host holds them (129; rule core.11).
+
+#### Scenario: A one-shot overview after a branch is removed
+
+- **WHEN** the host process read the repository within its tick, and
+  `sluice branch delete bolt/x` then removes `bolt/x`, whose records
+  stay, and `sluice overview` runs
+- **THEN** it shows `bolt/x` gone, as `sluice status bolt/x` says it is,
+  never at its last revision as the reading before the removal had it
+
 ## MODIFIED Requirements
 
 ### Requirement: No other reader's lease is taken
