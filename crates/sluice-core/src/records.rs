@@ -1183,6 +1183,10 @@ pub enum Event {
         remote: String,
         asked: String,
         said: String,
+        /// 133 (design D27): a read of the branch's intake, its pull
+        /// requests on the forge, rather than of its remote's refs.
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        intake: bool,
     },
     /// 133: the first round on `host` that read the remote again: when the
     /// refusal began, how many seconds it stood and how many rounds it
@@ -1194,6 +1198,9 @@ pub enum Event {
         since: String,
         stood: u64,
         rounds: u64,
+        /// 133 (design D27): the end of a refusal of the branch's intake.
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        intake: bool,
     },
     /// 114, record 0105 (design D6 of the change
     /// `a-pass-nothing-proves-blames-no-one`; rule core.28's way): a run
@@ -1706,6 +1713,7 @@ mod tests {
                     said: "remote: Repository not found.\n\
                            fatal: repository 'https://github.com/acme/app.git/' not found"
                         .into(),
+                    intake: false,
                 },
             },
             LogLine {
@@ -1717,6 +1725,7 @@ mod tests {
                     since: "2026-10-26T09:16:40Z".into(),
                     stood: 1800,
                     rounds: 12,
+                    intake: false,
                 },
             },
         ];

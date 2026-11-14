@@ -168,6 +168,8 @@ struct Inner {
     failed_refs: Option<String>,
     /// Each host's refusal document of a branch, by host and branch (133).
     refusals: BTreeMap<(String, String), Vec<u8>>,
+    /// This host's refusal of each branch's intake (design D27).
+    intake_refusals: BTreeMap<(String, String), Vec<u8>>,
     crash: Option<Crash>,
     // the check
     tasks: Vec<TaskDef>,
@@ -3576,6 +3578,22 @@ impl State for FakeState {
         match doc {
             Some(doc) => inner.refusals.insert(key, doc.to_vec()),
             None => inner.refusals.remove(&key),
+        };
+        Ok(())
+    }
+
+    fn intake_refusal(&self, branch: &str) -> Result<Option<Vec<u8>>> {
+        let inner = self.0 .0.borrow();
+        let key = (inner.host.clone(), branch.to_string());
+        Ok(inner.intake_refusals.get(&key).cloned())
+    }
+
+    fn keep_intake_refusal(&self, branch: &str, doc: Option<&[u8]>) -> Result<()> {
+        let mut inner = self.0 .0.borrow_mut();
+        let key = (inner.host.clone(), branch.to_string());
+        match doc {
+            Some(doc) => inner.intake_refusals.insert(key, doc.to_vec()),
+            None => inner.intake_refusals.remove(&key),
         };
         Ok(())
     }

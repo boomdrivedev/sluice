@@ -38,6 +38,8 @@ const PROGRESS: &str = ".progress";
 /// 133: this host's refusals of its branches' remotes, beside the records
 /// and never in them; the dot keeps them out of [`State::branches`].
 const REFUSED: &str = ".refused";
+/// 133 (design D27): this host's refusal of each branch's intake.
+const INTAKE_REFUSED: &str = ".intake";
 const PROGRESS_SCHEMA: &str = "sluice/progress@1";
 
 /// One candidate's tasks as kept: the candidate is named inside, since a
@@ -115,6 +117,33 @@ impl LocalFiles {
             bail!("{branch:?} cannot name a branch's records");
         }
         Ok(self.root.join(branch))
+    }
+
+    /// 133: this host's document `branch`'s file under `dir` keeps, a
+    /// refusal of its remote or of its intake (design D27).
+    fn read_kept(&self, dir: &str, branch: &str) -> Result<Option<Vec<u8>>> {
+        self.dir(branch)?;
+        let path = self.root.join(dir).join(format!("{branch}.json"));
+        match std::fs::read(&path) {
+            Ok(b) => Ok(Some(b)),
+            Err(e) if e.kind() == ErrorKind::NotFound => Ok(None),
+            Err(e) => Err(e).with_context(|| format!("reading {}", path.display())),
+        }
+    }
+
+    /// Keep `doc` as `branch`'s file under `dir`, or remove it.
+    fn keep_kept(&self, dir: &str, branch: &str, doc: Option<&[u8]>) -> Result<()> {
+        self.dir(branch)?;
+        let dir = self.root.join(dir);
+        let name = format!("{branch}.json");
+        match doc {
+            Some(doc) => write_atomic(&dir, &name, doc),
+            None => match std::fs::remove_file(dir.join(&name)) {
+                Ok(()) => Ok(()),
+                Err(e) if e.kind() == ErrorKind::NotFound => Ok(()),
+                Err(e) => Err(e).with_context(|| format!("removing {name}")),
+            },
+        }
     }
 
     /// 69: where the results log is (design D17).
@@ -597,27 +626,19 @@ impl State for LocalFiles {
     }
 
     fn refusal(&self, branch: &str) -> Result<Option<Vec<u8>>> {
-        self.dir(branch)?;
-        let path = self.root.join(REFUSED).join(format!("{branch}.json"));
-        match std::fs::read(&path) {
-            Ok(b) => Ok(Some(b)),
-            Err(e) if e.kind() == ErrorKind::NotFound => Ok(None),
-            Err(e) => Err(e).with_context(|| format!("reading {}", path.display())),
-        }
+        self.read_kept(REFUSED, branch)
     }
 
     fn keep_refusal(&self, branch: &str, doc: Option<&[u8]>) -> Result<()> {
-        self.dir(branch)?;
-        let dir = self.root.join(REFUSED);
-        let name = format!("{branch}.json");
-        match doc {
-            Some(doc) => write_atomic(&dir, &name, doc),
-            None => match std::fs::remove_file(dir.join(&name)) {
-                Ok(()) => Ok(()),
-                Err(e) if e.kind() == ErrorKind::NotFound => Ok(()),
-                Err(e) => Err(e).with_context(|| format!("removing {name}")),
-            },
-        }
+        self.keep_kept(REFUSED, branch, doc)
+    }
+
+    fn intake_refusal(&self, branch: &str) -> Result<Option<Vec<u8>>> {
+        self.read_kept(INTAKE_REFUSED, branch)
+    }
+
+    fn keep_intake_refusal(&self, branch: &str, doc: Option<&[u8]>) -> Result<()> {
+        self.keep_kept(INTAKE_REFUSED, branch, doc)
     }
 
     fn progress(&self, branch: &str) -> Result<BTreeMap<String, Vec<TaskProgress>>> {

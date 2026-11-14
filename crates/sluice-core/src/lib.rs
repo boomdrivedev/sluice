@@ -29,7 +29,7 @@ pub mod verdict_view;
 
 use anyhow::{anyhow, bail, Context, Result};
 use chrono::{DateTime, SecondsFormat, Utc};
-use sluice_seams::{Branch, Checkout, Driver, Rev, State, Tests, Written};
+use sluice_seams::{Branch, Checkout, Driver, ReadRefused, Rev, State, Tests, Written};
 
 use crate::line::Line;
 use crate::policy::{Policy, Rules, POLICY_PATH};
@@ -338,10 +338,21 @@ impl<'a> Sluice<'a> {
             }),
         };
         let refusal = self.refusal(&line.branch)?;
-        let carried = refusal
+        // 133 (design D27): this host's refusal of the branch's intake, its
+        // lines marked so, written beside the round's.
+        let intake = self.intake_refusal(&line.branch)?;
+        let carried: Vec<(String, crate::records::Event)> = refusal
             .as_ref()
             .map(|r| r.unwritten(&self.peer.name))
-            .unwrap_or_default();
+            .unwrap_or_default()
+            .into_iter()
+            .chain(
+                intake
+                    .as_ref()
+                    .map(|r| r.unwritten_as(&self.peer.name, true))
+                    .unwrap_or_default(),
+            )
+            .collect();
         let changes = if carried.is_empty() && ending.is_none() {
             own
         } else {
@@ -361,14 +372,22 @@ impl<'a> Sluice<'a> {
             .seams
             .state
             .write(&line.branch, line.version, changes)?;
-        if let (Written::Written(_), Some(r)) = (written, refusal) {
-            if !carried.is_empty() {
-                // The write stands whatever this does: a line not marked is
-                // written again by the next write, which decides nothing.
+        if let Written::Written(_) = written {
+            // The write stands whatever this does: a line not marked is
+            // written again by the next write, which decides nothing.
+            if let Some(r) = refusal.filter(|_| !carried.is_empty()) {
                 if let Err(e) = self.keep_refusal(&line.branch, r.written().as_ref()) {
                     tracing::warn!(
                         sluice.branch = line.branch,
                         "noting the refusal's lines as written failed: {e:#}"
+                    );
+                }
+            }
+            if let Some(r) = intake.filter(|_| !carried.is_empty()) {
+                if let Err(e) = self.keep_intake_refusal(&line.branch, r.written().as_ref()) {
+                    tracing::warn!(
+                        sluice.branch = line.branch,
+                        "noting the intake refusal's lines as written failed: {e:#}"
                     );
                 }
             }
@@ -404,6 +423,98 @@ impl<'a> Sluice<'a> {
     fn keep_refusal(&self, branch: &str, refusal: Option<&Refusal>) -> Result<()> {
         let bytes = refusal.map(Refusal::to_bytes);
         self.seams.state.keep_refusal(branch, bytes.as_deref())
+    }
+
+    /// 133 (design D27): this host's refusal of `branch`'s intake, as the
+    /// records seam keeps it beside its refusal of the remote.
+    pub fn intake_refusal(&self, branch: &str) -> Result<Option<Refusal>> {
+        self.seams
+            .state
+            .intake_refusal(branch)?
+            .map(|b| Refusal::parse(&b))
+            .transpose()
+    }
+
+    /// Keep `refusal` as this host's refusal of `branch`'s intake, or, with
+    /// `None`, remove it.
+    fn keep_intake_refusal(&self, branch: &str, refusal: Option<&Refusal>) -> Result<()> {
+        let bytes = refusal.map(Refusal::to_bytes);
+        self.seams
+            .state
+            .keep_intake_refusal(branch, bytes.as_deref())
+    }
+
+    /// 133, rule core.28 (design D27): an intake pass of `branch` met
+    /// `causes`, each a read of the forge it could not make: counted in this
+    /// host's refusal of the branch's intake, each cause no pass of the
+    /// refusal met before added, and a `read-refused` line marked `intake`
+    /// written for each, in a write of its own where the branch's lock is
+    /// free, or the next write of the branch's log otherwise. The causes
+    /// whose lines this note wrote, which a pass says in the host process's
+    /// log; none it met before, and none a restarted process, a step or a
+    /// submit meets again.
+    pub fn note_intake_refused(
+        &self,
+        branch: &str,
+        causes: &[ReadRefused],
+    ) -> Result<Vec<ReadRefused>> {
+        let Some(first) = causes.first() else {
+            return Ok(Vec::new());
+        };
+        let now = self.now();
+        let standing = self.intake_refusal(branch)?.filter(|r| r.ended.is_none());
+        let rounds = standing.as_ref().map_or(0, |r| r.rounds);
+        let mut r = Refusal::refused(self.intake_refusal(branch)?, first, &now);
+        for c in &causes[1..] {
+            r = Refusal::refused(Some(r), c, &now);
+        }
+        r.rounds = rounds + 1;
+        let unlogged = |r: &Refusal| -> Vec<(String, String)> {
+            r.causes
+                .iter()
+                .filter(|c| !c.logged)
+                .map(|c| (c.asked.clone(), c.said.clone()))
+                .collect()
+        };
+        let before = unlogged(&r);
+        self.keep_intake_refusal(branch, Some(&r))?;
+        self.write_intake_lines(branch)?;
+        let after = self
+            .intake_refusal(branch)?
+            .map(|r| unlogged(&r))
+            .unwrap_or_default();
+        Ok(causes
+            .iter()
+            .filter(|c| {
+                let key = (c.asked.clone(), c.said.clone());
+                before.contains(&key) && !after.contains(&key)
+            })
+            .cloned()
+            .collect())
+    }
+
+    /// 133 (design D27): an intake pass of `branch` met no failure: this
+    /// host's refusal of its intake, where one stands, ends, its
+    /// `read-again` line marked `intake` written as the refusal's are.
+    pub fn note_intake_read(&self, branch: &str) -> Result<()> {
+        let Some(mut r) = self.intake_refusal(branch)? else {
+            return Ok(());
+        };
+        if r.ended.is_none() {
+            r.read_again(&self.now());
+            self.keep_intake_refusal(branch, Some(&r))?;
+        }
+        self.write_intake_lines(branch)
+    }
+
+    /// The lines of this host's refusals of `branch` not yet in its log, in
+    /// a write holding nothing else, where the branch's lock is free;
+    /// otherwise the next write carries them (rule core.14).
+    fn write_intake_lines(&self, branch: &str) -> Result<()> {
+        let Some(_lock) = self.seams.state.lock(branch)? else {
+            return Ok(());
+        };
+        self.write_refusal_lines(branch)
     }
 
     /// Read, change and write a branch's records, reading again when the
@@ -732,5 +843,106 @@ mod tests {
             assert!(s.policy_at(&at).unwrap().is_some());
         }
         assert_eq!(f.world.file_reads(), reads + 1);
+    }
+}
+
+#[cfg(test)]
+mod intake_refusals {
+    use chrono::{DateTime, TimeZone, Utc};
+    use sluice_fakes::Fakes;
+
+    use super::*;
+    use crate::records::Event;
+
+    struct Noon;
+
+    impl Clock for Noon {
+        fn now(&self) -> DateTime<Utc> {
+            Utc.with_ymd_and_hms(2026, 11, 13, 12, 0, 0).unwrap()
+        }
+    }
+
+    fn cause(asked: &str, said: &str) -> ReadRefused {
+        ReadRefused {
+            remote: "origin".into(),
+            asked: asked.into(),
+            said: said.into(),
+            note: None,
+        }
+    }
+
+    /// The branch's `read-refused` and `read-again` lines: whether each is
+    /// of its intake, its event and what it asked.
+    fn lines(s: &Sluice<'_>) -> Vec<(bool, &'static str, String)> {
+        let snapshot = s.seams.state.read("main").unwrap();
+        Line::read_log(&snapshot)
+            .unwrap()
+            .into_iter()
+            .filter_map(|l| match l.event {
+                Event::ReadRefused { intake, asked, .. } => Some((intake, "read-refused", asked)),
+                Event::ReadAgain { intake, .. } => Some((intake, "read-again", String::new())),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// 133, rule core.28 (design D27): an intake pass's causes are kept in
+    /// this host's refusal of the branch's intake, apart from the round's
+    /// refusal of its remote, and logged once for each cause, marked
+    /// `intake`: a pass that meets them again logs nothing and says
+    /// nothing, a new cause is logged alone, and a pass that meets none
+    /// ends the refusal with a `read-again` so marked.
+    #[test]
+    fn an_intake_refusal_is_logged_once_per_cause_apart_from_the_rounds() {
+        let f = Fakes::new();
+        f.world
+            .init("main", &[(crate::policy::POLICY_PATH, "[branches.main]\n")]);
+        let seams = Seams {
+            checkout: &f.checkout,
+            tests: &f.tests,
+            branch: &f.branch,
+            driver: &f.driver,
+            state: &f.state,
+        };
+        let s = Sluice::new(seams, &Noon);
+        let listed = cause("main's pull requests", "GitHub said 401 Bad credentials");
+        let headless = cause("pull/12", "pull/12 has no head");
+        let noted = s
+            .note_intake_refused("main", &[listed.clone(), headless.clone()])
+            .unwrap();
+        assert_eq!(noted, [listed.clone(), headless.clone()]);
+        let two = vec![
+            (true, "read-refused", "main's pull requests".to_string()),
+            (true, "read-refused", "pull/12".to_string()),
+        ];
+        assert_eq!(lines(&s), two);
+        // Met again: nothing logged, nothing to say.
+        let noted = s
+            .note_intake_refused("main", &[listed.clone(), headless.clone()])
+            .unwrap();
+        assert!(noted.is_empty(), "{noted:?}");
+        assert_eq!(lines(&s), two);
+        // A new cause alone.
+        let other = cause("pull/13", "GitHub said 502");
+        let noted = s
+            .note_intake_refused("main", &[listed.clone(), other.clone()])
+            .unwrap();
+        assert_eq!(noted, [other]);
+        assert_eq!(lines(&s).len(), 3);
+        let kept = s.intake_refusal("main").unwrap().unwrap();
+        assert_eq!(kept.rounds, 3);
+        // The round's own refusal of the remote is apart.
+        assert_eq!(s.refusal("main").unwrap(), None);
+        // A pass that met none ends it.
+        s.note_intake_read("main").unwrap();
+        let all = lines(&s);
+        assert_eq!(
+            all.last(),
+            Some(&(true, "read-again", String::new())),
+            "{all:?}"
+        );
+        assert_eq!(s.intake_refusal("main").unwrap(), None);
+        s.note_intake_read("main").unwrap();
+        assert_eq!(lines(&s).len(), 4, "ended once");
     }
 }

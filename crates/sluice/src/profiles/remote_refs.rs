@@ -688,6 +688,22 @@ impl crate::host_process::results::SignerRef for FetchedRuns<'_> {
     }
 }
 
+/// Keep `doc` at `path`, written whole, or remove it with `None` (133).
+fn keep_file(path: &Path, doc: Option<&[u8]>) -> Result<()> {
+    let Some(doc) = doc else {
+        return match std::fs::remove_file(path) {
+            Ok(()) => Ok(()),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
+            Err(e) => Err(e.into()),
+        };
+    };
+    std::fs::create_dir_all(path.parent().expect("a parent"))?;
+    let tmp = path.with_extension("json.tmp");
+    std::fs::write(&tmp, doc)?;
+    std::fs::rename(&tmp, path)?;
+    Ok(())
+}
+
 /// `refs/sluice/state/<branch>`, for a branch git may name.
 fn state_ref(branch: &str) -> Result<String> {
     if branch.is_empty()
@@ -1035,6 +1051,18 @@ impl State for RemoteRefs {
 
     fn stale(&self, branch: &str) -> Option<ReadRefused> {
         self.stale.borrow().get(branch).cloned()
+    }
+
+    fn intake_refusal(&self, branch: &str) -> Result<Option<Vec<u8>>> {
+        match std::fs::read(self.own_file("intake", branch)?) {
+            Ok(b) => Ok(Some(b)),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
+            Err(e) => Err(e.into()),
+        }
+    }
+
+    fn keep_intake_refusal(&self, branch: &str, doc: Option<&[u8]>) -> Result<()> {
+        keep_file(&self.own_file("intake", branch)?, doc)
     }
 
     fn refusal(&self, branch: &str) -> Result<Option<Vec<u8>>> {
