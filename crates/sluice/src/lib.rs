@@ -2261,7 +2261,7 @@ pub fn run(
             runs::supervise(&dir)?;
             Ok(0)
         }
-        Command::Host => host_process::run(),
+        Command::Host => host_process::run(telemetry::Choices::default()),
         Command::Protect { remove, json } => {
             let dir = std::env::current_dir()?;
             if remove {

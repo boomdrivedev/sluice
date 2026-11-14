@@ -53,7 +53,7 @@ fn main() {
     // The host process needs no repository: it holds every repository its
     // index names (135; design D1).
     if let Some(Command::Host) = &cli.command {
-        match sluice::host_process::run() {
+        match sluice::host_process::run(cli.choices()) {
             Ok(code) => std::process::exit(code),
             Err(e) => {
                 eprintln!("sluice host: {e:#}");

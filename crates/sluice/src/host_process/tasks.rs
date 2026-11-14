@@ -393,6 +393,12 @@ impl Tasks {
             std::thread::sleep(Duration::from_millis(20));
         }
     }
+
+    /// Start tasks and looks again after [`Tasks::stop_all`]: a hand-over
+    /// whose successor did not start (design D20).
+    pub fn resume(&self) {
+        self.0.stopping.store(false, Ordering::SeqCst);
+    }
 }
 
 /// A command's way to a repository's task.

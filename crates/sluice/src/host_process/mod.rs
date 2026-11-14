@@ -33,6 +33,7 @@ pub mod results;
 pub mod room;
 pub mod tasks;
 
+use std::ffi::OsString;
 use std::fs::{File, OpenOptions};
 use std::io::{BufReader, ErrorKind, Read};
 use std::os::unix::net::{UnixListener, UnixStream};
@@ -212,19 +213,51 @@ impl Hosting {
     }
 }
 
+/// The host process as it started, which its successor starts as
+/// (record 0107 as amended 2026-11-13; design D20): its environment
+/// before telemetry took anything out of it, and the executable it
+/// started as resolved through every link, or why that could not be read.
+struct Successor {
+    env: Vec<(OsString, OsString)>,
+    program: Result<PathBuf, String>,
+}
+
+/// How the host process's loop ended.
+enum Ending {
+    /// It ends: no work in play, a newer sluice's ask or its state folder
+    /// gone.
+    Ended,
+    /// It handed its repositories to a successor, whose socket is now the
+    /// host's (design D20).
+    HandedOver,
+}
+
 /// `sluice host`: run as the host process of this user's state folder,
 /// or, where another holds its lock, end at once and move nothing (135;
-/// design D1). Its exit.
-pub fn run() -> Result<i32> {
+/// design D1). `choices` are the telemetry its own command line and
+/// sluice's variables choose (151; rule core.53). Its exit.
+pub fn run(choices: crate::telemetry::Choices) -> Result<i32> {
+    let successor = Successor {
+        env: std::env::vars_os().collect(),
+        program: std::env::current_exe()
+            .and_then(std::fs::canonicalize)
+            .map_err(|e| format!("the executable the host process started as: {e}")),
+    };
     let paths = Paths::host()?;
     let Some(lock) = try_lock(&paths.lock())? else {
         log("sluice host: another host process holds this host's lock; this one ends");
         return Ok(0);
     };
-    run_holding(paths, lock)
+    run_holding(paths, lock, choices, successor)
 }
 
-fn run_holding(paths: Paths, _lock: File) -> Result<i32> {
+fn run_holding(
+    paths: Paths,
+    lock: File,
+    choices: crate::telemetry::Choices,
+    successor: Successor,
+) -> Result<i32> {
+    let mut lock = Some(lock);
     take_log(&paths)?;
     let named = Named {
         version: crate::VERSION.to_string(),
@@ -256,6 +289,25 @@ fn run_holding(paths: Paths, _lock: File) -> Result<i32> {
     // their file, which it looks at between its ticks.
     let host_settings = HostSettings::read()?;
     let instance = host_settings.held().clone();
+    // 151 (record 0106; rule core.53): its rounds' telemetry, as the host's
+    // settings and its own choices say, started before any thread of its
+    // own; a change of `[telemetry]` goes to a successor (design D20).
+    let chosen = crate::telemetry::Settings::choose(
+        choices,
+        instance.telemetry.as_ref(),
+        &crate::profiles::checks::hostname(),
+        std::env::vars(),
+    );
+    let telemetry = match chosen.send {
+        true => match crate::telemetry::Telemetry::start(&chosen) {
+            Ok(t) => Some(t),
+            Err(e) => {
+                log(&format!("sluice host: warning: telemetry off: {e:#}"));
+                None
+            }
+        },
+        false => None,
+    };
     let settings = tasks::Settings::new(instance.clone());
     let room = Shared::new(Room::over(
         crate::host_count::HostCount::host()?,
@@ -316,10 +368,24 @@ fn run_holding(paths: Paths, _lock: File) -> Result<i32> {
     for repository in index.list().unwrap_or_default() {
         hosting.tasks.look(&repository);
     }
-    let code = serve(&hosting, &listener, TakeUp::new(host_settings));
-    let _ = std::fs::remove_file(&hosting.paths.socket);
+    let ending = serve(
+        &hosting,
+        listener,
+        TakeUp::new(host_settings),
+        &mut lock,
+        &successor,
+        telemetry.as_ref(),
+    );
+    // A successor's socket is the host's now: only this process's own is
+    // removed.
+    if !matches!(ending, Ok(Ending::HandedOver)) {
+        let _ = std::fs::remove_file(&hosting.paths.socket);
+    }
     log(&format!("sluice host {} ends", hosting.named.pid));
-    code
+    if let Some(t) = telemetry {
+        t.finish();
+    }
+    ending.map(|_| 0)
 }
 
 /// Keep the previous process's log as `log.1`, and send this one's output
@@ -359,6 +425,15 @@ struct TakeUp {
     )>,
 }
 
+/// What a look at the host's settings asks of the loop.
+enum Taken {
+    /// Nothing more: taken up in place, refused, or nothing changed.
+    Done,
+    /// A change it takes up only by handing over, bound: the tables it
+    /// moves (design D20).
+    HandOver(Vec<&'static str>),
+}
+
 impl TakeUp {
     fn new(settings: HostSettings) -> TakeUp {
         TakeUp {
@@ -382,17 +457,22 @@ impl TakeUp {
     /// room's next admission, said once in its log. A file gone,
     /// unreadable or refused, or settings that do not bind, leave it on
     /// what it holds, said once by the sign kept (design D19).
-    fn look(&mut self, hosting: &Hosting) {
+    fn look(&mut self, hosting: &Hosting) -> Taken {
         if let Some((_, _, answer)) = &self.binding {
             let bound = match answer.try_recv() {
                 Ok(bound) => bound,
-                Err(mpsc::TryRecvError::Empty) => return,
+                Err(mpsc::TryRecvError::Empty) => return Taken::Done,
                 Err(mpsc::TryRecvError::Disconnected) => {
                     Err("binding them stopped short".to_string())
                 }
             };
             let (instance, tables, _) = self.binding.take().expect("a change being bound");
+            let afresh = tables.iter().any(|t| crate::instance::AFRESH.contains(t));
             match bound {
+                // D20: the successor reads the file itself; this process
+                // keeps what it holds until it ends.
+                Ok(()) if afresh => return Taken::HandOver(tables),
+                Err(why) if afresh => self.not_handed(&tables, "its settings do not bind", &why),
                 Ok(()) => {
                     hosting
                         .room
@@ -408,10 +488,10 @@ impl TakeUp {
                 }
                 Err(why) => self.refused(&why),
             }
-            return;
+            return Taken::Done;
         }
         if self.looked.elapsed() < SETTINGS_LOOK {
-            return;
+            return Taken::Done;
         }
         self.looked = Instant::now();
         match self.settings.look() {
@@ -431,6 +511,18 @@ impl TakeUp {
                 self.binding = Some((instance, tables, rx));
             }
         }
+        Taken::Done
+    }
+
+    /// A change it takes up only by handing over that it could not hand
+    /// over for, said once with the tables (rule core.54; design D20).
+    fn not_handed(&self, tables: &[&str], cause: &str, why: &str) {
+        log(&format!(
+            "sluice: warning: {} changed {}, which the host process takes up only by handing \
+             over, and {cause}, so it keeps the settings it holds until the file changes: {why}",
+            self.file(),
+            tables.join(", ")
+        ));
     }
 
     fn refused(&self, why: &str) {
@@ -464,9 +556,164 @@ fn binds(instance: &Instance, repositories: &[PathBuf]) -> Result<()> {
     Ok(())
 }
 
+/// How long it waits for its successor to answer: a start's (design D2,
+/// D20).
+const SUCCESSOR_WAIT: Duration = Duration::from_secs(10);
+
+/// D20: hand the repositories to a successor it starts itself, for a
+/// change of `tables` no binding takes up in place: every task finishes
+/// its pass and lets its locks go, its telemetry sends what it holds, and
+/// under the start lock, held until a host process of another pid
+/// answers, it lets its lock and its socket go and starts `<the executable
+/// it started as> host` with the environment it started with, detached.
+/// Nothing passes to the successor but what the records and the host's
+/// state hold: it reads the settings file itself. Where none answers, it
+/// takes its lock and socket back and goes on as it was, said once.
+/// Whether it handed over.
+fn hand_over(
+    hosting: &Hosting,
+    listener: &mut UnixListener,
+    lock: &mut Option<File>,
+    successor: &Successor,
+    telemetry: Option<&crate::telemetry::Telemetry>,
+    take_up: &TakeUp,
+    tables: &[&'static str],
+) -> bool {
+    let program = match &successor.program {
+        Ok(p) => p.clone(),
+        Err(why) => {
+            take_up.not_handed(tables, "its successor could not start", why);
+            return false;
+        }
+    };
+    let start = match lock_start(&hosting.paths) {
+        Ok(f) => f,
+        Err(e) => {
+            take_up.not_handed(tables, "its successor could not start", &format!("{e:#}"));
+            return false;
+        }
+    };
+    log(&format!(
+        "sluice: {} changed {}, which the host process takes up by handing its repositories to \
+         a fresh one",
+        take_up.file(),
+        tables.join(", ")
+    ));
+    hosting.tasks.stop_all();
+    if let Some(t) = telemetry {
+        t.flush();
+    }
+    drop(lock.take());
+    let _ = std::fs::remove_file(&hosting.paths.socket);
+    let log_path = hosting.paths.log();
+    let spawned = OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&log_path)
+        .and_then(|out| {
+            let mut command = std::process::Command::new(&program);
+            command
+                .arg("host")
+                .current_dir("/")
+                .stdin(std::process::Stdio::null())
+                .stdout(out.try_clone()?)
+                .stderr(out)
+                .env_clear()
+                .envs(successor.env.iter().cloned());
+            // SAFETY: setsid is async-signal-safe; nothing else runs here.
+            unsafe {
+                use std::os::unix::process::CommandExt;
+                command.pre_exec(|| {
+                    nix::unistd::setsid().map_err(std::io::Error::from)?;
+                    Ok(())
+                });
+            }
+            command.spawn()
+        });
+    let own = std::process::id();
+    let answered = match spawned {
+        Ok(child) => {
+            std::thread::spawn(move || {
+                let mut child = child;
+                child.wait()
+            });
+            let client = client::Client::new(&program, successor.env.clone());
+            let until = Instant::now() + SUCCESSOR_WAIT;
+            loop {
+                let pid = client
+                    .as_ref()
+                    .ok()
+                    .and_then(|c| c.answering().ok().flatten())
+                    .map(|c| c.named.pid);
+                if pid.is_some_and(|p| p != own) {
+                    break true;
+                }
+                if Instant::now() >= until {
+                    break false;
+                }
+                std::thread::sleep(Duration::from_millis(20));
+            }
+        }
+        Err(_) => false,
+    };
+    if answered {
+        drop(start);
+        return true;
+    }
+    // A successor that took the lock late holds the host now.
+    match try_lock(&hosting.paths.lock()) {
+        Ok(Some(f)) => *lock = Some(f),
+        _ => {
+            drop(start);
+            return true;
+        }
+    }
+    let _ = std::fs::remove_file(&hosting.paths.socket);
+    match UnixListener::bind(&hosting.paths.socket) {
+        Ok(l) => {
+            let _ = l.set_nonblocking(true);
+            *listener = l;
+        }
+        Err(e) => log(&format!(
+            "sluice host: binding {} again: {e}",
+            hosting.paths.socket.display()
+        )),
+    }
+    hosting.tasks.resume();
+    drop(start);
+    take_up.not_handed(
+        tables,
+        "its successor did not start",
+        &format!("see {}", log_path.display()),
+    );
+    false
+}
+
+/// The host's start lock, once whatever holds it lets go.
+fn lock_start(paths: &Paths) -> Result<File> {
+    let path = paths.start_lock();
+    let file = OpenOptions::new()
+        .create(true)
+        .write(true)
+        .truncate(false)
+        .open(&path)
+        .with_context(|| format!("creating {}", path.display()))?;
+    file.lock()
+        .with_context(|| format!("locking {}", path.display()))?;
+    Ok(file)
+}
+
 /// Accept connections, each answered on a thread of its own, until the
-/// process should end (design D6, D8, D19).
-fn serve(hosting: &Arc<Hosting>, listener: &UnixListener, mut take_up: TakeUp) -> Result<i32> {
+/// process should end or hands over (design D6, D8, D19, D20).
+fn serve(
+    hosting: &Arc<Hosting>,
+    mut listener: UnixListener,
+    mut take_up: TakeUp,
+    lock: &mut Option<File>,
+    successor: &Successor,
+    telemetry: Option<&crate::telemetry::Telemetry>,
+) -> Result<Ending> {
+    let listener = &mut listener;
     let mut looked = Instant::now();
     let mut scanned = Instant::now();
     loop {
@@ -484,7 +731,13 @@ fn serve(hosting: &Arc<Hosting>, listener: &UnixListener, mut take_up: TakeUp) -
             hosting.stopping.store(true, Ordering::SeqCst);
         }
         if !hosting.stopping.load(Ordering::SeqCst) {
-            take_up.look(hosting);
+            if let Taken::HandOver(tables) = take_up.look(hosting) {
+                if hand_over(
+                    hosting, listener, lock, successor, telemetry, &take_up, &tables,
+                ) {
+                    return Ok(Ending::HandedOver);
+                }
+            }
             hosting.tasks.tick();
             // D13: a run that ended since the last look frees its part for
             // the repository it is owed to.
@@ -499,7 +752,7 @@ fn serve(hosting: &Arc<Hosting>, listener: &UnixListener, mut take_up: TakeUp) -
         }
         if hosting.stopping.load(Ordering::SeqCst) {
             hosting.tasks.stop_all();
-            return Ok(0);
+            return Ok(Ending::Ended);
         }
         if hosting.tasks.any()
             || hosting.connections.load(Ordering::SeqCst) > 0
@@ -519,7 +772,7 @@ fn serve(hosting: &Arc<Hosting>, listener: &UnixListener, mut take_up: TakeUp) -
         let _ = std::fs::remove_file(&hosting.paths.socket);
         // The start lock goes with the process.
         std::mem::forget(start);
-        return Ok(0);
+        return Ok(Ending::Ended);
     }
 }
 

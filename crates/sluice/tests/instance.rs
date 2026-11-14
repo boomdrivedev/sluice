@@ -571,16 +571,26 @@ mod bound {
         assert!(!log.contains("took up"), "{log}");
     }
 
-    /// The settings-take-up spec's "A kept run sends to the collector it
-    /// is changed to" (135; 151; record 0107; rules core.53, core.54;
-    /// design D1 to D7): `[telemetry]` changed to another collector while
-    /// the first combination's run goes is taken up by the run starting
-    /// itself afresh, which says so once; the first collector is sent what
-    /// the run held before it, traces and metrics, and the second the
-    /// traces of the run started afresh; each run starts once with every
-    /// core, and both land.
+    /// The pids of the host processes `log` names as started.
+    fn started(log: &str) -> std::collections::BTreeSet<String> {
+        log.lines()
+            .filter_map(|l| l.split(" started, pid ").nth(1))
+            .filter_map(|rest| rest.split(';').next())
+            .map(|pid| pid.trim().to_string())
+            .collect()
+    }
+
+    /// The settings-take-up spec's "The host process sends to the collector
+    /// it is changed to" (135; 151; record 0107 as amended 2026-11-13;
+    /// rules core.53, core.54; design D20): `[telemetry]` changed to
+    /// another collector while the first combination's run goes is handed
+    /// by sluice's host process to a fresh one it starts, which reads the
+    /// file itself: the first collector is sent what the first process
+    /// held, traces and metrics, and the second the traces of its
+    /// successor; each run starts once with every core, both land, and a
+    /// host process of another pid answers.
     #[test]
-    fn a_run_takes_a_changed_telemetry_table_up_by_starting_afresh() {
+    fn the_host_process_hands_a_changed_telemetry_table_to_a_fresh_one() {
         use std::collections::BTreeSet;
         let ok = |_: &support::http::Request| (200, Vec::new(), String::new());
         let first = support::http::Fake::start(ok);
@@ -615,30 +625,35 @@ mod bound {
         let out = run.args(["run", "--rounds", "12"]).output().unwrap();
         let said = text(&out);
         assert!(out.status.success(), "{said}");
+        let log = host_log(&s);
 
         // Read before any other command sends to the second collector.
         let paths = |c: &support::http::Fake| -> BTreeSet<String> {
             c.requests().into_iter().map(|r| r.path).collect()
         };
         let (to_first, to_second) = (paths(&first), paths(&second));
-        assert!(to_first.contains("/v1/traces"), "{to_first:?}\n{said}");
-        assert!(to_first.contains("/v1/metrics"), "{to_first:?}\n{said}");
-        assert!(to_second.contains("/v1/traces"), "{to_second:?}\n{said}");
+        assert!(to_first.contains("/v1/traces"), "{to_first:?}\n{log}");
+        assert!(to_first.contains("/v1/metrics"), "{to_first:?}\n{log}");
+        assert!(to_second.contains("/v1/traces"), "{to_second:?}\n{log}");
 
         let processors = std::thread::available_parallelism().map_or(1, |n| n.get());
         assert_eq!(
             starts(seen.path()),
             [(1, processors), (1, processors)],
-            "{said}"
+            "{said}{log}"
         );
-        assert_eq!(states(&s, "bolt/a"), ["landed", "landed"], "{said}");
-        let took = format!(
-            "sluice: took up the host's settings in {}: [telemetry] changed, in this sluice run \
-             started afresh",
+        assert_eq!(states(&s, "bolt/a"), ["landed", "landed"], "{said}{log}");
+        let handed = format!(
+            "sluice: {} changed [telemetry], which the host process takes up by handing its \
+             repositories to a fresh one",
             file.display()
         );
-        assert_eq!(said.matches(&took).count(), 1, "{said}");
-        assert!(!said.contains("could not start afresh"), "{said}");
+        assert_eq!(log.matches(&handed).count(), 1, "{log}");
+        assert!(
+            started(&log).len() >= 2,
+            "a host process of another pid: {log}"
+        );
+        assert!(!log.contains("did not start"), "{log}");
     }
 
     /// The settings-take-up spec's "Settings it would start afresh for that
