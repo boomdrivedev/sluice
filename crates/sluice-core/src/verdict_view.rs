@@ -30,7 +30,7 @@ impl Sluice<'_> {
     /// from the records alone; `None` when the branch has no such
     /// submission.
     pub fn verdict_of(&self, branch: &str, id: u64) -> Result<Option<VerdictView>> {
-        let snapshot = self.seams.state.read(branch)?;
+        let snapshot = self.state_read(branch)?;
         let log = Line::read_log(&snapshot)?;
         let line = Line::load(branch, snapshot)?;
         let sub = match line.subs.get(&id) {

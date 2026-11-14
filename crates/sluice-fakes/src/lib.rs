@@ -8,7 +8,7 @@
 //! The records fake stores the real bytes the core writes (53), so a
 //! file store need only put them on disk.
 
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
@@ -256,6 +256,8 @@ struct Inner {
     unanswered_starts: usize,
     /// The next start finds the host at its bound (71).
     refuse_start: bool,
+    /// How many times the records were read afresh (design D16).
+    state_reads: Cell<usize>,
     /// The next hold finds the host at its bound, as when another
     /// repository's run took the last one (71).
     refuse_hold: bool,
@@ -630,6 +632,12 @@ impl World {
     /// How many reads fetched a branch kept on a remote (129).
     pub fn fetches(&self) -> usize {
         self.0.borrow().fetches
+    }
+
+    /// How many times a branch's records were read afresh, as a round
+    /// reads them, rather than as the host holds them (129; design D16).
+    pub fn state_reads(&self) -> usize {
+        self.0.borrow().state_reads.get()
     }
 
     /// How many times a branch's revision was read, fetched or as held
@@ -3364,12 +3372,19 @@ impl State for FakeState {
         Ok(())
     }
 
+    /// As the host holds them: no read afresh is counted (design D16).
     fn read_held(&self, branch: &str) -> Result<Snapshot> {
-        self.read(branch)
+        let read = self.read(branch);
+        let inner = self.0 .0.borrow();
+        inner
+            .state_reads
+            .set(inner.state_reads.get().saturating_sub(1));
+        read
     }
 
     fn read(&self, branch: &str) -> Result<Snapshot> {
         let inner = self.0 .0.borrow();
+        inner.state_reads.set(inner.state_reads.get() + 1);
         if let Some(said) = inner.failed_state.get(branch) {
             bail!("{said}");
         }

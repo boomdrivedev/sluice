@@ -82,6 +82,10 @@ pub struct Sluice<'a> {
     peer: Peer,
     /// 124: whether it reads the policy only as far as guarding needs.
     guarding: bool,
+    /// 129 (design D16): whether it reads every branch as the host holds
+    /// it since the host process's last ask, asking no remote: a one-shot
+    /// read's. A round never reads held.
+    held: bool,
     /// 129: each policy read, by the revision it was read at.
     policies: Keeping<'a>,
 }
@@ -200,6 +204,7 @@ impl<'a> Sluice<'a> {
             clock,
             peer: Peer::default(),
             guarding: false,
+            held: false,
             policies: Keeping::Own(Policies::default()),
         }
     }
@@ -245,7 +250,35 @@ impl<'a> Sluice<'a> {
     }
 
     fn read_line(&self, branch: &str) -> Result<Line> {
-        Line::load(branch, self.seams.state.read(branch)?)
+        Line::load(branch, self.state_read(branch)?)
+    }
+
+    /// The branch's live records: as the host holds them since the last
+    /// ask where this sluice reads held, and read afresh otherwise (129;
+    /// design D16).
+    fn state_read(&self, branch: &str) -> Result<sluice_seams::Snapshot> {
+        match self.held {
+            true => self.seams.state.read_held(branch),
+            false => self.seams.state.read(branch),
+        }
+    }
+
+    /// The branch's revision: as the host holds it, with no fetch, where
+    /// this sluice reads held, and read as a round reads it otherwise (129;
+    /// design D16).
+    fn branch_read(&self, branch: &str) -> Result<Option<Rev>> {
+        match self.held {
+            true => self.seams.branch.held(branch),
+            false => self.seams.branch.read(branch),
+        }
+    }
+
+    /// The same sluice, reading every branch as the host holds it since the
+    /// host process's last ask, asking no remote: a one-shot read's, once
+    /// the host process's reading is current (129; design D16). A round
+    /// refuses to run under it.
+    pub fn holding(self) -> Self {
+        Sluice { held: true, ..self }
     }
 
     /// Write `line`'s changes. 133: the lines of this host's refusal of

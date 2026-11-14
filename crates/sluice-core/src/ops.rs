@@ -1518,7 +1518,7 @@ impl Sluice<'_> {
     /// said to be gone: by that read where it was made, and otherwise by
     /// the revision the host holds of it, with no fetch (record 0091).
     pub fn status(&self, branch: &str) -> Result<Status> {
-        let snapshot = self.seams.state.read(branch)?;
+        let snapshot = self.state_read(branch)?;
         let found = snapshot.version > 0 || !snapshot.files.is_empty();
         let kept_out = kept_out(&Line::read_log(&snapshot)?);
         let line = Line::load(branch, snapshot)?;
@@ -1532,7 +1532,7 @@ impl Sluice<'_> {
                 (Some(base.clone()), held, gone)
             }
             None => {
-                let read = self.seams.branch.read(branch)?;
+                let read = self.branch_read(branch)?;
                 let gone = read.is_none();
                 (read, self.seams.branch.held(branch)?, gone)
             }

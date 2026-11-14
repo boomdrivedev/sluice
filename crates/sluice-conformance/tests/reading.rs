@@ -297,3 +297,28 @@ fn a_branch_that_is_not_held_has_nothing_to_accept() {
     );
     assert_eq!(h.version(), version, "nothing recorded");
 }
+
+/// satisfies: 129; design D16: a status read held, once the host
+/// process's reading is current, reads every branch as the host holds it
+/// and asks no remote: no fetch of the branch and no read of its records
+/// afresh. One that is not held reads them afresh, and a round never reads
+/// held.
+#[test]
+fn a_held_status_asks_no_remote() {
+    let h = Harness::bolt();
+    h.w().on_remote(BRANCH);
+    h.work("unit/a", "agent-a", &[("a/lib", Some("a2"))]);
+    let one = h.submit("unit/a");
+    let (fetches, reads) = (h.w().fetches(), h.w().state_reads());
+    let status = h.sluice().holding().status(BRANCH).unwrap();
+    assert_eq!(status.submissions.len(), 1);
+    assert_eq!(status.submissions[0].id, one);
+    assert_eq!(
+        (h.w().fetches(), h.w().state_reads()),
+        (fetches, reads),
+        "a held status asked a remote"
+    );
+    h.sluice().status(BRANCH).unwrap();
+    assert!(h.w().fetches() + h.w().state_reads() > fetches + reads);
+    assert!(h.sluice().holding().round(BRANCH).is_err());
+}

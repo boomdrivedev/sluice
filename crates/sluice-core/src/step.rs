@@ -193,6 +193,11 @@ impl Sluice<'_> {
     /// 101), before the branch's lock is taken: each release takes the
     /// lock of its own place's branch.
     pub fn round(&self, branch: &str) -> Result<Round> {
+        // 129 (design D16): a round reads afresh, never as the host holds
+        // the branch since another process's ask.
+        if self.held {
+            bail!("a round of {branch} never reads its records as held");
+        }
         let round = info_span!("sluice.round", sluice.branch = branch, sluice.step = "");
         let _round = round.enter();
         let released = info_span!("sluice.abandoned").in_scope(|| self.release_abandoned())?;
