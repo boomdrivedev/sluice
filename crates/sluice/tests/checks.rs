@@ -11,7 +11,7 @@ use std::time::{Duration, Instant};
 use sluice::instance::{HostCache, Instance};
 use sluice::profiles::checks::{docker_host, Checks, Endpoint, EngineTls};
 use sluice_seams::{
-    AtBound, Equip, EquipStep, Limits, Network, Outcome, Place, Progress, Refusals, RunHandle,
+    Equip, EquipStep, Limits, Network, Outcome, Place, Progress, Refusals, RunHandle, RunKind,
     RunReport, RunRequest, Setting, Settings, Source, Tests, Through,
 };
 use support::{Repo, Scratch};
@@ -412,9 +412,10 @@ fn the_bound_is_the_instances() {
     assert_eq!(checks(&repo).bound().unwrap(), 2);
 }
 
-/// 71, S60: the bound is the host's, shared by every repository on it. A
-/// start from a second repository's checkout while the host's one run goes
-/// is refused before anything of it runs, and starts once that run ends.
+/// 71, S60 (rule core.49; record 0087): the bound is the host's, shared
+/// by every repository on it. A second repository's hold while the host's
+/// one run goes is refused before anything of its run runs, and holds
+/// once that run ends.
 #[test]
 fn a_second_repositorys_start_waits_for_the_hosts_bound() {
     let host = Scratch::new("checks-host-running");
@@ -444,8 +445,10 @@ fn a_second_repositorys_start_waits_for_the_hosts_bound() {
     let going = support::start(&first, &request(&a, "sluice/try/main/1", command(&holds))).unwrap();
 
     let req = request(&b, "sluice/try/main/1", command("touch ran"));
-    let err = support::start(&second, &req).unwrap_err();
-    assert!(err.downcast_ref::<AtBound>().is_some(), "{err:#}");
+    assert!(
+        second.hold(RunKind::Queue).unwrap().is_none(),
+        "the host's one run is the first repository's"
+    );
     let dir = second.runs().dir("sluice/try/main/1");
     assert!(!dir.join("request.json").exists(), "nothing of it ran");
     assert!(!b.dir().join("ran").exists());
@@ -457,7 +460,19 @@ fn a_second_repositorys_start_waits_for_the_hosts_bound() {
         assert!(Instant::now() < until, "the first run never ended");
         std::thread::sleep(Duration::from_millis(50));
     }
-    assert_eq!(finish(&second, &req).tasks[0].outcome, Outcome::Pass);
+    let part = second.hold(RunKind::Queue).unwrap().expect("the run ended");
+    let run = second.start(&req, part).unwrap();
+    let until = Instant::now() + Duration::from_secs(60);
+    let report = loop {
+        match second.progress(&run).unwrap() {
+            Progress::Finished(r) => break r,
+            Progress::Lost => panic!("lost"),
+            Progress::Running => {}
+        }
+        assert!(Instant::now() < until, "the run never finished");
+        std::thread::sleep(Duration::from_millis(50));
+    };
+    assert_eq!(report.tasks[0].outcome, Outcome::Pass);
     assert!(b.dir().join("ran").exists());
 }
 
