@@ -1050,7 +1050,9 @@ fn the_overview_names_the_host_process() {
         assert!(out.status.success(), "{}", text(&out));
         serde_json::from_slice::<serde_json::Value>(&out.stdout).unwrap()
     };
-    assert_eq!(overview(&d)["host_process"], serde_json::Value::Null);
+    // 129 (design D16): the first overview starts the host process for its
+    // reading, whichever answers once it has read.
+    overview(&d);
     let repository = d.repository(d.repo.dir());
     let follow = d
         .client(d.repo.dir())
@@ -1068,4 +1070,108 @@ fn the_overview_names_the_host_process() {
     assert_eq!(doc["room"]["turn"], "queue", "{doc}");
     // The host's name stays where it was.
     assert!(doc["host"].is_string(), "{doc}");
+}
+
+/// `main`'s records on a bare origin, its runs signed by `a`, whose key
+/// `d`'s host holds: the host, and the remote.
+fn on_origin(name: &str) -> (OnDisk, support::Scratch) {
+    use ssh_key::{Algorithm, PrivateKey};
+    let k = PrivateKey::random(&mut rand_core::OsRng, Algorithm::Ed25519).unwrap();
+    let d = OnDisk::new(
+        name,
+        &format!(
+            "[tests]\nrunner = \"command\"\ncommand = \"true\"\n\n\
+             [signers.a]\nssh = \"a {}\"\n\n\
+             [branches.main]\ntimeout = \"1m\"\nremote = \"origin\"\ntrust = [\"a\"]\n",
+            k.public_key().to_openssh().unwrap()
+        ),
+    );
+    let origin = d.repo.bare_origin();
+    signing(&d, &k);
+    (d, origin)
+}
+
+/// `d`'s host signs as `a` with `k`.
+fn signing(d: &OnDisk, k: &ssh_key::PrivateKey) {
+    let path = d.config.path().join("signing");
+    k.write_openssh_file(&path, ssh_key::LineEnding::LF)
+        .unwrap();
+    use std::os::unix::fs::PermissionsExt;
+    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).unwrap();
+    std::fs::create_dir_all(d.config.path().join("sluice")).unwrap();
+    std::fs::write(
+        d.config.path().join("sluice/config.toml"),
+        format!(
+            "[signing]\nsigner = \"a\"\nkey = {:?}\n",
+            path.display().to_string()
+        ),
+    )
+    .unwrap();
+}
+
+/// Whether `start`, a git command's arguments, asks a remote.
+fn asks_a_remote(start: &str) -> bool {
+    [" fetch ", " ls-remote ", " push "]
+        .iter()
+        .any(|a| format!(" {start} ").contains(a))
+}
+
+/// 129 (design D16): with no host process running and `main` on origin
+/// holding a submission another host queued, which this host has never
+/// fetched, `sluice status <id> --json` starts the host process and shows
+/// the submission as its first reading found it; the status itself asks
+/// origin nothing.
+#[test]
+fn a_status_with_no_host_process_starts_it_and_reads_its_first_reading() {
+    let (d, origin) = on_origin("host-first-reading");
+    let other = OnDisk {
+        repo: support::Repo::clone_of(origin.path(), "host-first-reading-other"),
+        git: support::CountingGit::new(),
+        config: support::Scratch::new("host-first-reading-other-config"),
+        state: support::Scratch::new("host-first-reading-other-state"),
+        sessions: support::Scratch::new("host-first-reading-other-sessions"),
+    };
+    std::fs::create_dir_all(other.config.path().join("sluice")).unwrap();
+    std::fs::copy(
+        d.config.path().join("sluice/config.toml"),
+        other.config.path().join("sluice/config.toml"),
+    )
+    .unwrap();
+    let id = queued(&other, "theirs");
+    assert_eq!(
+        answering(&d),
+        None,
+        "this host's host process is not running"
+    );
+
+    let before = d.git.count();
+    let child = d
+        .command(d.repo.dir())
+        .env("SLUICE_ROUND_SLEEP", "record")
+        .args(["status", &id.to_string(), "--json"])
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .unwrap();
+    let status_pid = child.id();
+    let out = child.wait_with_output().unwrap();
+    assert!(out.status.success(), "{}", text(&out));
+    let doc: serde_json::Value =
+        serde_json::from_slice(&out.stdout).unwrap_or_else(|_| panic!("{}", text(&out)));
+    assert_eq!(doc["id"].as_u64(), Some(id), "{doc}");
+    assert!(doc["state"].is_string(), "{doc}");
+
+    let starts = d.git.parented()[before..].to_vec();
+    let own: Vec<&String> = starts
+        .iter()
+        .filter(|(pid, args)| *pid == status_pid && asks_a_remote(args))
+        .map(|(_, args)| args)
+        .collect();
+    assert!(own.is_empty(), "the status asked origin: {own:?}");
+    assert!(
+        starts
+            .iter()
+            .any(|(pid, args)| *pid != status_pid && asks_a_remote(args)),
+        "no host process read origin: {starts:?}"
+    );
 }
