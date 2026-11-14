@@ -336,7 +336,7 @@ fn is_own(dir: &Path, meta: &std::fs::Metadata) -> Result<()> {
 /// where it is there, refused with its path unless it is so (35 as
 /// amended, rule core.30): nothing of one refused is changed or removed.
 /// One another process of the user made first is no error.
-fn make_own(dir: &Path) -> Result<()> {
+pub(crate) fn make_own(dir: &Path) -> Result<()> {
     use std::os::unix::fs::DirBuilderExt as _;
     match std::fs::DirBuilder::new().mode(0o700).create(dir) {
         Err(e) if e.kind() != std::io::ErrorKind::AlreadyExists => {

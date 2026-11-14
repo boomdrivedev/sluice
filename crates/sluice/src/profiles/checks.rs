@@ -961,6 +961,19 @@ const KEEP: [&str; 10] = [
     "MOON_HOME",
 ];
 
+/// 135 (design D3): whether a run keeps `name` of the environment it is
+/// started from, `KEEP` and the locale's `LC_*`: what sluice's host
+/// process keeps of its starter's, beside the host's own settings.
+pub fn run_keeps(name: &str) -> bool {
+    KEEP.contains(&name) || name.starts_with("LC_")
+}
+
+/// 135 (design D3): what a development shell sets that the host process
+/// keeps none of, by prefix, whatever else would keep it: the shell's own
+/// settings name the shell's working copy, which no repository the host
+/// process holds is (rule core.1 keeps their names here).
+pub const SHELL_ONLY: [&str; 5] = ["DEVENV_", "DIRENV_", "IN_NIX_SHELL", "NIX_", "MOON_"];
+
 /// Whether sluice sets `name` for every run itself: what it keeps of its
 /// own environment, the locale's `LC_*` and its own `SLUICE_*`. A host's
 /// cache declares none of them, so none is silently replaced (35).

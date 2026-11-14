@@ -84,7 +84,6 @@ fn no_credentials(dir: &Path) {
 /// `tests` starting `request` in a combination's part it holds first: a
 /// round's start, refused with [`sluice_seams::AtBound`] where the host has
 /// no room (71; rule core.49).
-#[allow(dead_code)]
 pub fn start(
     tests: &dyn sluice_seams::Tests,
     request: &sluice_seams::RunRequest,
@@ -324,6 +323,63 @@ impl OnDisk {
             String::from_utf8_lossy(&out.stdout),
             String::from_utf8_lossy(&out.stderr)
         );
+    }
+}
+
+/// The environment `c` runs with: the test's own, with what `c` sets and
+/// removes.
+pub fn env_of(c: &Command) -> Vec<(std::ffi::OsString, std::ffi::OsString)> {
+    let mut env: std::collections::BTreeMap<std::ffi::OsString, std::ffi::OsString> =
+        std::env::vars_os().collect();
+    for (k, v) in c.get_envs() {
+        match v {
+            Some(v) => {
+                env.insert(k.to_os_string(), v.to_os_string());
+            }
+            None => {
+                env.remove(k);
+            }
+        }
+    }
+    env.into_iter().collect()
+}
+
+impl OnDisk {
+    /// The way to this setup's host process, as a command run in `dir`
+    /// with this setup's environment reaches it (135).
+    pub fn client(&self, dir: &Path) -> sluice::host_process::client::Client {
+        sluice::host_process::client::Client::new(
+            Path::new(env!("CARGO_BIN_EXE_sluice")),
+            env_of(&self.command(dir)),
+        )
+        .expect("the host process's paths")
+    }
+
+    /// A second repository on this host, its `main` holding `policy`,
+    /// driven with this setup's config and state.
+    pub fn another(&self, name: &str, policy: &str) -> Repo {
+        let repo = Repo::new(name);
+        repo.write(".config/sluice.toml", policy);
+        repo.git(&["add", "-A"]);
+        repo.git(&["commit", "-q", "-m", "sluice's policy"]);
+        repo
+    }
+
+    /// The repository holding `dir`, as sluice names it: its common git
+    /// directory, as the overview's `repository` gives it.
+    pub fn repository(&self, dir: &Path) -> String {
+        let out = self
+            .command(dir)
+            .env("SLUICE_ROUND_SLEEP", "record")
+            .args(["overview", "--json"])
+            .output()
+            .unwrap();
+        let doc: serde_json::Value = serde_json::from_slice(&out.stdout)
+            .unwrap_or_else(|_| panic!("{}", String::from_utf8_lossy(&out.stderr)));
+        doc["repository"]
+            .as_str()
+            .expect("a repository")
+            .to_string()
     }
 }
 

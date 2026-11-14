@@ -215,6 +215,9 @@ pub struct Policy {
     seed: Option<u64>,
 }
 
+/// Set to `record` in tests, the retry policy's pauses are skipped.
+pub const SLEEP_VAR: &str = "SLUICE_RETRY_SLEEP";
+
 impl Policy {
     /// Tries for `bound` of pauses, pausing in earnest until Ctrl-C.
     pub fn new(bound: Duration) -> Policy {
@@ -286,6 +289,17 @@ impl Policy {
         self.now = Rc::new(now);
         self.origin = ((self.now)(), Utc::now());
         self
+    }
+
+    /// `self`, [`Policy::recording`] where the process's environment sets
+    /// [`SLEEP_VAR`] to `record`, as a test that runs the binary does: for
+    /// every policy the process binds, a command's and each repository's
+    /// in sluice's host process alike (135).
+    pub fn recording_where_set(self) -> Policy {
+        match std::env::var(SLEEP_VAR).as_deref() {
+            Ok("record") => self.recording(),
+            _ => self,
+        }
     }
 
     /// `self`, skipping every pause and reading the time as if it had

@@ -298,6 +298,34 @@ impl Sluice<'_> {
         Ok(true)
     }
 
+    /// 101, 135: whether a preview on this host is one to drop, or comes
+    /// to be one or not as its command ends: its checkout gone, or its
+    /// command failed, timed out, lost or still running. These are what
+    /// [`Sluice::release_unusable_previews`] would take, read from the
+    /// previews' places and their runs alone, with no process started, so
+    /// an idle tick reads them (129). A preview up, waiting for room, kept
+    /// as failed, or held with its checkout in place is none.
+    pub fn previews_in_play(&self) -> Result<bool> {
+        for p in self.seams.checkout.previews()? {
+            let held = p.release_failed.as_ref().is_some_and(|f| f.stopped);
+            if p.failed.is_some() || (held && !p.gone) {
+                continue;
+            }
+            if p.gone {
+                return Ok(true);
+            }
+            let Some(run) = &p.run else {
+                continue;
+            };
+            match self.seams.tests.progress(run)? {
+                Progress::Running | Progress::Lost => return Ok(true),
+                Progress::Finished(r) if r.timed_out || r.failed() => return Ok(true),
+                Progress::Finished(_) => {}
+            }
+        }
+        Ok(false)
+    }
+
     /// 101, rule core.16: release every preview nobody can use: one whose
     /// command failed, timed out or was lost, kept with what it printed,
     /// and one whose checkout is gone, its stored release run once from its

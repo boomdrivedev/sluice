@@ -50,6 +50,17 @@ fn main() {
         }
         return;
     }
+    // The host process needs no repository: it holds every repository its
+    // index names (135; design D1).
+    if let Some(Command::Host) = &cli.command {
+        match sluice::host_process::run() {
+            Ok(code) => std::process::exit(code),
+            Err(e) => {
+                eprintln!("sluice host: {e:#}");
+                std::process::exit(3);
+            }
+        }
+    }
     // git's credential helper needs no repository: what it gives is in
     // its environment.
     if let Some(Command::Credential { operation }) = &cli.command {
@@ -505,14 +516,8 @@ fn retry(cli: &Cli) -> Policy {
         Some(Command::Run { .. } | Command::Step { .. }) => Policy::round(),
         _ => Policy::command(),
     };
-    match std::env::var(RETRY_SLEEP_VAR).as_deref() {
-        Ok("record") => policy.recording(),
-        _ => policy,
-    }
+    policy.recording_where_set()
 }
-
-/// Set to `record` in tests, the retry policy's pauses are skipped.
-const RETRY_SLEEP_VAR: &str = "SLUICE_RETRY_SLEEP";
 
 /// Set to `record` in tests, the pauses between a run's or a wait's rounds
 /// are skipped, and the clock the command reads moved on by each.
