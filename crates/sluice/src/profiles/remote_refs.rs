@@ -31,7 +31,9 @@ use std::process::{Output, Stdio};
 use std::rc::Rc;
 
 use anyhow::{anyhow, bail, Context, Result};
-use sluice_core::records::{parse_lines, to_line, ResultKind, ResultLine, RESULT_SCHEMA};
+use sluice_core::records::{
+    parse_lines, to_line, HomeDoc, ResultKind, ResultLine, HOME_FILE, RESULT_SCHEMA,
+};
 use sluice_seams::{
     read_refused, Changes, Enforced, Guard, ReadRefused, ResultAsk, Rev, Snapshot, State, TaskLog,
     TaskProgress, Written, FINISHED, KEPT_LOGS,
@@ -200,6 +202,25 @@ impl RemoteRefs {
 
     pub fn remote(&self) -> &str {
         self.pushed.remote()
+    }
+
+    /// Record 0122 (design D2): `branch`'s home document in its state on
+    /// the remote as this host last fetched it, read with no process and
+    /// without touching what a write is leased on; `None` where the state
+    /// fetched holds none, or none was fetched.
+    pub fn held_home(&self, branch: &str) -> Result<Option<HomeDoc>> {
+        let name = state_ref(branch)?;
+        let Some(at) = self.pushed.read_ref(&self.fetched(&name))? else {
+            return Ok(None);
+        };
+        let entries = self.pushed.local().tree_entries(at.as_str())?;
+        let Some((_, oid)) = entries.iter().find(|(p, _)| p == HOME_FILE) else {
+            return Ok(None);
+        };
+        let bytes = self.pushed.local().blob(oid)?;
+        Ok(Some(serde_json::from_slice(&bytes).with_context(|| {
+            format!("reading {branch}'s {HOME_FILE} on {}", self.remote())
+        })?))
     }
 
     /// The results each signer in `signers` signed, each verified with the

@@ -518,69 +518,6 @@ fn logs_are_kept_on_the_remote_for_the_last_candidates() {
     assert!(refs.contains(&format!("refs/sluice/logs/main/c{}\n", KEPT_LOGS + 2)));
 }
 
-/// Design D10: the first host to take a branch whose records moved to its
-/// remote pushes its own queue there as the starting state; another host
-/// whose queue was not first leaves its queued submissions behind, for its
-/// round to submit again.
-#[test]
-fn the_first_hosts_queue_moves_and_the_others_is_left_behind() {
-    use sluice::profiles::branches::Branches;
-    use sluice::profiles::local_files::LocalFiles;
-    use sluice::profiles::records::Records;
-
-    let k = key();
-    let a = Repo::new("rr-move");
-    a.write(
-        ".config/sluice.toml",
-        &format!(
-            "[signers.box]\nssh = \"box {}\"\n\n[branches.main]\nremote = \"origin\"\ntrust = [\"box\"]\n",
-            k.public_key().to_openssh().unwrap()
-        ),
-    );
-    a.git(&["add", "-A"]);
-    a.git(&["commit", "-q", "-m", "signers"]);
-    let bare = a.bare_origin();
-    let b = Repo::clone_of(bare.path(), "rr-move-b");
-    // Each host's own queue, as its sluice wrote it before the move.
-    let own = |r: &Repo, id: u64| {
-        let s = LocalFiles::new(&r.dir().join(".git"));
-        let _g = s.lock("main").unwrap().unwrap();
-        let doc = format!(
-            "{{\"schema\":\"sluice/submission@1\",\"id\":{id},\"branch\":\"main\",\"state\":\"queued\"}}\n"
-        );
-        s.write("main", 0, put(&[(&format!("submissions/{id}.json"), &doc)]))
-            .unwrap();
-    };
-    own(&a, 5);
-    own(&b, 9);
-
-    let records = |r: &Repo| {
-        Records::new(
-            &r.dir().join(".git"),
-            Branches::open_as(r.dir(), None, recorded()).unwrap(),
-            None,
-        )
-    };
-    let ra = records(&a);
-    drop(ra.lock("main").unwrap().unwrap());
-    let moved = ra.read("main").unwrap();
-    assert!(moved.files.contains_key("submissions/5.json"));
-    assert!(ra.left_behind("main").unwrap().is_empty());
-
-    let rb = records(&b);
-    drop(rb.lock("main").unwrap().unwrap());
-    assert!(!rb
-        .read("main")
-        .unwrap()
-        .files
-        .contains_key("submissions/9.json"));
-    let left = rb.left_behind("main").unwrap();
-    assert_eq!(left.len(), 1);
-    assert!(String::from_utf8_lossy(&left[0]).contains("\"id\":9"));
-    rb.forget_left_behind("main", &[9]).unwrap();
-    assert!(rb.left_behind("main").unwrap().is_empty());
-}
-
 /// 134, 122, 77: a host's sign of life whose push was cut after it was
 /// sent is pushed once, and stands when the remote's ref holds the commit
 /// it pushed.
@@ -1296,4 +1233,214 @@ fn a_branch_in_the_hosts_own_files_numbers_from_the_hosts_count() {
         .contains_key(&format!("submissions/{next}.json")));
     assert_eq!(r.allocate_id("main").unwrap(), 1, "origin's count");
     assert_eq!(r.allocate_id("scratch").unwrap(), 5);
+}
+
+/// A submission's document, `id` on `branch` from `worktree`.
+fn submission_doc(id: u64, branch: &str, worktree: &str) -> String {
+    format!(
+        "{{\"schema\":\"sluice/submission@1\",\"id\":{id},\"branch\":\"{branch}\",\
+         \"head\":\"h{id}\",\"from\":{{\"agent\":\"a\",\"worktree\":\"{worktree}\"}},\
+         \"submitted\":\"t\",\"after\":[],\"priority\":0,\"attempt\":1,\"state\":\"queued\"}}\n"
+    )
+}
+
+/// Write submission `id` to `branch` through `r`, as a submit does: under
+/// the branch's lock, from the version read.
+fn submit_through(r: &sluice::profiles::records::Records, branch: &str, id: u64) -> Written {
+    let _g = r.wait_lock(branch).unwrap();
+    let at = r.read(branch).unwrap().version;
+    let doc = submission_doc(id, branch, &format!("unit/{id}"));
+    r.write(
+        branch,
+        at,
+        put(&[(&format!("submissions/{id}.json"), &doc)]),
+    )
+    .unwrap()
+}
+
+/// `branch`'s home document in `files`, as read.
+fn home_of(files: &BTreeMap<String, Vec<u8>>) -> Option<sluice_core::records::HomeDoc> {
+    files
+        .get(sluice_core::records::HOME_FILE)
+        .map(|b| serde_json::from_slice(b).unwrap())
+}
+
+/// satisfies: record 0122, C.6 (design D2); the queue-home spec's "A
+/// policy that names another home does not move the reading": `main`'s
+/// queue open in this host's own files stays read and written there after
+/// a landing brings a policy naming signers and `remote = "origin"`, by a
+/// process started afresh as by one already running, until a move closes
+/// it; origin is given no state of it.
+#[test]
+fn a_branchs_home_is_read_from_its_records_not_its_policy() {
+    use sluice_core::records::{HomeState, HERE};
+    let k = key();
+    let a = Repo::new("rr-home-records");
+    a.write(
+        ".config/sluice.toml",
+        "[branches.main]\nremote = \"origin\"\n",
+    );
+    a.git(&["add", "-A"]);
+    a.git(&["commit", "-q", "-m", "no signers"]);
+    let bare = a.bare_origin();
+    let r = records(&a);
+    assert_eq!(submit_through(&r, "main", 1), Written::Written(1));
+    let own = home_of(&r.read("main").unwrap().files).expect("its first write wrote its home");
+    assert_eq!((own.at.as_str(), own.state), (HERE, HomeState::Open));
+
+    a.push_change(".config/sluice.toml", &signers_policy(&[("box", &[&k])]));
+    for r in [r, records(&a)] {
+        r.next_pass();
+        assert!(r.route("main").unwrap().is_none(), "this host's own files");
+        assert!(matches!(submit_through(&r, "main", 2), Written::Written(_)));
+        let read = r.read("main").unwrap();
+        assert!(read.files.contains_key("submissions/1.json"));
+        assert_eq!(home_of(&read.files), Some(own.clone()));
+        // Written again by the next process: back to one submission.
+        let _g = r.wait_lock("main").unwrap();
+        let at = r.read("main").unwrap().version;
+        let mut c = put(&[]);
+        c.remove.insert("submissions/2.json".into());
+        r.write("main", at, c).unwrap();
+    }
+    let listed = support::git_command()
+        .args([
+            "ls-remote",
+            bare.path().to_str().unwrap(),
+            "refs/sluice/state/*",
+        ])
+        .output()
+        .unwrap();
+    assert!(listed.stdout.is_empty(), "origin holds no state of main");
+}
+
+/// satisfies: record 0122, 129 (design D2); the queue-home spec's "A host
+/// with no records of the branch": host A's queue of `bolt/x` is open on
+/// origin, and its policy has since dropped its signers; host B, holding
+/// no records of it, reads its home from origin's state as its tick
+/// fetched it, not from the policy at its head, and its submission is
+/// written there under origin's next number, origin's home as A wrote it.
+#[test]
+fn a_host_with_no_records_of_a_branch_finds_its_home_on_the_remote() {
+    let k = key();
+    let a = Repo::new("rr-home-found");
+    a.write(".config/sluice.toml", &signers_policy(&[("box", &[&k])]));
+    a.git(&["add", "-A"]);
+    a.git(&["commit", "-q", "-m", "signers"]);
+    let bare = a.bare_origin();
+    let signed_x =
+        signers_policy(&[("box", &[&k])]).replace("[branches.release]", "[branches.\"bolt/x\"]");
+    a.branch(
+        "bolt/x",
+        "main",
+        &[(".config/sluice.toml", Some(&signed_x))],
+    );
+    a.git(&["push", "-q", "origin", "bolt/x"]);
+    let ra = records(&a);
+    assert!(
+        ra.route("bolt/x").unwrap().is_some(),
+        "by its policy, origin"
+    );
+    let first = ra.allocate_id("bolt/x").unwrap();
+    assert_eq!(submit_through(&ra, "bolt/x", first), Written::Written(1));
+    let homed = home_of(&ra.read("bolt/x").unwrap().files).expect("written on origin");
+    assert_eq!(homed.at, "origin");
+    // A landing drops bolt/x's signers; its remote stays named.
+    a.branch(
+        "bolt/x",
+        "bolt/x",
+        &[(
+            ".config/sluice.toml",
+            Some("[branches.\"bolt/x\"]\nremote = \"origin\"\n"),
+        )],
+    );
+    a.git(&["push", "-q", "origin", "bolt/x"]);
+
+    let b = Repo::clone_of(bare.path(), "rr-home-found-b");
+    b.git(&["fetch", "-q", "origin", "bolt/x:bolt/x"]);
+    let rb = records(&b);
+    assert!(LocalFiles::new(&b.dir().join(".git"))
+        .read("bolt/x")
+        .unwrap()
+        .files
+        .is_empty());
+    rb.refresh().unwrap();
+    assert!(
+        rb.route("bolt/x").unwrap().is_some(),
+        "origin, as its records say"
+    );
+    let next = rb.allocate_id("bolt/x").unwrap();
+    assert_eq!(next, first + 1, "origin's next number");
+    assert_eq!(submit_through(&rb, "bolt/x", next), Written::Written(2));
+    let on_origin = rb.read("bolt/x").unwrap();
+    assert!(on_origin
+        .files
+        .contains_key(&format!("submissions/{next}.json")));
+    assert_eq!(home_of(&on_origin.files), Some(homed));
+    assert!(LocalFiles::new(&b.dir().join(".git"))
+        .read("bolt/x")
+        .unwrap()
+        .files
+        .is_empty());
+}
+
+/// satisfies: record 0122, 26 (design D2); the queue-home spec's "Two open
+/// homes": this host's own files and origin's state of `bolt/x` both hold
+/// an open home, origin's come from this host's own files, so its queue is
+/// in two places: a read, a lock and a write of `bolt/x` are refused naming
+/// both homes, and `main` is read as before.
+#[test]
+fn two_open_homes_refuse_the_branch_naming_both() {
+    use sluice_core::records::{to_document, CameFrom, HomeDoc, HERE, HOME_FILE};
+    let k = key();
+    let a = Repo::new("rr-two-homes");
+    a.write(".config/sluice.toml", &signers_policy(&[("box", &[&k])]));
+    a.git(&["add", "-A"]);
+    a.git(&["commit", "-q", "-m", "signers"]);
+    let _bare = a.bare_origin();
+    let signed_x =
+        signers_policy(&[("box", &[&k])]).replace("[branches.release]", "[branches.\"bolt/x\"]");
+    a.branch(
+        "bolt/x",
+        "main",
+        &[(".config/sluice.toml", Some(&signed_x))],
+    );
+    a.git(&["push", "-q", "origin", "bolt/x"]);
+    a.git(&["switch", "-q", "main"]);
+    let mut on_origin = HomeDoc::open("origin", None);
+    on_origin.came_from = Some(CameFrom {
+        home: HERE.into(),
+        host: Some("host-a".into()),
+        carried: BTreeMap::new(),
+    });
+    let theirs = host(&a, None);
+    theirs
+        .write(
+            "bolt/x",
+            0,
+            put(&[(
+                HOME_FILE,
+                &String::from_utf8(to_document(&on_origin)).unwrap(),
+            )]),
+        )
+        .unwrap();
+    let own = LocalFiles::new(&a.dir().join(".git"));
+    {
+        let _g = own.lock("bolt/x").unwrap().unwrap();
+        let doc = String::from_utf8(to_document(&HomeDoc::open(HERE, None))).unwrap();
+        own.write("bolt/x", 0, put(&[(HOME_FILE, &doc)])).unwrap();
+    }
+    let r = records(&a).as_host("host-a");
+    r.refresh().unwrap();
+    let said = r.read("bolt/x").unwrap_err().to_string();
+    assert!(
+        said.contains("this host's own files") && said.contains("origin"),
+        "{said}"
+    );
+    assert!(r.lock("bolt/x").is_err());
+    assert!(r.write("bolt/x", 1, put(&[])).is_err());
+    assert!(
+        r.read("main").is_ok(),
+        "every other branch is read as before"
+    );
 }
