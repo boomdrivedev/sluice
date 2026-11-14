@@ -164,6 +164,19 @@ fn line(principal: &str, k: &PrivateKey) -> String {
 /// signer and trusting those in `trust`; the first host's and the
 /// second's, and the remote.
 fn two_hosts(name: &str, trust: &str) -> (Host, Host, Scratch) {
+    hosts_under(name, |a, b| {
+        format!(
+            "[tests]\nrunner = \"command\"\ncommand = \"true\"\n\n\
+             [signers.a]\nssh = \"{a}\"\n\n[signers.b]\nssh = \"{b}\"\n\n\
+             [branches.main]\ntimeout = \"1m\"\nremote = \"origin\"\ntrust = {trust}\n"
+        )
+    })
+}
+
+/// Two hosts over one bare remote, under the policy `policy` makes of
+/// signer `a`'s key line and signer `b`'s; the first host's and the
+/// second's, and the remote.
+fn hosts_under(name: &str, policy: impl Fn(&str, &str) -> String) -> (Host, Host, Scratch) {
     let (ka, kb) = (
         PrivateKey::random(&mut rand_core::OsRng, Algorithm::Ed25519).unwrap(),
         PrivateKey::random(&mut rand_core::OsRng, Algorithm::Ed25519).unwrap(),
@@ -171,13 +184,7 @@ fn two_hosts(name: &str, trust: &str) -> (Host, Host, Scratch) {
     let a = Repo::new(&format!("{name}-a"));
     a.write(
         ".config/sluice.toml",
-        &format!(
-            "[tests]\nrunner = \"command\"\ncommand = \"true\"\n\n\
-             [signers.a]\nssh = \"{}\"\n\n[signers.b]\nssh = \"{}\"\n\n\
-             [branches.main]\ntimeout = \"1m\"\nremote = \"origin\"\ntrust = {trust}\n",
-            line("a", &ka),
-            line("b", &kb)
-        ),
+        &policy(&line("a", &ka), &line("b", &kb)),
     );
     a.git(&["add", "-A"]);
     a.git(&["commit", "-q", "-m", "sluice's policy"]);
@@ -200,13 +207,26 @@ fn refs_under(origin: &Scratch, prefix: &str) -> String {
     String::from_utf8(out.stdout).unwrap()
 }
 
-/// 75, 82, 78: the host that keeps the branch signs as no one its gate
-/// trusts, so the other host's `sluice run`, a standing executor, claims
-/// the run, fetches the combination,
-/// runs it and signs it, and the first lands it.
+/// 75, 82, 78: the host that keeps the branch, one the branch accepts
+/// (137; record 0122, design D8), has no room for its run: its signer may
+/// claim only a system the gate does not ask for (79), so the other host's
+/// `sluice run`, a standing executor, claims the run, fetches the
+/// combination, runs it and signs it, and the first lands it.
 #[test]
 fn a_run_is_claimed_and_run_by_the_other_host() {
-    let (host_a, host_b, origin) = two_hosts("claims", "[\"b\"]");
+    let (os, arch) = sluice::instance::this_system();
+    let elsewhere = if os == "windows" { "linux" } else { "windows" };
+    let (host_a, host_b, origin) = hosts_under("claims", |a, b| {
+        format!(
+            "[tests]\nrunner = \"command\"\ncommand = \"true\"\n\n\
+             [systems.here]\nos = \"{os}\"\narch = \"{arch}\"\n\n\
+             [systems.elsewhere]\nos = \"{elsewhere}\"\narch = \"{arch}\"\n\n\
+             [signers.a]\nssh = \"{a}\"\nsystems = [\"elsewhere\"]\n\n\
+             [signers.b]\nssh = \"{b}\"\n\n\
+             [branches.main]\ntimeout = \"1m\"\nremote = \"origin\"\n\
+             trust = [\"a\", \"b\"]\nsystems = [\"here\"]\n"
+        )
+    });
     let id = host_a.submit("x");
     let out = host_a.sluice(&["step", "main"]);
     assert!(out.status.success(), "{}", text(&out));

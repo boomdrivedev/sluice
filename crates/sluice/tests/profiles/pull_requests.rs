@@ -6595,12 +6595,15 @@ fn no_check_on_its_head_yet() {
 /// host C keeps main, while sluice's check on host A's pull request,
 /// posted by host B, still names submission 1406 there. `sluice status
 /// main --json` on A gives `taken_in_by` naming C and the request's queue
-/// naming B and 1406, and its words say both (design D25).
+/// naming B and 1406, and its words say both (design D25). C signs as the
+/// policy's signer `b`, so main accepts it and it may keep main and take
+/// its requests in (137; record 0093 as amended 2026-11-08; record 0122,
+/// design D8).
 #[test]
 fn the_keeper_and_the_check_name_different_hosts() {
     let g = OnGitHub::new("status-there-two-hosts", "");
     g.named("a", "");
-    g.other("c", "", "").run("1");
+    g.other("c", "", &g.b_signing).run("1");
     let w = g.session("moved", &[("m.txt", "m\n")]);
     let out = g.wt_submit(&w, &["--no-wait"]);
     assert_eq!(out.status.code(), Some(0), "{}", text(&out));
