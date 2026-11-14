@@ -20,6 +20,12 @@ docker = true         # the integration tests start a database container
 [landing]
 subject = "chore(land): #{id} {from}"
 
+# Who signs main's results. Naming signers keeps main's queue on origin,
+# so the one host that keeps it there takes its pull requests in.
+[signers.ci]
+ssh = ".config/sluice.signers" # one line per key of a host that runs main's checks
+confined = true
+
 # Small, fast landings many times a day. feature/* is a placeholder:
 # name the pattern as the project names its branches.
 [branches."feature/*"]
@@ -33,8 +39,8 @@ required = ["#check-fast", "#check-tools"]
 parallel = 2
 batch = true                               # test the longest combination, bisect on failure
 timeout = "30m"
-trust = ["confined", "sandbox"]
-remote = "origin"                          # fetched every round, landed by a leased push
+trust = ["ci"]                             # results count once ci signs them
+remote = "origin"                          # its queue kept there, landed by a leased push
 
 [branches.main.pull_requests]
 reviews = 1

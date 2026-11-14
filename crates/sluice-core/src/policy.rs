@@ -165,7 +165,34 @@ pub struct Rules {
     /// its remote, submitted once these conditions hold. `None` for a
     /// branch whose work is submitted straight from a session's place.
     pub pull_requests: Option<PullRequests>,
+    /// 137 (design D22): the branch takes pull requests and the policy
+    /// names no `[signers]`, so its records are each host's own and no
+    /// host keeps it on its remote to take them in: [`Policy::rules_for`]
+    /// refuses this branch alone.
+    pub unkept: bool,
 }
+
+/// 137 (design D22): a branch that takes pull requests on records each
+/// host keeps, refused alone, naming the branch and its remote.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct NoIntake {
+    pub branch: String,
+    pub remote: String,
+}
+
+impl std::fmt::Display for NoIntake {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let (branch, remote) = (&self.branch, &self.remote);
+        write!(
+            f,
+            "{branch} takes pull requests, which only the host that keeps it on {remote} takes \
+             in, and its records are each host's own: name [signers] so they are kept on \
+             {remote} (137)"
+        )
+    }
+}
+
+impl std::error::Error for NoIntake {}
 
 /// C.7 `pull_requests`: what a pull request into the branch meets before
 /// its driver submits it (27). Read from the branch's revision (56), so a
@@ -250,6 +277,7 @@ impl Default for Rules {
             claims: BTreeMap::new(),
             remote: None,
             pull_requests: None,
+            unkept: false,
         }
     }
 }
@@ -626,6 +654,7 @@ impl Policy {
                     systems_for,
                     claims,
                     remote: r.remote,
+                    unkept: pull_requests.is_some() && signers.is_empty(),
                     pull_requests,
                 },
             ));
@@ -730,8 +759,30 @@ impl Policy {
     /// The gate for `branch`: an exact name before any pattern, then the
     /// pattern with the most literal characters. `None` when no table
     /// names the branch, which is then not sluice's to land on.
+    /// A branch that takes pull requests on records each host keeps is
+    /// refused alone, with [`NoIntake`]'s words (137; design D22).
     pub fn rules_for(&self, branch: &str) -> Result<Option<&Rules>> {
-        Ok(self.table_for(branch)?.map(|i| &self.branches[i].1))
+        let Some(i) = self.table_for(branch)? else {
+            return Ok(None);
+        };
+        let rules = &self.branches[i].1;
+        if rules.unkept {
+            return Err(NoIntake {
+                branch: branch.to_string(),
+                remote: rules.remote.clone().unwrap_or_default(),
+            }
+            .into());
+        }
+        Ok(Some(rules))
+    }
+
+    /// The remote the table that gives `branch` its gate names, whatever
+    /// [`Policy::rules_for`] refuses of the table: what routing reads
+    /// (core.27; design D22).
+    pub fn remote_of(&self, branch: &str) -> Result<Option<String>> {
+        Ok(self
+            .table_for(branch)?
+            .and_then(|i| self.branches[i].1.remote.clone()))
     }
 
     /// Which of the `[branches]` tables, in the order written, gives
@@ -1138,6 +1189,9 @@ hold = "5m"
         let main = full.rules_for("main").unwrap().unwrap();
         assert_eq!(main.remote.as_deref(), Some("origin"));
         assert!(main.pull_requests.is_some());
+        // 137 (design D22): kept on origin, so the host that keeps it
+        // takes its pull requests in.
+        assert!(main.signed && !main.unkept);
         let peers = Policy::parse(examples[3].1).unwrap();
         let main = peers.rules_for("main").unwrap().unwrap();
         assert!(main.signed && main.confined);
@@ -1158,14 +1212,66 @@ hold = "5m"
         let bolt = p.rules_for("bolt/x").unwrap().unwrap();
         assert_eq!(bolt.required, ["#check-fast"]);
         assert!(bolt.satisfiable_by("sandbox") && !bolt.trusts("cache"));
-        let main = p.rules_for("main").unwrap().unwrap();
-        assert_eq!(main.required, ["#check-fast", "#check-tools", "#check-e2e"]);
-        assert!(main.batch && main.satisfiable_by("sandbox") && !main.trusts("cache"));
-        assert_eq!(main.remote.as_deref(), Some("origin"));
         assert_eq!(bolt.remote.as_deref(), Some("origin"));
-        assert_eq!(main.pull_requests, Some(PullRequests::default()));
         assert_eq!(bolt.pull_requests, None);
+        // 137 (design D22): main takes pull requests and the policy names
+        // no [signers], so main is refused alone until it names them, which
+        // is ops' to choose; its remote still reads for routing.
+        match p.rules_for("main") {
+            Ok(Some(main)) => {
+                assert_eq!(main.required, ["#check-fast", "#check-tools", "#check-e2e"]);
+                assert!(main.batch && main.satisfiable_by("sandbox") && !main.trusts("cache"));
+                assert_eq!(main.remote.as_deref(), Some("origin"));
+                assert_eq!(main.pull_requests, Some(PullRequests::default()));
+                assert!(main.signed, "main names [signers] once it reads");
+            }
+            Ok(None) => panic!("main has no table"),
+            Err(e) => {
+                assert!(e.downcast_ref::<NoIntake>().is_some(), "{e:#}");
+                assert!(format!("{e:#}").contains("[signers]"), "{e:#}");
+            }
+        }
+        assert_eq!(p.remote_of("main").unwrap().as_deref(), Some("origin"));
         assert!(p.rules_for("unit/x").unwrap().is_none());
+    }
+
+    /// 137, 56, S64 (design D22): a branch that takes pull requests on
+    /// records each host keeps is refused alone, naming the branch, its
+    /// remote and `[signers]`; every other branch reads, and the refused
+    /// branch's remote still reads for routing. Once the policy names
+    /// signers, it reads.
+    #[test]
+    fn a_pull_request_table_on_records_each_host_keeps_refuses_its_branch_alone() {
+        let unkept = Policy::parse(
+            "[branches.main]\nremote = \"origin\"\n[branches.main.pull_requests]\n\
+             [branches.\"bolt/*\"]\nremote = \"origin\"\n",
+        )
+        .unwrap();
+        let e = unkept.rules_for("main").unwrap_err();
+        assert_eq!(
+            e.downcast_ref::<NoIntake>(),
+            Some(&NoIntake {
+                branch: "main".into(),
+                remote: "origin".into(),
+            })
+        );
+        assert_eq!(
+            format!("{e:#}"),
+            "main takes pull requests, which only the host that keeps it on origin takes in, \
+             and its records are each host's own: name [signers] so they are kept on origin \
+             (137)"
+        );
+        assert!(unkept.rules_for("bolt/x").unwrap().is_some());
+        assert_eq!(unkept.remote_of("main").unwrap().as_deref(), Some("origin"));
+        assert_eq!(unkept.remote_of("unit/x").unwrap(), None);
+        let kept = Policy::parse(
+            "[signers.a]\nssh = \".config/sluice.signers\"\n\
+             [branches.main]\nremote = \"origin\"\ntrust = [\"a\"]\n\
+             [branches.main.pull_requests]\n",
+        )
+        .unwrap();
+        let main = kept.rules_for("main").unwrap().unwrap();
+        assert!(main.signed && !main.unkept && main.pull_requests.is_some());
     }
 
     /// 23: a landing commit's subject is the policy's, conventional by
@@ -1260,7 +1366,8 @@ hold = "5m"
     #[test]
     fn reads_a_branchs_pull_requests() {
         let p = Policy::parse(
-            "[branches.main]\nremote = \"origin\"\n\
+            "[signers.a]\nssh = \".config/sluice.signers\"\n\
+             [branches.main]\nremote = \"origin\"\ntrust = [\"a\"]\n\
              [branches.main.pull_requests]\nreviews = 1\nchecks = [\"qa/approved\"]\n\
              [branches.\"bolt/*\"]\n",
         )
@@ -1275,7 +1382,9 @@ hold = "5m"
         );
         // ADR 0044: a failed check's output posted only as asked.
         let asked = Policy::parse(
-            "[branches.main]\nremote = \"origin\"\n[branches.main.pull_requests]\nlog_lines = 40\n",
+            "[signers.a]\nssh = \".config/sluice.signers\"\n\
+             [branches.main]\nremote = \"origin\"\ntrust = [\"a\"]\n\
+             [branches.main.pull_requests]\nlog_lines = 40\n",
         )
         .unwrap();
         assert_eq!(
@@ -1298,9 +1407,12 @@ hold = "5m"
         // Absent: work is submitted straight from a session's place.
         assert_eq!(p.rules_for("bolt/x").unwrap().unwrap().pull_requests, None);
         // An empty table takes every pull request out of draft.
-        let p =
-            Policy::parse("[branches.main]\nremote = \"origin\"\n[branches.main.pull_requests]\n")
-                .unwrap();
+        let p = Policy::parse(
+            "[signers.a]\nssh = \".config/sluice.signers\"\n\
+             [branches.main]\nremote = \"origin\"\ntrust = [\"a\"]\n\
+             [branches.main.pull_requests]\n",
+        )
+        .unwrap();
         assert_eq!(
             p.rules_for("main").unwrap().unwrap().pull_requests,
             Some(PullRequests::default())
