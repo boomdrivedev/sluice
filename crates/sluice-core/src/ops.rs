@@ -658,9 +658,21 @@ impl Sluice<'_> {
         for _ in &sessions {
             ids.push(self.seams.state.allocate_id(&req.branch)?);
         }
+        let ids = std::cell::RefCell::new(ids);
         let now = self.now();
         let _lock = self.seams.state.wait_lock(&req.branch)?;
         let accepted = self.update(&req.branch, |l| {
+            // Record 0122 (design D3, D5): the write goes where the branch's
+            // records are now, a move having closed the home it read; a
+            // number that home's count gave and the records it is written in
+            // hold already is given again by theirs (record 0114).
+            if ids.borrow().iter().any(|&id| l.has(id)) {
+                let again = (0..ids.borrow().len())
+                    .map(|_| self.seams.state.allocate_id(&req.branch))
+                    .collect::<Result<Vec<_>>>()?;
+                *ids.borrow_mut() = again;
+            }
+            let ids = ids.borrow();
             let mut accepted = Vec::new();
             // 125, 140: the act's heads, named by its first, where it has
             // several.

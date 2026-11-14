@@ -344,3 +344,83 @@ fn a_move_stopped_after_the_new_home_was_written_is_closed_by_the_next_round() {
         .count();
     assert_eq!(carried, 1);
 }
+
+/// satisfies: record 0122, 62 (design D3): a submission made while its
+/// branch's move is written is taken into the moving home, this host's own
+/// files, and carried with the rest once the move carries.
+#[test]
+fn a_submission_made_while_moving_is_carried() {
+    let (h, _, a) = moving(false);
+    h.work("unit/b", "agent-b", &[("b/lib", Some("b2"))]);
+    let b = h.submit("unit/b");
+    let in_own = format!("submissions/{b}.json");
+    assert!(
+        h.w().file_in(HERE, BRANCH, &in_own).is_some(),
+        "taken into the moving home"
+    );
+    assert!(h.w().home_in("origin", BRANCH).is_none());
+    h.w().signs_as("box");
+    land(&h, a);
+    step_box(&h);
+    assert!(h.w().file_in(HERE, BRANCH, &in_own).is_none());
+    assert!(h.w().file_in("origin", BRANCH, &in_own).is_some());
+    assert_eq!(h.sub(b).state, State::Queued);
+    let carried = h.events().into_iter().find_map(|e| match e {
+        Event::Carried { numbers, .. } => Some(numbers),
+        _ => None,
+    });
+    assert_eq!(carried, Some([(b, b)].into()));
+}
+
+/// satisfies: record 0122, 62 (design D3); the queue-home spec's "A submit
+/// racing the carry": a submit reads the branch's home in this host's own
+/// files as moving, and rounds land what was under test and carry the queue,
+/// closing that home, between the submit's numbering and its write; the
+/// submit's write is not made there but on origin, where its pointer names,
+/// and the submission is queued on origin.
+#[test]
+fn a_submit_racing_the_carry_is_written_in_the_new_home() {
+    let (h, _, a) = moving(false);
+    h.w().signs_as("box");
+    h.work("unit/c", "agent-c", &[("c/lib", Some("c2"))]);
+    let world = h.w().clone();
+    h.w().after_allocating(move |w, _| {
+        let f = sluice_fakes::Fakes::of(w.clone());
+        let s = f.sluice().as_peer(Peer {
+            signer: Some("box".into()),
+            ..Peer::default()
+        });
+        for _ in 0..12 {
+            if w.carries() > 0 {
+                return;
+            }
+            if w.live_runs() > 0 {
+                w.complete_all();
+            }
+            s.step(BRANCH).expect("a round runs");
+        }
+    });
+    assert_eq!(
+        world.home_in(HERE, BRANCH).unwrap().state,
+        HomeState::Moving
+    );
+    let c = h.submit("unit/c");
+    assert_eq!(world.carries(), 1);
+    assert!(
+        world
+            .file_in(HERE, BRANCH, &format!(".finished/{a}.json"))
+            .is_some(),
+        "#{a} landed first"
+    );
+    assert_eq!(
+        world.home_in(HERE, BRANCH).unwrap().closed_to(),
+        Some("origin")
+    );
+    let file = format!("submissions/{c}.json");
+    assert!(
+        world.file_in(HERE, BRANCH, &file).is_none(),
+        "not written in the closed home"
+    );
+    assert!(world.file_in("origin", BRANCH, &file).is_some());
+    assert_eq!(h.sub(c).state, State::Queued);
+}
