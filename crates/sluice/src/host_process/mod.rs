@@ -680,6 +680,9 @@ fn hand_over(
         )),
     }
     hosting.tasks.resume();
+    // Its repositories with work in play are held again at once, as its
+    // start finds them (design D4).
+    scan(hosting);
     drop(start);
     take_up.not_handed(
         tables,

@@ -1549,3 +1549,75 @@ fn a_submit_during_a_hand_over_reaches_the_successor() {
         "one host process throughout"
     );
 }
+
+/// 135, record 0107 as amended 2026-11-13 (design D20): where the
+/// successor the host process starts for a changed `[telemetry]` exits at
+/// once, it takes its lock back, its socket answers with its own pid, its
+/// repository's work goes on, and its log says once that its successor did
+/// not start, naming the log.
+#[test]
+fn a_successor_that_does_not_start_leaves_the_host_process_as_it_was() {
+    let marks = support::Scratch::new("host-no-successor-marks");
+    let go = marks.path().join("go");
+    let policy = format!(
+        "[tests]\nrunner = \"command\"\ncommand = \"while [ ! -f {} ]; do sleep 0.1; done\"\n\n\
+         [branches.main]\ntimeout = \"1m\"\n",
+        go.display()
+    );
+    let d = OnDisk::new("host-no-successor", &policy);
+    settings(&d, "[telemetry]\nservice = \"one\"\n");
+    let dir = d.session("a");
+    let repository = d.repository(d.repo.dir());
+    live_from_here(&d);
+    // The host process started from a copy of sluice, which a successor
+    // started from the same path finds replaced by one that exits at once.
+    let bin = support::Scratch::new("host-no-successor-bin");
+    let copy = bin.path().join("sluice");
+    std::fs::copy(env!("CARGO_BIN_EXE_sluice"), &copy).unwrap();
+    let client =
+        sluice::host_process::client::Client::new(&copy, support::env_of(&d.command(d.repo.dir())))
+            .unwrap();
+    let kept = client
+        .follow(Path::new(&repository), FollowKind::Wait)
+        .expect("a host process");
+    let first = kept.named.pid;
+    let id = queued_live(&d, &dir);
+    within(60, "#1 is under test", || {
+        state(&d, d.repo.dir(), id) == "testing"
+    });
+    std::fs::remove_file(&copy).unwrap();
+    std::fs::write(&copy, "#!/bin/sh\nexit 0\n").unwrap();
+    use std::os::unix::fs::PermissionsExt;
+    std::fs::set_permissions(&copy, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+    settings(&d, "[telemetry]\nservice = \"two\"\n");
+    let log = client.paths().log();
+    let said = || std::fs::read_to_string(&log).unwrap_or_default();
+    within(
+        40,
+        "the host process says its successor did not start",
+        || said().contains("its successor did not start"),
+    );
+    assert!(alive(first), "{}", said());
+    assert_eq!(answering(&d), Some(first), "{}", said());
+    let warned: Vec<String> = said()
+        .lines()
+        .filter(|l| l.contains("its successor did not start"))
+        .map(str::to_string)
+        .collect();
+    assert_eq!(warned.len(), 1, "{}", said());
+    assert!(
+        warned[0]
+            .contains("changed [telemetry], which the host process takes up only by handing over"),
+        "{}",
+        warned[0]
+    );
+    assert!(
+        warned[0].contains(&log.display().to_string()),
+        "{}",
+        warned[0]
+    );
+    std::fs::write(&go, "").unwrap();
+    within(60, "#1 lands", || state(&d, d.repo.dir(), id) == "landed");
+    assert_eq!(answering(&d), Some(first), "{}", said());
+}
