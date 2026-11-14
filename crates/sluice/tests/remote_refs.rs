@@ -1444,3 +1444,69 @@ fn two_open_homes_refuse_the_branch_naming_both() {
         "every other branch is read as before"
     );
 }
+
+/// satisfies: record 0122, C.6 (design D2); the queue-home spec's "The
+/// first submission writes the home" and "A branch with no signers", and
+/// the remote-records spec's "Signers move the state to the remote" and
+/// "No signers, no change": a branch with no home anywhere has one written
+/// by its first write, on origin naming origin and the revision whose
+/// policy chose it where that policy has `[signers.box]` and `remote =
+/// "origin"` for it, the host's own files left unwritten; and in the host's
+/// own files naming them where the policy names no signers, nothing under
+/// `refs/sluice/` pushed.
+#[test]
+fn the_first_write_writes_the_home_its_policy_chose() {
+    use sluice_core::records::{HomeState, HERE};
+    let k = key();
+    let a = Repo::new("rr-first-home");
+    a.write(".config/sluice.toml", &signers_policy(&[("box", &[&k])]));
+    a.git(&["add", "-A"]);
+    a.git(&["commit", "-q", "-m", "signers"]);
+    let bare = a.bare_origin();
+    let chose = a.rev("main");
+    let r = records(&a);
+    assert_eq!(submit_through(&r, "main", 1), Written::Written(1));
+    let on_origin = host(&a, None).read("main").unwrap();
+    assert!(on_origin.files.contains_key("submissions/1.json"));
+    let home = home_of(&on_origin.files).expect("origin holds main's home");
+    assert_eq!(
+        (home.at.as_str(), home.state, home.chosen_at),
+        ("origin", HomeState::Open, Some(Rev::new(&chose)))
+    );
+    let own = LocalFiles::new(&a.dir().join(".git"));
+    assert!(
+        own.read("main").unwrap().files.is_empty(),
+        "the host's own files are not written"
+    );
+
+    // No signers: the host's own files, nothing pushed under refs/sluice/.
+    let b = Repo::new("rr-first-home-local");
+    b.write(
+        ".config/sluice.toml",
+        "[branches.main]\nremote = \"origin\"\n",
+    );
+    b.git(&["add", "-A"]);
+    b.git(&["commit", "-q", "-m", "no signers"]);
+    let bare_b = b.bare_origin();
+    let chose = b.rev("main");
+    let r = records(&b);
+    assert_eq!(submit_through(&r, "main", 1), Written::Written(1));
+    let read = LocalFiles::new(&b.dir().join(".git")).read("main").unwrap();
+    assert!(read.files.contains_key("submissions/1.json"));
+    let home = home_of(&read.files).expect("the host's own files hold main's home");
+    assert_eq!(
+        (home.at.as_str(), home.state, home.chosen_at),
+        (HERE, HomeState::Open, Some(Rev::new(&chose)))
+    );
+    let listed = support::git_command()
+        .args([
+            "ls-remote",
+            bare_b.path().to_str().unwrap(),
+            "refs/sluice/*",
+        ])
+        .output()
+        .unwrap();
+    let refs = String::from_utf8_lossy(&listed.stdout).to_string();
+    assert!(refs.is_empty(), "nothing pushed: {refs}");
+    drop(bare);
+}
