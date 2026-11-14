@@ -1315,9 +1315,12 @@ fn held_when_github_refuses_the_draft() {
     let new = g.push_from(&w, &[("fix.txt", "a fix\n")]);
     for _ in 0..3 {
         let out = g.round();
+        // 128 (design D26): a step says each cause its intake met, by
+        // what it asked.
         assert!(
             out.contains(&format!(
-                "#{n} waits for the next submit, and GitHub would not mark it a draft"
+                "taking in main's pull requests: pull/{n}: it waits for the next submit, and \
+                 GitHub would not mark it a draft"
             )) && out.contains("Resource not accessible by integration"),
             "{out}"
         );
@@ -4799,21 +4802,28 @@ fn a_waiting_submit_waits_out_the_pause() {
     );
     assert_eq!(stderr.matches(&said).count(), 1, "{stderr}");
     assert!(!String::from_utf8_lossy(&out.stdout).contains("allowance"));
-    assert!(!g.pull_from("unit/paused").open, "landed");
+    // 135 (design D9): the host process landed what the submit opened
+    // once the pause was waited out; it asks GitHub nothing while the
+    // pause stands, so the request reads merged at its next call.
+    let n = g.pull_from("unit/paused").number;
+    assert_eq!(g.of(n)[0]["state"], "landed", "{:?}", g.subs());
 }
 
 /// The forge-allowance spec's "A wait whose timeout comes first": `sluice
-/// wait --timeout 5m` beside a pause twenty minutes long exits `5` with
-/// the submission as it stands, having made no call to GitHub.
+/// wait main --timeout 5m`, following the pull request its worktree's
+/// submit opened, beside a pause twenty minutes long exits `5` with the
+/// request as it stands, having made no call to GitHub. A wait runs no
+/// intake and follows the host process (135; design D9): the request it
+/// reads of GitHub is where it meets the pause.
 #[test]
 fn a_wait_whose_timeout_comes_first_calls_nothing() {
     let g = OnGitHub::new("pr-spent-wait", "");
-    let (n, _) = g.by_hand("unit/slow", &[("slow", Some("x\n"))], false);
-    g.step();
-    let id = g.of(n)[0]["id"].as_u64().expect("taken in").to_string();
+    let w = g.session("slow", &[("slow", "x\n")]);
+    let out = g.wt_submit(&w, &["--no-wait"]);
+    assert_eq!(out.status.code(), Some(0), "{}", text(&out));
     g.spent_for(20);
     let before = g.repo_calls();
-    let out = g.sluice(&["wait", &id, "--timeout", "5m"]);
+    let out = g.skipping(&w, &["wait", "main", "--timeout", "5m"]);
     assert_eq!(out.status.code(), Some(sluice::WAITING), "{}", text(&out));
     assert_eq!(g.repo_calls(), before, "no call to GitHub: {}", text(&out));
 }
@@ -5024,11 +5034,11 @@ fn passes_between_discoveries_start_no_git_and_ask_github_nothing() {
     let lists = g.lists();
     let (one, asked_one) = run("1");
     let (six, asked_six) = run("6");
-    // Main's records are on its remote: each pass asks it once, and starts
-    // nothing else (129).
+    // The passes are the host process's, which the run follows: six of
+    // them start no git in the run beyond what one does (129, 135).
     let fetches = |s: &[String]| s.iter().filter(|a| a.contains(" fetch ")).count();
-    assert_eq!(six.len(), one.len() + 5, "one: {one:?}; six: {six:?}");
-    assert_eq!(fetches(&six), fetches(&one) + 5, "{six:?}");
+    assert_eq!(six.len(), one.len(), "one: {one:?}; six: {six:?}");
+    assert_eq!(fetches(&six), fetches(&one), "{six:?}");
     assert_eq!(g.lists(), lists + 2, "asked at each run's first pass alone");
     for call in &asked_six {
         assert!(

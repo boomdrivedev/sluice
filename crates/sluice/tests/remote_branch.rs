@@ -1785,6 +1785,9 @@ fn a_forecast_beside_a_current_reader_asks_the_remote_nothing() {
         "{doc}"
     );
     let repository = doc["repository"].as_str().unwrap().to_string();
+    // D7: the host process the steps reached drives the repository and
+    // keeps its reader's place; ended, the test's own reader takes it.
+    support::kill_host_process(&mut s.command(s.repo.dir()));
     let readers = s.state.path().join("sluice/readers");
     let mut reader =
         match sluice::reader::Reader::take(&readers, &repository, sluice::VERSION).unwrap() {

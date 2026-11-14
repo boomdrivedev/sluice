@@ -752,7 +752,11 @@ mod bound {
             config: Rc::new(host_config(2)),
             state: Rc::new(Scratch::new("instance-cores-state")),
         };
-        s.submit("bolt/a", "ca");
+        // The host process the submit starts passes only when asked, so
+        // it starts no run on the settings it read (design D14), and is
+        // ended: the run starts one that reads them as stated below.
+        s.submit_with("bolt/a", "ca", &[("SLUICE_ROUND_SLEEP", "record")]);
+        support::kill_host_process(&mut s.command(s.repo.dir()));
         // Stated once the submission is in, so a host that refuses them
         // still has a combination that would run.
         std::fs::write(
