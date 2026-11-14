@@ -179,6 +179,20 @@ fn a_host_process_that_cannot_start_names_its_log() {
     assert!(err.contains(&log.display().to_string()), "{err}");
 }
 
+/// The worktree `dir` submitted to `main` without waiting, the host
+/// process it starts or reaches passing at its own tick: its number.
+fn queued_live(d: &OnDisk, dir: &Path) -> u64 {
+    let out = d
+        .command(dir)
+        .args(["submit", "main", "--no-wait", "--json"])
+        .output()
+        .unwrap();
+    assert!(out.status.success(), "{}", text(&out));
+    let doc: serde_json::Value =
+        serde_json::from_slice(&out.stdout).unwrap_or_else(|_| panic!("{}", text(&out)));
+    doc["id"].as_u64().expect("a number")
+}
+
 /// The host process that answers now: its pid.
 fn answering(d: &OnDisk) -> Option<u32> {
     d.client(d.repo.dir())
@@ -555,4 +569,164 @@ fn an_older_client_uses_a_newer_host_process() {
         answer.contains("0.80.0") && answer.contains(sluice::VERSION),
         "{answer}"
     );
+}
+
+/// host-process, "A submit with no host process running": the submit
+/// starts it, and it lands the submission with no other command run (135).
+#[test]
+fn a_submit_with_no_host_process_running_is_landed_by_it() {
+    let d = OnDisk::new("host-submit", POLICY);
+    let dir = d.session("a");
+    assert_eq!(answering(&d), None);
+    let id = queued_live(&d, &dir);
+    assert!(answering(&d).is_some(), "a host process runs");
+    within(60, "the submission lands", || {
+        state(&d, d.repo.dir(), id) == "landed"
+    });
+}
+
+/// host-process, "Ten submits at once": each has its own number, and one
+/// host process starts (135; design D2).
+#[test]
+fn ten_submits_at_once_start_one_host_process() {
+    let d = OnDisk::new("host-ten-submits", POLICY);
+    let dirs: Vec<_> = (0..10).map(|n| d.session(&format!("s{n}"))).collect();
+    let barrier = std::sync::Arc::new(std::sync::Barrier::new(10));
+    let started: Vec<_> = dirs
+        .iter()
+        .map(|dir| {
+            let mut c = d.command(dir);
+            c.args(["submit", "main", "--no-wait", "--json"]);
+            let barrier = barrier.clone();
+            std::thread::spawn(move || {
+                barrier.wait();
+                c.output().unwrap()
+            })
+        })
+        .collect();
+    let mut ids = BTreeSet::new();
+    for t in started {
+        let out = t.join().unwrap();
+        assert!(out.status.success(), "{}", text(&out));
+        let doc: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+        ids.insert(doc["id"].as_u64().unwrap());
+    }
+    assert_eq!(ids.len(), 10, "{ids:?}");
+    let client = d.client(d.repo.dir());
+    let log = std::fs::read_to_string(client.paths().log()).unwrap_or_default();
+    assert_eq!(log.matches(" started, pid ").count(), 1, "{log}");
+    assert!(!log.contains("another host process holds"), "{log}");
+    assert!(!client.paths().previous_log().exists(), "one process's log");
+}
+
+/// host-process, "A withdrawal with no host process running": the
+/// withdrawal starts it, and its next pass ends the run and releases the
+/// combination's checkout (135; design D14).
+#[test]
+fn a_withdrawal_starts_the_host_process() {
+    let slow = "[tests]\nrunner = \"command\"\ncommand = \"sleep 30\"\n\n[branches.main]\ntimeout = \"5m\"\n";
+    let d = OnDisk::new("host-withdraw", slow);
+    let id = queued(&d, "a");
+    let out = d.sluice(&["step", "main"]);
+    assert!(out.status.success(), "{}", text(&out));
+    assert_eq!(state(&d, d.repo.dir(), id), "testing");
+    let checkouts = || {
+        d.repo
+            .git(&["worktree", "list", "--porcelain"])
+            .lines()
+            .filter(|l| l.starts_with("worktree ") && l.contains("try+2Fmain"))
+            .count()
+    };
+    assert_eq!(checkouts(), 1, "the combination's checkout");
+    kill(answering(&d).expect("the host process the submit started"));
+    within(10, "it is gone", || answering(&d).is_none());
+    let out = d
+        .command(d.repo.dir())
+        .args(["withdraw", &id.to_string()])
+        .output()
+        .unwrap();
+    assert!(out.status.success(), "{}", text(&out));
+    assert!(answering(&d).is_some(), "a host process runs");
+    within(60, "the checkout is released", || checkouts() == 0);
+}
+
+/// host-process, "Two repositories, one process" (135).
+#[test]
+fn two_repositories_one_host_process() {
+    let d = OnDisk::new("host-two-a", POLICY);
+    let b = d.another("host-two-b", POLICY);
+    let a_dir = d.session("a");
+    let id_a = queued_live(&d, &a_dir);
+    let pid = answering(&d).expect("a host process runs");
+    let id_b = queued_live(&d, b.dir());
+    assert_eq!(answering(&d), Some(pid), "the same process");
+    within(60, "both land", || {
+        state(&d, d.repo.dir(), id_a) == "landed" && state(&d, b.dir(), id_b) == "landed"
+    });
+}
+
+/// host-process, "Started from another repository": the process a submit
+/// in B starts finds A in its index and lands both (135; design D4).
+#[test]
+fn started_from_another_repository_lands_both() {
+    let d = OnDisk::new("host-from-a", POLICY);
+    let b = d.another("host-from-b", POLICY);
+    let id_a = queued(&d, "a");
+    kill(answering(&d).expect("the host process the submit started"));
+    within(10, "it is gone", || answering(&d).is_none());
+    let id_b = queued_live(&d, b.dir());
+    within(60, "both land", || {
+        state(&d, d.repo.dir(), id_a) == "landed" && state(&d, b.dir(), id_b) == "landed"
+    });
+}
+
+/// host-process, "Started from inside a hook and a pane": the checks the
+/// host process runs carry nothing of the submit that started it, and the
+/// process works in `/` (135, 147; design D3).
+#[test]
+fn a_run_holds_nothing_of_the_command_that_started_the_host_process() {
+    let seen = support::Scratch::new("host-env-seen");
+    let file = seen.path().join("env");
+    let policy = format!(
+        "[tests]\nrunner = \"command\"\ncommand = \"env > '{}'\"\n\n[branches.main]\ntimeout = \"1m\"\n",
+        file.display()
+    );
+    let d = OnDisk::new("host-env", &policy);
+    let dir = d.session("a");
+    let git_dir = d.repo.git(&[
+        "-C",
+        dir.to_str().unwrap(),
+        "rev-parse",
+        "--absolute-git-dir",
+    ]);
+    let started_from = [
+        ("GIT_DIR", git_dir.as_str()),
+        ("GIT_WORK_TREE", dir.to_str().unwrap()),
+        (support::HERDR[3], "p-1"),
+        (support::HERDR[2], "/tmp/m.sock"),
+    ];
+    let out = d
+        .command(&dir)
+        .envs(started_from)
+        .args(["submit", "main", "--no-wait"])
+        .output()
+        .unwrap();
+    assert!(out.status.success(), "{}", text(&out));
+    // Followed, it lives on once the submission lands.
+    let _follow = d
+        .client(d.repo.dir())
+        .follow(Path::new(&d.repository(d.repo.dir())), FollowKind::Wait)
+        .unwrap();
+    within(60, "the checks ran", || file.exists());
+    let env = std::fs::read_to_string(&file).unwrap();
+    for (name, _) in started_from {
+        assert!(!env.contains(&format!("{name}=")), "{name} in\n{env}");
+    }
+    let pid = answering(&d).expect("the host process runs");
+    let cwd = std::process::Command::new("lsof")
+        .args(["-a", "-p", &pid.to_string(), "-d", "cwd", "-Fn"])
+        .output()
+        .unwrap();
+    let cwd = String::from_utf8_lossy(&cwd.stdout);
+    assert!(cwd.lines().any(|l| l == "n/"), "{cwd}");
 }

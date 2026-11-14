@@ -1530,9 +1530,26 @@ pub fn run(
         Some(Command::Hook { .. }) => s.guarding(),
         _ => s,
     };
+    let here = host_process::Here {
+        s: &s,
+        host,
+        pulls,
+        clock,
+    };
     let Some(command) = cli.command else {
         return home::run(&s, host, &cli.worktree, cli.json, out);
     };
+    // 135 (design D4): the repository, where it has sluice, listed for the
+    // host process to find again.
+    if matches!(
+        command,
+        Command::Exec { .. } | Command::Preview { .. } | Command::Equip { .. }
+    ) {
+        host_process::ask::note(&here);
+    }
+    // 135 (design D15): what changes a queue tells the host process,
+    // starting it where none answers.
+    let serve = || host_process::ask::serve(&here);
     match command {
         Command::Submit {
             branch,
@@ -2043,6 +2060,7 @@ pub fn run(
             None => s.amend(id, &requester(&by), after, priority)?,
         } {
             Ok(()) if json => {
+                serve();
                 // Record 0114: another branch may take the number between
                 // the amend and this read, which then finds none.
                 let doc = match state(&s, id, branch.as_deref())? {
@@ -2055,6 +2073,7 @@ pub fn run(
                 Ok(0)
             }
             Ok(()) => {
+                serve();
                 writeln!(out, "amended #{id}")?;
                 Ok(0)
             }
@@ -2125,6 +2144,7 @@ pub fn run(
             None => s.withdraw(id, &requester(&by))?,
         } {
             Ok(withdrew) => {
+                serve();
                 let already = withdrew == Withdrew::Already;
                 if json {
                     let mut doc = serde_json::json!({ "id": id, "state": "withdrawn" });
@@ -2188,6 +2208,7 @@ pub fn run(
             );
             match s.set_aside(&task, &at, hash.as_deref(), &reason, &by) {
                 Ok(aside) => {
+                    serve();
                     if json {
                         writeln!(out, "{}", serde_json::to_string(&aside)?)?;
                     } else {
@@ -2267,13 +2288,21 @@ pub fn run(
             accept_failure,
             json,
             ..
-        } if name.starts_with(CHECKOUT) => release_checkout(&s, &name, accept_failure, json, out),
+        } if name.starts_with(CHECKOUT) => {
+            let code = release_checkout(&s, &name, accept_failure, json, out);
+            serve();
+            code
+        }
         Command::Release {
             name: Some(name),
             accept_failure,
             json,
             ..
-        } => preview::release(&s, host, &name, accept_failure, json, out),
+        } => {
+            let code = preview::release(&s, host, &name, accept_failure, json, out);
+            serve();
+            code
+        }
         Command::Release {
             name: None,
             worktree,
@@ -2281,6 +2310,7 @@ pub fn run(
             json,
         } => {
             let released = exec::release(&s, host, &worktree, accept_failure, json, out)?;
+            serve();
             if json {
                 let mut doc = serde_json::json!({
                     "worktree": released.worktree,
@@ -2355,7 +2385,17 @@ pub fn run(
             }
             Ok(0)
         }
-        Command::Branch { command } => branch::run(&s, command, out),
+        Command::Branch { command } => {
+            let changes = matches!(
+                command,
+                BranchCommand::Create { .. } | BranchCommand::Accept { .. }
+            );
+            let code = branch::run(&s, command, out)?;
+            if changes && code == 0 {
+                serve();
+            }
+            Ok(code)
+        }
         Command::Forge {
             command: ForgeCommand::Check { branch, json },
         } => profiles::forge_check(
@@ -2740,6 +2780,14 @@ fn submit(
     };
     let id = accepted.id;
     let copy = accepted.copy.as_ref();
+    // 135: its entry written, the host process is told of it, and started
+    // where none answers; the submit then returns or waits as asked.
+    host_process::ask::serve(&host_process::Here {
+        s,
+        host,
+        pulls,
+        clock,
+    });
     if json && no_wait {
         let mut doc =
             serde_json::json!({ "id": id, "branch": req.branch, "ahead": accepted.ahead });
@@ -2833,6 +2881,13 @@ fn submit_group(
     };
     let names = req.names();
     let items: Vec<(&String, Accepted)> = names.iter().zip(accepted).collect();
+    // 135: every entry written, the host process is told of them.
+    host_process::ask::serve(&host_process::Here {
+        s,
+        host,
+        pulls,
+        clock,
+    });
     if json && no_wait {
         let submissions: Vec<serde_json::Value> = items
             .iter()
@@ -5174,6 +5229,15 @@ fn submit_pull(
                 Some(_) if INTERRUPTED.load(Ordering::SeqCst) => return Ok(STOPPED),
                 _ => {}
             }
+            // 135: the host process is told of the request it takes in.
+            if first && !status {
+                host_process::ask::serve(&host_process::Here {
+                    s,
+                    host,
+                    pulls,
+                    clock,
+                });
+            }
         }
         first = false;
         let followed = match pulls.follow(seams, clock, branch, number) {
@@ -5631,6 +5695,15 @@ fn submit_pull_group(
                 Some(e) if no_wait => return Err(e),
                 Some(_) if INTERRUPTED.load(Ordering::SeqCst) => break 'wait Some(STOPPED),
                 _ => {}
+            }
+            // 135: the host process is told of the requests it takes in.
+            if first {
+                host_process::ask::serve(&host_process::Here {
+                    s,
+                    host,
+                    pulls,
+                    clock,
+                });
             }
         }
         first = false;
