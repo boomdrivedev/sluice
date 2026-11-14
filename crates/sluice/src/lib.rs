@@ -1467,15 +1467,18 @@ pub fn run(
         _ => s,
     };
     // 129 (design D16): a one-shot read, a status in each form, a one-shot
-    // overview, the home view and a forecast where no reader keeps its
-    // tick, asks sluice's host process for a reading of the repository
-    // current within its tick, starting it where none answers, and then
-    // reads every branch as the host holds it, fetching nothing of its own.
-    let one_shot = match &cli.command {
-        None | Some(Command::Status { .. }) | Some(Command::Overview { watch: false, .. }) => true,
-        Some(Command::Submit { check: true, .. }) => !reader_keeps_tick(host),
-        _ => false,
-    };
+    // overview, the home view and a forecast, asks sluice's host process
+    // for a reading of the repository current within its tick, starting it
+    // where none answers, and then reads every branch as the host holds it,
+    // fetching nothing of its own: a forecast beside a reader that keeps
+    // its tick is answered at once, and forms from that reader's document
+    // where it holds what the forecast forms from.
+    let one_shot = matches!(
+        &cli.command,
+        None | Some(Command::Status { .. })
+            | Some(Command::Overview { watch: false, .. })
+            | Some(Command::Submit { check: true, .. })
+    );
     let s = match one_shot {
         true => {
             host_process::ask::read(
@@ -2599,23 +2602,16 @@ fn refusal_next(r: &SubmitRefusal, branch: &str) -> Vec<String> {
     }
 }
 
-/// Whether the host's reader of this repository keeps its tick, its
-/// document current (64, 129). A reader this cannot look for is none.
-fn reader_keeps_tick(host: &dyn exec::Host) -> bool {
-    let now = std::time::SystemTime::now();
-    host.readers()
-        .and_then(|dir| reader::current(&dir, &host.repository()?, now))
-        .is_ok_and(|doc| doc.is_some())
-}
-
 /// 64, 124, 129: `sluice submit --check`: formed on the branch and its
 /// queue as the host's live reader last read them, asking the remote
 /// nothing, where that reader keeps its tick and its read holds all the
-/// forecast forms from. Where none does, the host process's reading was
-/// asked for and the forecast forms on every branch as the host holds it
-/// since, fetching nothing; where the host lacks what it forms from, it
-/// asks a reading afresh once, and what is still lacking is a read it
-/// could not make, exit 3 (design D16).
+/// forecast forms from. Otherwise the forecast forms on every branch as the
+/// host holds it since the host process's reading, fetching nothing; where
+/// the host lacks what it forms from, it asks a reading afresh once. A
+/// branch that current reading still brings no revision of is no branch,
+/// refused as one (exit 2); anything else still lacking, or a branch
+/// lacking where the reading was not current or a remote refused it, is a
+/// read it could not make, exit 3 (design D16).
 #[allow(clippy::too_many_arguments)]
 fn forecast(
     here: &host_process::Here<'_, '_>,
@@ -2641,15 +2637,25 @@ fn forecast(
     };
     let got = match formed() {
         Err(e) if e.downcast_ref::<sluice_core::Unheld>().is_some() => {
-            host_process::ask::read(here, true);
-            formed().map_err(|e| match e.downcast_ref::<sluice_core::Unheld>() {
-                Some(unheld) => {
-                    anyhow::anyhow!(
-                        "could not read what a forecast of {branch} forms from: {unheld}"
-                    )
-                }
-                None => e,
-            })?
+            let reading = host_process::ask::read(here, true);
+            let whole = reading.is_some_and(|r| r.current && r.refused.is_none());
+            match formed() {
+                Err(e) => match e.downcast_ref::<sluice_core::Unheld>() {
+                    // 64: once a reading is current, a branch the host holds
+                    // no revision of, at its own ref or a remote's, is none.
+                    Some(sluice_core::Unheld::Branch(name)) if whole => match name == branch {
+                        true => Err(SubmitRefusal::NoBranch),
+                        false => Err(SubmitRefusal::NoHead(name.clone())),
+                    },
+                    Some(unheld) => {
+                        return Err(anyhow::anyhow!(
+                            "could not read what a forecast of {branch} forms from: {unheld}"
+                        ))
+                    }
+                    None => return Err(e),
+                },
+                got => got?,
+            }
         }
         got => got?,
     };
@@ -2711,7 +2717,7 @@ fn forecast_read(
     }
     let Some(head) = s.branch_read(from)? else {
         if s.is_held() {
-            return Err(sluice_core::Unheld(format!("a revision of {from}")).into());
+            return Err(sluice_core::Unheld::Branch(from.into()).into());
         }
         return Ok(Some(Err(SubmitRefusal::NoHead(from.into()))));
     };
@@ -4692,7 +4698,8 @@ fn no_intake(e: &anyhow::Error) -> Option<&sluice_core::policy::NoIntake> {
 }
 
 fn takes_pulls(s: &Sluice<'_>, branch: &str) -> Result<bool> {
-    let Some(tip) = s.seams().branch.read(branch)? else {
+    // 129 (design D16): a sluice that reads held fetches nothing for it.
+    let Some(tip) = s.branch_read(branch)? else {
         return Ok(false);
     };
     Ok(s.rules_at(branch, &tip)?

@@ -742,32 +742,98 @@ fn a_reader_in_a_slow_read_is_current() {
     assert_eq!(v["ahead"], serde_json::json!([4]), "{v}");
 }
 
-/// 64, 129: a read that names no revision of the branch, as a reader's
-/// that could not ask its remote, is read past as a round reads.
+/// 64, 129 (design D16): a read that names no revision of the branch, as
+/// a reader's that could not ask its remote, is no read to form on: beside
+/// that reader keeping its tick, the forecast forms on the branch and its
+/// records as the host holds them since the host process's reading, and
+/// fetches nothing nor reads the records afresh itself.
 #[test]
-fn a_forecast_with_no_revision_reads_as_a_round() {
+fn a_forecast_beside_a_reader_with_no_revision_forms_as_the_host_holds_it() {
     let f = setup();
+    f.world.on_remote(BRANCH);
     let (_reader, mut doc, _, _) = reader_of_four(&f, 3);
     doc["branches"][0]
         .as_object_mut()
         .unwrap()
         .remove("revision");
     rewrite_readers_doc(&doc);
-    let v = check_forecast(&f);
+    work(
+        &f,
+        "unit/forecast",
+        "crw-1-unit-3",
+        &[("plugin/lib/plan.py", Some("two"))],
+    );
+    let (fetches, reads) = (f.world.fetches(), f.world.state_reads());
+    let (code, out) = sluice(
+        &f,
+        &[
+            "submit",
+            "--check",
+            BRANCH,
+            "--worktree",
+            "unit/forecast",
+            "--json",
+        ],
+    );
+    assert_eq!(code, CONFLICT, "{out}");
+    let v = json(&out);
     assert_eq!(v["onto"], f.world.tip(BRANCH).as_str(), "{v}");
     assert_eq!(v["ahead"], serde_json::json!([1]), "{v}");
+    assert_eq!(f.world.fetches(), fetches, "the forecast fetched");
+    assert_eq!(f.world.state_reads(), reads, "the forecast read afresh");
 }
 
-/// 64, 124, 129: where the host lacks `#4`'s head, the reader's read is
-/// no read to form on: the forecast reads as a round does.
+/// 64, 124, 129 (design D16): where the host lacks `#4`'s head, the
+/// reader's read is no read to form on, and the host holds too little to
+/// form on either: the forecast asks a reading afresh once and, where the
+/// head is still not on the host, says so as a read it could not make,
+/// fetching nothing.
 #[test]
-fn a_forecast_lacking_a_head_reads_as_a_round() {
+fn a_forecast_lacking_a_head_is_a_read_it_could_not_make() {
     let f = setup();
     let (_reader, _, _, one) = reader_of_four(&f, 3);
     f.world.lack(&one, true);
-    let v = check_forecast(&f);
-    assert_eq!(v["onto"], f.world.tip(BRANCH).as_str(), "{v}");
-    assert_eq!(v["ahead"], serde_json::json!([1]), "{v}");
+    work(
+        &f,
+        "unit/forecast",
+        "crw-1-unit-3",
+        &[("plugin/lib/plan.py", Some("two"))],
+    );
+    let (fetches, reads) = (f.world.fetches(), f.world.state_reads());
+    let cli = Cli::try_parse_from([
+        "sluice",
+        "submit",
+        "--check",
+        BRANCH,
+        "--worktree",
+        "unit/forecast",
+    ])
+    .unwrap();
+    let mut out = Vec::new();
+    let host = support::FakeHost::new(f.world.clone(), 0);
+    let e = settled(|| {
+        run(
+            cli,
+            f.seams(),
+            &host,
+            &(),
+            &(),
+            &f.clock,
+            &Rounds(Cell::new(0)),
+            &mut out,
+        )
+    })
+    .unwrap_err();
+    assert_eq!(
+        format!("{e:#}"),
+        format!(
+            "could not read what a forecast of {BRANCH} forms from: the host process's reading \
+             did not bring the work queued on {BRANCH} or a combination formed on it to this host"
+        )
+    );
+    assert!(out.is_empty(), "{}", String::from_utf8_lossy(&out));
+    assert_eq!(f.world.fetches(), fetches, "the forecast fetched");
+    assert_eq!(f.world.state_reads(), reads, "the forecast read afresh");
 }
 
 #[test]

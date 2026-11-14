@@ -78,18 +78,27 @@ pub struct Seams<'a> {
 
 /// 64, 129 (design D16): what a forecast read as the host holds the
 /// repository could not form from, since the host process's reading did not
-/// bring it to the host: the branch, a revision of it, or work queued on
-/// it. A forecast asks a reading afresh once and, where this is still so,
-/// says it as a read it could not make.
-#[derive(Debug)]
-pub struct Unheld(pub String);
+/// bring it to the host. A forecast asks a reading afresh once; where that
+/// reading is current and still brings no revision of a branch, the branch
+/// is no branch, refused as one (64); anything else still lacking is said
+/// as a read it could not make.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Unheld {
+    /// The branch named: the host holds no revision of it.
+    Branch(String),
+    /// The work queued on the branch named, or a combination formed on it.
+    Work(String),
+}
 
 impl std::fmt::Display for Unheld {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let what = match self {
+            Unheld::Branch(b) => format!("a revision of {b}"),
+            Unheld::Work(b) => format!("the work queued on {b} or a combination formed on it"),
+        };
         write!(
             f,
-            "the host process's reading did not bring {} to this host",
-            self.0
+            "the host process's reading did not bring {what} to this host"
         )
     }
 }

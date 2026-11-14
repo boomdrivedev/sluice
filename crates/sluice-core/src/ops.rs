@@ -840,7 +840,7 @@ impl Sluice<'_> {
     ) -> Result<Result<Forecasted, SubmitRefusal>> {
         let Some(head) = self.branch_read(from)? else {
             if self.held {
-                return Err(crate::Unheld(format!("a revision of {from}")).into());
+                return Err(crate::Unheld::Branch(from.into()).into());
             }
             return Ok(Err(SubmitRefusal::NoHead(from.into())));
         };
@@ -862,7 +862,7 @@ impl Sluice<'_> {
     ) -> Result<Result<Forecasted, SubmitRefusal>> {
         let Some(tip) = self.branch_read(branch)? else {
             if self.held {
-                return Err(crate::Unheld(format!("a revision of {branch}")).into());
+                return Err(crate::Unheld::Branch(branch.into()).into());
             }
             return Ok(Err(SubmitRefusal::NoBranch));
         };
@@ -936,10 +936,7 @@ impl Sluice<'_> {
         if self.lacks(&queue)? {
             // 129 (design D16): a forecast read held fetches nothing.
             if self.held {
-                return Err(crate::Unheld(format!(
-                    "the work queued on {branch}, or a combination formed on it"
-                ))
-                .into());
+                return Err(crate::Unheld::Work(branch.into()).into());
             }
             self.seams.state.fetch_heads(branch)?;
             self.seams.state.fetch_candidates(branch)?;
