@@ -150,7 +150,10 @@ impl Scratch {
     }
 
     /// `c` as a test runs it, whatever its parent gave it: isolated, with
-    /// the scratch's own config and state.
+    /// the scratch's own config and state, and with
+    /// `SLUICE_ROUND_SLEEP=record`, so the host process its commands start
+    /// passes only when asked, a test's rounds those its steps and waits
+    /// ask for (135; design D14).
     fn command_under(&self, mut c: Command, dir: &Path) -> Command {
         let bin = Path::new(env!("CARGO_BIN_EXE_sluice")).parent().unwrap();
         let path = format!(
@@ -164,6 +167,7 @@ impl Scratch {
             .env("PATH", path)
             .env("XDG_CONFIG_HOME", &self.config)
             .env("XDG_STATE_HOME", &self.state)
+            .env("SLUICE_ROUND_SLEEP", "record")
             .env_remove("SLUICE_AGENT")
             .env_remove("GIT_DIR")
             .env_remove("GIT_WORK_TREE")
@@ -747,6 +751,9 @@ fn a_submission_from_another_host_is_not_pushed() {
     let a = s.session("a", &[("a.txt", "a\n")]);
     let (n, _) = s.submit_from_pane(&a, "w1:p2");
     peers("box-2");
+    // The host process the submit started keeps box-1's settings until it
+    // ends; the next command's reads box-2's (135; rule core.54).
+    support::kill_host_process(&mut s.command(env!("CARGO_BIN_EXE_sluice"), s.repo.dir()));
     let v = s.decide(n);
     assert_eq!(v["state"], "landed", "{v}");
     assert!(s.herdr.calls().is_empty());
