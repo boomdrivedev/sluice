@@ -1023,15 +1023,26 @@ fn hold(
     writer: &mut UnixStream,
     reader: &mut BufReader<UnixStream>,
 ) -> Result<()> {
-    let waiter = hosting.room.lock().wait(repository);
-    let asker = match kind {
-        sluice_seams::RunKind::Session => Asker::Session(waiter),
-        sluice_seams::RunKind::Queue => Asker::Queue(repository.to_path_buf()),
+    // A session's or a preview's ask waits its turn; a combination's, from
+    // a profile beside the host process (task 3.4), is answered once, held
+    // or refused, as a round's own ask is, and counts as no session's wait.
+    let waiter = match kind {
+        sluice_seams::RunKind::Session => Some(hosting.room.lock().wait(repository)),
+        sluice_seams::RunKind::Queue => None,
+    };
+    let let_go = || {
+        if let Some(w) = waiter {
+            hosting.room.lock().let_go(w);
+        }
+    };
+    let asker = match waiter {
+        Some(w) => Asker::Session(w),
+        None => Asker::Queue(repository.to_path_buf()),
     };
     let mut said = None;
     let id = loop {
         if hosting.stopping.load(Ordering::SeqCst) || closed(stream) {
-            hosting.room.lock().let_go(waiter);
+            let_go();
             return Ok(());
         }
         let asked = hosting.room.lock().ask(&asker, repository, Instant::now());
@@ -1041,19 +1052,22 @@ fn hold(
                 if said != Some(why) {
                     said = Some(why);
                     if send(writer, &Answer::Waiting(why)).is_err() {
-                        hosting.room.lock().let_go(waiter);
+                        let_go();
                         return Ok(());
                     }
                 }
+                if waiter.is_none() {
+                    return Ok(());
+                }
             }
             Err(e) => {
-                hosting.room.lock().let_go(waiter);
+                let_go();
                 return send(writer, &Answer::Error(format!("{e:#}")));
             }
         }
         std::thread::sleep(Duration::from_millis(100));
     };
-    hosting.room.lock().let_go(waiter);
+    let_go();
     let part = hosting.room.part(kind, id);
     if send(writer, &Answer::Held).is_err() {
         return Ok(());

@@ -1004,6 +1004,8 @@ fn a_profile_beside_the_host_process_holds_through_its_socket() {
     within(10, "the run given back is the second repository's", || {
         second.hold(RunKind::Queue).unwrap().is_some()
     });
+    let (_, room) = client.room().unwrap().expect("it answers");
+    assert_eq!(room.waiting.sessions, 0, "no session waits: {room:?}");
 }
 
 /// run-bound, "Turns on a bound of two" (150, S75; rule core.49; record
