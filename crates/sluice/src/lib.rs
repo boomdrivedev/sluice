@@ -1238,6 +1238,15 @@ impl Skipped {
     }
 }
 
+impl Skipped {
+    /// Its time moved on to `at`, where `at` is later (design D14).
+    pub fn reach(&self, at: chrono::DateTime<chrono::Utc>) {
+        if let Ok(to) = (at - self.start).to_std() {
+            self.moved.set(self.moved.get().max(to));
+        }
+    }
+}
+
 impl Pause for Skipped {
     fn pause(&self) -> bool {
         self.moved.set(self.moved.get() + self.every);

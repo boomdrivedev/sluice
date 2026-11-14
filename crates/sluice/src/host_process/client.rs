@@ -323,10 +323,16 @@ impl Client {
         }
     }
 
-    /// A pass of `repository` now, once it ends (D14).
-    pub fn pass(&self, repository: &Path) -> Result<Report> {
+    /// A pass of `repository` now, once it ends, at the asker's time `at`
+    /// (D14).
+    pub fn pass(
+        &self,
+        repository: &Path,
+        at: Option<chrono::DateTime<chrono::Utc>>,
+    ) -> Result<Report> {
         match self.ask(&Request::Pass {
             repository: repository.to_path_buf(),
+            at: at.map(|at| at.to_rfc3339()),
         })? {
             Answer::Pass(r) => Ok(r),
             other => Err(unexpected(other)),

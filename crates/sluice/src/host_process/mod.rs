@@ -863,9 +863,10 @@ fn answer(hosting: &Arc<Hosting>, stream: UnixStream) -> Result<()> {
             }
             send(&mut writer, &Answer::Ok)
         }
-        Request::Pass { repository } => {
+        Request::Pass { repository, at } => {
             note(hosting, &repository);
-            let answer = match hosting.tasks.handle(&repository).pass() {
+            let at = at.and_then(|at| at.parse::<chrono::DateTime<chrono::Utc>>().ok());
+            let answer = match hosting.tasks.handle(&repository).pass(at) {
                 Ok(report) => Answer::Pass(report),
                 Err(e) => Answer::Error(e),
             };

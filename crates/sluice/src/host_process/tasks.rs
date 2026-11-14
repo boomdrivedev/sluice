@@ -38,8 +38,12 @@ pub const FINISH_FOR: Duration = Duration::from_secs(60);
 
 /// What a task is asked.
 pub enum Job {
-    /// A pass now, answered once it ends.
-    Pass(Sender<Result<Report, String>>),
+    /// A pass now, answered once it ends, at its asker's time where it
+    /// names one (D14).
+    Pass(
+        Sender<Result<Report, String>>,
+        Option<chrono::DateTime<chrono::Utc>>,
+    ),
     /// One round of a branch, answered with the step's document (D10).
     Step(String, Sender<Result<serde_json::Value, String>>),
     /// A pass at once rather than at the next tick.
@@ -412,11 +416,12 @@ pub struct Handle {
 }
 
 impl Handle {
-    /// A pass now, once it ends.
-    pub fn pass(&self) -> Result<Report, String> {
+    /// A pass now, once it ends, at its asker's time `at` where it names
+    /// one (D14).
+    pub fn pass(&self, at: Option<chrono::DateTime<chrono::Utc>>) -> Result<Report, String> {
         let (tx, rx) = mpsc::channel();
         self.jobs
-            .send(Job::Pass(tx))
+            .send(Job::Pass(tx, at))
             .map_err(|_| "the repository's task ended".to_string())?;
         rx.recv()
             .map_err(|_| "the repository's task ended before its pass".to_string())?
@@ -752,7 +757,7 @@ fn repository(inbox: Inbox, room: Shared, asked_only: bool, named: Named, settin
         // lock, followers and parts kept, as `Task` and the room hold
         // them. Settings that do not bind here leave it on its binding.
         let passes = match &job {
-            Some(Job::Pass(_)) | Some(Job::Step(..)) => true,
+            Some(Job::Pass(..)) | Some(Job::Step(..)) => true,
             Some(Job::Wake) => !asked_only,
             None => due,
         };
@@ -779,9 +784,15 @@ fn repository(inbox: Inbox, room: Shared, asked_only: bool, named: Named, settin
         }
         let s = sluice_of(&bound, &policies, clock);
         match job {
-            Some(Job::Pass(reply)) => {
+            Some(Job::Pass(reply, at)) => {
+                // D14: the pass's time is its asker's where it names one,
+                // so two waits asking passes move it no faster than one;
+                // else it moves on by its tick after the pass.
+                if let (true, Some(at)) = (asked_only, at) {
+                    skipped.reach(at);
+                }
                 let report = task.read(&inbox, &s, &bound, clock, every);
-                if asked_only {
+                if asked_only && at.is_none() {
                     skipped.pause();
                 }
                 last = Some(Instant::now());
@@ -998,11 +1009,11 @@ mod tests {
         assert_eq!(starts.load(Ordering::SeqCst), 1);
         // Another repository's task runs meanwhile.
         let b = other.handle(Path::new("/host/b.git"));
-        assert_eq!(b.pass(), Ok(Report::default()));
+        assert_eq!(b.pass(None), Ok(Report::default()));
         // The next tick starts it again.
         tasks.tick();
         let a = tasks.handle(&repo);
-        assert_eq!(a.pass(), Ok(Report::default()));
+        assert_eq!(a.pass(None), Ok(Report::default()));
         assert!(starts.load(Ordering::SeqCst) >= 3);
     }
 
@@ -1010,7 +1021,7 @@ mod tests {
     fn answer_until_idle(inbox: &Inbox) {
         loop {
             match inbox.next(Duration::from_millis(50)) {
-                Some(Job::Pass(reply)) => {
+                Some(Job::Pass(reply, _)) => {
                     let _ = reply.send(Ok(Report::default()));
                 }
                 Some(_) => {}
@@ -1041,7 +1052,7 @@ mod tests {
                 Arc::new(move |inbox: Inbox| loop {
                     match inbox.next(Duration::from_millis(50)) {
                         Some(Job::Wake) => locked(&counted).push(inbox.repository.clone()),
-                        Some(Job::Pass(reply)) => {
+                        Some(Job::Pass(reply, _)) => {
                             let _ = reply.send(Ok(Report::default()));
                         }
                         Some(_) => {}
@@ -1101,7 +1112,7 @@ mod tests {
                     passed.fetch_add(1, Ordering::SeqCst);
                     inbox.end_reading(None);
                 }
-                Some(Job::Pass(reply)) => {
+                Some(Job::Pass(reply, _)) => {
                     let _ = reply.send(Ok(Report::default()));
                 }
                 Some(_) => {}
@@ -1286,7 +1297,7 @@ mod tests {
             started(&quick) == 1
         });
         // A command's ask is answered meanwhile.
-        assert_eq!(tasks.handle(&other).pass(), Ok(Report::default()));
+        assert_eq!(tasks.handle(&other).pass(None), Ok(Report::default()));
         // A second look while the first still reads reads nothing again.
         tasks.look(&slow);
         std::thread::sleep(Duration::from_millis(50));

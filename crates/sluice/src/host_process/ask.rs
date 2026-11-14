@@ -152,7 +152,8 @@ impl HostProcess for Socketed {
     }
 
     fn pass(&self, here: &Here<'_, '_>) -> Result<Report> {
-        self.client()?.pass(&here.repository()?)
+        self.client()?
+            .pass(&here.repository()?, Some(here.clock.now()))
     }
 
     fn read(&self, here: &Here<'_, '_>, afresh: bool) -> Result<Reading> {

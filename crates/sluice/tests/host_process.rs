@@ -1445,7 +1445,7 @@ fn a_status_during_a_long_round_answers_at_once() {
     host.slow();
     let (client, repository) = (host.client.clone(), host.repository.clone());
     std::thread::spawn(move || {
-        let _ = client.pass(&repository);
+        let _ = client.pass(&repository, None);
     });
     std::thread::sleep(sluice::host_process::READ_TICK + Duration::from_secs(1));
     let (out, took, asked) = timed_status(&d);

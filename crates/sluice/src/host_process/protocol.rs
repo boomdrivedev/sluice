@@ -59,8 +59,15 @@ pub enum Request {
         repository: PathBuf,
         kind: FollowKind,
     },
-    /// A pass of the repository now, answered once it ends (D14).
-    Pass { repository: PathBuf },
+    /// A pass of the repository now, answered once it ends (D14). `at`,
+    /// RFC 3339, is the asker's time: where passes are taken only when
+    /// asked, the pass's time moves on to it, so the host process's time
+    /// is its askers', however many ask.
+    Pass {
+        repository: PathBuf,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        at: Option<String>,
+    },
     /// Answered once a reading of the repository is current (D16); with
     /// `afresh`, once a reading begun after the ask ends, as a forecast's
     /// second ask has it.
