@@ -104,13 +104,13 @@ When a remote home's branch has a policy at its head naming no signers,
 its lead SHALL close the remote home toward the hosts' own files once no
 combination is under test, and each host SHALL carry the live
 submissions it made into its own files, the lead in that round and every
-other host at its next lock of the branch, writing their pointers in the
-remote home (record 0122; 26; C.6).
+other host the first time a round of its own reads the closed remote
+home, writing their pointers in the remote home (record 0122; 26; C.6).
 
 #### Scenario: Two hosts' submissions come home
 
 - **WHEN** `bolt/x` is open on origin with #7 made on host A and #8 made on host B, a landing brings a policy naming no signers, and no combination is under test
-- **THEN** after A's round and B's next submit or round, A's own files hold #7 and B's own files hold #8, each queued under its number, and origin's `home.json` of `bolt/x` is closed naming each submission and the host that took it
+- **THEN** after A's round and B's next round, A's own files hold #7 and B's own files hold #8, each queued under its number, and origin's `home.json` of `bolt/x` is closed naming each submission and the host that took it
 
 ### Requirement: A submission whose host never takes it home stays readable
 

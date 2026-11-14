@@ -9,10 +9,10 @@ of 2026-11-08 ("Yes: machines choose how sluice runs, the repository
 says what must pass") adds that a machine whose signature a branch does
 not accept leads none of its rounds and runs none of its checks, and
 that no setting names how a queue runs. The statement carries that half
-in 58, 72, 135, 137 and C.8 (boomdrivedev/blueprints,
-`design/sluice/requirements.md`). Record 0122 has C.6 amended to
-match; that amendment is not on blueprints' main at 786d040, and this
-change cites C.6 as the record amends it.
+in 58, 135, 137 and C.8, and C.6 and 72 carry record 0122 at e966dcb
+(boomdrivedev/blueprints, `design/sluice/requirements.md`, on the
+branch `design/sluice-a-branch-comes-home-when-its-signers-go` until
+the user pushes it).
 
 What sluice's code holds at d6d11623 is what the record replaces:
 
@@ -66,7 +66,8 @@ What sluice's code holds at d6d11623 is what the record replaces:
 - **A branch comes home to each host's own files.** When its policy
   stops naming signers, the lead closes the remote home once no
   combination is under test, and each host carries the submissions it
-  made into its own files at its next lock of the branch.
+  made into its own files the first time a round of its own reads the
+  closed remote home.
 - **A wait follows a submission to where it lives**, through a closed
   home's pointer, and a status of a carried number names the number it
   has now.
@@ -96,14 +97,16 @@ What sluice's code holds at d6d11623 is what the record replaces:
 - `queue-home`: a branch's queue has one home written in its records,
   read from there by every process; a move between homes, step by step;
   numbers across a move; a branch coming home; what a status shows; and
-  no setting naming how a queue runs (record 0122; 135, 137, C.6, C.8).
+  no setting naming how a queue runs (record 0122; 135, 137, C.8; C.6
+  at e966dcb).
 
 ### Modified Capabilities
 
 - `remote-records`: a policy with signers chooses the remote home for a
   queue that has none; the left-behind move goes.
 - `peer-lead`: only a host the branch accepts leads it, and the lead
-  writes at least once a lease while a run is live (58, 72, 137).
+  writes at least once a lease while a run is live (58, 137; 72 at
+  e966dcb).
 - `submission-wait`: a wait follows its submission to its queue's new
   home.
 

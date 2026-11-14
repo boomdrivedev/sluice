@@ -5,7 +5,11 @@
 Record 0122 has two halves. This change builds the first: a queue's
 home written in its records, a move between homes, and one lead while a
 run is live, with record 0093's amendment of 2026-11-08 on who may lead
-(58, 72, 135, 137, C.6 as record 0122 amends it, C.8). The second half,
+(58, 135, 137, C.8; C.6 and 72 at e966dcb on boomdrivedev/blueprints'
+branch `design/sluice-a-branch-comes-home-when-its-signers-go`, waiting
+on the user's push). D4 and D5 are boomdrive-design's ruling of
+2026-11-14 as well as this design's, written in C.6 there and in record
+0122 on sluice's main. The second half,
 a run's life, is `a-runs-life-is-written-first-and-actions-runs-its-checks`.
 
 What the code does today, at d6d11623:
@@ -171,11 +175,14 @@ A branch in the hosts' own files has one home on each host (C.6 local
 files: one host), so a remote home's submissions go home to the hosts
 that made them. The lead's carry, once no combination is under test,
 closes the remote home with `closed.to = here` and carries the live
-submissions whose `from.host` is its own. Every other host whose binding,
-under the branch's lock, reaches that closed home holding live
-submissions of its own not yet carried carries them into its own files,
-`open` with `came_from`, then writes each one's pointer in the remote
-home. A submission naming no host, or a host that never returns, stays
+submissions whose `from.host` is its own. Every other host carries the
+live submissions it made the first time a round of its own reads that
+closed home (C.6): into its own files, `open` with `came_from`, then
+each one's pointer in the remote home. A round asks `State::carry` under
+the branch's lock before it reads the branch wherever its home is not
+moving, and once no combination is under test where it is; the binding
+carries whatever of a move this host owes and writes nothing where it
+owes none. A submit never carries. A submission naming no host, or a host that never returns, stays
 in the closed remote home, readable, and its status says it waits for
 its host to take it.
 
