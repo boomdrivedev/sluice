@@ -1075,20 +1075,46 @@ fn the_overview_names_the_host_process() {
 /// `main`'s records on a bare origin, its runs signed by `a`, whose key
 /// `d`'s host holds: the host, and the remote.
 fn on_origin(name: &str) -> (OnDisk, support::Scratch) {
+    let (d, mut remotes) = on_remotes(name, &["origin"]);
+    (d, remotes.remove(0))
+}
+
+/// `main`'s records on a bare `remotes[0]`, and a branch of each other
+/// remote's name on that remote, their runs signed by `a`, whose key
+/// `d`'s host holds: the host, and the remotes in order.
+fn on_remotes(name: &str, remotes: &[&str]) -> (OnDisk, Vec<support::Scratch>) {
     use ssh_key::{Algorithm, PrivateKey};
     let k = PrivateKey::random(&mut rand_core::OsRng, Algorithm::Ed25519).unwrap();
-    let d = OnDisk::new(
-        name,
-        &format!(
-            "[tests]\nrunner = \"command\"\ncommand = \"true\"\n\n\
-             [signers.a]\nssh = \"a {}\"\n\n\
-             [branches.main]\ntimeout = \"1m\"\nremote = \"origin\"\ntrust = [\"a\"]\n",
-            k.public_key().to_openssh().unwrap()
-        ),
+    let mut policy = format!(
+        "[tests]\nrunner = \"command\"\ncommand = \"true\"\n\n\
+         [signers.a]\nssh = \"a {}\"\n\n\
+         [branches.main]\ntimeout = \"1m\"\nremote = \"{}\"\ntrust = [\"a\"]\n",
+        k.public_key().to_openssh().unwrap(),
+        remotes[0]
     );
-    let origin = d.repo.bare_origin();
+    for r in &remotes[1..] {
+        policy.push_str(&format!(
+            "\n[branches.{r}]\ntimeout = \"1m\"\nremote = \"{r}\"\ntrust = [\"a\"]\n"
+        ));
+    }
+    let d = OnDisk::new(name, &policy);
+    for r in &remotes[1..] {
+        d.repo.git(&["branch", r]);
+    }
+    let mut bare = vec![d.repo.bare_origin()];
+    for r in &remotes[1..] {
+        let other = support::Scratch::new(&format!("{r}.git"));
+        let at = other.path().to_str().unwrap();
+        d.repo.git(&["clone", "-q", "--bare", ".", at]);
+        d.repo.git(&["remote", "add", r, at]);
+        d.repo.git(&["fetch", "-q", r]);
+        bare.push(other);
+    }
+    if remotes[0] != "origin" {
+        d.repo.git(&["remote", "rename", "origin", remotes[0]]);
+    }
     signing(&d, &k);
-    (d, origin)
+    (d, bare)
 }
 
 /// `d`'s host signs as `a` with `k`.
@@ -1174,4 +1200,155 @@ fn a_status_with_no_host_process_starts_it_and_reads_its_first_reading() {
             .any(|(pid, args)| *pid != status_pid && asks_a_remote(args)),
         "no host process read origin: {starts:?}"
     );
+}
+
+/// A host process of `d`'s, started afresh in the test, which passes only
+/// when asked and whose every git, once `flag` names its pid, waits a
+/// minute before it runs: one whose looks and passes are slow while a
+/// command's own git is not. The repository, and the host process's
+/// connection that keeps its task, its pid written to `flag` by the
+/// caller.
+struct Slowed {
+    repository: std::path::PathBuf,
+    client: sluice::host_process::client::Client,
+    _follow: sluice::host_process::client::Connection,
+    pid: u32,
+    flag: std::path::PathBuf,
+    _bin: support::Scratch,
+}
+
+impl Slowed {
+    fn start(d: &OnDisk, name: &str) -> Slowed {
+        let repository = std::path::PathBuf::from(d.repository(d.repo.dir()));
+        live_from_here(d);
+        let bin = support::Scratch::new(&format!("{name}-slow-git"));
+        let flag = bin.path().join("flag");
+        let real = std::env::split_paths(&std::env::var_os("PATH").unwrap_or_default())
+            .map(|p| p.join("git"))
+            .find(|p| p.is_file())
+            .expect("git on the path");
+        let script = bin.path().join("git");
+        std::fs::write(
+            &script,
+            format!(
+                "#!/bin/sh\nif [ -f '{flag}' ] && [ \"$PPID\" = \"$(cat '{flag}')\" ]; then sleep 60; fi\nexec '{real}' \"$@\"\n",
+                flag = flag.display(),
+                real = real.display()
+            ),
+        )
+        .unwrap();
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let mut c = d.command(d.repo.dir());
+        c.env("SLUICE_ROUND_SLEEP", "record");
+        let mut env = support::env_of(&c);
+        for (k, v) in env.iter_mut() {
+            if k == "PATH" {
+                let mut path = vec![bin.path().to_path_buf()];
+                path.extend(std::env::split_paths(v));
+                *v = std::env::join_paths(path).unwrap();
+            }
+        }
+        let client =
+            sluice::host_process::client::Client::new(Path::new(env!("CARGO_BIN_EXE_sluice")), env)
+                .expect("its paths");
+        let follow = client
+            .follow(&repository, FollowKind::Wait)
+            .expect("the host process starts");
+        let pid = follow.named.pid;
+        Slowed {
+            repository,
+            client,
+            _follow: follow,
+            pid,
+            flag,
+            _bin: bin,
+        }
+    }
+
+    /// From now on, every git the host process starts waits a minute.
+    fn slow(&self) {
+        std::fs::write(&self.flag, self.pid.to_string()).unwrap();
+    }
+}
+
+/// `sluice status main --json` in `d`'s repository: its output, how long
+/// it took, and whether its own process asked a remote.
+fn timed_status(d: &OnDisk) -> (std::process::Output, Duration, bool) {
+    let before = d.git.count();
+    let began = Instant::now();
+    let child = d
+        .command(d.repo.dir())
+        .env("SLUICE_ROUND_SLEEP", "record")
+        .args(["status", "main", "--json"])
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .unwrap();
+    let pid = child.id();
+    let out = child.wait_with_output().unwrap();
+    let took = began.elapsed();
+    let asked = d.git.parented()[before..]
+        .iter()
+        .any(|(p, args)| *p == pid && asks_a_remote(args));
+    (out, took, asked)
+}
+
+/// 129 (design D16): a status whose reading does not come within the
+/// round's retry bound and a tick, the host process's look held by two
+/// remotes that answer nothing, each for a try's whole limit, reads the
+/// records as the host holds them, fetching nothing, and says on stderr
+/// when the host process last read the repository.
+#[test]
+fn a_status_beside_a_slow_look_reads_as_held_and_says_so() {
+    let (d, _remotes) = on_remotes("host-slow-look", &["origin", "mirror"]);
+    queued(&d, "mine");
+    let host = Slowed::start(&d, "host-slow-look");
+    let (out, _, asked) = timed_status(&d);
+    assert!(out.status.success(), "{}", text(&out));
+    assert!(!asked, "the status asked origin");
+    let first = String::from_utf8_lossy(&out.stderr).to_string();
+    assert!(!first.contains("host process"), "{first}");
+
+    host.slow();
+    std::thread::sleep(sluice::host_process::READ_TICK + Duration::from_millis(500));
+    let (out, took, asked) = timed_status(&d);
+    assert!(out.status.success(), "{}", text(&out));
+    assert!(!asked, "the status asked origin");
+    let bound = sluice::host_process::read_for();
+    assert!(took >= bound, "answered in {took:?}, within {bound:?}");
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        err.contains("sluice's host process last read it at"),
+        "{err}"
+    );
+    let doc: serde_json::Value =
+        serde_json::from_slice(&out.stdout).unwrap_or_else(|_| panic!("{}", text(&out)));
+    assert_eq!(doc["branch"], "main", "{doc}");
+}
+
+/// 129 (design D16): a status while the host process's pass of the
+/// repository is long under way, begun within a tick of its last reading's
+/// end, answers at once from the records as the host holds them, with
+/// nothing fetched and nothing said.
+#[test]
+fn a_status_during_a_long_round_answers_at_once() {
+    let (d, _origin) = on_origin("host-long-round");
+    queued(&d, "mine");
+    let host = Slowed::start(&d, "host-long-round");
+    let (out, _, _) = timed_status(&d);
+    assert!(out.status.success(), "{}", text(&out));
+
+    host.slow();
+    let (client, repository) = (host.client.clone(), host.repository.clone());
+    std::thread::spawn(move || {
+        let _ = client.pass(&repository);
+    });
+    std::thread::sleep(sluice::host_process::READ_TICK + Duration::from_secs(1));
+    let (out, took, asked) = timed_status(&d);
+    assert!(out.status.success(), "{}", text(&out));
+    assert!(!asked, "the status asked origin");
+    assert!(took < Duration::from_secs(10), "answered in {took:?}");
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert!(!err.contains("host process"), "{err}");
 }

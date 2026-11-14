@@ -264,10 +264,19 @@ pub fn note(here: &Here<'_, '_>) {
 /// answers. One that does not come within the round's retry bound and a
 /// tick, or a host process that cannot be reached, is said on stderr, with
 /// when the host process last read the repository where it says, and the
-/// command reads the records as the host holds them all the same.
+/// command reads the records as the host holds them all the same. A
+/// current reading whose ask a remote refused says so in the remote's
+/// words (133), the records read as last fetched.
 pub fn read(here: &Here<'_, '_>) -> Option<Reading> {
     match here.host.host_process().read(here) {
-        Ok(r) if r.current => Some(r),
+        Ok(r) if r.current => {
+            if let Some(words) = &r.refused {
+                crate::telemetry::warn(&format!(
+                    "sluice: warning: sluice's host process could not read the repository's remote, so this reads it as last fetched: {words}"
+                ));
+            }
+            Some(r)
+        }
         Ok(r) => {
             let when = match &r.ended {
                 Some(at) => format!("last read it at {at}"),
