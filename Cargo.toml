@@ -97,6 +97,11 @@ weir-delivery = { git = "https://github.com/agentplot/weir", rev = "9cba69196e92
 weir-pack = { git = "https://github.com/agentplot/weir", rev = "9cba69196e9269a36b02024861340355bdbe6d4b" }
 weir-bounded = { git = "https://github.com/agentplot/weir", rev = "9cba69196e9269a36b02024861340355bdbe6d4b" }
 
+# Every sluice process raises its soft limit on open files to its hard
+# limit as it starts, as far as the system lets one process open (macOS's
+# kern.maxfilesperproc), through a maintained crate (135; record 0126).
+rlimit = "0.11"
+
 # The tests' container engine over TLS: its certificates, made in each
 # test's scratch directory, and its server, on the ring provider ureq uses.
 rcgen = { version = "0.14", default-features = false, features = [
