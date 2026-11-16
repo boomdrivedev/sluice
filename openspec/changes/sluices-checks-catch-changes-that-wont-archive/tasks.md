@@ -9,11 +9,11 @@ number and rules by id.
 
 ## 1. The check is held to its cases
 
-- [x] 1.1 Add `check-changes-cases.sh`, Flume's copied whole but for its header, and run it in `root:changes-cases`, tagged `check-fast`, with both scripts among the task's inputs. True when `sluice exec bolt/sluices-changes-are-checked-as-archived -- moon run root:changes-cases` passes, and fails naming "A modified requirement past OpenSpec's length" over a `check-changes.sh` whose spec validation is made to pass.
+- [x] 1.1 Add `check-changes-cases.sh`, copied from Flume's, each case named for the scenario it answers, and run it in `root:changes-cases`, tagged `check-fast`, with both scripts among the task's inputs. True when `sluice exec bolt/sluices-changes-are-checked-as-archived -- moon run root:changes-cases` passes.
 
 ## 2. The decision is written down
 
-- [ ] 2.1 Amend record 0128 with the cases as a task of their own, and rule core.61's details with the cases' scratch trees as allowed. True when `sluice exec bolt/sluices-changes-are-checked-as-archived` passes.
+- [x] 2.1 Amend record 0128 with the cases as a task of their own, and rule core.61's details with the cases' scratch trees as allowed. True when `sluice exec bolt/sluices-changes-are-checked-as-archived` passes.
 
 ## 3. The specs archive clean
 
