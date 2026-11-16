@@ -638,9 +638,10 @@ pub enum Command {
         #[command(subcommand)]
         command: InitCommand,
     },
-    /// A pool's job, as the workflow `sluice init actions` writes runs it:
-    /// its run, its signature and its record (record 0119).
+    /// Run by the workflow `sluice init actions` writes: a pool's job's
+    /// run, its signature and its record (record 0119).
     #[command(
+        hide = true,
         after_help = "Example:\n  $ sluice job run --claim pool/forge/3 --branch main --out \"$RUNNER_TEMP/sluice-run\""
     )]
     Job {
