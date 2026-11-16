@@ -59,6 +59,10 @@ pub const INTERNAL: i32 = 3;
 pub const WITHDRAWN: i32 = 4;
 /// `sluice wait --timeout` ran out with the submission undecided.
 pub const WAITING: i32 = 5;
+/// 152, record 0124 (design D10): the forge refused the submission's
+/// landing, with the branch where the landing expected it: held, with the
+/// forge's words. No reader takes it as a failure (1).
+pub const REFUSED: i32 = 6;
 /// How long a waiting submit or `sluice wait` gives each call to a remote,
 /// tried again under the retry policy through a forge's 5xx answers and
 /// whatever else the remote never judged, before it says it could not read
@@ -124,6 +128,7 @@ Exit codes:
   3    sluice itself failed, or it could not read the forge for 5m and
        whether it landed is not known; the cause is on stderr
   4    withdrawn while it waited
+  6    held: the forge refused its landing; its words are on stdout
   64   a command line sluice cannot read
   130  stopped with Ctrl-C; the submission stays queued
 
@@ -148,6 +153,7 @@ Exit codes:
        it could not read is named with why
   4    withdrawn
   5    still waiting: --timeout ran out, and the submission stays queued
+  6    held: the forge refused its landing; its words are on stdout
   64   a command line sluice cannot read; or the number is on more than
        one branch and no --branch names one: each branch is named
   130  stopped with Ctrl-C; the submission stays queued";
@@ -3080,7 +3086,7 @@ fn submit_group(
     } else {
         for (((w, _), sub), by) in items.iter().zip(&subs).zip(&carriers) {
             writeln!(out, "submission {} from {w}:", sub.id)?;
-            if sub.state.is_out() {
+            if sub.state.is_out() || sub.state == State::Refused {
                 report(
                     s,
                     sub,
@@ -3811,6 +3817,11 @@ fn wait_on(
     let mut first = true;
     // Record 0100 D1: what carries `own`'s work, followed in its stead.
     let mut following: Option<Submission> = None;
+    // 152, record 0124 (design D10): a landing the forge refused ends the
+    // wait at once, held with the forge's words.
+    if own.state == State::Refused {
+        return Ok(Waited::Decided(own, None));
+    }
     // Decided already: nothing read again, and nothing followed.
     if own.state.is_out() {
         match decided(s, waiting, &own, own.clone(), out)? {
@@ -3830,6 +3841,10 @@ fn wait_on(
     reading.read(s, following.as_mut().unwrap_or(&mut own))?;
     loop {
         let sub = following.as_ref().unwrap_or(&own);
+        // 152, record 0124 (design D10): held, its end for the wait.
+        if sub.state == State::Refused {
+            return Ok(Waited::Decided(sub.clone(), None));
+        }
         if sub.state.is_out() {
             match decided(s, waiting, &own, sub.clone(), out)? {
                 Next::End(w) => return Ok(w),
@@ -5989,6 +6004,7 @@ fn exit_for(sub: &Submission) -> i32 {
         State::Landed => LANDED,
         State::Conflict => CONFLICT,
         State::Withdrawn => WITHDRAWN,
+        State::Refused => REFUSED,
         _ => FAILED,
     }
 }
