@@ -445,3 +445,43 @@ fn a_held_landing_is_owed_to_its_submitter() {
     assert_eq!(sub.state, State::Refused);
     assert_eq!(sub.decided(), None, "no outcome decided");
 }
+
+/// satisfies: 152, 51, 135; rules core.31, core.52; record 0124: a
+/// held landing's refusal, once the round has pushed its notice, is
+/// collected by its worktree's inbox as an outcome is, with the forge's
+/// words read from the landing that holds it, and its delivery is given
+/// under `<id>:refused`
+#[test]
+fn a_held_landing_is_collected_by_its_worktrees_inbox() {
+    use sluice_seams::Decided;
+    let h = Harness::bolt();
+    h.w().forge_refuses(BRANCH, Some(DECLINED));
+    h.work("unit/a", "agent-a", &[("a/lib", Some("a2"))]);
+    let one = h.submit("unit/a");
+    for _ in 0..4 {
+        h.step();
+    }
+    assert_eq!(h.w().delivered_to("agent-a").len(), 1, "the notice pushed");
+    assert!(h.doc().outbox.is_empty(), "its outbox item gone");
+    let s = h.sluice();
+    let me = s.seams().driver.session("unit/a").unwrap().from;
+    let owed = s.owed(&me, sluice_core::Collect::All).unwrap();
+    let got: Vec<_> = owed
+        .outcomes
+        .iter()
+        .map(|o| (o.submission.id, o.key.clone(), o.decided.clone()))
+        .collect();
+    assert_eq!(
+        got,
+        [(
+            one,
+            format!("{one}:refused"),
+            Decided::Refused {
+                words: DECLINED.to_string()
+            }
+        )]
+    );
+    drop(owed);
+    let delivery = s.delivery_of(&h.sub(one)).unwrap().expect("its delivery");
+    assert_eq!(delivery.to_json()["key"], format!("{one}:refused").as_str());
+}
