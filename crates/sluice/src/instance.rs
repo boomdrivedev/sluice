@@ -35,6 +35,9 @@
 //! signer = "box"
 //! key = "~/.config/sluice/signing"
 //!
+//! [aws]
+//! profile = "sluice-lead"
+//!
 //! [peers]
 //! lease = "5m"
 //! alive = "2m"
@@ -82,6 +85,13 @@
 //! need not name that store as a `dir` (C.2 sandbox row; record 0105).
 //! sluice names no cache's tool and runs no cache's server: the keeper
 //! does, as it runs the container engine.
+//!
+//! `[aws] profile` names the AWS profile every call to a CodeBuild pool
+//! makes on this host, so a lead's identity is the profile its operator
+//! gave sluice's user and never the environment of whichever command
+//! started sluice's host process; unset, the AWS SDK's own chain finds the
+//! credentials from the environment, or in a build its role (record 0119;
+//! timber record 0017; [`Aws`]).
 //!
 //! `[forge]` names the app and one way to its token on this host: `key`,
 //! the path of its private key, or `credential`, a command that gives the
@@ -142,6 +152,17 @@ pub struct Instance {
     /// file holds no table, which is not a table with nothing set (record
     /// 0106; design D1).
     pub telemetry: Option<HostTelemetry>,
+    /// How this host reaches AWS, `[aws]` (record 0119).
+    pub aws: Aws,
+}
+
+/// The host's `[aws]` table (record 0119; design D9 of the change
+/// `a-codebuild-fleet-runs-a-queues-checks`): the AWS profile every call to
+/// a CodeBuild pool makes on this host, read as the AWS tools read it;
+/// `None` for the AWS SDK's own chain, the environment's or a build's role.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct Aws {
+    pub profile: Option<String>,
 }
 
 /// The host's `[telemetry]` table (151, C.7; record 0106): each key as the
@@ -281,6 +302,14 @@ struct ConfigForm {
     caches: Vec<toml::Value>,
     #[serde(default, deserialize_with = "telemetry_form")]
     telemetry: Option<TelemetryForm>,
+    aws: Option<AwsForm>,
+}
+
+/// `[aws]` as the file writes it (record 0119).
+#[derive(Deserialize, Default)]
+#[serde(deny_unknown_fields)]
+struct AwsForm {
+    profile: Option<String>,
 }
 
 /// `[telemetry]` as the file writes it (design D1).
@@ -494,6 +523,15 @@ impl Instance {
         let caches = caches(form.caches, home)?;
         let expire_after = expire_after(form.deliveries.expire_after)?;
         let telemetry = form.telemetry.map(telemetry).transpose()?;
+        let aws = Aws {
+            profile: match form.aws.and_then(|a| a.profile) {
+                Some(p) if p.trim().is_empty() || p.trim() != p => bail!(
+                    "[aws] profile {p:?} names no profile; leave it out for the AWS SDK's own \
+                     chain"
+                ),
+                p => p,
+            },
+        };
         Ok(Instance {
             bound,
             reserved,
@@ -505,6 +543,7 @@ impl Instance {
             caches,
             expire_after,
             telemetry,
+            aws,
         })
     }
 
@@ -542,6 +581,7 @@ impl Instance {
             caches: Vec::new(),
             expire_after: sluice_core::EXPIRE_AFTER,
             telemetry: None,
+            aws: Aws::default(),
         })
     }
 
@@ -556,7 +596,7 @@ impl Instance {
     /// configuration reference's order: `[runs]` for the bound, the
     /// reserve, the cores sluice may use and the systems; `[forge]`;
     /// `[signing]`; `[peers]`; `[deliveries]` for the span an outcome is
-    /// owed; `[telemetry]`, compared whole; `[[caches]]`. What a process
+    /// owed; `[telemetry]`, compared whole; `[aws]`; `[[caches]]`. What a process
     /// that took `other` up says it took up, and, where one of [`AFRESH`]
     /// is among them, takes up only by starting afresh (135; record 0107;
     /// design D1, D5).
@@ -577,6 +617,7 @@ impl Instance {
             ("[peers]", self.peers != other.peers),
             ("[deliveries]", self.expire_after != other.expire_after),
             ("[telemetry]", self.telemetry != other.telemetry),
+            ("[aws]", self.aws != other.aws),
             ("[[caches]]", self.caches != other.caches),
         ]
         .into_iter()
@@ -940,6 +981,73 @@ mod tests {
         let out = Instance::from_host(Some(&path), given, all);
         let _ = std::fs::remove_file(&path);
         out
+    }
+
+    /// Record 0119 (design D9 of the change
+    /// `a-codebuild-fleet-runs-a-queues-checks`): `[aws] profile` is the
+    /// profile a CodeBuild pool's calls are made as, its credentials read
+    /// from it whatever the process's environment names; unset, the SDK's
+    /// own chain reads the environment; and a change of it is taken up as
+    /// every setting is (core.54).
+    #[test]
+    fn an_aws_profile_in_the_settings_is_the_one_used() {
+        use aws_runtime::env_config::file::{EnvConfigFileKind, EnvConfigFiles};
+        use aws_sdk_codebuild::config::ProvideCredentials as _;
+        use aws_types::os_shim_internal::Env;
+        let named = with("[aws]\nprofile = \"sluice-lead\"\n", 4).unwrap();
+        assert_eq!(named.aws.profile.as_deref(), Some("sluice-lead"));
+        let unset = with("", 4).unwrap();
+        assert_eq!(unset.aws, Aws::default());
+        assert_eq!(unset.changed_tables(&named), ["[aws]"]);
+        assert!(
+            format!("{:#}", with("[aws]\nprofile = \"\"\n", 4).unwrap_err())
+                .contains("[aws] profile")
+        );
+        assert!(format!(
+            "{:#}",
+            with("[aws]\nregion = \"us-east-1\"\n", 4).unwrap_err()
+        )
+        .contains("region"));
+
+        let dir = std::env::temp_dir().join(format!("sluice-aws-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let config = dir.join("config");
+        std::fs::write(
+            &config,
+            "[profile sluice-lead]\naws_access_key_id = AKIALEAD\naws_secret_access_key = lead\n\n\
+             [profile person]\naws_access_key_id = AKIAPERSON\naws_secret_access_key = person\n",
+        )
+        .unwrap();
+        let files = EnvConfigFiles::builder()
+            .with_file(EnvConfigFileKind::Config, &config)
+            .build();
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let made_as = |aws: &Aws, env: &[(&str, &str)]| -> String {
+            let chain = crate::profiles::codebuild::sdk::Chain {
+                aws: aws.clone(),
+                files: Some(files.clone()),
+            };
+            let loaded =
+                runtime.block_on(chain.loader("us-east-1").env(Env::from_slice(env)).load());
+            let credentials = runtime
+                .block_on(loaded.credentials_provider().unwrap().provide_credentials())
+                .unwrap();
+            credentials.access_key_id().to_string()
+        };
+        let person = [("AWS_PROFILE", "person")];
+        let keys = [
+            ("AWS_PROFILE", "person"),
+            ("AWS_ACCESS_KEY_ID", "AKIAENVIRONMENT"),
+            ("AWS_SECRET_ACCESS_KEY", "environment"),
+        ];
+        assert_eq!(made_as(&named.aws, &person), "AKIALEAD");
+        assert_eq!(made_as(&named.aws, &keys), "AKIALEAD");
+        assert_eq!(made_as(&unset.aws, &person), "AKIAPERSON");
+        assert_eq!(made_as(&unset.aws, &keys), "AKIAENVIRONMENT");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// 71: the bound is the host's, a quarter of its cores unless its
@@ -1571,6 +1679,7 @@ dir = "/caches/moon"
                     logs_tail_bytes: Some(4096),
                     attributes: variables(&[("deployment.environment", "prod")]),
                 }),
+                aws: Aws::default(),
             }
         );
     }
