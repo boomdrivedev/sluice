@@ -23,6 +23,7 @@ fn main() {
         eprintln!("sluice: {e:#}");
         std::process::exit(3);
     });
+    raise_open_files();
     // The run as it started, which a `sluice run` starts afresh as: its
     // environment before telemetry takes anything out of it, its
     // executable through every link, and its command line (151; rule
@@ -291,6 +292,20 @@ fn main() {
     };
     finish(telemetry);
     std::process::exit(code);
+}
+
+/// Raise this process's soft limit on open files to its hard limit, as
+/// far as the system lets one process open (macOS's
+/// `kern.maxfilesperproc`), before sluice reads or starts anything, so a
+/// supervisor's low default, launchd's 256 among them, holds neither
+/// sluice nor the runs it starts, which inherit the raised limit (135;
+/// record 0126; rule core.59). A soft limit already at its hard limit is
+/// left as it is. Where the system refuses, sluice goes on under the
+/// limit it was given and says so.
+fn raise_open_files() {
+    if let Err(e) = rlimit::increase_nofile_limit(u64::MAX) {
+        eprintln!("sluice: warning: the limit on open files stays as sluice was started with: {e}");
+    }
 }
 
 /// Send what telemetry holds, where it started.

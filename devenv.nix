@@ -249,9 +249,8 @@ let
   # the specs are written with, built as nixpkgs builds its older one. Bump
   # the version, then each hash from the mismatch the build reports, then
   # write OpenSpec's Claude Code skills and commands under .claude/ again
-  # with it, `sh check-openspec-claude.sh --write` in the shell, since the
-  # tree tracks them as this release writes them and root:openspec-claude
-  # holds them to it (record 0101).
+  # with it, `sh write-openspec-claude.sh` in the shell, since the tree
+  # tracks them as this release writes them (records 0101, 0127).
   openspecVersion = "1.14.3";
   openspec = pkgs.openspec.overrideAttrs (
     finalAttrs: _: {

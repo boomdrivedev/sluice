@@ -81,7 +81,12 @@ impl Setup {
 
     /// The `sluice` that [`Setup::sluice`] runs, not yet started.
     fn command(&self, args: &[&str]) -> Command {
-        let mut c = Command::new(env!("CARGO_BIN_EXE_sluice"));
+        self.prepared(Command::new(env!("CARGO_BIN_EXE_sluice")), args)
+    }
+
+    /// `c`, a command that runs `sluice` given `args`, in this setup's
+    /// worktree on its configuration and state, not yet started.
+    fn prepared(&self, mut c: Command, args: &[&str]) -> Command {
         support::isolated(&mut c)
             .args(args)
             .current_dir(&self.worktree)
@@ -301,6 +306,49 @@ fn a_command_gets_the_worktrees_environment_and_its_exit() {
     assert_eq!(one, two, "the same place and port on the second run");
     assert_eq!(s.results(), "", "a command records nothing");
     assert!(s.sessions().is_empty(), "the run is no longer counted");
+}
+
+/// 135; record 0126: sluice started under a supervisor's low soft limit
+/// on open files, launchd's 256, raises it to its hard limit, as far as
+/// the system lets one process open, and the command it runs has the
+/// raised limit.
+#[test]
+fn a_command_runs_under_the_raised_limit_on_open_files() {
+    let s = Setup::new("exec-open-files");
+    let mut launched = Command::new("sh");
+    launched.args([
+        "-c",
+        "ulimit -S -n 256 && exec \"$@\"",
+        "sh",
+        env!("CARGO_BIN_EXE_sluice"),
+    ]);
+    let out = s
+        .prepared(
+            launched,
+            &[
+                "exec",
+                "bolt/x",
+                "--",
+                "sh",
+                "-c",
+                "printf '%s %s %s' \"$(ulimit -S -n)\" \"$(ulimit -H -n)\" \
+                 \"$(sysctl -n kern.maxfilesperproc 2>/dev/null)\" > seen",
+            ],
+        )
+        .output()
+        .unwrap();
+    assert!(out.status.success(), "{}", text(&out));
+    let seen = std::fs::read_to_string(s.worktree.join("seen")).unwrap();
+    let words: Vec<&str> = seen.split_whitespace().collect();
+    let limit = |w: &str| (w != "unlimited").then(|| w.parse::<u64>().unwrap());
+    // The most one process may open: its hard limit, and on macOS no more
+    // than kern.maxfilesperproc.
+    let most = [limit(words[1]), words.get(2).and_then(|w| limit(w))]
+        .into_iter()
+        .flatten()
+        .min();
+    assert_eq!(limit(words[0]), most, "soft, hard, per process: {seen}");
+    assert_ne!(limit(words[0]), Some(256), "{seen}");
 }
 
 /// 35, 89: an agent's run in its worktree is given the host's caches as

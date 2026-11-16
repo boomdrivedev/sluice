@@ -261,7 +261,7 @@ enum Unstarted {
     Unmade,
 }
 
-/// satisfies: record 0122; rule core.61; the run-life spec's "Nothing acts
+/// satisfies: record 0122; rule core.65; the run-life spec's "Nothing acts
 /// on a run before the state naming the act is written", its checkout
 /// released only once the run is written ended: a start refused at the
 /// bound, a start that fails, and a checkout a stopped step made that

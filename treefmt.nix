@@ -5,8 +5,8 @@ _: {
 
   # What no formatter owns, each with its reason (core.21).
   settings.excludes = [
-    # Prose: the site's pages are Vale's (site:prose), and no formatter
-    # here rewraps prose.
+    # Markdown: no task reads it (principle 16; core.21; record 0127), and
+    # no formatter here rewraps prose.
     "*.md"
     "*.mdx"
     # Written by cargo, devenv and bun in their own layouts.

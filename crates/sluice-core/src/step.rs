@@ -1110,7 +1110,7 @@ impl Sluice<'_> {
     /// started for want of room, ended with no outcome for `checks`
     /// ([`Sluice::reopen`]); the checkout a start made for it, where one
     /// was made, is released only once that end is written (record 0122,
-    /// design D3; rule core.61), [`Sluice::release_ended`].
+    /// design D3; rule core.65), [`Sluice::release_ended`].
     fn reopen_made(
         &self,
         branch: &str,
@@ -1128,7 +1128,7 @@ impl Sluice<'_> {
         Ok(())
     }
 
-    /// Record 0122 (design D3; 123; rule core.61): the checkout `place` of
+    /// Record 0122 (design D3; 123; rule core.65): the checkout `place` of
     /// run `i` of candidate `cand`, released now that the run's end is
     /// written, and the run closed once the release frees it; a release
     /// that was not plain goes into `releases`, and one that failed or is
@@ -1629,7 +1629,7 @@ impl Sluice<'_> {
     /// as any run that left checks not run, its follow-up holding them
     /// under the bound and past it each check named with why; its checkout,
     /// where one was made, is released only once that end is written
-    /// (record 0122, design D3; rule core.61), as a run refused at the
+    /// (record 0122, design D3; rule core.65), as a run refused at the
     /// bound has its released ([`Sluice::release_ended`]).
     #[allow(clippy::too_many_arguments)]
     fn not_started(
@@ -1698,7 +1698,7 @@ impl Sluice<'_> {
     /// runs in a row (115) and blames no one, and its follow-up is open
     /// for any host, its record saying why (16) until its next run has a
     /// result. Whatever of the place was made is released once the run's
-    /// end is written (record 0122, design D3; rule core.61).
+    /// end is written (record 0122, design D3; rule core.65).
     fn unmade(
         &self,
         branch: &str,
