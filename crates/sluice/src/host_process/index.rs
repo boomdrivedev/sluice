@@ -6,95 +6,124 @@
 //! holds, notes it where it is not listed yet; one listed costs nothing to
 //! note. The host process drops a listed repository whose directory is
 //! gone, or which has no sluice, read as an idle tick reads it (129).
+//! The host process's index is of the folder it holds (design D6;
+//! [`super::folder`]), a command's of the folder its path names when it
+//! asks.
 
-use std::fs::File;
 use std::io::ErrorKind;
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
+use std::sync::Arc;
 
 use anyhow::{Context, Result};
 
+use super::folder::Folder;
 use crate::exec::Host;
 use crate::profiles::Bound;
+
+const NAME: &str = "repositories";
 
 /// The index under the host process's folder `dir`.
 #[derive(Clone, Debug)]
 pub struct Index {
     dir: PathBuf,
+    /// The host process's own folder, wherever it is now; a command's
+    /// index has none and opens the folder at `dir` for each call.
+    held: Option<Arc<Folder>>,
 }
 
 impl Index {
+    /// A command's: the folder at `dir` as each call finds it.
     pub fn at(dir: &Path) -> Index {
         Index {
             dir: dir.to_path_buf(),
+            held: None,
+        }
+    }
+
+    /// The host process's: the folder it holds, written there alone.
+    pub fn held(folder: Arc<Folder>) -> Index {
+        Index {
+            dir: folder.path().to_path_buf(),
+            held: Some(folder),
         }
     }
 
     fn path(&self) -> PathBuf {
-        self.dir.join("repositories")
+        self.dir.join(NAME)
+    }
+
+    /// The folder its calls read and write. The folder is never made
+    /// here: a command's [`super::Paths`] makes it, and a host process
+    /// whose folder is gone writes nothing there again (135; design D6).
+    fn folder(&self) -> std::io::Result<Arc<Folder>> {
+        match &self.held {
+            Some(f) => Ok(f.clone()),
+            None => Folder::open(&self.dir).map(Arc::new),
+        }
     }
 
     /// Every repository listed, in order; none where nothing was noted.
     pub fn list(&self) -> Result<Vec<PathBuf>> {
-        let path = self.path();
-        match std::fs::read(&path) {
-            Ok(bytes) => serde_json::from_slice(&bytes)
-                .with_context(|| format!("reading {}", path.display())),
+        match self.folder() {
+            Ok(folder) => self.list_in(&folder),
             Err(e) if e.kind() == ErrorKind::NotFound => Ok(Vec::new()),
-            Err(e) => Err(e).with_context(|| format!("reading {}", path.display())),
+            Err(e) => Err(e).with_context(|| format!("reading {}", self.dir.display())),
+        }
+    }
+
+    fn list_in(&self, folder: &Folder) -> Result<Vec<PathBuf>> {
+        match folder.read(NAME) {
+            Ok(bytes) => serde_json::from_slice(&bytes)
+                .with_context(|| format!("reading {}", self.path().display())),
+            Err(e) if e.kind() == ErrorKind::NotFound => Ok(Vec::new()),
+            Err(e) => Err(e).with_context(|| format!("reading {}", self.path().display())),
         }
     }
 
     /// List `repository`, a common git directory, where it is not listed:
     /// whether it was written.
     pub fn note(&self, repository: &Path) -> Result<bool> {
-        if self.list()?.iter().any(|r| r == repository) {
+        let folder = self
+            .folder()
+            .with_context(|| format!("opening {}", self.dir.display()))?;
+        if self.list_in(&folder)?.iter().any(|r| r == repository) {
             return Ok(false);
         }
-        let _lock = self.lock()?;
-        let mut listed = self.list()?;
+        let _lock = folder.lock("start.lock")?;
+        let mut listed = self.list_in(&folder)?;
         if listed.iter().any(|r| r == repository) {
             return Ok(false);
         }
         listed.push(repository.to_path_buf());
-        self.write(&listed)?;
+        folder.write(NAME, &serde_json::to_vec_pretty(&listed)?)?;
         Ok(true)
     }
 
     /// Take each repository `drops` says goes out of the index: those it
     /// took out.
     pub fn prune(&self, drops: impl Fn(&Path) -> bool) -> Result<Vec<PathBuf>> {
-        let gone: Vec<PathBuf> = self.list()?.into_iter().filter(|r| drops(r)).collect();
+        let folder = match self.folder() {
+            Ok(f) => f,
+            Err(e) if e.kind() == ErrorKind::NotFound => return Ok(Vec::new()),
+            Err(e) => return Err(e).with_context(|| format!("reading {}", self.dir.display())),
+        };
+        let gone: Vec<PathBuf> = self
+            .list_in(&folder)?
+            .into_iter()
+            .filter(|r| drops(r))
+            .collect();
         if gone.is_empty() {
             return Ok(gone);
         }
-        let _lock = self.lock()?;
+        let _lock = folder.lock("start.lock")?;
         let listed: Vec<PathBuf> = self
-            .list()?
+            .list_in(&folder)?
             .into_iter()
             .filter(|r| !gone.contains(r))
             .collect();
-        self.write(&listed)?;
+        folder.write(NAME, &serde_json::to_vec_pretty(&listed)?)?;
         Ok(gone)
-    }
-
-    /// The host process's start lock, which the index is written under,
-    /// once whatever holds it lets go. The folder is never made here: a
-    /// command's [`super::Paths`] makes it, and a host process whose folder
-    /// is gone writes nothing there again (135; design D6).
-    fn lock(&self) -> Result<File> {
-        let path = self.dir.join("start.lock");
-        let file = File::create(&path).with_context(|| format!("creating {}", path.display()))?;
-        file.lock()
-            .with_context(|| format!("locking {}", path.display()))?;
-        Ok(file)
-    }
-
-    fn write(&self, listed: &[PathBuf]) -> Result<()> {
-        let (tmp, path) = (self.dir.join(".repositories.tmp"), self.path());
-        std::fs::write(&tmp, serde_json::to_vec_pretty(listed)?)
-            .with_context(|| format!("writing {}", tmp.display()))?;
-        std::fs::rename(&tmp, &path).with_context(|| format!("writing {}", path.display()))
     }
 }
 
@@ -301,5 +330,25 @@ mod tests {
         assert!(index.note(Path::new("/x/b.git")).is_err());
         assert!(index.prune(|_| true).is_ok_and(|gone| gone.is_empty()));
         assert!(!s.0.join("host").exists());
+    }
+
+    /// 135 (design D6): the host process's index, of the folder it holds,
+    /// notes into that folder once it is moved and another is made at its
+    /// path, and the other is written nothing: an answer that notes a
+    /// repository as the folder goes (bolt bbc6a183's verify, where
+    /// `start.lock` and `repositories` were written into the new folder).
+    #[test]
+    fn a_held_index_writes_nothing_into_a_folder_made_again() {
+        let s = Scratch::new("held");
+        s.host();
+        let (dir, aside) = (s.0.join("host"), s.0.join("aside"));
+        let index = Index::held(Arc::new(Folder::open(&dir).unwrap()));
+        index.note(Path::new("/x/a.git")).unwrap();
+        std::fs::rename(&dir, &aside).unwrap();
+        std::fs::create_dir(&dir).unwrap();
+        assert!(index.note(Path::new("/x/b.git")).unwrap());
+        assert_eq!(index.prune(|r| r.ends_with("a.git")).unwrap().len(), 1);
+        assert_eq!(std::fs::read_dir(&dir).unwrap().count(), 0);
+        assert_eq!(Index::at(&aside).list().unwrap(), [Path::new("/x/b.git")]);
     }
 }
