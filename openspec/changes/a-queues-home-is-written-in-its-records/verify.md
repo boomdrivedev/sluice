@@ -1,61 +1,44 @@
 # Verify: a-queues-home-is-written-in-its-records
 
-Verified on `change/a-queues-home-is-written-in-its-records` at `b2ac1ea4`,
+Verified on `change/a-queues-home-is-written-in-its-records` at `6ec031c0`,
 cut from `bolt/sluice-is-refactored-and-runs-on-pools`, whose head
-`48a9c3d5` it holds (merged in at `cfe6b529`), on 2026-11-15 with sluice
-0.93.2 and moon 2.6.1.
+`48a9c3d5` it holds, on 2026-11-16 with sluice 0.93.2.
 
 ## Outcome
 
-**Not ready to archive.** The bolt's gate passes at this commit. So do
-the tools-tier targets that hold the tasks' tools tests.
-
-The work falls short of its own spec in one place. The queue-home spec
-and design D2 still say that any two homes of a branch that are both open
-or moving refuse the branch. The build refuses only one case: this host's
-own home is open while a live remote home came from this host's own
-files. Record 0122's amendment and rule core.59 say the same as the build.
-Archiving now would write into `openspec/specs/queue-home/spec.md` a
-requirement the code does not keep. That requirement also contradicts two
-other scenarios of the same spec. Task 3.1's text describes a lookup order
-the build does not use, and its record calls that order the path not
-taken.
-
-Every one of the 28 tasks is ticked. Each test a task names exists where
-the task says. Every scenario of the four delta specs maps to a test, and
-`openspec validate --strict` finds the change valid.
+**Ready to archive.** The bolt's gate passes at `6ec031c`, and so do the
+tools-tier targets that hold the tasks' tools tests. All 29 tasks are
+ticked. Every test a task names exists where the task says and passed in
+this stage. Every requirement and scenario of the four delta specs is
+met by the build and shown by a test. `openspec validate --strict` finds
+the change valid.
 
 ## Whole checks
 
-I ran `sluice exec bolt/sluice-is-refactored-and-runs-on-pools` once at
-`b2ac1ea4`. It runs the bolt's gate, `#check-fast` (S66), over the checks
-`b2ac1ea` affects against the bolt's `48a9c3d`. It exited 0 with 12 tasks
-passed and none failed:
+`sluice exec bolt/sluice-is-refactored-and-runs-on-pools` ran once at
+`6ec031c`. It ran the bolt's gate, `#check-fast` (S66), over the checks
+`6ec031c` affects against the bolt's `48a9c3d`. It exited 0 with 12 tasks
+passed and none failed, and sluice recorded the 12 results under their
+keys for `6ec031c`:
 
 | Task | Outcome |
 |---|---|
-| site:prose, site:rules, nix:typecheck | passed |
-| root:adrs, root:changes, root:format (`6ea15f59`), root:lint | passed |
+| nix:typecheck, site:prose, site:rules | passed |
+| root:adrs, root:changes (7 of 7), root:format, root:lint | passed |
 | core:test (164), fakes:test (17), seams:test (5) | passed |
 | conformance:test (every target, `homes`, `peers` and `reading` among them) | passed |
 | cli:test (`10d4525f`) | passed |
 
-`cli:test` ran every target of `cargo test -p sluice -- --skip sandbox`,
-with no failures. This time `host_process` passed 39 of 39: the bolt's
-#86, merged in at `cfe6b529`, fixed the failure the last verify found
-there. `cli` passed 223 tests and `local_files` passed with task 1.3's
-test.
-
-sluice recorded none of the 12 results. I wrote this report into the
-worktree while the run was going, so at its end the worktree held
-`verify.md` beyond `b2ac1ea`'s head (S66). This affects only whether the
-results were recorded, not the outcome. moon also warned on each task
-that it could not package outputs into `.moon/cache/outputs/` under the
-place.
+`cli:test` ran every target of `cargo test -p sluice -- --skip sandbox`
+with no failures: `host_process` 39 of 39, `cli` 310, `local_files`
+among them with task 1.3's test. moon warned on each task that it could
+not package outputs into `.moon/cache/outputs/` under the place, and
+that it had no internet connection for its dependency install; neither
+touched an outcome.
 
 The tools tier is main's gate, not the bolt's, so `#check-fast` builds
 no test with `--features tools`. Tasks 1.4 to 1.6, 2.4, 2.5, 3.2, 4.4,
-4.6 and 4.7 name checks in that tier. I ran their four targets whole,
+4.6 and 4.7 name checks in that tier. Their four targets ran whole,
 once, through sluice against the bolt: `sluice exec
 bolt/sluice-is-refactored-and-runs-on-pools -- cargo test -p sluice
 --features tools --test remote_refs --test remote_branch --test peers
@@ -70,85 +53,10 @@ bolt/sluice-is-refactored-and-runs-on-pools -- cargo test -p sluice
 
 Every test those tasks name is in these targets.
 
-## Findings
-
-### 1. The queue-home spec refuses two homes the build does not refuse
-
-`specs/queue-home/spec.md`, requirement "Every process reads the home
-from the records":
-
-> Two homes of one branch that are both open or moving SHALL refuse that
-> branch alone, naming both (26).
-
-Its scenario "Two open homes" has the same WHEN: this host's own files and
-origin's state of `bolt/x` both hold an open `home.json`. Design D2 says
-the same: "Two homes both `open` or `moving` refuse the branch alone,
-naming both (26)."
-
-The build, in `crates/sluice/src/profiles/records.rs` `find_route`
-(lines 346 to 364), refuses a branch only where this host's own home is
-`open` and a live remote home's `came_from` names this host's own files
-and this host. It routes the following cases to this host's own files
-with no refusal:
-
-- this host's own home is `open` and origin's home is open, having come
-  from another host or been opened by a policy;
-- this host's own home is `moving` and origin's home is open.
-
-Record 0122's amendment of 2026-11-14 chooses this on purpose: "One queue
-in two homes is told apart from a queue not yet moved ... *Not taken:*
-refusing any two open homes, which would refuse every host whose own
-queue had not yet moved, so none ever could." Rule core.59, added by
-this change, also leaves it open: "Not ruled out: ... a host's own open
-home beside a remote home another host's queue or a policy opened, which
-its round moves (design D5)". The test
-`two_open_homes_refuse_the_branch_naming_both` sets origin's `came_from`
-to this host (`host-a`). So it shows only the narrow case.
-
-The build's reading is the one the spec needs. Read as written, the
-requirement contradicts the spec's own scenarios:
-
-- "Two hosts each held #52": once A's queue is open on origin, B's own
-  home of `bolt/x` is still open, so B would be refused and never carry.
-- "Stopped after the new home was written": this host's own home is
-  `moving` while origin's is open, so the next round would be refused
-  and never close the move.
-
-The statement asks for no refusal of this kind. C.6 at agentplot/blueprints
-`e966dcb` says "A branch's queue has one home" and nothing about refusing
-two. The broad wording is the change's own, in the delta spec and in D2.
-
-CLAUDE.md requires that "where the work changes a requirement, it
-carries that change in the same branch". The work narrowed this
-requirement and did not carry the change in its delta spec. The fix
-belongs in this change, before it is archived:
-
-- amend the requirement and the "Two open homes" scenario in
-  `specs/queue-home/spec.md` to say what is refused: this host's own home
-  open while a live remote home came from this host's own files;
-- say in the requirement, or in a scenario, that the round moves a
-  host's own open home beside a remote home that another host's queue or
-  a policy opened;
-- make the same change in design D2.
-
-### 2. Task 3.1 describes the lookup order the build rejected
-
-Task 3.1 says a status by number and each act by number "read the open
-home first and, for a number it does not hold live or finished, each
-closed home this host reached it through". The build does the reverse.
-`Sluice::reach` in `crates/sluice-core/src/lib.rs` reads the pointer of
-each closed home this host reached the branch through first, then the
-open home, then the closed homes' own records. Record 0122's amendment
-names the task's order as the path not taken: "*Not taken:* the open home
-first, which would answer another host's submission for a number given
-up". The build's order is the one the scenario "Two hosts each held #52"
-needs, and the task's named tests pass on it. The task's text should say
-what was built.
-
 ## Tasks
 
-All 28 tasks in `tasks.md` are ticked, and each test a task names exists
-where the task says:
+All 29 tasks in `tasks.md` are ticked, none open. Each test a task names
+exists where the task says:
 
 - 1.1: `sluice-core/src/records.rs`. 1.2: `sluice-fakes/src/lib.rs`.
   1.3: `tests/local_files.rs`.
@@ -161,44 +69,51 @@ where the task says:
 - 4.5: `sluice/src/instance.rs` and `sluice-core/src/policy.rs`. 5.1:
   `sluice-conformance/tests/reading.rs`.
 
-The tests that left with 1.4 and 2.6,
+The tests that go with 1.4 and 2.6,
 `the_first_hosts_queue_moves_and_the_others_is_left_behind` and
 `a_submission_left_behind_is_submitted_again_naming_its_old_id`, are gone.
 No `migrate`, `left_behind`, `forget_left_behind`, `adopt_left_behind`,
 `leave_behind` or `sluice-remote/moved/` is left in the crates or the
-site. The `left_behind` in `tests/profiles/places.rs` belongs to a place
-and has nothing to do with this change. The `Moved` still in
-`sluice-seams` is the branch seam's result for a move of a ref, not the
-records' old migration type.
+site, but for a place's own `left_behind` in `tests/profiles/places.rs`,
+which is not this change's.
 
-Every test a task names passed in this stage: in the bolt's gate, or in
-the tools-tier run above. Tasks 2.6, 5.2, 5.3 and 5.4 hold by
-`root:lint`, `site:prose`, `root:adrs` and `site:rules`, each of which
-passed.
+Tasks 2.6, 5.2, 5.3, 5.4 and 5.7 hold by `root:lint`, `site:prose`,
+`root:adrs`, `site:rules` and `root:changes`, each of which passed in the
+gate. Record 0122 has its build amendment of 2026-11-14, and record
+0116's routing half is marked replaced by it (5.3). Rules core.59 and
+core.60 are in `docs/architecture/core.md`, and core.27's details read
+with core.59 (5.4). `site/src/content/docs/reference/state.md` names
+`home.json`, `carried_from`, `kept` and the log lines `moving`, `stayed`
+and `carried`; `commands.md`'s `sluice status` names the home line (5.2).
+Task 5.6's `moon.yml` reached the bolt through #86 and is this branch's.
 
-Record 0122 has its build amendment and record 0116's routing half is
-marked as replaced (5.3). Rules core.59 and core.60 are in
-`docs/architecture/core.md`, and core.27's details point to core.59
-(5.4). `site/src/content/docs/reference/state.md` and `commands.md` name
-the home, `carried_from`, `kept` and the three log lines (5.2).
-
-Task 5.6's `moon.yml` change reached the bolt through #86 (`d2472262`)
-and came into this branch with the merge at `cfe6b529`. This branch's
-`moon.yml` is the bolt's.
+Task 5.7 holds. The queue-home requirement "One queue in two homes is
+told apart from a queue not yet moved" and design D2 refuse a branch
+only where this host's own home is open while a live remote home came
+from this host's own files. That is what `find_route` in
+`crates/sluice/src/profiles/records.rs` does: an own home `open` is
+refused only where a live remote home's `came_from` names `here` and
+this host; otherwise it routes to this host's own files. Record 0122's
+amendment and rule core.59 say the same. Task 3.1 names the lookup order
+`Sluice::reach` in `crates/sluice-core/src/lib.rs` keeps: the pointers of
+the closed homes this host reached the branch through first, then the
+open home, then those closed homes' own live or finished records.
 
 ## Specs
 
 `openspec validate a-queues-home-is-written-in-its-records --strict` finds
-the change valid. The MODIFIED and REMOVED requirements of `peer-lead` and
-`remote-records` name requirements that `openspec/specs/` holds, and
-`queue-home` is a new capability. Each scenario maps to a test:
+the change valid. The MODIFIED and REMOVED requirements of `peer-lead`
+and `remote-records` name requirements `openspec/specs/` holds, and
+`queue-home` is a new capability. Each scenario maps to a test that
+passed in this stage:
 
 | Spec: scenario | Test |
 |---|---|
 | queue-home: The first submission writes the home; A branch with no signers | `the_first_write_writes_the_home_its_policy_chose` (both cases) |
 | queue-home: A policy that names another home does not move the reading | `a_branchs_home_is_read_from_its_records_not_its_policy` |
 | queue-home: A host with no records of the branch | `a_host_with_no_records_of_a_branch_finds_its_home_on_the_remote` |
-| queue-home: Two open homes | `two_open_homes_refuse_the_branch_naming_both`, only where origin's home came from this host (finding 1) |
+| queue-home: Two open homes | `two_open_homes_refuse_the_branch_naming_both`: origin's home came from this host; a read, a lock and a write of `bolt/x` refused naming both homes, `main` read as before |
+| queue-home: a queue not yet moved, read in this host's own files and moved by its round | `a_status_of_a_carried_number_names_the_number_it_has_now`: host b's own home open beside origin's that a policy opened, b's step carrying its #52 |
 | queue-home: A move waits for a combination under test | `a_policy_naming_another_home_writes_a_move_and_opens_no_combination`, `a_move_waits_for_the_combination_under_test` |
 | queue-home: The policy names the open home again | `a_policy_naming_the_open_home_again_ends_the_move` |
 | queue-home: A host's queue moves to origin | `a_move_carries_every_live_submission_with_its_number_and_state`, `a_hosts_queue_moves_to_its_remote_with_its_numbers` |
@@ -220,6 +135,3 @@ the change valid. The MODIFIED and REMOVED requirements of `peer-lead` and
 | peer-lead: A run longer than the lease | `a_lead_keeps_its_branch_through_a_run_longer_than_the_lease` |
 | peer-lead: Nothing live | `a_lead_with_no_live_run_writes_nothing_to_keep_it` |
 | remote-records: Signers move the state to the remote; No signers, no change | `the_first_write_writes_the_home_its_policy_chose` |
-
-I read the move tests in `homes.rs` against their scenarios. Each one
-asserts what its scenario's THEN says.
