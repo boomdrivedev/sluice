@@ -15,6 +15,7 @@ use std::collections::BTreeMap;
 use std::time::Duration;
 
 use anyhow::{anyhow, bail, Context, Result};
+use base64::Engine as _;
 use serde::Deserialize;
 use sluice_seams::{Limits, Network, Setting, Settings};
 
@@ -449,6 +450,9 @@ impl Policy {
                 known(&at, s)?;
             }
             let identity = one(table, &at, "identity")?;
+            if identity.0 == "kms" {
+                kms_identity(&identity.1, &format!("[signers.{name}] kms"))?;
+            }
             signers.insert(
                 name,
                 Signer {
@@ -484,12 +488,23 @@ impl Policy {
             let Some(s) = signers.get(&signer) else {
                 bail!("{at} signs as {signer:?}, which [signers] does not name");
             };
-            if s.identity.0 != kind.0 {
+            // 88, 107; record 0119 (design D1 of the change
+            // `a-codebuild-fleet-runs-a-queues-checks`): a pool's kind
+            // decides the kind of signer its jobs sign as.
+            if !POOL_SIGNERS.contains(&(kind.0.as_str(), s.identity.0.as_str())) {
                 bail!(
-                    "{at} is a {} pool and its signer {signer} signs by {}; a pool's jobs sign as a signer of its own kind",
+                    "{at} is a {} pool and its signer {signer} is a {} signer; {}",
                     kind.0,
-                    s.identity.0
+                    s.identity.0,
+                    POOL_SIGNERS
+                        .iter()
+                        .map(|(p, s)| format!("a {p} pool's jobs sign as a {s} signer"))
+                        .collect::<Vec<_>>()
+                        .join(" and ")
                 );
+            }
+            if kind.0 == "codebuild" {
+                codebuild_pool(&kind.1, &format!("{at} codebuild"))?;
             }
             let names: Vec<String> = runners.keys().cloned().collect();
             known(&format!("{at} runners"), &names)?;
@@ -941,6 +956,131 @@ fn strings(v: toml::Value, at: &str) -> Result<Vec<String>> {
             .collect(),
         other => bail!("{at} must be a list of strings, not {other}"),
     }
+}
+
+/// Each kind of pool and the kind of signer its jobs sign as (88, 107;
+/// record 0119): a forge's job keylessly as its workflow, a CodeBuild
+/// fleet's sign build with its key in KMS.
+pub const POOL_SIGNERS: &[(&str, &str)] = &[("github", "github"), ("codebuild", "kms")];
+
+/// `[signers.<name>] kms = { key, public }` (78; record 0119, design D1 of
+/// the change `a-codebuild-fleet-runs-a-queues-checks`): `key` a key's ARN,
+/// which timber's key-service signer takes as the signer's one name (timber
+/// record 0017), and `public` its public half as KMS's `GetPublicKey`
+/// answers it, read here by its form alone; the records profile reads the
+/// key itself.
+fn kms_identity(setting: &Setting, at: &str) -> Result<()> {
+    let Setting::Tables(tables) = setting else {
+        bail!("{at} must be a table: kms = {{ key = \"arn:aws:kms:…:key/…\", public = \"…\" }}");
+    };
+    let table = &tables[0];
+    if let Some(k) = table
+        .keys()
+        .find(|k| !["key", "public"].contains(&k.as_str()))
+    {
+        bail!("{at} names {k}; a kms signer names its key and public half");
+    }
+    let text = |field: &str| -> Result<&str> {
+        match table.get(field) {
+            Some(Setting::Text(t)) => Ok(t),
+            Some(_) => bail!("{at}.{field} must be a string"),
+            None => bail!(
+                "{at}.{field} is missing; a kms signer names its key by its ARN and lists its \
+                 public half"
+            ),
+        }
+    };
+    let key = text("key")?;
+    if !is_key_arn(key) {
+        bail!(
+            "{at}.key is {key:?}, which is no key's ARN; a kms signer names its key as \
+             arn:<partition>:kms:<region>:<account>:key/<id>, never an alias or a bare id"
+        );
+    }
+    let public = text("public")?;
+    let der = base64::engine::general_purpose::STANDARD
+        .decode(public)
+        .map_err(|e| anyhow::anyhow!("{at}.public is not base64: {e}"))?;
+    if !is_p256_spki(&der) {
+        bail!(
+            "{at}.public is no P-256 public key: it is the base64 of a DER \
+             SubjectPublicKeyInfo on prime256v1, as KMS's GetPublicKey answers an \
+             ECC_NIST_P256 key"
+        );
+    }
+    Ok(())
+}
+
+/// `arn:<partition>:kms:<region>:<account>:key/<id>`.
+fn is_key_arn(arn: &str) -> bool {
+    let parts: Vec<&str> = arn.splitn(6, ':').collect();
+    let [scheme, partition, service, region, account, resource] = parts[..] else {
+        return false;
+    };
+    scheme == "arn"
+        && !partition.is_empty()
+        && service == "kms"
+        && !region.is_empty()
+        && account.len() == 12
+        && account.bytes().all(|b| b.is_ascii_digit())
+        && resource
+            .strip_prefix("key/")
+            .is_some_and(|id| !id.is_empty() && !id.contains('/'))
+}
+
+/// A DER SubjectPublicKeyInfo whose algorithm is `id-ecPublicKey` with the
+/// parameters `prime256v1`: a sequence of that algorithm identifier and a
+/// bit string, read by its form alone.
+fn is_p256_spki(der: &[u8]) -> bool {
+    // SEQUENCE { OID 1.2.840.10045.2.1, OID 1.2.840.10045.3.1.7 }
+    const ALGORITHM: &[u8] = &[
+        0x30, 0x13, 0x06, 0x07, 0x2a, 0x86, 0x48, 0xce, 0x3d, 0x02, 0x01, 0x06, 0x08, 0x2a, 0x86,
+        0x48, 0xce, 0x3d, 0x03, 0x01, 0x07,
+    ];
+    let [0x30, len, rest @ ..] = der else {
+        return false;
+    };
+    if *len as usize != rest.len() || *len >= 0x80 {
+        return false;
+    }
+    let Some(rest) = rest.strip_prefix(ALGORITHM) else {
+        return false;
+    };
+    // BIT STRING, no unused bits, an uncompressed (65) or compressed (33) point.
+    match rest {
+        [0x03, n, 0x00, point @ ..] if *n as usize == point.len() + 1 => {
+            matches!(
+                (point.first(), point.len()),
+                (Some(0x04), 65) | (Some(0x02 | 0x03), 33)
+            )
+        }
+        _ => false,
+    }
+}
+
+/// `[pools.<name>] codebuild = { region, sign }` (88; record 0119, design D1
+/// of the change `a-codebuild-fleet-runs-a-queues-checks`): where the
+/// projects are and the sign project; `runners` names each system's run
+/// project.
+fn codebuild_pool(setting: &Setting, at: &str) -> Result<()> {
+    let Setting::Tables(tables) = setting else {
+        bail!("{at} must be a table: codebuild = {{ region = \"…\", sign = \"…\" }}");
+    };
+    let table = &tables[0];
+    if let Some(k) = table
+        .keys()
+        .find(|k| !["region", "sign"].contains(&k.as_str()))
+    {
+        bail!("{at} names {k}; a codebuild pool names its region and sign project");
+    }
+    for field in ["region", "sign"] {
+        match table.get(field) {
+            Some(Setting::Text(t)) if !t.is_empty() => {}
+            Some(_) => bail!("{at}.{field} must be a string"),
+            None => bail!("{at}.{field} is missing; a codebuild pool names its region and the project that signs its runs"),
+        }
+    }
+    Ok(())
 }
 
 /// The one key left in a signer's or a pool's table, for its profile: a
@@ -1838,10 +1978,144 @@ checks = ["codeql"]
         );
     }
 
+    /// A P-256 key's SubjectPublicKeyInfo, as KMS's `GetPublicKey` answers it.
+    const P256: &str = "MFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAEg44RRacS1htcK8s6X92E7lTYn8f6s5LC4GIxCQv+9fg1UWxDvETlpCR7yLWZ337t0Q/nT0nGEvEP5rLDBHhtTg==";
+    /// The same of a P-384 key.
+    const P384: &str = "MHYwEAYHKoZIzj0CAQYFK4EEACIDYgAEPTyTx8dQ8U/5GmCq156JtNYFjdGXQOegWmbS/BjaQw5/sMksjG5C1m0o8c0HeeZSn0SqMDOyeTahr3mYeaWvgGozr9JvJsPHC54Y7VTuIEK+vb23eVh3O2cuDbl4dJTB";
+    const KEY_ARN: &str =
+        "arn:aws:kms:us-east-1:111122223333:key/1234abcd-12ab-34cd-56ef-1234567890ab";
+
+    fn with_kms(kms: &str) -> String {
+        format!("{PEERS}\n[signers.codebuild]\nkms = {kms}\nsystems = [\"linux-x64\"]\n")
+    }
+
+    fn kms(key: &str, public: &str) -> String {
+        format!("{{ key = \"{key}\", public = \"{public}\" }}")
+    }
+
     #[test]
-    fn a_pool_signs_as_a_signer_of_its_kind() {
+    fn a_kms_signer_names_its_key_and_public_half() {
+        let p = Policy::parse(&with_kms(&kms(KEY_ARN, P256))).unwrap();
+        let s = &p.signers["codebuild"];
+        assert_eq!(s.identity.0, "kms");
+        let Setting::Tables(t) = &s.identity.1 else {
+            panic!("{:?}", s.identity.1)
+        };
+        assert_eq!(t[0]["key"], Setting::Text(KEY_ARN.into()));
+        assert_eq!(t[0]["public"], Setting::Text(P256.into()));
+        assert!(s.may_claim("linux-x64") && !s.may_claim("macos-arm64"));
+        // Another partition's key is a key all the same.
+        Policy::parse(&with_kms(&kms(
+            "arn:aws-us-gov:kms:us-gov-west-1:111122223333:key/mrk-1234abcd",
+            P256,
+        )))
+        .unwrap();
+    }
+
+    #[test]
+    fn a_kms_signer_needs_a_key_arn_and_a_p256_public_half() {
+        for (kms_table, field) in [
+            (
+                kms("arn:aws:kms:us-east-1:111122223333:alias/sluice-sign", P256),
+                "kms.key",
+            ),
+            (kms("1234abcd-12ab-34cd-56ef-1234567890ab", P256), "kms.key"),
+            (kms("alias/sluice-sign", P256), "kms.key"),
+            (format!("{{ key = \"{KEY_ARN}\" }}"), "kms.public"),
+            (format!("{{ public = \"{P256}\" }}"), "kms.key"),
+            (kms(KEY_ARN, P384), "kms.public"),
+            (kms(KEY_ARN, "not base64!"), "kms.public"),
+            (kms(KEY_ARN, "AAAA"), "kms.public"),
+            (format!("\"{KEY_ARN}\""), "kms"),
+        ] {
+            let e = refused(&with_kms(&kms_table));
+            assert!(
+                e.contains("[signers.codebuild]") && e.contains(field),
+                "{kms_table}: {e}"
+            );
+        }
+    }
+
+    const CODEBUILD: &str = "\n[pools.codebuild]\ncodebuild = { region = \"us-east-1\", sign = \"sluice-sign\" }\nsigner = \"codebuild\"\nrunners = { linux-x64 = \"sluice-run-linux-x64\" }\n";
+
+    #[test]
+    fn a_codebuild_pool_names_its_region_sign_project_and_runners() {
+        let p = Policy::parse(&format!("{}{CODEBUILD}", with_kms(&kms(KEY_ARN, P256)))).unwrap();
+        let pool = p.pools.iter().find(|p| p.name == "codebuild").unwrap();
+        assert_eq!(pool.kind.0, "codebuild");
+        let Setting::Tables(t) = &pool.kind.1 else {
+            panic!("{:?}", pool.kind.1)
+        };
+        assert_eq!(t[0]["region"], Setting::Text("us-east-1".into()));
+        assert_eq!(t[0]["sign"], Setting::Text("sluice-sign".into()));
+        assert_eq!(pool.signer, "codebuild");
+        assert_eq!(pool.runners["linux-x64"], "sluice-run-linux-x64");
+        for (from, to, field) in [
+            (", sign = \"sluice-sign\"", "", "codebuild.sign"),
+            ("region = \"us-east-1\", ", "", "codebuild.region"),
+            (
+                "sign = \"sluice-sign\"",
+                "sign = \"s\", fleet = \"f\"",
+                "fleet",
+            ),
+        ] {
+            let e = refused(&format!(
+                "{}{}",
+                with_kms(&kms(KEY_ARN, P256)),
+                CODEBUILD.replace(from, to)
+            ));
+            assert!(e.contains("[pools.codebuild]") && e.contains(field), "{e}");
+        }
+        // A run project for a system the signer may not claim.
+        let e = refused(&format!(
+            "{}{}",
+            with_kms(&kms(KEY_ARN, P256)),
+            CODEBUILD.replace("linux-x64 = ", "linux-arm64 = ")
+        ));
+        assert!(
+            e.contains("[pools.codebuild]") && e.contains("linux-arm64"),
+            "{e}"
+        );
+    }
+
+    #[test]
+    fn a_pool_signs_as_its_kinds_signer() {
+        // A github pool signing as an SSH signer.
         let e = refused(&PEERS.replace("signer = \"forge\"", "signer = \"box\""));
-        assert!(e.contains("[pools.forge]") && e.contains("own kind"), "{e}");
+        assert!(
+            e.contains("[pools.forge] is a github pool")
+                && e.contains("its signer box is a ssh signer")
+                && e.contains("a github pool's jobs sign as a github signer"),
+            "{e}"
+        );
+        // A github pool signing as a kms signer.
+        let e = refused(
+            &with_kms(&kms(KEY_ARN, P256)).replace("signer = \"forge\"", "signer = \"codebuild\""),
+        );
+        assert!(
+            e.contains("[pools.forge] is a github pool") && e.contains("is a kms signer"),
+            "{e}"
+        );
+        // A codebuild pool signing as a github signer.
+        let e = refused(&format!(
+            "{}{}",
+            with_kms(&kms(KEY_ARN, P256)),
+            CODEBUILD
+                .replace("signer = \"codebuild\"", "signer = \"forge\"")
+                .replace("linux-x64 = ", "linux-arm64 = ")
+        ));
+        assert!(
+            e.contains("[pools.codebuild] is a codebuild pool")
+                && e.contains("its signer forge is a github signer")
+                && e.contains("a codebuild pool's jobs sign as a kms signer"),
+            "{e}"
+        );
+        // A kind sluice does not know.
+        let e = refused(&PEERS.replace(
+            "github = { workflow = \".github/workflows/sluice.yml\" }\nsigner",
+            "gitlab = { pipeline = \"x\" }\nsigner",
+        ));
+        assert!(e.contains("[pools.forge] is a gitlab pool"), "{e}");
         let e = refused(&PEERS.replace("signer = \"forge\"", "signer = \"nobody\""));
         assert!(e.contains("nobody"), "{e}");
     }
