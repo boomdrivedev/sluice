@@ -90,7 +90,8 @@ fn a_run_whose_toolchain_fails_to_enter_is_recorded_with_its_words() {
         ended_with_none(r, "#gate", &could_not_start(TOOLCHAIN)),
         "{r:?}"
     );
-    assert_eq!(r.place, None);
+    // Record 0122 (design D3): released once its end was written, then closed.
+    assert_eq!(r.state, RunState::Closed);
     assert!(h.doc().release.is_empty(), "nothing left to release");
     // Its follow-up, open to any host, holds its checks.
     h.w().start_fails(Some(TOOLCHAIN));

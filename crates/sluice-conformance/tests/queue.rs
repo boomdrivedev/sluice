@@ -281,7 +281,9 @@ fn a_start_refused_at_the_bound_waits_for_a_later_round() {
     h.step();
     assert!(h.w().started().is_empty(), "nothing of it ran");
     assert!(h.w().live_places().is_empty(), "its place was released");
-    assert_eq!(run_states(&h), [(RunState::Closed, false, false)]);
+    // Record 0122 (design D3): its checkout, named until the run closed,
+    // released once its end was written.
+    assert_eq!(run_states(&h), [(RunState::Closed, true, false)]);
     assert!(h.w().results_log().is_empty(), "no run is recorded");
     assert!(!h
         .events()
@@ -294,7 +296,7 @@ fn a_start_refused_at_the_bound_waits_for_a_later_round() {
     assert_eq!(
         run_states(&h),
         [
-            (RunState::Closed, false, false),
+            (RunState::Closed, true, false),
             (RunState::Running, true, false)
         ]
     );
@@ -324,7 +326,7 @@ fn a_refused_start_starts_no_further_run_that_round() {
     assert_eq!(
         run_states(&h),
         [
-            (RunState::Closed, false, false),
+            (RunState::Closed, true, false),
             (RunState::Closed, false, false)
         ]
     );

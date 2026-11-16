@@ -248,6 +248,75 @@ fn a_release_found_done_is_closed_and_not_run_again() {
     assert_eq!(h.releases_of(&place), 1);
 }
 
+/// How a claimed run whose checkout was made comes to end with no outcome
+/// before any check of it runs.
+#[derive(Clone, Copy, Debug)]
+enum Unstarted {
+    /// Its start is refused at the host's bound (71).
+    AtBound,
+    /// Its start fails, as a toolchain that does not enter (114).
+    StartFails,
+    /// A step that made its checkout stopped, and the next cannot make it
+    /// (record 0118).
+    Unmade,
+}
+
+/// satisfies: record 0122; rule core.61; the run-life spec's "Nothing acts
+/// on a run before the state naming the act is written", its checkout
+/// released only once the run is written ended: a start refused at the
+/// bound, a start that fails, and a checkout a stopped step made that
+/// cannot be made again, each stopped right after the release
+#[test]
+fn a_checkout_is_released_only_once_its_run_is_written_ended() {
+    for how in [Unstarted::AtBound, Unstarted::StartFails, Unstarted::Unmade] {
+        let h = local();
+        h.work("unit/a", "agent-a", &[("a/lib", Some("a2"))]);
+        let one = h.submit("unit/a");
+        match how {
+            Unstarted::AtBound => h.w().refuse_next_start(),
+            Unstarted::StartFails => h.w().start_fails(Some("devenv: no such file")),
+            Unstarted::Unmade => {
+                h.w().crash(Crash::AfterCheckout);
+                assert!(
+                    h.sluice().step(BRANCH).is_err(),
+                    "{how:?}: the step stopped"
+                );
+                assert_eq!(runs_of(&h, &[one])[0].state, RunState::Claimed);
+                h.w().checkout_fails(Some("no room left on the device"));
+            }
+        }
+        h.w().crash(Crash::AfterRelease);
+        assert!(
+            h.sluice().step(BRANCH).is_err(),
+            "{how:?}: the step stopped"
+        );
+        let run = &runs_of(&h, &[one])[0];
+        let place = run.place.clone().expect("its checkout named until closed");
+        assert_eq!(h.releases_of(&place), 1, "{how:?}: its checkout released");
+        assert_eq!(
+            run.state,
+            RunState::Ended,
+            "{how:?}: written ended before its checkout was released"
+        );
+        assert!(
+            run.ended.as_ref().is_some_and(|e| e
+                .outcomes
+                .values()
+                .all(|o| matches!(o, CheckOutcome::None { .. }))),
+            "{how:?}: {run:?}"
+        );
+
+        h.w().start_fails(None);
+        h.w().checkout_fails(None);
+        h.step();
+        let run = &runs_of(&h, &[one])[0];
+        assert_eq!(run.state, RunState::Closed, "{how:?}");
+        assert_eq!(h.releases_of(&place), 1, "{how:?}: not released again");
+        h.settle();
+        assert_eq!(h.sub(one).state, State::Landed, "{how:?}");
+    }
+}
+
 /// Instance `a`, leading with no room of its own, so other hosts take its
 /// runs.
 fn lead(h: &Harness) -> Sluice<'_> {

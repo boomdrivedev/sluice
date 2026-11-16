@@ -1084,9 +1084,9 @@ impl Sluice<'_> {
 
     /// 71, 123: run `i` of candidate `cand`, claimed into `place` and not
     /// started for want of room, ended with no outcome for `checks`
-    /// ([`Sluice::reopen`]), the checkout a stopped start made for it
-    /// released first, into `releases` when its release was not plain, and
-    /// released again by the rounds after where it failed.
+    /// ([`Sluice::reopen`]); the checkout a start made for it, where one
+    /// was made, is released only once that end is written (record 0122,
+    /// design D3; rule core.61), [`Sluice::release_ended`].
     fn reopen_made(
         &self,
         branch: &str,
@@ -1096,14 +1096,35 @@ impl Sluice<'_> {
         checks: &[String],
         releases: &mut Vec<ReleaseOutcome>,
     ) -> Result<()> {
-        if !self.seams.checkout.made()?.iter().any(|p| p == place) {
-            return self.reopen(branch, cand, i, place, false, checks);
+        let made = self.seams.checkout.made()?.iter().any(|p| p == place);
+        self.reopen(branch, cand, i, place, made, checks)?;
+        if made {
+            self.release_ended(branch, cand, i, place, releases)?;
         }
+        Ok(())
+    }
+
+    /// Record 0122 (design D3; 123; rule core.61): the checkout `place` of
+    /// run `i` of candidate `cand`, released now that the run's end is
+    /// written, and the run closed once the release frees it; a release
+    /// that was not plain goes into `releases`, and one that failed or is
+    /// held leaves the run ended, its checkout tried by the rounds after
+    /// as any ended run's is ([`Sluice::perform_closes`]).
+    fn release_ended(
+        &self,
+        branch: &str,
+        cand: &str,
+        i: usize,
+        place: &str,
+        releases: &mut Vec<ReleaseOutcome>,
+    ) -> Result<()> {
         let outcome = self.release_made(branch, place)?;
-        let retry = matches!(outcome.how, Releasing::Failed { .. });
-        self.reopen(branch, cand, i, place, retry, checks)?;
+        let freed = outcome.how.freed();
         if outcome.how != Releasing::Released {
             releases.push(outcome);
+        }
+        if freed {
+            self.write_closed(branch, cand, i, Some(place))?;
         }
         Ok(())
     }
@@ -1410,14 +1431,10 @@ impl Sluice<'_> {
                 self.write_running(branch, &c.id, i, &name, claim, &run, &since)?;
                 return Ok(Started::Running(run));
             }
-            // Refused before anything of it ran: no run, no outcome.
+            // Refused before anything of it ran: no run, no outcome, its
+            // end written before its checkout is released (design D3).
             Err(e) if e.downcast_ref::<AtBound>().is_some() => {
-                let outcome = self.release_made(branch, &name)?;
-                let retry = matches!(outcome.how, Releasing::Failed { .. });
-                self.reopen(branch, &c.id, i, &name, retry, &checks)?;
-                if outcome.how != Releasing::Released {
-                    releases.push(outcome);
-                }
+                self.reopen_made(branch, &c.id, i, &name, &checks, releases)?;
                 return Ok(Started::AtBound);
             }
             // 133, 134: a remote that could not answer says nothing of the
@@ -1571,11 +1588,12 @@ impl Sluice<'_> {
 
     /// Design D1 (16, 114, 115): run `i` of candidate `c`, decided into
     /// `place`, whose tests could not be started, read as `report`, a run
-    /// whose every check was not run. Its checkout, where one was made, is
-    /// released as a run refused at the bound has its released, a release
-    /// that failed tried again by the rounds after (123); the run is
-    /// written once, read as any run that left checks not run: open again
-    /// for any host under the bound, past it each check named with why.
+    /// whose every check was not run. The run is written ended once, read
+    /// as any run that left checks not run, its follow-up holding them
+    /// under the bound and past it each check named with why; its checkout,
+    /// where one was made, is released only once that end is written
+    /// (record 0122, design D3; rule core.61), as a run refused at the
+    /// bound has its released ([`Sluice::release_ended`]).
     #[allow(clippy::too_many_arguments)]
     fn not_started(
         &self,
@@ -1588,13 +1606,6 @@ impl Sluice<'_> {
         releases: &mut Vec<ReleaseOutcome>,
     ) -> Result<()> {
         let made = self.seams.checkout.made()?.iter().any(|p| p == place);
-        let outcome = match made {
-            true => Some(self.release_made(branch, place)?),
-            false => None,
-        };
-        let retry = outcome
-            .as_ref()
-            .is_some_and(|o| matches!(o.how, Releasing::Failed { .. }));
         self.update(branch, |l| {
             let now = self.now();
             let Some(xr) = l.candidate_mut(&c.id).and_then(|x| x.runs.get_mut(i)) else {
@@ -1603,8 +1614,9 @@ impl Sluice<'_> {
             if xr.state != RunState::Claimed || xr.place.as_deref() != Some(place) {
                 return Ok(());
             }
-            // Released here; to be released again only where that failed.
-            if !retry {
+            // Design D3: a checkout made stays the run's until its release,
+            // after this end; with none made, the run closes as it ends.
+            if !made {
                 xr.place = None;
             }
             let system = xr.system.clone();
@@ -1626,8 +1638,8 @@ impl Sluice<'_> {
             end_run(l, &c.id, i, ended, &now);
             Ok(())
         })?;
-        if let Some(o) = outcome.filter(|o| o.how != Releasing::Released) {
-            releases.push(o);
+        if made {
+            self.release_ended(branch, &c.id, i, place, releases)?;
         }
         Ok(())
     }
@@ -1646,10 +1658,10 @@ impl Sluice<'_> {
     /// 60, 114 (record 0118): run `i` of candidate `c`, decided into
     /// `place`, whose place could not be made, `report` naming each check
     /// with why. The run never began: it has no outcome, counts toward no
-    /// runs in a row (115) and blames no one, and it is open again for any
-    /// host, its record saying why (16) until its next run has a result.
-    /// Whatever of the place was made is released, a release that failed
-    /// tried again by the rounds after (123).
+    /// runs in a row (115) and blames no one, and its follow-up is open
+    /// for any host, its record saying why (16) until its next run has a
+    /// result. Whatever of the place was made is released once the run's
+    /// end is written (record 0122, design D3; rule core.61).
     fn unmade(
         &self,
         branch: &str,
@@ -1660,13 +1672,6 @@ impl Sluice<'_> {
         releases: &mut Vec<ReleaseOutcome>,
     ) -> Result<()> {
         let made = self.seams.checkout.made()?.iter().any(|p| p == place);
-        let outcome = match made {
-            true => Some(self.release_made(branch, place)?),
-            false => None,
-        };
-        let retry = outcome
-            .as_ref()
-            .is_some_and(|o| matches!(o.how, Releasing::Failed { .. }));
         self.update(branch, |l| {
             let now = self.now();
             let Some(xr) = l.candidate_mut(&c.id).and_then(|x| x.runs.get_mut(i)) else {
@@ -1675,8 +1680,9 @@ impl Sluice<'_> {
             if xr.state != RunState::Claimed || xr.place.as_deref() != Some(place) {
                 return Ok(());
             }
-            // Released here; to be released again only where that failed.
-            if !retry {
+            // Design D3: a checkout made stays the run's until its release,
+            // after this end; with none made, the run closes as it ends.
+            if !made {
                 xr.place = None;
             }
             xr.lost = Some(LostRun {
@@ -1696,8 +1702,8 @@ impl Sluice<'_> {
             end_run(l, &c.id, i, with_none(&report.not_run, &now), &now);
             Ok(())
         })?;
-        if let Some(o) = outcome.filter(|o| o.how != Releasing::Released) {
-            releases.push(o);
+        if made {
+            self.release_ended(branch, &c.id, i, place, releases)?;
         }
         Ok(())
     }
@@ -1705,16 +1711,16 @@ impl Sluice<'_> {
     /// 71, record 0122 (design D7): run `i` of candidate `cand`, claimed
     /// into `place` and not started for want of room, ends with no outcome
     /// for each of `checks`, counting toward nothing, and its follow-up,
-    /// open to any host with room, holds them; `retry` when its place was
-    /// made and its release failed, so the rounds after try it again (123),
-    /// and otherwise it is closed in the same write.
+    /// open to any host with room, holds them; `made` when its checkout
+    /// was made, which stays the run's until its release after this end
+    /// (design D3), and otherwise it is closed in the same write.
     fn reopen(
         &self,
         branch: &str,
         cand: &str,
         i: usize,
         place: &str,
-        retry: bool,
+        made: bool,
         checks: &[String],
     ) -> Result<()> {
         self.update(branch, |l| {
@@ -1725,7 +1731,7 @@ impl Sluice<'_> {
             if r.state != RunState::Claimed || r.place.as_deref() != Some(place) {
                 return Ok(());
             }
-            if !retry {
+            if !made {
                 r.place = None;
             }
             let none: Vec<NotRun> = checks
