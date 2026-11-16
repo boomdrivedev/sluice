@@ -116,6 +116,13 @@ _: {
   # actionlint reads the workflows' keys and expressions, which yamlfmt
   # only lays out.
   programs.actionlint.enable = true;
+  # The workflows `sluice init actions` writes, from their templates
+  # (record 0119; design D11).
+  settings.formatter.actionlint.includes = [
+    ".github/workflows/*.yml"
+    ".github/workflows/*.yaml"
+    "crates/sluice/src/profiles/github/workflows/*.yml"
+  ];
 
   # ruff lints and formats the diagram scripts: its default rules, then
   # its format.
