@@ -886,6 +886,24 @@ impl PushedRefs {
             if refused_at_the_ref {
                 return Ok(Moved::Elsewhere(self.fetch(branch)?));
             }
+            // 152, rule core.5, record 0124 (design D10): a refusal the
+            // remote answered for the ref, `[remote rejected]` by a hook, a
+            // ruleset or push protection, is read against the branch,
+            // fetched: still where the move expected it, the forge refused
+            // the move, in its words whole; holding `to`, it moved;
+            // elsewhere, it was moved meanwhile.
+            let answered_for_the_ref = report.lines().any(|l| l.starts_with('!'));
+            if answered_for_the_ref {
+                let found = self.fetch(branch)?;
+                return Ok(match found {
+                    Some(f) if Some(&f) == to => Moved::Moved,
+                    None if to.is_none() => Moved::Moved,
+                    f if f.as_ref().map_or("", Rev::as_str) == expected => {
+                        Moved::Refused(refusal(out))
+                    }
+                    f => Moved::Elsewhere(f),
+                });
+            }
         }
         match pushed.why() {
             None => Ok(Moved::Moved),

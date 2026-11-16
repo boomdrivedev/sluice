@@ -249,9 +249,11 @@ fn the_window_shrinks_on_a_failure_grows_on_passes_and_the_host_bounds_it() {
     assert_eq!(h.w().live_runs(), 1);
 }
 
-/// satisfies: 60, S15, 37
+/// satisfies: 60, S15, 37; record 0122: the run ends with no outcome, and
+/// its follow-up runs its checks again
 #[test]
 fn a_run_whose_executor_stopped_has_no_outcome_and_runs_again() {
+    use sluice_core::records::CheckOutcome;
     let h = Harness::bolt();
     h.w().hold_runs(true);
     h.work("unit/a", "agent-a", &[("a/lib", Some("a2"))]);
@@ -261,6 +263,16 @@ fn a_run_whose_executor_stopped_has_no_outcome_and_runs_again() {
     h.w().lose(&c);
     h.step();
     assert!(h.events().iter().any(|e| matches!(e, Event::Lost { .. })));
+    let runs = h.doc().candidates[0].runs.clone();
+    let ended = runs[0].ended.as_ref().expect("the run ended");
+    assert_eq!(
+        ended.outcomes.get("#gate"),
+        Some(&CheckOutcome::None {
+            why: "its executor stopped before it reported".into()
+        })
+    );
+    assert_eq!(runs[1].follows, Some(0));
+    assert_eq!(runs[1].checks, runs[0].checks);
     h.w().hold_runs(false);
     h.w().complete_all();
     h.settle();
@@ -276,14 +288,35 @@ fn a_landed_change_to_the_gate_runs_every_check_it_now_requires() {
     ));
 }
 
-/// satisfies: 70, 55
+/// satisfies: 70, 55; 60, 114; record 0122: a report holding none of the
+/// required checks is no pass: the run ends with no outcome for them,
+/// nobody is blamed, and a follow-up holds them
 #[test]
 fn a_report_holding_none_of_the_required_checks_is_no_pass() {
+    use sluice_core::records::CheckOutcome;
     let h = Harness::new(&policy(false, "fail", 4).replace("#gate", "#nothing"));
     h.work("unit/a", "agent-a", &[("a/lib", Some("a2"))]);
     let one = h.submit("unit/a");
-    h.settle();
-    assert_eq!(h.sub(one).state, State::Failed);
+    for _ in 0..3 {
+        h.step();
+    }
+    let s = h.sub(one);
+    assert!(
+        s.state != State::Landed && s.state != State::Failed,
+        "{s:?}"
+    );
+    assert!(s.failed.is_empty());
+    assert!(!h.events().iter().any(|e| matches!(e, Event::Blamed { .. })));
+    let runs = h.doc().candidates[0].runs.clone();
+    let ended = runs[0].ended.as_ref().expect("the run ended");
+    assert_eq!(
+        ended.outcomes.get("#nothing"),
+        Some(&CheckOutcome::None {
+            why: "the run's report holds no outcome for it".into()
+        })
+    );
+    assert_eq!(runs[1].follows, Some(0));
+    assert_eq!(runs[1].checks, ["#nothing"]);
 }
 
 /// Two bolt branches, each with two submissions, under a bound of two;
@@ -474,20 +507,38 @@ fn a_limit_the_executor_cannot_hold_refuses_the_run() {
     assert_ne!(h.sub(one).state, State::Landed);
 }
 
-/// satisfies: 15, 55
+/// satisfies: 15, 55; 60, 114; record 0122: a required check the run left
+/// without a result is no pass: it has no outcome, nobody is blamed, and a
+/// follow-up holding it settles it
 #[test]
 fn a_required_check_the_run_left_without_a_result_is_no_pass() {
+    use sluice_core::records::CheckOutcome;
     let h = Harness::bolt();
     h.w().skips("b:test");
     h.work("unit/a", "agent-a", &[("b/lib", Some("b2"))]);
     let one = h.submit("unit/a");
-    h.settle();
-    assert_eq!(h.sub(one).state, State::Failed);
+    h.step();
+    h.step();
+    assert_ne!(h.sub(one).state, State::Landed, "no pass");
+    assert!(h.sub(one).failed.is_empty());
     assert!(results(&h).iter().all(|r| r.task != "b:test"));
-    match &h.w().delivered()[0].decided {
-        Decided::Failed { failed, .. } => assert_eq!(failed, &vec!["b:test".to_string()]),
-        other => panic!("delivered {other:?}"),
-    }
+    assert!(h.w().delivered().is_empty(), "nobody is blamed");
+    let runs = h.doc().candidates[0].runs.clone();
+    let ended = runs[0].ended.as_ref().expect("the run ended");
+    assert_eq!(
+        ended.outcomes.get("b:test"),
+        Some(&CheckOutcome::None {
+            why: "the run's report holds no outcome for it".into()
+        })
+    );
+    assert_eq!(
+        (runs[1].follows, runs[1].checks.as_slice()),
+        (Some(0), &["b:test".to_string()][..])
+    );
+    h.w().stops_skipping("b:test");
+    h.settle();
+    assert_eq!(h.sub(one).state, State::Landed);
+    assert!(results(&h).iter().any(|r| r.task == "b:test"));
 }
 
 /// satisfies: 15, 27 (ADR 0044)
@@ -663,6 +714,10 @@ fn a_replay_no_trusted_pass_proves_runs_again_with_no_replay() {
         })
         .expect("an unproven line");
     assert_eq!(tasks.len(), 3);
+    // Record 0122 (design D7): its follow-up held the unproven checks.
+    assert!(events
+        .iter()
+        .any(|e| matches!(e, Event::Opened { run: 1, .. })));
     // The first attempt's replays are recorded as replays (core.9), and
     // the runs as runs.
     let r = results(&h);
@@ -748,7 +803,11 @@ fn a_combination_opens_one_run_per_system() {
     );
     // This host is linux-x64: it runs that run alone, and the other stays
     // open for an executor of its system (87).
-    assert_eq!(runs[0].state, sluice_core::records::RunState::Passed);
+    assert_eq!(runs[0].state, sluice_core::records::RunState::Closed);
+    assert_eq!(
+        runs[0].ended.as_ref().map(|e| e.verdict()),
+        Some(sluice_core::records::RunVerdict::Passed)
+    );
     assert_eq!(runs[1].state, sluice_core::records::RunState::Open);
     let req = &h.w().requests()[0];
     assert_eq!(req.system.as_deref(), Some("linux-x64"));
@@ -772,21 +831,23 @@ fn a_run_no_executor_takes_reads_as_not_passed_at_the_time_limit() {
     for _ in 0..4 {
         s.step(BRANCH).unwrap();
     }
+    // Record 0122 (design D6): not passed, nobody blamed and no check
+    // failed; the macos-arm64 run's checks say no host that may take it was
+    // live, and the submission stays queued, formed again.
     let sub = h.sub(one);
-    assert_eq!(sub.state, State::Failed);
-    assert_eq!(sub.result.as_deref(), Some("timed out"));
-    let missing: Vec<(&str, Option<&str>)> = sub
-        .failed
+    assert_ne!(sub.state, State::Failed);
+    assert!(sub.failed.is_empty(), "{:?}", sub.failed);
+    let events = h.events();
+    assert!(!events.iter().any(|e| matches!(e, Event::Blamed { .. })));
+    assert!(events.iter().any(|e| matches!(
+        e,
+        Event::Ended { system: Some(s), why: Some(w), .. }
+            if s == "macos-arm64" && w == "no host that may take it was live"
+    )));
+    assert!(events
         .iter()
-        .map(|f| (f.task.as_str(), f.system.as_deref()))
-        .collect();
-    assert_eq!(
-        missing,
-        [
-            ("a:test", Some("macos-arm64")),
-            ("b:test", Some("macos-arm64"))
-        ]
-    );
+        .any(|e| matches!(e, Event::Result { result, .. } if result == "not passed")));
+    assert!(h.w().delivered().is_empty());
     // Each result names the system it ran on.
     assert!(results(&h)
         .iter()

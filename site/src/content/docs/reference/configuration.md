@@ -290,10 +290,11 @@ ssh = ".config/sluice.sessions"
 | key | meaning |
 |---|---|
 | `ssh` | An SSH public key in `allowed_signers` form, or the path in the repository of a file of them, one per host. A host signs with the private half its own [`[signing]`](#signing) names. |
+| `github` | A workflow's own identity on GitHub Actions: `{ workflow = ".github/workflows/sluice.yml", ref = "refs/heads/main" }`, the workflow and the branch it runs from, in the repository the branch's remote is. A result counts only when that workflow on that branch signed it, checked against the roots sluice carries ([GitHub Actions](/sluice/guides/github-actions/)). |
 | `confined` | Whether results it signs may count as confined: no agent could reach the checkout or what the test wrote. Say it only of a host that runs no agents; sluice never works it out. The default is `false`. |
 | `systems` | The systems its results may say they ran on. The default is every system. |
 
-A signer has exactly one `ssh`.
+A signer has exactly one `ssh` or one `github`.
 
 ### `ssh`: one key, or a file of them
 
@@ -323,6 +324,28 @@ lines are skipped. Options between the label and the key, such as
 remove a key's line to stop trusting it. Any key on the list signs as
 the signer. A host prints its own line with
 `echo "$(hostname -s) $(cat ~/.config/sluice/signing.pub)"`.
+
+## `[pools."<name>"]`: machines for a run no host takes
+
+A pool starts a machine for a run no host could take now, none of its
+system having room or being there at all. Its results are signed as its
+signer, which a branch's `trust` names like any other.
+
+```toml
+[pools.forge]
+github = { workflow = ".github/workflows/sluice.yml" }
+signer = "forge"
+runners = { linux-x64 = "ubuntu-24.04", macos-arm64 = "macos-15" }
+```
+
+| key | meaning |
+|---|---|
+| `github` | A pool on GitHub Actions: the workflow sluice starts for each run, which `sluice init actions` writes. |
+| `signer` | The signer its results are signed as, one `[signers]` names. |
+| `runners` | For each system it takes runs of, by `[systems]`'s names, the runner it asks for. A run of a system it names no runner for waits for a host. |
+
+[Running checks on GitHub Actions](/sluice/guides/github-actions/) sets
+one up.
 
 ## `[branches."<pattern>"]`: rules per target branch
 
@@ -549,7 +572,7 @@ its own state, so sluice refuses the branch alone, and reads every other
 branch as before:
 
 ```text
-main takes pull requests, which only the host that keeps it on origin takes in, and its state is each host's own: name [signers] in .config/sluice.toml so its state is kept on origin (137)
+main takes pull requests, which only the host that keeps it on origin takes in, and its state is each host's own: name [signers] in .config/sluice.toml so its state is kept on origin, as `sluice init actions` names a pool's signer (137)
 ```
 
 A submit to it exits 2 before anything is pushed or opened, and status,

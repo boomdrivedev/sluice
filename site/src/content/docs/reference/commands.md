@@ -27,7 +27,10 @@ sidebar:
 | `sluice branch create <branch> --from <branch>` | Make a branch sluice lands on, such as a feature branch, at another such branch's current revision: on its remote when its policy names one. `--json` for scripts. |
 | `sluice branch delete <branch>` | Delete it once its work has landed into `main`, or the branch `--into` names, and nothing is queued on it. `--json` for scripts. |
 | `sluice branch accept <branch> <revision>` | Accept the revision a held branch is read at, which lacks its last landing, as the one it stands on: the next round forms the queue on it. The operator's to do, never an agent's. `--json` for scripts. |
-| `sluice forge check [<branch>]` | Whether sluice's own identity on GitHub is set up so only sluice may move the branch there. `--json` for scripts. |
+| `sluice forge check [<branch>]` | Whether sluice's own identity on GitHub is set up so only sluice may move the branch there, and, for a pool on GitHub Actions, whether it is set up as `sluice init actions` sets it up. `--json` for scripts. |
+| `sluice push <branch>` | Push again a landing the forge refused, on your word, once the forge's rule allows it: it lands as the same landing, or is held again with the forge's new words ([below](#sluice-push)). `--json` for scripts. |
+| `sluice init actions` | Set up a pool on GitHub Actions in this working copy: write its two workflows and append its signer and pool to the policy where it names none ([below](#sluice-init-actions)). `--force` writes a workflow that differs. |
+| `sluice job run`, `sign`, `record` | A pool's job, as the workflow `sluice init actions` writes runs it; you don't run them yourself ([below](#sluice-job)). |
 
 ## Forecasting a conflict
 
@@ -1020,6 +1023,92 @@ ok      ruleset "main" on main lets only app 123456 through
 [Protecting main on GitHub](/sluice/guides/github-app/) sets
 it up.
 
+Where the branch's policy names a pool on GitHub Actions, the check
+also reads it as `sluice init actions` sets it up: the signer verifies
+the pool's workflow at its ref; the workflow on that branch is as this
+sluice writes it; the app may run workflows; and only that branch may
+use the `sluice` environment, which holds the app's key.
+
+```console
+ok      the signer forge verifies .github/workflows/sluice.yml at refs/heads/main
+failed  main holds no .github/workflows/sluice.yml: sluice init actions writes it, to land on main
+ok      the app may run acme/widgets's workflows
+failed  any branch may use acme/widgets's sluice environment, and so its key: let only main deploy from it
+```
+
+## `sluice push`
+
+A landing the forge refuses, for a rule on the branch or push
+protection finding what looks like a secret, is held: nothing is pushed
+or formed on the branch, and each of its submissions is `refused`, with
+the forge's words. A submission's fixed head from the same worktree, or
+`sluice withdraw`, takes its entry out, and the rest go back to the
+queue. Once the forge's rule allows the landing, `sluice push <branch>`
+pushes it again:
+
+```console
+$ sluice push main
+#12, #13 landed on main as b7d2e94
+```
+
+Refused again, it is held again with the forge's new words, and the
+command exits `6` with them. Where one of its submissions has left the
+queue, nothing is pushed: the landing is dropped and the rest are
+formed again.
+
+## `sluice init actions`
+
+Sets up a pool on GitHub Actions in the working copy it runs in, or
+`--worktree <path>`. It writes `.github/workflows/sluice.yml`, a pool's
+run in two jobs, and `sluice-pr.yml`, which runs a pull request's head
+on each of the pool's systems. Where the policy names no pool on
+GitHub, it appends `[signers.forge]`, whose workflow runs from the
+remote's default branch, and `[pools.forge]`, with a runner for each
+system `[systems]` names that GitHub hosts, leaving the file's own lines
+as they were. It names each system GitHub hosts no runner for, and a
+policy with no `[systems]` gains `linux-x64`. A workflow that differs from what it writes is
+left as it is, naming the first line that differs, and it exits `1`;
+`--force` writes it. Then it says what to set on GitHub: the app's
+permission to run workflows, and the `sluice` environment.
+
+```console
+$ sluice init actions
+.github/workflows/sluice.yml: written
+.github/workflows/sluice-pr.yml: written
+.config/sluice.toml: [signers.forge] and [pools.forge] appended; a branch's `systems` names the systems its runs need, and `trust` names forge
+
+Then, on GitHub:
+  - give sluice's app the permission to run workflows: Actions, read and write
+  - make an environment named `sluice` that only main may deploy from, holding the secret SLUICE_APP_KEY, the app's private key, and the variable SLUICE_APP_ID, its id
+  - land these files on main, where the workflow runs from
+```
+
+[Running a queue's checks on GitHub Actions](/sluice/guides/github-actions/)
+walks through it.
+
+## `sluice job`
+
+The workflow `sluice init actions` writes runs these; you don't run
+them yourself.
+
+- `sluice job run --claim <claim> --branch <branch> --out <dir>`, in
+  the run job, starts the run its claim holds and keeps its report and
+  what proves its keys in `<dir>`, recording nothing, writing no state
+  and holding no key. `--head <revision> --system <system>` runs a pull
+  request's head with no claim. It exits `0` once the report is kept,
+  and `3` with why where the run reported nothing.
+- `sluice job sign --claim <claim> --branch <branch> --from <dir> --out
+  <dir>`, in the sign job, keeps of that report only the keys the
+  combination's tree bears out, running nothing of it, and writes what
+  `actions/attest` signs.
+- `sluice job record --claim <claim> --branch <branch> --bundle <file>
+  --from <dir>` adds the signed bundle to the signer's runs and writes
+  the run ended and closed. A test of the run job's report in `<dir>`
+  that the sign job left out has no result, and runs again. Where the
+  claim no longer holds the run, it writes nothing and exits `1`. With
+  no bundle, the run ends with no outcome. `--head <revision>` adds a
+  pull request's head run's bundle, writing no state.
+
 ## `sluice set-aside`
 
 sluice records nothing under a test's key for four failures it tells
@@ -1473,6 +1562,7 @@ it. A key refused or not found gives the error document, with its
 | `2` | a conflict, or a refusal |
 | `4` | withdrawn, and none of its work landed |
 | `5` | `sluice wait --timeout` ran out; the submission stays queued |
+| `6` | the forge refused its landing: held, with the forge's words, until `sluice push` or a withdrawal ([above](#sluice-push)). Under `--json`, the submission's record carries `refused`, the forge's `words` and `at` |
 | `130` | stopped with Ctrl-C; the submission stays queued |
 
 A submission has landed once its branch holds its work, and nothing that

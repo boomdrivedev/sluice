@@ -50,16 +50,21 @@ as before.
 ### Requirement: A combination whose tests could not run is tested again
 
 When a combination's run leaves tests not run and fails no test on its
-own result, sluice SHALL test the combination again and blame no
-submission. When its tests could not run in three runs in a row, sluice
-SHALL read the combination as failed and blame it as any failure. The
-submitter SHALL be told each test that could not run, and why.
+own result, sluice SHALL test those tests again in a follow-up run of
+the same system that holds them alone, keep every other test's outcome,
+and blame no submission (run-life). When its tests could not run in
+three runs in a row, a run and its follow-ups, sluice SHALL read the
+combination as failed and blame it as any failure. The submitter SHALL
+be told each test that could not run, and why.
 
 #### Scenario: Once
 
-- **WHEN** a combination's run leaves `cli:tools` not run and nothing
-  failed
-- **THEN** the combination is tested again and no submission is blamed
+- **WHEN** a combination's run passes `core:test`, leaves `cli:tools`
+  not run and nothing failed
+- **THEN** a follow-up run holds `cli:tools` alone, `core:test` keeps
+  its pass, and no submission is blamed
+  (`a_check_that_could_not_run_records_nothing_and_runs_again` in
+  `crates/sluice-conformance/tests/could_not_run.rs`)
 
 #### Scenario: Three times in a row
 
@@ -110,12 +115,14 @@ pass reads passed.
 
 ### Requirement: A test the time limit ended has no result
 
-When a branch's time limit ends a run, sluice SHALL keep the result of
-every test whose end the task runner recorded before the limit, and SHALL
+When a branch's time limit ends a running run, its limit counted from the
+run's own `running` (run-life), sluice SHALL keep the result of every
+test whose end the task runner recorded before the limit, and SHALL
 record no result under the key of a test whose end it did not, whatever
 the runner reported of that test (time-limit-1 66). It SHALL name each
 such test as left without a result, keep its log, and read the
-submission as timed out.
+submission as timed out. A run that never ran is never timed out (87;
+run-life).
 
 #### Scenario: A test running when the limit came
 
@@ -142,6 +149,14 @@ submission as timed out.
 - **WHEN** the same head is submitted again after the limit ended its
   run, and `b:test` passes
 - **THEN** the submission lands, and no test reads as flaky
+
+#### Scenario: A run that waited before it ran
+
+- **WHEN** a run waited for room longer than the branch's time limit and
+  then ran within it
+- **THEN** it is not timed out
+  (`a_run_that_waited_for_room_has_its_whole_limit` in
+  `crates/sluice-conformance/tests/run_life.rs`)
 
 ### Requirement: A failure says what to do without changing inputs
 

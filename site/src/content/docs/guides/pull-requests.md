@@ -96,7 +96,8 @@ log_lines = 40               # post the end of a failed test's output
 `required` is what sluice tests. `reviews` and `checks` are what a pull
 request needs before sluice takes it. A name in `checks` is the name
 GitHub shows for the check on the pull request, whoever posts it: your
-CI, a deployment, a QA tool.
+CI, a deployment, a QA tool. sluice refuses one that names its own
+check, `sluice` or `sluice / <task>`, which it posts itself.
 
 `log_lines` posts the last lines of a failed test's output in the pull
 request's report, with anything shaped like a token or a key replaced by
@@ -115,7 +116,7 @@ on. `sluice submit main` exits 2, and pushes and opens nothing:
 
 ```console
 $ sluice submit main
-refused: main takes pull requests, which only the host that keeps it on origin takes in, and its state is each host's own: name [signers] in .config/sluice.toml so its state is kept on origin (137)
+refused: main takes pull requests, which only the host that keeps it on origin takes in, and its state is each host's own: name [signers] in .config/sluice.toml so its state is kept on origin, as `sluice init actions` names a pool's signer (137)
 ```
 
 `sluice status main`, `sluice step main` and `sluice overview` say the
@@ -528,7 +529,11 @@ top of it:
 
 ## GitHub Actions as sluice's executor
 
-This guide runs sluice's tests on your machine. Running them, and
-sluice's rounds, as GitHub Actions jobs is [designed, not
-built](/sluice/roadmap/). It will use pull requests exactly as this
-guide does, and change only where the work runs.
+This guide runs sluice's tests on your machines. A pool on GitHub
+Actions takes the runs none of them takes, and runs each pull request's
+head on each of its systems; a combination that holds the same work
+reads those results by key, so a check that passed on the head runs
+nothing again ([Running checks on GitHub
+Actions](/sluice/guides/github-actions/)). It uses pull requests exactly
+as this guide does, and changes only where the work runs. Running
+sluice's rounds as jobs is [designed, not built](/sluice/roadmap/).

@@ -138,9 +138,10 @@ systems = ["linux-x64"]
 
 A pass on one system never stands for another. Each combination becomes
 one run per system, each run holding only the checks that need it, and
-a host takes only runs of its own system. A run no host can take
-fails the combination when the branch's `timeout` passes, naming the
-check and the system it never ran on. Name a system only for the checks
+a host takes only runs of its own system. A run that nothing able to
+take it was there to take when the branch's `timeout` passes leaves its
+combination not passed: no one is blamed, nothing counts against a
+host, and the combination is formed again. Name a system only for the checks
 that need it: [Parallel and
 batch](/sluice/guides/parallel-and-batch/#systems-multiply-runs) counts
 what each costs.
@@ -148,9 +149,10 @@ what each costs.
 ## When no box has room
 
 A run waits until a host of its system that the branch trusts has room,
-and claims go earliest combination first. GitHub Actions as a pool of
-machines that takes a burst, or a system no box runs, is [designed, not
-built](/sluice/roadmap/).
+and claims go earliest combination first. A pool on GitHub Actions takes
+a run no host takes, a burst or a system no box runs, in a workflow run
+of its own: [Running checks on GitHub
+Actions](/sluice/guides/github-actions/).
 
 ## Watching it
 

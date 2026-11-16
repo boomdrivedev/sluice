@@ -2581,6 +2581,8 @@ enum Outcome {
         paths: Vec<String>,
         with: Vec<String>,
     },
+    /// 152, record 0124 (design D10): the forge refused its landing.
+    Refused { words: String },
 }
 
 impl Outcome {
@@ -2650,6 +2652,7 @@ impl Outcome {
                 paths,
                 with: with.iter().map(|w| name_of(w.id, &w.from)).collect(),
             },
+            Decided::Refused { words } => Outcome::Refused { words },
         }
     }
 
@@ -2659,6 +2662,7 @@ impl Outcome {
             Outcome::Landed { .. } => State::Landed,
             Outcome::Failed { .. } => State::Failed,
             Outcome::Conflict { .. } => State::Conflict,
+            Outcome::Refused { .. } => State::Refused,
         }
     }
 }
@@ -2720,6 +2724,11 @@ fn outcome_shown(branch: &str, o: &Outcome, names: &BTreeMap<u64, String>, queue
                 c.short()
             ),
         ),
+        Outcome::Refused { words } => (
+            Status::Failure,
+            "held: the forge refused its landing".to_string(),
+            format!("Passed; the forge refused its landing on {branch}, and it is held: {words}"),
+        ),
         Outcome::Conflict { paths, with } => (
             Status::Failure,
             format!("{CONFLICTED}{}", paths.join(", ")),
@@ -2763,6 +2772,11 @@ fn comment(
     };
     match o {
         Outcome::Landed { .. } => None,
+        Outcome::Refused { words } => Some(format!(
+            "The forge refused this pull request's landing on {branch}, and it is held: \
+             {words}\n\nPush a change that the forge takes, and sluice forms it again; or the \
+             operator pushes the landing again once the forge's rule allows it."
+        )),
         Outcome::Failed {
             tasks,
             logs,

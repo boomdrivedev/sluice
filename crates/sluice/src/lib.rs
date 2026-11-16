@@ -14,7 +14,9 @@ pub mod host_count;
 pub mod host_process;
 pub mod host_settings;
 pub mod identity;
+pub mod init;
 pub mod instance;
+pub mod job;
 pub mod overview;
 pub mod preview;
 pub mod profiles;
@@ -32,6 +34,7 @@ pub mod words;
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::io::Write;
+use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
@@ -59,6 +62,10 @@ pub const INTERNAL: i32 = 3;
 pub const WITHDRAWN: i32 = 4;
 /// `sluice wait --timeout` ran out with the submission undecided.
 pub const WAITING: i32 = 5;
+/// 152, record 0124 (design D10): the forge refused the submission's
+/// landing, with the branch where the landing expected it: held, with the
+/// forge's words. No reader takes it as a failure (1).
+pub const REFUSED: i32 = 6;
 /// How long a waiting submit or `sluice wait` gives each call to a remote,
 /// tried again under the retry policy through a forge's 5xx answers and
 /// whatever else the remote never judged, before it says it could not read
@@ -124,6 +131,7 @@ Exit codes:
   3    sluice itself failed, or it could not read the forge for 5m and
        whether it landed is not known; the cause is on stderr
   4    withdrawn while it waited
+  6    held: the forge refused its landing; its words are on stdout
   64   a command line sluice cannot read
   130  stopped with Ctrl-C; the submission stays queued
 
@@ -148,6 +156,7 @@ Exit codes:
        it could not read is named with why
   4    withdrawn
   5    still waiting: --timeout ran out, and the submission stays queued
+  6    held: the forge refused its landing; its words are on stdout
   64   a command line sluice cannot read; or the number is on more than
        one branch and no --branch names one: each branch is named
   130  stopped with Ctrl-C; the submission stays queued";
@@ -367,6 +376,19 @@ pub enum Command {
         #[arg(long, default_value = ".")]
         worktree: String,
         /// One JSON document on stdout: `{"confirmed":[...]}`.
+        #[arg(long)]
+        json: bool,
+    },
+    /// Push again a branch's landing the forge refused, on the operator's
+    /// word, once the forge's rule allows it: its submissions land as the
+    /// same landing, or it is held again with the forge's new words.
+    #[command(
+        after_help = "Example:\n  $ sluice push main\n\nExit codes:\n  0    landed, or no landing was held and nothing was pushed\n  3    sluice itself failed\n  6    the forge refused it again: held, its words on stdout"
+    )]
+    Push {
+        /// The branch whose held landing to push.
+        branch: String,
+        /// One JSON document on stdout; the rest on stderr.
         #[arg(long)]
         json: bool,
     },
@@ -609,6 +631,22 @@ pub enum Command {
     Forge {
         #[command(subcommand)]
         command: ForgeCommand,
+    },
+    /// Set sluice up in this working copy.
+    #[command(after_help = "Example:\n  $ sluice init actions")]
+    Init {
+        #[command(subcommand)]
+        command: InitCommand,
+    },
+    /// Run by the workflow `sluice init actions` writes: a pool's job's
+    /// run, its signature and its record (record 0119).
+    #[command(
+        hide = true,
+        after_help = "Example:\n  $ sluice job run --claim pool/forge/3 --branch main --out \"$RUNNER_TEMP/sluice-run\""
+    )]
+    Job {
+        #[command(subcommand)]
+        command: JobCommand,
     },
     /// Run by sluice's own git calls as their credential helper:
     /// `credential get`, git's credential protocol on stdin.
@@ -1225,6 +1263,107 @@ pub enum ForgeCommand {
     },
 }
 
+#[derive(Subcommand, Debug)]
+pub enum InitCommand {
+    /// Write the workflows a pool on GitHub Actions runs, append its signer
+    /// and pool to the policy where it names no pool on GitHub, and say what
+    /// to set on GitHub. A workflow that differs is left, exit 1, unless
+    /// --force.
+    #[command(after_help = "Examples:\n  $ sluice init actions\n  $ sluice init actions --force")]
+    Actions {
+        /// The working copy to set up.
+        #[arg(long, default_value = ".")]
+        worktree: PathBuf,
+        /// Write a workflow that differs from what sluice writes.
+        #[arg(long)]
+        force: bool,
+    },
+}
+
+#[derive(Subcommand, Debug)]
+pub enum JobCommand {
+    /// Start the run a claim holds, or a pull request's head, and keep its
+    /// report and what proves its keys in --out; records nothing, writes
+    /// no state and holds no key. Exits 0 once the report is kept, and 3
+    /// with why where the run reported nothing.
+    #[command(
+        after_help = "Examples:\n  $ sluice job run --claim pool/forge/3 --branch main --out run\n  $ sluice job run --head 4f2c9e1 --branch main --system linux-x64 --out run"
+    )]
+    Run {
+        /// The claim the pool's job runs under, `pool/<pool>/<n>`.
+        #[arg(long, conflicts_with = "head")]
+        claim: Option<String>,
+        /// A pull request's head, run with no claim.
+        #[arg(long, required_unless_present = "claim")]
+        head: Option<String>,
+        /// The branch the run's combination, or the head, lands on.
+        #[arg(long)]
+        branch: String,
+        /// With --head, the system the policy names the runner as.
+        #[arg(long, requires = "head")]
+        system: Option<String>,
+        /// The directory the run's report and proof are kept in.
+        #[arg(long)]
+        out: PathBuf,
+    },
+    /// Keep of a run job's report only the keys the combination's tree
+    /// bears out, running nothing of it, and write the subjects and the
+    /// predicate `actions/attest` signs to --out; where none is borne out,
+    /// or the run job kept no report, it writes no subjects.
+    #[command(
+        after_help = "Example:\n  $ sluice job sign --claim pool/forge/3 --branch main --from run --out sign"
+    )]
+    Sign {
+        /// The claim the pool's job ran under.
+        #[arg(long, conflicts_with = "head")]
+        claim: Option<String>,
+        /// A pull request's head, signed with no claim.
+        #[arg(long, required_unless_present = "claim")]
+        head: Option<String>,
+        /// The branch the run's combination, or the head, lands on.
+        #[arg(long)]
+        branch: String,
+        /// With --head, the system the head's run job ran as.
+        #[arg(long, requires = "head")]
+        system: Option<String>,
+        /// The run job's directory, as `sluice job run --out` kept it.
+        #[arg(long)]
+        from: PathBuf,
+        /// The directory the subjects and the predicate are written to.
+        #[arg(long)]
+        out: PathBuf,
+    },
+    /// Add the sign job's bundle to the signer's runs and write the run
+    /// ended and closed under its claim in one write; with no bundle, the
+    /// run ended with no outcome. Refused, exit 1 with nothing written,
+    /// where the claim no longer holds the run. With --head, a pull
+    /// request's head run's bundle is added, under no claim, writing no
+    /// state.
+    #[command(
+        after_help = "Examples:\n  $ sluice job record --claim pool/forge/3 --branch main --bundle attestation.json\n  $ sluice job record --head 4f2c9e1 --branch main --bundle attestation.json"
+    )]
+    Record {
+        /// The claim the pool's job ran under.
+        #[arg(long, conflicts_with = "head")]
+        claim: Option<String>,
+        /// A pull request's head, whose signed results are added with no
+        /// claim.
+        #[arg(long, required_unless_present = "claim", requires = "bundle")]
+        head: Option<String>,
+        /// The branch the run's combination lands on.
+        #[arg(long)]
+        branch: String,
+        /// The bundle `actions/attest` made of the run's statement.
+        #[arg(long)]
+        bundle: Option<PathBuf>,
+        /// The run job's directory: each check of its report the sign job
+        /// left out ends with no result, and where it holds no report it
+        /// says why.
+        #[arg(long)]
+        from: Option<PathBuf>,
+    },
+}
+
 /// What a waiting command does between rounds.
 pub trait Pause {
     /// Wait for the next round; `false` when the wait was stopped.
@@ -1362,6 +1501,7 @@ impl Cli {
                 | Command::Preview { json, .. }
                 | Command::Previews { json }
                 | Command::Step { json, .. }
+                | Command::Push { json, .. }
                 | Command::Amend { json, .. }
                 | Command::Withdraw { json, .. }
                 | Command::SetAside { json, .. }
@@ -1506,6 +1646,14 @@ pub fn run(
     pause: &dyn Pause,
     out: &mut dyn Write,
 ) -> Result<i32> {
+    // Record 0119 (design D11): a pool's job holds the records only as it
+    // read them, and writes none.
+    let cli = match cli.command {
+        Some(Command::Job { command }) => {
+            return job::run(command, seams, host, clock, pause, out);
+        }
+        command => Cli { command, ..cli },
+    };
     let s = Sluice::new(seams, clock).as_peer(host.peer());
     // 124: the hook reads the policy only as far as guarding needs.
     let s = match &cli.command {
@@ -1833,6 +1981,10 @@ pub fn run(
             worktree,
             json,
         } => confirm(&s, &keys, who.is_some(), &worktree, json, out),
+        Command::Job { .. } => unreachable!("a job is run before the instance"),
+        Command::Init {
+            command: InitCommand::Actions { worktree, force },
+        } => init::actions(&worktree, force, out),
         Command::Step { branch, json } => {
             // Rule core.14 (design D10): the host process's round of the
             // branch, between its passes, printed as a step prints it.
@@ -2329,6 +2481,11 @@ pub fn run(
         }
         .run(&s, out),
         Command::Previews { json } => preview::list(&s, host, json, out),
+        Command::Push { branch, json } => {
+            let code = push_held(&s, &branch, json, out);
+            serve();
+            code
+        }
         Command::Release {
             name: Some(name),
             accept_failure,
@@ -2464,6 +2621,24 @@ pub fn run(
             other => anyhow::bail!("sluice runs no {other} hook"),
         },
     }
+}
+
+/// 152, record 0124 (design D10): a branch whose landing the forge
+/// refused, held with the forge's words, and the ways out.
+pub(crate) fn refused_landing_line(
+    branch: &str,
+    ids: &[u64],
+    refused: &sluice_core::records::LandingRefused,
+) -> String {
+    let ids: Vec<String> = ids.iter().map(|i| format!("#{i}")).collect();
+    format!(
+        "held: the forge refused the landing of {} on {branch} at {}: {}; withdraw one of \
+         them or submit again from its place, or run sluice push {branch} once the forge \
+         takes it",
+        ids.join(", "),
+        refused.at,
+        refused.words
+    )
 }
 
 /// 121: a branch held because the revision it is read at lacks its last
@@ -3062,7 +3237,7 @@ fn submit_group(
     } else {
         for (((w, _), sub), by) in items.iter().zip(&subs).zip(&carriers) {
             writeln!(out, "submission {} from {w}:", sub.id)?;
-            if sub.state.is_out() {
+            if sub.state.is_out() || sub.state == State::Refused {
                 report(
                     s,
                     sub,
@@ -3793,6 +3968,11 @@ fn wait_on(
     let mut first = true;
     // Record 0100 D1: what carries `own`'s work, followed in its stead.
     let mut following: Option<Submission> = None;
+    // 152, record 0124 (design D10): a landing the forge refused ends the
+    // wait at once, held with the forge's words.
+    if own.state == State::Refused {
+        return Ok(Waited::Decided(own, None));
+    }
     // Decided already: nothing read again, and nothing followed.
     if own.state.is_out() {
         match decided(s, waiting, &own, own.clone(), out)? {
@@ -3812,6 +3992,10 @@ fn wait_on(
     reading.read(s, following.as_mut().unwrap_or(&mut own))?;
     loop {
         let sub = following.as_ref().unwrap_or(&own);
+        // 152, record 0124 (design D10): held, its end for the wait.
+        if sub.state == State::Refused {
+            return Ok(Waited::Decided(sub.clone(), None));
+        }
         if sub.state.is_out() {
             match decided(s, waiting, &own, sub.clone(), out)? {
                 Next::End(w) => return Ok(w),
@@ -3841,7 +4025,7 @@ fn wait_on(
                         let line = progress::testing_line(&branch, c, waiting.clock.now(), None);
                         writeln!(out, "{line}")?;
                     }
-                    None => match detail(&branch, sub, None, &mut BTreeSet::new()) {
+                    None => match detail(&branch, sub, None, None, &mut BTreeSet::new()) {
                         d if d.is_empty() => writeln!(out, "#{id} {}", sub.state.word())?,
                         d => writeln!(out, "#{id} {} · {d}", sub.state.word())?,
                     },
@@ -4074,11 +4258,19 @@ fn report(
         }
         s
     };
+    // 152, record 0124 (design D10): held, with the forge's refusal.
+    let refusal = match sub.state {
+        State::Refused => landing_refusal(s, branch, id)?,
+        _ => None,
+    };
     if json {
         let mut doc = with_carried(with_copy(serde_json::to_value(sub)?, copy)?, by);
         // 51, D13: a decided submission's delivery, where it has one.
         if let Some(delivery) = delivery {
             doc["delivery"] = delivery;
+        }
+        if let Some(r) = &refusal {
+            doc["refused"] = serde_json::json!({ "words": r.words, "at": r.at });
         }
         writeln!(out, "{}", serde_json::to_string_pretty(&doc)?)?;
         return Ok(exit_for(sub));
@@ -4281,6 +4473,11 @@ fn report(
             if let CarriedBy::Entry(e) = by {
                 writeln!(out, "sluice status {}", e.id)?;
             }
+        }
+        // 152, record 0124 (design D10): held, with the forge's words.
+        State::Refused => {
+            let words = refusal.map(|r| r.words).unwrap_or_default();
+            writeln!(out, "held: the forge refused its landing: {words}")?;
         }
         _ => writeln!(out, "{}", sub.state.word())?,
     }
@@ -5954,11 +6151,40 @@ fn s_state<'a>(s: &'a Sluice<'a>) -> &'a dyn sluice_seams::State {
     s.seams().state
 }
 
+/// 152, record 0124 (design D10): the forge's refusal of the landing that
+/// holds `branch`'s submission `id`, as the branch's records keep it, or,
+/// once the landing has gone from them, as its `forge_refused` line logged
+/// it.
+fn landing_refusal(
+    s: &Sluice<'_>,
+    branch: &str,
+    id: u64,
+) -> Result<Option<sluice_core::records::LandingRefused>> {
+    let snap = sluice_seams::State::read(s_state(s), branch)?;
+    let log = sluice_core::line::Line::read_log(&snap)?;
+    let line = sluice_core::line::Line::load(branch, snap)?;
+    if let Some(landing) = line.doc.landing.as_ref().filter(|l| l.ids.contains(&id)) {
+        if let Some(r) = &landing.refused {
+            return Ok(Some(r.clone()));
+        }
+    }
+    Ok(log.iter().rev().find_map(|l| match &l.event {
+        Event::ForgeRefused { ids, words } if ids.contains(&id) => {
+            Some(sluice_core::records::LandingRefused {
+                words: words.clone(),
+                at: l.at.clone(),
+            })
+        }
+        _ => None,
+    }))
+}
+
 fn exit_for(sub: &Submission) -> i32 {
     match sub.state {
         State::Landed => LANDED,
         State::Conflict => CONFLICT,
         State::Withdrawn => WITHDRAWN,
+        State::Refused => REFUSED,
         _ => FAILED,
     }
 }
@@ -5978,10 +6204,21 @@ fn failed_name(f: &sluice_core::records::FailedTask) -> String {
     name
 }
 
+/// A branch's landing the forge refused, held: its submissions and the
+/// forge's refusal (152; record 0124).
+type HeldLanding = (Vec<u64>, sluice_core::records::LandingRefused);
+
 /// What a row says of `s` after its columns, naming the submissions it
-/// names as `names` and `said` do.
-fn detail(branch: &str, s: &Submission, names: Option<&Names>, said: &mut BTreeSet<u64>) -> String {
-    let shown = detail_of_state(branch, s, names, said);
+/// names as `names` and `said` do; `held`, the branch's landing the forge
+/// refused, where the reader read it.
+fn detail(
+    branch: &str,
+    s: &Submission,
+    held: Option<&HeldLanding>,
+    names: Option<&Names>,
+    said: &mut BTreeSet<u64>,
+) -> String {
+    let shown = detail_of_state(branch, s, held, names, said);
     // 140: what work no check reads at the branch's revision waits behind,
     // until it lands.
     match &s.beside {
@@ -6000,6 +6237,7 @@ fn detail(branch: &str, s: &Submission, names: Option<&Names>, said: &mut BTreeS
 fn detail_of_state(
     branch: &str,
     s: &Submission,
+    held: Option<&HeldLanding>,
     names: Option<&Names>,
     said: &mut BTreeSet<u64>,
 ) -> String {
@@ -6041,7 +6279,30 @@ fn detail_of_state(
                 format!("{} with {}", c.paths.join(", "), hashes(&ids, names, said))
             })
             .unwrap_or_default(),
-        State::Waiting => format!("after {}", hashes(&s.after, names, said)),
+        State::Waiting => {
+            let after =
+                (!s.after.is_empty()).then(|| format!("after {}", hashes(&s.after, names, said)));
+            // 152, record 0124 (design D10): what it waits behind while the
+            // branch's landing the forge refused is held.
+            let behind = held
+                .filter(|(ids, _)| !ids.contains(&s.id))
+                .map(|(ids, _)| {
+                    format!(
+                        "waits behind the landing the forge refused of {}",
+                        hashes(ids, names, said)
+                    )
+                });
+            [after, behind]
+                .into_iter()
+                .flatten()
+                .collect::<Vec<_>>()
+                .join(" · ")
+        }
+        // 152, record 0124 (design D10): held, with the forge's words.
+        State::Refused => match held {
+            Some((_, refused)) => format!("held: the forge refused its landing: {}", refused.words),
+            None => "held: the forge refused its landing".to_string(),
+        },
         // 120, 137: withdrawn at a hand-over of intake, which holds no
         // request: the host it went to.
         State::Withdrawn => s
@@ -6138,6 +6399,14 @@ fn write_status(
     if let Some(hold) = &status.held {
         writeln!(out, "{}", held_line(&status.branch, hold))?;
     }
+    // 152, record 0124 (design D10): the landing the forge refused, held.
+    if let Some((ids, refused)) = &status.landing_refused {
+        writeln!(
+            out,
+            "{}",
+            refused_landing_line(&status.branch, ids, refused)
+        )?;
+    }
     write_failed_releases(&status.failed_releases, out)?;
     if let Some(copy) = &status.copy {
         writeln!(out, "{}", copy_behind_line(&status.branch, copy))?;
@@ -6179,7 +6448,13 @@ fn write_status(
             s.state.word(),
             s.from.agent,
             s.from.worktree,
-            detail(&status.branch, s, Some(names), &mut said),
+            detail(
+                &status.branch,
+                s,
+                status.landing_refused.as_ref(),
+                Some(names),
+                &mut said
+            ),
         );
         writeln!(out, "{}", line.trim_end())?;
     }
@@ -6352,6 +6627,70 @@ const CHECKOUT: &str = "sluice/try/";
 /// that name on this host, its release run once more under its branch's
 /// lock, or with `accept` freed with nothing run. Exits 1, saying what
 /// failed, when its release fails again.
+/// 152, record 0124 (design D10): `sluice push <branch>`: the branch's
+/// held landing pushed again on the operator's word, and what came of it.
+fn push_held(s: &Sluice<'_>, branch: &str, json: bool, out: &mut dyn Write) -> Result<i32> {
+    use sluice_core::step::PushedHeld;
+    let ids = |ids: &[u64]| {
+        ids.iter()
+            .map(|i| format!("#{i}"))
+            .collect::<Vec<_>>()
+            .join(", ")
+    };
+    let pushed = s.push_held(branch)?;
+    let (text, code, doc) = match &pushed {
+        PushedHeld::Nothing => (
+            format!("{branch} holds no landing the forge refused: nothing is pushed"),
+            LANDED,
+            serde_json::json!({ "branch": branch, "pushed": false }),
+        ),
+        PushedHeld::Landed { ids: landed, to } => (
+            format!("{} landed on {branch} as {}", ids(landed), to.short()),
+            LANDED,
+            serde_json::json!({ "branch": branch, "pushed": true, "landed": landed, "to": to }),
+        ),
+        PushedHeld::Refused { ids: held, words } => (
+            format!(
+                "held: the forge refused the landing of {} on {branch} again: {words}",
+                ids(held)
+            ),
+            REFUSED,
+            serde_json::json!({ "branch": branch, "pushed": true, "refused": held, "words": words }),
+        ),
+        PushedHeld::Elsewhere { ids: back, found } => (
+            format!(
+                "{branch} moved{}: the landing of {} is dropped, and they are formed again",
+                found
+                    .as_ref()
+                    .map(|f| format!(" to {}", f.short()))
+                    .unwrap_or_default(),
+                ids(back)
+            ),
+            LANDED,
+            serde_json::json!({ "branch": branch, "pushed": true, "queued": back }),
+        ),
+        PushedHeld::Dropped { left, back } => (
+            format!(
+                "{} left the queue: the landing held on {branch} is dropped and nothing is pushed{}",
+                ids(left),
+                match back.is_empty() {
+                    true => String::new(),
+                    false => format!(", and {} are formed again", ids(back)),
+                }
+            ),
+            LANDED,
+            serde_json::json!({ "branch": branch, "pushed": false, "dropped": left, "queued": back }),
+        ),
+    };
+    if json {
+        writeln!(std::io::stderr(), "{text}")?;
+        writeln!(out, "{}", serde_json::to_string_pretty(&doc)?)?;
+    } else {
+        writeln!(out, "{text}")?;
+    }
+    Ok(code)
+}
+
 fn release_checkout(
     s: &Sluice<'_>,
     name: &str,

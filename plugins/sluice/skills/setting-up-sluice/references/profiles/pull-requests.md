@@ -32,7 +32,7 @@ log_lines = 40               # optional: post the end of a failed test's output
   then on its remote, and the host that keeps it there takes its pull
   requests in. Without them each host keeps its own state, and sluice
   refuses that branch alone, a submit to it exiting 2 before anything is
-  pushed or opened: `main takes pull requests, which only the host that keeps it on origin takes in, and its state is each host's own: name [signers] in .config/sluice.toml so its state is kept on origin (137)`.
+  pushed or opened: `main takes pull requests, which only the host that keeps it on origin takes in, and its state is each host's own: name [signers] in .config/sluice.toml so its state is kept on origin, as `sluice init actions` names a pool's signer (137)`.
 - `log_lines` posts that many last lines of a failed test's output in the
   pull request's report, scrubbed of what looks like a secret. Leave it out
   unless the tests' output is safe for every reader of the repository: the

@@ -716,6 +716,10 @@ impl Tests for Roomed<'_> {
         })
     }
 
+    fn found(&self, place: &str) -> Result<Option<sluice_seams::Found>> {
+        self.inner.found(place)
+    }
+
     fn progress(&self, run: &RunHandle) -> Result<Progress> {
         self.inner.progress(run)
     }
@@ -744,13 +748,13 @@ impl Tests for Roomed<'_> {
         self.inner.launch(launch)
     }
 
-    fn job_alive(
+    fn job(
         &self,
         kind: &(String, Setting),
         claim: &str,
         remote: Option<&str>,
-    ) -> Result<bool> {
-        self.inner.job_alive(kind, claim, remote)
+    ) -> Result<sluice_seams::Job> {
+        self.inner.job(kind, claim, remote)
     }
 
     fn wake(&self, kind: &(String, Setting), branch: &str, remote: Option<&str>) -> Result<()> {
@@ -766,6 +770,20 @@ impl Tests for Roomed<'_> {
 
     fn proven(&self, run: &RunHandle, report: &RunReport) -> Result<Proof> {
         self.inner.proven(run, report)
+    }
+
+    fn keep_proof(&self, run: &RunHandle, report: &RunReport, dir: &Path) -> Result<()> {
+        self.inner.keep_proof(run, report, dir)
+    }
+
+    fn proven_from(
+        &self,
+        dir: &Path,
+        revision: &sluice_seams::Rev,
+        tests: &sluice_seams::Settings,
+        report: &RunReport,
+    ) -> Result<Proof> {
+        self.inner.proven_from(dir, revision, tests, report)
     }
 
     fn session_runs(&self) -> Result<Vec<HostRun>> {

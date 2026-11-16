@@ -50,6 +50,26 @@ pub fn unanswered(e: &anyhow::Error) -> bool {
     e.chain().any(|c| c.is::<Unanswered>())
 }
 
+/// Record 0122 (design D3): the process stopped part way through an act,
+/// as a host that stops does: whatever the core does with a seam's error,
+/// it reads nothing of this one, and the round ends with what came after
+/// the act unwritten. A fake raises it, standing for a host that stopped.
+#[derive(Debug)]
+pub struct Stopped(pub String);
+
+impl fmt::Display for Stopped {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
+impl std::error::Error for Stopped {}
+
+/// Whether `e`, or anything that caused it, is a [`Stopped`].
+pub fn stopped(e: &anyhow::Error) -> bool {
+    e.chain().any(|c| c.is::<Stopped>())
+}
+
 /// 133: a read of a branch's remote that could not be made: a fetch that
 /// failed for any reason but the remote having no such ref.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -739,7 +759,8 @@ pub enum Outcome {
 
 /// Whether an outcome was observed in this run or answered from an
 /// earlier one (37, 38).
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum Source {
     /// Observed by an executor on `host`.
     Ran { host: String },
@@ -749,7 +770,7 @@ pub enum Source {
 
 /// One check's result in a run: its key is `(task, hash)` (glossary
 /// "key").
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TaskResult {
     pub task: String,
     pub hash: String,
@@ -845,7 +866,9 @@ pub struct FailedBy {
     pub by: Vec<String>,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+/// Record 0119 (design D11): what a pool's run job hands its sign job is
+/// this, as JSON.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RunReport {
     pub tasks: Vec<TaskResult>,
     /// 84: what the executor held the run to.
@@ -930,6 +953,28 @@ pub enum Progress {
     Lost,
 }
 
+/// 88, record 0122 (design D12): where a pool's job of a claim stands.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Job {
+    /// No run of the pool bears the claim.
+    None,
+    /// Its run waits for a runner, or its run job has not started.
+    Queued,
+    /// Its run job runs, since its own start.
+    Running { since: String },
+    /// Its run is over: `recorded` where its sign job recorded the run's
+    /// end, and otherwise not, a lapsed claim.
+    Ended { recorded: bool },
+}
+
+/// Record 0122 (design D3): a run found started in a checkout, by the
+/// supervisor's own files: its handle, and its own start.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Found {
+    pub run: RunHandle,
+    pub since: String,
+}
+
 /// Where one task of a run still going has got, as its runner tells it.
 /// No run and no result (16, 38): no verdict, gate, blame or result reads
 /// it (rules core.7, core.9; ADR 0028).
@@ -997,6 +1042,12 @@ pub trait Tests {
     /// outcome, executor and whether it was replayed.
     fn progress(&self, run: &RunHandle) -> Result<Progress>;
 
+    /// Record 0122 (design D3): whether a run was started in the checkout
+    /// `place`, and its own start, read from the supervisor's own files,
+    /// running nothing: the proof a reader checks before it starts one, so
+    /// a start found done is not done again. `None` where none was.
+    fn found(&self, place: &str) -> Result<Option<Found>>;
+
     /// 84, 87, record 0074: what of `limits` this host cannot meet, in
     /// words. First what its executor cannot hold, the executor kind,
     /// memory or network, as [`Tests::start`] would refuse it, which looks
@@ -1059,16 +1110,14 @@ pub trait Tests {
         anyhow::bail!("no pool is bound for {}", launch.pool)
     }
 
-    /// 77, 88: whether the job under `claim` that pool `kind` was given
-    /// still runs or waits to; one its pool finished, cancelled or lost
-    /// without a report is a lapsed claim.
-    fn job_alive(
-        &self,
-        _kind: &(String, Setting),
-        _claim: &str,
-        _remote: Option<&str>,
-    ) -> Result<bool> {
-        Ok(false)
+    /// 77, 88, record 0122 (design D12): where the job under `claim` that
+    /// pool `kind` was given stands, read from the pool: none of its title,
+    /// queued, its run job running since its own start, or ended, with
+    /// whether its run was recorded. One that ended with no record is a
+    /// lapsed claim, and so is none past the sign-of-life bound since the
+    /// claim.
+    fn job(&self, _kind: &(String, Setting), _claim: &str, _remote: Option<&str>) -> Result<Job> {
+        Ok(Job::None)
     }
 
     /// 111: ask a pool to advance `branch`, when work is written that no
@@ -1094,6 +1143,32 @@ pub trait Tests {
     /// a task a check was failed by and a replay are never unkept, and a
     /// task in neither list is no pass.
     fn proven(&self, run: &RunHandle, report: &RunReport) -> Result<Proof>;
+
+    /// Record 0119 (design D11; 109): keep in `dir` what proves the keys
+    /// of `report`, run `run`'s, in the profile's own form, as a pool's run
+    /// job hands it to its sign job, which holds the run's place nowhere;
+    /// nothing is recorded. A profile whose keys need no proof keeps
+    /// nothing.
+    fn keep_proof(&self, _run: &RunHandle, _report: &RunReport, _dir: &Path) -> Result<()> {
+        Ok(())
+    }
+
+    /// Record 0119 (design D11; 78, 109): which keys of `report`, a pool's
+    /// run job's, the tree of `revision` bears out by what the run job
+    /// kept in `dir` ([`Tests::keep_proof`]), read as [`Tests::proven`]
+    /// reads a run's own, the runner taken from `tests`, the policy's
+    /// `[tests]` at the branch's revision, never from the run job: nothing
+    /// of the combination runs. A profile that proves nothing so handed
+    /// over proves none.
+    fn proven_from(
+        &self,
+        _dir: &Path,
+        _revision: &Rev,
+        _tests: &Settings,
+        _report: &RunReport,
+    ) -> Result<Proof> {
+        Ok(Proof::default())
+    }
 
     /// ADR 0035: the session runs running on this host, as `running`
     /// counts them, each with what its `sluice exec` kept of it: for a
@@ -1383,6 +1458,10 @@ pub enum Moved {
     Moved,
     /// 45: refused, the branch was elsewhere.
     Elsewhere(Option<Rev>),
+    /// 152, rule core.5, record 0124 (design D10): the forge refused the
+    /// move with the branch where it was expected, in the forge's words,
+    /// whole: a refusal of the move itself, never pushed again by itself.
+    Refused(String),
 }
 
 /// What this host holds of a branch apart from the branch itself (124).
@@ -1563,6 +1642,10 @@ pub enum Decided {
         paths: Vec<String>,
         with: Vec<Contested>,
     },
+    /// 152, record 0124 (design D10): the forge refused its landing, with
+    /// the branch where the landing expected it, in the forge's words: no
+    /// outcome, a hold its submitter is owed word of.
+    Refused { words: String },
 }
 
 impl Decided {
@@ -1571,6 +1654,7 @@ impl Decided {
             Decided::Landed { .. } => "landed",
             Decided::Failed { .. } => "failed",
             Decided::Conflict { .. } => "conflict",
+            Decided::Refused { .. } => "refused",
         }
     }
 }
@@ -1627,6 +1711,12 @@ pub enum Standing {
     /// Its combination passed; the combinations ahead have yet to (18).
     Passed,
     Landing,
+    /// 152, record 0124 (design D10): its combination passed and the forge
+    /// refused its landing, with the branch where the landing expected it:
+    /// held, with the forge's words.
+    Refused {
+        words: String,
+    },
     Landed {
         landed_as: Rev,
         /// 140: landed beside the chain, with no check run.
@@ -2073,6 +2163,14 @@ pub trait State {
 
     /// 69: append to the repository's results log.
     fn record_results(&self, lines: &[u8]) -> Result<()>;
+
+    /// Record 0119 (design D11; 78, 109): add `record`, signed elsewhere, at
+    /// `path` among `signer`'s runs where `branch`'s records are, as a
+    /// pool's sign job adds its keyless bundle; only added to (109).
+    /// Records in one host's own files hold no signer's runs (78).
+    fn add_signed(&self, branch: &str, _signer: &str, _path: &str, _record: &[u8]) -> Result<()> {
+        anyhow::bail!("{branch}'s records hold no signer's runs, since its policy names no signer")
+    }
 
     /// Could-not-run-1 116: the results set aside, one JSON document per
     /// line, beside the results log and never in it.

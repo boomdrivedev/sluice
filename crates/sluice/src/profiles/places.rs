@@ -1410,6 +1410,81 @@ impl Places {
             .context("running git")
     }
 
+    /// Record 0122 (design D3): the place `name`, where its record names a
+    /// checkout this host made that git lists, unlocked, holding exactly
+    /// `rev`: the proof a step that stopped before its run started made it.
+    /// Its scratch is made again where the system emptied it. `None`
+    /// otherwise.
+    fn made_at(&self, name: &str, rev: &Rev) -> Result<Option<Place>> {
+        let Some(made) = self.read_record(name)?.filter(|m| m.kind == Kind::Made) else {
+            return Ok(None);
+        };
+        let Some(path) = made.path.clone().filter(|p| p.is_dir()) else {
+            return Ok(None);
+        };
+        let Some(listed) = self.worktree_entry(&path)? else {
+            return Ok(None);
+        };
+        if listed.locked.is_some() || listed.head.as_ref() != Some(rev) {
+            return Ok(None);
+        }
+        // Holding nothing beyond its revision, as git made it: nothing ran
+        // in it.
+        let path_text = path
+            .to_str()
+            .ok_or_else(|| anyhow!("{} is not UTF-8", path.display()))?;
+        let status = self.git(&[
+            "-C",
+            path_text,
+            "status",
+            "--porcelain",
+            "--untracked-files=all",
+            "--ignored",
+        ])?;
+        if !status.status.success() || !status.stdout.is_empty() {
+            return Ok(None);
+        }
+        let tmp = self.scratch(name, &made);
+        if !tmp.exists() {
+            self.make_scratch(&tmp)?;
+        }
+        let record = self.record(name);
+        let mut env = BTreeMap::from([(
+            "SLUICE_PLACE".to_string(),
+            format!("sluice-{}", &self.hash(&record.to_string_lossy())?[..10]),
+        )]);
+        env.extend(made.ports.clone());
+        Ok(Some(Place {
+            name: name.into(),
+            path,
+            tmp,
+            env,
+        }))
+    }
+
+    /// Record 0122 (design D3, D4): what `git worktree list --porcelain`
+    /// says of the folder `path`, matched by what it is on disk
+    /// ([`Folder`]) or, where it is gone, by its spelling: the revision it
+    /// holds and whether, and why, git keeps it locked. `None` where git
+    /// lists no such folder.
+    fn worktree_entry(&self, path: &Path) -> Result<Option<Listed>> {
+        let out = self.git(&["worktree", "list", "--porcelain", "-z"])?;
+        if !out.status.success() {
+            bail!(
+                "git worktree list: {}",
+                String::from_utf8_lossy(&out.stderr).trim()
+            );
+        }
+        let want = Folder::of(path).ok();
+        Ok(parse_worktree_entries(&out.stdout)
+            .into_iter()
+            .find(|(at, _)| match &want {
+                Some(w) => Folder::of(at).is_ok_and(|f| f == *w),
+                None => at == path,
+            })
+            .map(|(_, listed)| listed))
+    }
+
     fn make_worktree(&self, name: &str, rev: &Rev) -> Result<PathBuf> {
         let path = self.worktree_path(name);
         let out = self.git(&[
@@ -1489,19 +1564,49 @@ impl Places {
                 )
             });
         }
-        let out = self.git(&[
-            "worktree",
-            "remove",
-            "--force",
-            path.to_str()
-                .ok_or_else(|| anyhow!("{} is not UTF-8", path.display()))?,
-        ])?;
+        let path_text = path
+            .to_str()
+            .ok_or_else(|| anyhow!("{} is not UTF-8", path.display()))?;
+        // 123, rule core.16, record 0122 (design D4): `git worktree add`
+        // locks the checkout `initializing` until it is done, and an add
+        // stopped part way leaves the lock, which every removal refuses.
+        // A checkout sluice made, locked so, is unlocked, removed and
+        // pruned; one locked for any other reason is a hold sluice keeps,
+        // and its release fails naming the lock and git's words.
+        let locked = self.worktree_entry(path)?.and_then(|l| l.locked);
+        if locked.as_deref() == Some(INITIALIZING) {
+            let out = self.git(&["worktree", "unlock", path_text])?;
+            if !out.status.success() {
+                bail!(
+                    "git worktree unlock {}: {}",
+                    path.display(),
+                    String::from_utf8_lossy(&out.stderr).trim()
+                );
+            }
+        }
+        let out = self.git(&["worktree", "remove", "--force", path_text])?;
         if !out.status.success() {
-            bail!(
-                "git worktree remove {}: {}",
-                path.display(),
-                String::from_utf8_lossy(&out.stderr).trim()
-            );
+            let said = String::from_utf8_lossy(&out.stderr).trim().to_string();
+            match locked.filter(|l| l != INITIALIZING) {
+                Some(why) => bail!(
+                    "{} is locked ({}), a hold sluice keeps: git worktree remove: {said}",
+                    path.display(),
+                    match why.is_empty() {
+                        true => "no reason given".to_string(),
+                        false => format!("reason: {why}"),
+                    }
+                ),
+                None => bail!("git worktree remove {}: {said}", path.display()),
+            }
+        }
+        if locked.is_some() {
+            let out = self.git(&["worktree", "prune"])?;
+            if !out.status.success() {
+                bail!(
+                    "git worktree prune: {}",
+                    String::from_utf8_lossy(&out.stderr).trim()
+                );
+            }
         }
         Ok(())
     }
@@ -1634,6 +1739,48 @@ fn on_branch(repo: &gix::Repository, head: &str, worktree: PathBuf) -> Result<Op
     }))
 }
 
+/// Record 0122 (design D3, D4): what `git worktree list --porcelain -z`
+/// says of one worktree: the revision it holds, and the reason git keeps
+/// it locked, empty for a lock given none.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Listed {
+    pub head: Option<Rev>,
+    pub locked: Option<String>,
+}
+
+/// Every worktree `git worktree list --porcelain -z` names, by its folder,
+/// with what it says of each ([`Listed`]).
+pub fn parse_worktree_entries(out: &[u8]) -> Vec<(PathBuf, Listed)> {
+    let mut found = Vec::new();
+    for entry in out
+        .split(|b| *b == 0)
+        .collect::<Vec<_>>()
+        .split(|f| f.is_empty())
+    {
+        let mut at = None;
+        let mut listed = Listed {
+            head: None,
+            locked: None,
+        };
+        for f in entry {
+            let f = String::from_utf8_lossy(f);
+            if let Some(w) = f.strip_prefix("worktree ") {
+                at = Some(PathBuf::from(w));
+            } else if let Some(h) = f.strip_prefix("HEAD ") {
+                listed.head = Some(Rev(h.to_string()));
+            } else if f == "locked" {
+                listed.locked = Some(String::new());
+            } else if let Some(why) = f.strip_prefix("locked ") {
+                listed.locked = Some(why.to_string());
+            }
+        }
+        if let Some(at) = at {
+            found.push((at, listed));
+        }
+    }
+    found
+}
+
 /// The worktrees `git worktree list --porcelain -z` names with a branch
 /// checked out: a bare entry, a detached one and one whose directory is
 /// gone (`prunable`) are left out. What [`Checkout::checked_out`] reads
@@ -1685,6 +1832,10 @@ pub const PREVIEW: &str = "preview/";
 /// What a place's record says made it.
 const METHOD: &str = "git-worktree";
 
+/// Record 0122 (design D4): the reason `git worktree add` locks a checkout
+/// with until it is done.
+const INITIALIZING: &str = "initializing";
+
 /// `[checkout] method`, which a policy need not name, is the one there is
 /// or is refused with the reason (ADR 0013).
 fn one_method(checkout: &Settings) -> Result<()> {
@@ -1711,6 +1862,11 @@ impl Checkout for Places {
         one_method(checkout)?;
         let ports = Ports::read(checkout)?;
         self.remove_saved_caches();
+        // Record 0122 (design D3): a checkout this host made at `rev`, by a
+        // step that stopped before its run started, is the place.
+        if let Some(place) = self.made_at(name, rev)? {
+            return Ok(place);
+        }
         // A place of this name left by a step that stopped part way.
         if self.read_record(name)?.is_some() {
             self.release(name)?;

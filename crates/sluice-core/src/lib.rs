@@ -47,7 +47,7 @@ pub use owed::{
     Collect, ConfirmAs, Confirmation, Confirmations, DeliveryView, Owed, OwedOutcome, OwedView,
     ReaderView,
 };
-pub use step::{Round, Started, Step};
+pub use step::{Round, SignedResult, Started, Step};
 
 /// The `tracing` target of a failure's output, one event per failed task
 /// with the output as its message: telemetry sends it as its level says,

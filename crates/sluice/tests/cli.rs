@@ -144,6 +144,72 @@ fn submit_waits_and_lands() {
     );
 }
 
+/// satisfies: 152, 50, 51; record 0124 (design D10); the refused-landing
+/// spec's "The submitter's notice" and "The submissions behind it", and the
+/// submission-wait spec's "A landing the forge refused": a waiting submit
+/// whose landing the forge refuses while it waits exits 6 with the forge's
+/// words; a wait's document is the submission's record with the refusal;
+/// `sluice status <n>` gives the refused submission's row with the words,
+/// and a submission queued behind it waits behind the held landing
+#[test]
+fn a_landing_the_forge_refused_is_told_with_its_words() {
+    let f = setup();
+    let words = "remote: error: GH013: Repository rule violations found for refs/heads/main.";
+    f.world.forge_refuses(BRANCH, Some(words));
+    work(
+        &f,
+        "unit/touches",
+        "crw-1-unit-1",
+        &[("plugin/lib/plan.py", Some("touched"))],
+    );
+    let (code, out) = sluice(&f, &["submit", BRANCH, "--worktree", "unit/touches"]);
+    assert_eq!(code, sluice::REFUSED, "{out}");
+    assert!(
+        out.contains(&format!("held: the forge refused its landing: {words}")),
+        "{out}"
+    );
+
+    let (code, out) = sluice(&f, &["wait", "1", "--json"]);
+    assert_eq!(code, sluice::REFUSED, "{out}");
+    let doc: serde_json::Value = serde_json::from_str(&out).unwrap();
+    assert_eq!(doc["state"], "refused", "{doc}");
+    assert_eq!(doc["id"], 1, "{doc}");
+    assert_eq!(doc["refused"]["words"], words, "{doc}");
+    assert!(doc["refused"]["at"].is_string(), "{doc}");
+
+    work(
+        &f,
+        "unit/cards",
+        "crw-1-unit-2",
+        &[("tests/t_cards.py", Some("cards 2"))],
+    );
+    let (code, out) = sluice(
+        &f,
+        &["submit", BRANCH, "--worktree", "unit/cards", "--no-wait"],
+    );
+    assert_eq!(code, 0, "{out}");
+    sluice(&f, &["step", BRANCH]);
+    let (code, out) = sluice(&f, &["status", "1"]);
+    assert_eq!(code, 0, "{out}");
+    let row = out
+        .lines()
+        .find(|l| l.trim_start().starts_with("#1 "))
+        .unwrap_or_else(|| panic!("#1's row: {out}"));
+    assert!(
+        row.ends_with(&format!("held: the forge refused its landing: {words}")),
+        "{row}"
+    );
+    let (_, out) = sluice(&f, &["status", "2"]);
+    let row = out
+        .lines()
+        .find(|l| l.trim_start().starts_with("#2 "))
+        .unwrap_or_else(|| panic!("#2's row: {out}"));
+    assert!(
+        row.ends_with("waits behind the landing the forge refused of #1 unit/touches"),
+        "{row}"
+    );
+}
+
 #[test]
 fn submit_fails_and_names_the_combination() {
     let f = setup();
@@ -1410,12 +1476,12 @@ fn status_lists_the_queue() {
             format!("2 no longer in the queue: sluice status {BRANCH} --all"),
             "OWED".to_string(),
             "  unit/batch-review · never confirmed".to_string(),
-            "    2:failed #2  owed until 2026-10-18T09:00:09Z · handed over by notice at \
-             2026-10-11T09:00:15Z"
+            "    2:failed #2  owed until 2026-10-18T09:00:11Z · handed over by notice at \
+             2026-10-11T09:00:18Z"
                 .to_string(),
             "  unit/touches · never confirmed".to_string(),
-            "    1:landed #1  owed until 2026-10-18T09:00:10Z · handed over by notice at \
-             2026-10-11T09:00:16Z"
+            "    1:landed #1  owed until 2026-10-18T09:00:14Z · handed over by notice at \
+             2026-10-11T09:00:19Z"
                 .to_string(),
             "confirm one with: sluice confirm <key>, in its worktree, or sluice confirm <key> \
              --as operator"
@@ -7137,8 +7203,8 @@ fn status_and_overview_show_a_hold_while_it_lasts() {
             // D13 (51; record 0102): #1's landing, which nobody confirmed.
             "OWED".to_string(),
             "  unit/a · never confirmed".to_string(),
-            "    1:landed #1  owed until 2026-10-18T09:00:10Z · handed over by notice at \
-             2026-10-11T09:00:14Z, wait at 2026-10-11T09:00:17Z"
+            "    1:landed #1  owed until 2026-10-18T09:00:13Z · handed over by notice at \
+             2026-10-11T09:00:16Z, wait at 2026-10-11T09:00:19Z"
                 .to_string(),
             "confirm one with: sluice confirm <key>, in its worktree, or sluice confirm <key> \
              --as operator"
@@ -9764,4 +9830,723 @@ fn a_run_handed_over_keeps_following_and_counts_its_passes() {
     assert_eq!(last, Driven::Ended(0));
     assert_eq!(afresh.passes(), 3);
     assert!(afresh.told(), "it says again nothing it said");
+}
+
+/// Record 0119 (design D11): `main` on `origin`, its runs for
+/// `macos-arm64`, which this world's hosts are not, taken by the `forge`
+/// pool on GitHub Actions; `a/` holds `a:test`, tagged `gate`.
+const POOLED: &str = "[tests]\nrunner = \"fake\"\n\n[checkout]\n\n\
+    [branches.main]\nrequired = [\"#gate\"]\nparallel = 4\ntimeout = \"20m\"\n\
+    trust = [\"box\", \"forge\"]\nremote = \"origin\"\nsystems = [\"macos-arm64\"]\n\
+    \n[signers.box]\nssh = \"box ssh-ed25519 AAAA\"\n\
+    \n[signers.forge]\ngithub = { workflow = \".github/workflows/sluice.yml\", ref = \"refs/heads/main\" }\n\
+    \n[pools.forge]\ngithub = { workflow = \".github/workflows/sluice.yml\" }\nsigner = \"forge\"\n\
+    runners = { macos-arm64 = \"macos-15\" }\n\
+    \n[systems]\nlinux-x64 = { os = \"linux\", arch = \"x86_64\" }\n\
+    macos-arm64 = { os = \"macos\", arch = \"aarch64\" }\n";
+
+/// Record 0119 (design D11): a world whose `main` holds `projects`, each
+/// `<p>/lib` with its check `<p>:test`, and one submission changing each,
+/// whose run the lead, host `a` with no room of its own, claimed for the
+/// pool and dispatched; the world's host is then `runner`, the pool's
+/// job's. The claim is answered.
+fn pooled(f: &Fakes, projects: &[&str]) -> String {
+    let libs: Vec<(String, String)> = projects
+        .iter()
+        .map(|p| (format!("{p}/lib"), format!("{p}1")))
+        .collect();
+    let mut files = vec![(POLICY_PATH, POOLED)];
+    files.extend(libs.iter().map(|(p, c)| (p.as_str(), c.as_str())));
+    f.world.init("main", &files);
+    for p in projects {
+        f.world.task(&format!("{p}:test"), &format!("{p}/"));
+    }
+    let changes: Vec<(String, String)> = projects
+        .iter()
+        .map(|p| (format!("{p}/lib"), format!("{p}2")))
+        .collect();
+    let changes: Vec<(&str, Option<&str>)> = changes
+        .iter()
+        .map(|(p, c)| (p.as_str(), Some(c.as_str())))
+        .collect();
+    let head = f.world.work(&f.world.tip("main"), &changes);
+    f.world.session("unit/a", "agent-a", &head);
+    f.world.be_host("a");
+    f.world.signs_as("box");
+    f.world.no_room();
+    let lead = pool_lead(f);
+    lead.submit(&sluice_core::SubmitRequest {
+        head: sluice_core::SubmitHead::Worktree("unit/a".into()),
+        branch: "main".into(),
+        after: Vec::new(),
+        priority: 0,
+        subject: None,
+    })
+    .unwrap()
+    .expect("accepted");
+    lead.step("main").unwrap();
+    let launches = f.world.launches();
+    assert_eq!(launches.len(), 1, "the pool's job dispatched");
+    f.world.be_host("runner");
+    launches[0].claim.clone()
+}
+
+/// Host `a`, which leads `main` and has no room of its own.
+fn pool_lead(f: &Fakes) -> sluice_core::Sluice<'_> {
+    f.sluice().as_peer(sluice_core::Peer {
+        name: "a".into(),
+        lease: Duration::from_secs(300),
+        alive: Duration::from_secs(120),
+        signer: Some("box".into()),
+        systems: None,
+        expire_after: sluice_core::EXPIRE_AFTER,
+    })
+}
+
+/// The runs of `main`'s first combination, as its records hold them.
+fn pooled_runs(f: &Fakes) -> Vec<sluice_core::records::SystemRun> {
+    let snap = f.sluice().seams().state.read("main").unwrap();
+    let doc = sluice_core::line::Line::load("main", snap).unwrap().doc;
+    doc.candidates[0].runs.clone()
+}
+
+/// satisfies: record 0119 (design D11); 82, 88; the actions-pool spec's
+/// "A pool's run job records nothing"
+#[test]
+fn job_run_writes_its_report_and_records_nothing() {
+    let f = Fakes::new();
+    let claim = pooled(&f, &["a"]);
+    // The lead writes the run running from its run job's start, before
+    // the job reads its records (record 0122, design D12).
+    f.world.be_host("a");
+    let since = "2026-11-16T03:00:00Z".to_string();
+    f.world.move_job(
+        &claim,
+        sluice_seams::Job::Running {
+            since: since.clone(),
+        },
+    );
+    pool_lead(&f).step("main").unwrap();
+    f.world.be_host("runner");
+    let runs = pooled_runs(&f);
+    assert_eq!(runs[0].state, sluice_core::records::RunState::Running);
+    assert_eq!(runs[0].running.as_deref(), Some(since.as_str()));
+    let version = f.world.version("main");
+    let results = f.world.results_log();
+    let out = support::Scratch::new("job-run");
+    let dir = out.path().join("sluice-run");
+    let (code, said) = sluice(
+        &f,
+        &[
+            "job",
+            "run",
+            "--claim",
+            &claim,
+            "--branch",
+            "main",
+            "--out",
+            dir.to_str().unwrap(),
+        ],
+    );
+    assert_eq!(code, 0, "{said}");
+    assert!(said.contains("1 passed, 0 failed"), "{said}");
+    let report: sluice_seams::RunReport =
+        serde_json::from_slice(&std::fs::read(dir.join("report.json")).unwrap()).unwrap();
+    assert_eq!(report.tasks.len(), 1);
+    assert_eq!(report.tasks[0].task, "a:test");
+    assert_eq!(report.tasks[0].outcome, Outcome::Pass);
+    let keys = std::fs::read_to_string(dir.join("proof/keys")).unwrap();
+    assert!(keys.starts_with("a:test "), "{keys}");
+    assert_eq!(f.world.version("main"), version, "no state written");
+    assert_eq!(f.world.results_log(), results, "nothing recorded");
+    assert_eq!(pooled_runs(&f), runs, "the run as the lead left it");
+
+    // A claim that holds no run of the branch starts nothing, and says why.
+    let none = out.path().join("none");
+    let (code, said) = sluice(
+        &f,
+        &[
+            "job",
+            "run",
+            "--claim",
+            "pool/forge/99",
+            "--branch",
+            "main",
+            "--out",
+            none.to_str().unwrap(),
+        ],
+    );
+    assert_eq!(code, sluice::INTERNAL, "{said}");
+    let why = std::fs::read_to_string(none.join("why")).unwrap();
+    assert!(
+        why.contains("no run of main waits for its job under pool/forge/99"),
+        "{why}"
+    );
+    assert!(!none.join("report.json").exists());
+}
+
+/// `sluice job run` under `claim` on `main`, its directory under `out`.
+fn job_run(f: &Fakes, claim: &str, out: &std::path::Path) -> std::path::PathBuf {
+    let dir = out.join("sluice-run");
+    let (code, said) = sluice(
+        f,
+        &[
+            "job",
+            "run",
+            "--claim",
+            claim,
+            "--branch",
+            "main",
+            "--out",
+            dir.to_str().unwrap(),
+        ],
+    );
+    assert_eq!(code, 0, "{said}");
+    dir
+}
+
+/// satisfies: record 0119 (design D11); 78, 109; the actions-pool spec's
+/// "The sign job signs only what the combination's tree bears out"
+#[test]
+fn job_sign_signs_only_what_the_tree_bears_out() {
+    let f = Fakes::new();
+    let claim = pooled(&f, &["a", "b"]);
+    let out = support::Scratch::new("job-sign");
+    let ran = job_run(&f, &claim, out.path());
+    let report: sluice_seams::RunReport =
+        serde_json::from_slice(&std::fs::read(ran.join("report.json")).unwrap()).unwrap();
+    let key_of = |task: &str| {
+        report
+            .tasks
+            .iter()
+            .find(|t| t.task == task)
+            .unwrap_or_else(|| panic!("{task} in the report"))
+            .hash
+            .clone()
+    };
+    let (a, _) = (key_of("a:test"), key_of("b:test"));
+    // b:test's key names an input the combination's tree does not hold.
+    f.world.forges("b:test");
+    let starts = f.world.run_starts().len();
+    let version = f.world.version("main");
+    let results = f.world.results_log();
+    let sign = out.path().join("sluice-sign");
+    let (code, said) = sluice(
+        &f,
+        &[
+            "job",
+            "sign",
+            "--claim",
+            &claim,
+            "--branch",
+            "main",
+            "--from",
+            out.path().to_str().unwrap(),
+            "--out",
+            sign.to_str().unwrap(),
+        ],
+    );
+    assert_eq!(code, 0, "{said}");
+    assert!(said.contains("not signed: b:test"), "{said}");
+    assert!(said.contains("signs 1 keys"), "{said}");
+    let subjects = std::fs::read_to_string(sign.join("subjects")).unwrap();
+    assert_eq!(subjects, format!("{a}  a:test@macos-arm64\n"));
+    let run: sluice::signing::statement::Run =
+        serde_json::from_slice(&std::fs::read(sign.join("predicate.json")).unwrap()).unwrap();
+    assert_eq!(run.results.len(), 1);
+    assert_eq!(run.results[0].check, "a:test");
+    assert_eq!(run.claim.as_deref(), Some(claim.as_str()));
+    assert_eq!(run.claims.system, "macos-arm64");
+    assert_eq!(run.combination, pooled_combination(&f));
+    assert_eq!(
+        std::fs::read_to_string(sign.join("predicate-type")).unwrap(),
+        sluice::signing::statement::RUN_PREDICATE
+    );
+    assert_eq!(f.world.run_starts().len(), starts, "nothing of it ran");
+    assert_eq!(f.world.version("main"), version, "no state written");
+    assert_eq!(f.world.results_log(), results, "nothing recorded");
+
+    // Every key refused: no subjects, so nothing is signed.
+    f.world.forges("a:test");
+    let (code, said) = sluice(
+        &f,
+        &[
+            "job",
+            "sign",
+            "--claim",
+            &claim,
+            "--branch",
+            "main",
+            "--from",
+            ran.to_str().unwrap(),
+            "--out",
+            sign.to_str().unwrap(),
+        ],
+    );
+    assert_eq!(code, 0, "{said}");
+    assert!(said.contains("no key the tree bears out"), "{said}");
+    assert!(!sign.join("subjects").exists());
+}
+
+/// The revision of `main`'s first combination.
+fn pooled_combination(f: &Fakes) -> Rev {
+    let snap = f.sluice().seams().state.read("main").unwrap();
+    sluice_core::line::Line::load("main", snap)
+        .unwrap()
+        .doc
+        .candidates[0]
+        .revision
+        .clone()
+}
+
+/// `sluice job sign` under `claim` on `main`, from `from`, into `out`'s
+/// `sluice-sign`; and the bundle `actions/attest` would make of what it
+/// wrote, its signatures aside.
+fn job_sign(f: &Fakes, claim: &str, from: &std::path::Path, out: &std::path::Path) -> String {
+    use base64::Engine as _;
+    let sign = out.join("sluice-sign");
+    let (code, said) = sluice(
+        f,
+        &[
+            "job",
+            "sign",
+            "--claim",
+            claim,
+            "--branch",
+            "main",
+            "--from",
+            from.to_str().unwrap(),
+            "--out",
+            sign.to_str().unwrap(),
+        ],
+    );
+    assert_eq!(code, 0, "{said}");
+    let run: sluice::signing::statement::Run =
+        serde_json::from_slice(&std::fs::read(sign.join("predicate.json")).unwrap()).unwrap();
+    let statement = sluice::signing::statement::Statement::of(run);
+    let payload =
+        base64::engine::general_purpose::STANDARD.encode(serde_json::to_vec(&statement).unwrap());
+    serde_json::json!({
+        "mediaType": "application/vnd.dev.sigstore.bundle.v0.3+json",
+        "dsseEnvelope": {
+            "payloadType": "application/vnd.in-toto+json",
+            "payload": payload,
+            "signatures": [],
+        },
+    })
+    .to_string()
+}
+
+/// `sluice job record` under `claim` on `main`, with `bundle` where given.
+fn job_record(f: &Fakes, claim: &str, bundle: Option<&std::path::Path>) -> (i32, String) {
+    let mut args = vec!["job", "record", "--claim", claim, "--branch", "main"];
+    if let Some(b) = bundle {
+        args.extend(["--bundle", b.to_str().unwrap()]);
+    }
+    sluice(f, &args)
+}
+
+/// satisfies: record 0119 (design D11); 77, 109; the actions-pool spec's
+/// "A record under a lapsed claim is refused"
+#[test]
+fn job_record_under_a_lapsed_claim_is_refused() {
+    use sluice_core::records::{CheckOutcome, RunState};
+    // Under the claim that holds the run: the bundle among the pool's
+    // signer's runs, and the run ended from it and closed in one write.
+    let f = Fakes::new();
+    let claim = pooled(&f, &["a"]);
+    let out = support::Scratch::new("job-record");
+    let ran = job_run(&f, &claim, out.path());
+    let bundle = out.path().join("bundle.json");
+    std::fs::write(&bundle, job_sign(&f, &claim, &ran, out.path())).unwrap();
+    let version = f.world.version("main");
+    let (code, said) = job_record(&f, &claim, Some(&bundle));
+    assert_eq!(code, 0, "{said}");
+    assert_eq!(f.world.version("main"), version + 1, "one write");
+    let adds = f.world.signed_adds();
+    assert_eq!(adds.len(), 1);
+    assert_eq!(adds[0].0, "forge");
+    let combination = pooled_combination(&f);
+    assert!(
+        adds[0]
+            .1
+            .starts_with(&format!("{combination}/macos-arm64/")),
+        "{}",
+        adds[0].1
+    );
+    assert_eq!(adds[0].2, std::fs::read(&bundle).unwrap());
+    let run = pooled_runs(&f)[0].clone();
+    assert_eq!(run.state, RunState::Closed);
+    let ended = run.ended.expect("ended");
+    assert_eq!(
+        ended.outcomes.get("a:test"),
+        Some(&CheckOutcome::Passed),
+        "{ended:?}"
+    );
+
+    // A claim that lapsed: refused, with nothing written.
+    let f = Fakes::new();
+    let claim = pooled(&f, &["a"]);
+    let out = support::Scratch::new("job-record-lapsed");
+    let ran = job_run(&f, &claim, out.path());
+    let bundle = out.path().join("bundle.json");
+    std::fs::write(&bundle, job_sign(&f, &claim, &ran, out.path())).unwrap();
+    f.world.be_host("a");
+    f.world
+        .move_job(&claim, sluice_seams::Job::Ended { recorded: false });
+    pool_lead(&f).step("main").unwrap();
+    f.world.be_host("runner");
+    let lapsed = pooled_runs(&f)[0].clone();
+    assert_eq!(
+        lapsed.state,
+        RunState::Closed,
+        "the lead ended the lapsed claim"
+    );
+    let version = f.world.version("main");
+    let (code, said) = job_record(&f, &claim, Some(&bundle));
+    assert_eq!(code, sluice::FAILED, "{said}");
+    assert!(said.contains("no longer holds a run of main"), "{said}");
+    assert_eq!(f.world.version("main"), version, "nothing written");
+    assert!(f.world.signed_adds().is_empty(), "no bundle added");
+    assert_eq!(pooled_runs(&f)[0], lapsed);
+
+    // With no bundle, after a run job that kept no report: ended with no
+    // outcome, for why the run job gave.
+    let f = Fakes::new();
+    let claim = pooled(&f, &["a"]);
+    let out = support::Scratch::new("job-record-none");
+    let ran = out.path().join("sluice-run");
+    std::fs::create_dir_all(&ran).unwrap();
+    std::fs::write(ran.join("why"), "the runner had no room for the run").unwrap();
+    let (code, said) = sluice(
+        &f,
+        &[
+            "job",
+            "record",
+            "--claim",
+            &claim,
+            "--branch",
+            "main",
+            "--from",
+            out.path().to_str().unwrap(),
+        ],
+    );
+    assert_eq!(code, 0, "{said}");
+    let run = pooled_runs(&f)[0].clone();
+    assert_eq!(run.state, RunState::Closed);
+    assert_eq!(
+        run.ended.unwrap().outcomes["#gate"],
+        CheckOutcome::None {
+            why: "the runner had no room for the run".into()
+        }
+    );
+    assert!(f.world.signed_adds().is_empty());
+}
+
+/// satisfies: record 0119 (design D7, D11); 78, 109; the actions-pool
+/// spec's "A key the tree does not bear out": on a branch whose gate is a
+/// tag, a check of the run job's report that `sluice job sign` left out is
+/// left without a result when the run ends, and its follow-up holds it,
+/// never read as passed under the tag
+#[test]
+fn job_record_leaves_a_key_the_tree_does_not_bear_out_without_a_result() {
+    use sluice_core::records::{CandidateState, CheckOutcome, RunState};
+    let f = Fakes::new();
+    let claim = pooled(&f, &["a", "b"]);
+    let out = support::Scratch::new("job-record-left-out");
+    let ran = job_run(&f, &claim, out.path());
+    // b:test's key names an input the combination's tree does not hold.
+    f.world.forges("b:test");
+    let bundle = out.path().join("bundle.json");
+    std::fs::write(&bundle, job_sign(&f, &claim, &ran, out.path())).unwrap();
+    let (code, said) = sluice(
+        &f,
+        &[
+            "job",
+            "record",
+            "--claim",
+            &claim,
+            "--branch",
+            "main",
+            "--bundle",
+            bundle.to_str().unwrap(),
+            "--from",
+            ran.to_str().unwrap(),
+        ],
+    );
+    assert_eq!(code, 0, "{said}");
+    assert!(said.contains("left without a result: b:test"), "{said}");
+    let run = pooled_runs(&f)[0].clone();
+    assert_eq!(run.state, RunState::Closed);
+    let ended = run.ended.expect("ended");
+    assert_eq!(ended.outcomes.get("a:test"), Some(&CheckOutcome::Passed));
+    assert_eq!(
+        ended.outcomes.get("b:test"),
+        Some(&CheckOutcome::None {
+            why: "b:test: its record names an input the tree does not hold".into()
+        }),
+        "{ended:?}"
+    );
+
+    // The lead reads the run undecided: its follow-up holds b:test alone,
+    // and the combination is not passed.
+    f.world.be_host("a");
+    pool_lead(&f).step("main").unwrap();
+    let runs = pooled_runs(&f);
+    let follow = runs
+        .iter()
+        .find(|r| r.follows == Some(0))
+        .expect("a follow-up of the run");
+    assert_eq!(follow.checks, ["b:test".to_string()]);
+    let snap = f.sluice().seams().state.read("main").unwrap();
+    let doc = sluice_core::line::Line::load("main", snap).unwrap().doc;
+    assert_ne!(doc.candidates[0].state, CandidateState::Passed);
+}
+
+/// A working copy holding `policy` as its policy, for `sluice init`.
+fn copy_with(policy: &str) -> support::Scratch {
+    let dir = support::Scratch::new("init-actions");
+    std::fs::create_dir_all(dir.path().join(".config")).unwrap();
+    std::fs::write(dir.path().join(POLICY_PATH), policy).unwrap();
+    dir
+}
+
+/// `sluice init actions` in `dir`, `--force` where asked.
+fn init_actions(f: &Fakes, dir: &std::path::Path, force: bool) -> (i32, String) {
+    let mut args = vec!["init", "actions", "--worktree", dir.to_str().unwrap()];
+    if force {
+        args.push("--force");
+    }
+    sluice(f, &args)
+}
+
+const INIT_POLICY: &str = "[tests]\nrunner = \"moon\"\n\n# The queue's gate.\n\
+    [branches.main]\nrequired = [\"#gate\"]\nremote = \"origin\"\n";
+
+/// satisfies: record 0119 (design D14); C.8; the actions-pool spec's
+/// "sluice init actions sets the pool up"
+#[test]
+fn init_actions_writes_both_workflows_and_the_pool() {
+    use sluice::profiles::github::workflows;
+    let f = setup();
+    let dir = copy_with(INIT_POLICY);
+    let (code, said) = init_actions(&f, dir.path(), false);
+    assert_eq!(code, 0, "{said}");
+    let read = |name: &str| {
+        std::fs::read_to_string(dir.path().join(".github/workflows").join(name)).unwrap()
+    };
+    let runners =
+        std::collections::BTreeMap::from([("linux-x64".to_string(), "ubuntu-24.04".to_string())]);
+    assert_eq!(
+        read("sluice.yml"),
+        workflows::sluice(sluice::VERSION, &runners)
+    );
+    assert_eq!(
+        read("sluice-pr.yml"),
+        workflows::sluice_pr(sluice::VERSION, &runners)
+    );
+    let policy = std::fs::read_to_string(dir.path().join(POLICY_PATH)).unwrap();
+    assert!(
+        policy.starts_with(INIT_POLICY),
+        "the file's own lines untouched: {policy}"
+    );
+    let p = sluice_core::policy::Policy::parse(&policy).expect("the policy parses");
+    assert_eq!(p.pools.len(), 1);
+    assert_eq!(p.pools[0].name, "forge");
+    assert_eq!(p.pools[0].signer, "forge");
+    assert_eq!(p.pools[0].runners, runners);
+    assert!(p.signers.contains_key("forge"));
+    assert!(said.contains("Actions, read and write"), "{said}");
+    assert!(said.contains("environment named `sluice`"), "{said}");
+
+    assert!(said.contains("[systems], naming linux-x64,"), "{said}");
+
+    // Again: nothing changes.
+    let (code, said) = init_actions(&f, dir.path(), false);
+    assert_eq!(code, 0, "{said}");
+    assert!(said.contains("sluice.yml: as sluice writes it"), "{said}");
+    assert!(said.contains("names its pool on GitHub already"), "{said}");
+    assert_eq!(
+        std::fs::read_to_string(dir.path().join(POLICY_PATH)).unwrap(),
+        policy
+    );
+
+    // A policy naming linux-x64 and macos-arm64, and a system GitHub hosts
+    // no runner for: a runner for each it hosts, the other named, and the
+    // signer's workflow on main, where it runs from.
+    let systems = format!(
+        "{INIT_POLICY}\n[systems]\nlinux-x64 = {{ os = \"linux\", arch = \"x86_64\" }}\n\
+         macos-arm64 = {{ os = \"macos\", arch = \"aarch64\" }}\n\
+         riscv = {{ os = \"linux\", arch = \"riscv64\" }}\n"
+    );
+    let dir = copy_with(&systems);
+    let (code, said) = init_actions(&f, dir.path(), false);
+    assert_eq!(code, 0, "{said}");
+    let policy = std::fs::read_to_string(dir.path().join(POLICY_PATH)).unwrap();
+    assert!(policy.starts_with(&systems), "{policy}");
+    assert_eq!(policy.matches("[systems]").count(), 1, "{policy}");
+    assert!(
+        policy.contains(
+            "[signers.forge]\ngithub = { workflow = \".github/workflows/sluice.yml\", ref = \
+             \"refs/heads/main\" }\n"
+        ),
+        "{policy}"
+    );
+    let p = sluice_core::policy::Policy::parse(&policy).expect("the policy parses");
+    assert_eq!(
+        p.pools[0].runners,
+        std::collections::BTreeMap::from([
+            ("linux-x64".to_string(), "ubuntu-24.04".to_string()),
+            ("macos-arm64".to_string(), "macos-15".to_string()),
+        ])
+    );
+    assert!(
+        said.contains("GitHub hosts no runner for riscv (linux riscv64)"),
+        "{said}"
+    );
+    assert!(!said.contains("[systems], naming"), "{said}");
+}
+
+/// satisfies: record 0119 (design D14); the actions-pool spec's "A
+/// workflow that differs is left unless forced"
+#[test]
+fn init_actions_leaves_a_differing_workflow_unless_forced() {
+    use sluice::profiles::github::workflows;
+    let f = setup();
+    let dir = copy_with(INIT_POLICY);
+    let at = dir.path().join(".github/workflows");
+    std::fs::create_dir_all(&at).unwrap();
+    let runners =
+        std::collections::BTreeMap::from([("linux-x64".to_string(), "ubuntu-24.04".to_string())]);
+    let edited =
+        workflows::sluice(sluice::VERSION, &runners).replace("name: sluice\n", "name: ours\n");
+    std::fs::write(at.join("sluice.yml"), &edited).unwrap();
+    let (code, said) = init_actions(&f, dir.path(), false);
+    assert_eq!(code, FAILED, "{said}");
+    assert!(
+        said.contains("sluice.yml: left as it is; line 8 holds \"name: ours\", where sluice writes \"name: sluice\"; --force writes it"),
+        "{said}"
+    );
+    assert_eq!(
+        std::fs::read_to_string(at.join("sluice.yml")).unwrap(),
+        edited
+    );
+    assert!(at.join("sluice-pr.yml").exists(), "the other is written");
+
+    let (code, said) = init_actions(&f, dir.path(), true);
+    assert_eq!(code, 0, "{said}");
+    assert_eq!(
+        std::fs::read_to_string(at.join("sluice.yml")).unwrap(),
+        workflows::sluice(sluice::VERSION, &runners)
+    );
+}
+
+/// satisfies: record 0119 (design D14); the actions-pool spec's "A pool the
+/// policy names is kept"
+#[test]
+fn init_actions_keeps_a_pool_the_policy_names() {
+    let f = setup();
+    let policy = format!(
+        "{INIT_POLICY}\n[systems]\nmacos-arm64 = {{ os = \"macos\", arch = \"aarch64\" }}\n\
+         \n[signers.ci]\ngithub = {{ workflow = \".github/workflows/sluice.yml\", ref = \"refs/heads/main\" }}\n\
+         \n[pools.ci]\ngithub = {{ workflow = \".github/workflows/sluice.yml\" }}\nsigner = \"ci\"\n\
+         runners = {{ macos-arm64 = \"macos-15-large\" }}\n"
+    );
+    let dir = copy_with(&policy);
+    let (code, said) = init_actions(&f, dir.path(), false);
+    assert_eq!(code, 0, "{said}");
+    assert_eq!(
+        std::fs::read_to_string(dir.path().join(POLICY_PATH)).unwrap(),
+        policy,
+        "the policy as it was"
+    );
+    let pr = std::fs::read_to_string(dir.path().join(".github/workflows/sluice-pr.yml")).unwrap();
+    assert!(
+        pr.contains("include: [{system: macos-arm64, runner: macos-15-large}]"),
+        "{pr}"
+    );
+}
+
+/// satisfies: 113, 15; record 0119 (design D11): a pull request's head
+/// run, run and signed with no claim, has its bundle added among the
+/// pool's signer's runs, and no state is written.
+#[test]
+fn job_record_of_a_head_adds_its_bundle_with_no_claim() {
+    use base64::Engine as _;
+    let f = Fakes::new();
+    pooled(&f, &["a"]);
+    let head = f.world.tip("main");
+    let out = support::Scratch::new("job-head");
+    let ran = out.path().join("sluice-run");
+    let sign = out.path().join("sluice-sign");
+    let version = f.world.version("main");
+    for args in [
+        vec![
+            "job",
+            "run",
+            "--head",
+            head.as_str(),
+            "--branch",
+            "main",
+            "--system",
+            "macos-arm64",
+            "--out",
+            ran.to_str().unwrap(),
+        ],
+        vec![
+            "job",
+            "sign",
+            "--head",
+            head.as_str(),
+            "--branch",
+            "main",
+            "--system",
+            "macos-arm64",
+            "--from",
+            ran.to_str().unwrap(),
+            "--out",
+            sign.to_str().unwrap(),
+        ],
+    ] {
+        let (code, said) = sluice(&f, &args);
+        assert_eq!(code, 0, "{said}");
+    }
+    let run: sluice::signing::statement::Run =
+        serde_json::from_slice(&std::fs::read(sign.join("predicate.json")).unwrap()).unwrap();
+    assert_eq!(run.claim, None);
+    assert_eq!(run.combination, head);
+    let payload = base64::engine::general_purpose::STANDARD
+        .encode(serde_json::to_vec(&sluice::signing::statement::Statement::of(run)).unwrap());
+    let bundle = out.path().join("bundle.json");
+    std::fs::write(
+        &bundle,
+        serde_json::json!({
+            "dsseEnvelope": { "payloadType": "application/vnd.in-toto+json", "payload": payload, "signatures": [] },
+        })
+        .to_string(),
+    )
+    .unwrap();
+    let (code, said) = sluice(
+        &f,
+        &[
+            "job",
+            "record",
+            "--head",
+            head.as_str(),
+            "--branch",
+            "main",
+            "--bundle",
+            bundle.to_str().unwrap(),
+        ],
+    );
+    assert_eq!(code, 0, "{said}");
+    let adds = f.world.signed_adds();
+    assert_eq!(adds.len(), 1);
+    assert_eq!(adds[0].0, "forge");
+    assert!(
+        adds[0].1.starts_with(&format!("{head}/macos-arm64/")),
+        "{}",
+        adds[0].1
+    );
+    assert_eq!(f.world.version("main"), version, "no state written");
 }

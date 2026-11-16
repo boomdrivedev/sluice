@@ -108,6 +108,10 @@ pub enum State {
     Passed,
     /// Its landing is written and the branch is being moved.
     Landing,
+    /// 152, record 0124 (design D10): its landing the forge refused, with
+    /// the branch where the landing expected it: held, its submitter's to
+    /// withdraw or replace, and pushed again only on the operator's word.
+    Refused,
     Landed,
     /// Blamed for a failure (17).
     Failed,
@@ -137,6 +141,7 @@ impl State {
             State::Testing => "testing",
             State::Passed => "passed",
             State::Landing => "landing",
+            State::Refused => "refused",
             State::Landed => "landed",
             State::Failed => "failed",
             State::Conflict => "conflict",
@@ -441,34 +446,42 @@ pub struct Held {
 // The branch's own state
 // ---------------------------------------------------------------------------
 
-/// A candidate's state: its lifecycle from formed to a verdict.
+/// A candidate's state: its lifecycle from formed to a verdict. Its runs
+/// carry where each of them is, claimed among them (record 0122; design
+/// D1).
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum CandidateState {
     /// Formed and not started.
     Formed,
-    /// Its place and run are decided and not yet confirmed started.
-    Starting,
     Testing,
     Passed,
     Failed,
     TimedOut,
+    /// 66, 87, record 0122 (design D6): a run of it no live executor may
+    /// take ended at the time limit with no outcome: a verdict with no
+    /// culprit, no check failed and nothing counted toward 115.
+    NotPassed,
 }
 
 impl CandidateState {
     pub fn has_verdict(self) -> bool {
         matches!(
             self,
-            CandidateState::Passed | CandidateState::Failed | CandidateState::TimedOut
+            CandidateState::Passed
+                | CandidateState::Failed
+                | CandidateState::TimedOut
+                | CandidateState::NotPassed
         )
     }
 
+    /// A verdict that blames its newest submission (17).
     pub fn failed(self) -> bool {
         matches!(self, CandidateState::Failed | CandidateState::TimedOut)
     }
 
     pub fn under_test(self) -> bool {
-        matches!(self, CandidateState::Starting | CandidateState::Testing)
+        self == CandidateState::Testing
     }
 
     /// Fixes the order of its submissions: under test or judged (6).
@@ -488,12 +501,10 @@ pub struct SystemRun {
     /// The checks it runs.
     pub checks: Vec<String>,
     pub state: RunState,
-    /// 75: the instance whose claim holds it, on a branch whose records
-    /// are on its remote; `None` on a branch kept in one host's files.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub host: Option<String>,
+    /// Named at its claim, on the host that claimed it (design D1).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub place: Option<String>,
+    /// The handle of its started checks, named at `running` (design D1).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub run: Option<RunHandle>,
     /// 108: started again with no replay, after a replay no trusted pass
@@ -512,6 +523,123 @@ pub struct SystemRun {
     /// records written before it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub lost: Option<LostRun>,
+    /// Record 0122 (design D1): when it was opened; a status reads an open
+    /// run as waiting since then.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub opened: Option<String>,
+    /// Record 0122 (design D1, D2; 75): the instance, or `pool/<pool>/<n>`,
+    /// whose claim holds it, and when it claimed; on a branch kept in one
+    /// host's files, `None`, its lead every claim holder.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub claim: Option<Claim>,
+    /// Record 0122 (design D1, D3, D6): the run's own start, read from the
+    /// supervisor's proof or a pool's run job; its time limit counts from
+    /// here.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub running: Option<String>,
+    /// Record 0122 (design D1, D9): its report, each given check's outcome;
+    /// once written, never written again.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ended: Option<Ended>,
+    /// Record 0122 (design D1): when nothing of it was left to do, its
+    /// checkout released.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub closed: Option<String>,
+    /// Record 0122 (design D7): the run of the same combination it follows
+    /// up, by its index, holding only the checks that run left undecided.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub follows: Option<usize>,
+    /// Record 0122 (design D6; 26): while it is open, the lead's last
+    /// reading found no live executor that may take it, so a status reads
+    /// it as waiting for a host of its system rather than for room; `false`
+    /// once one may, and in records written before it.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub no_executor: bool,
+}
+
+impl SystemRun {
+    /// 75: the instance, or pool's job, whose claim holds it; `None` where
+    /// no claim does.
+    pub fn holder(&self) -> Option<&str> {
+        self.claim.as_ref().map(|c| c.by.as_str())
+    }
+}
+
+/// Record 0122 (design D1, D2; 75): who holds a run, an instance or a
+/// pool's job `pool/<pool>/<n>`, and when it claimed.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Claim {
+    pub by: String,
+    pub at: String,
+    /// 88, 134, record 0122 (design D3, D12): for a pool's claim, when its
+    /// job was dispatched, or found dispatched, after the claim was
+    /// written; a dispatch is never sent twice under one claim.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub dispatched: Option<String>,
+}
+
+impl Claim {
+    pub fn new(by: &str, at: &str) -> Claim {
+        Claim {
+            by: by.into(),
+            at: at.into(),
+            dispatched: None,
+        }
+    }
+}
+
+/// Record 0122 (design D1, D7, D8): a run's end: when, each check it was
+/// given with its outcome, whether its time limit ended it, and, for a run
+/// that ended with nothing run, why (a lapsed claim, a run no executor
+/// took).
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Ended {
+    pub at: String,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub outcomes: BTreeMap<String, CheckOutcome>,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub timed_out: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub why: Option<String>,
+    /// 66, 87, record 0122 (design D6): ended at the time limit with no
+    /// live executor that may take it, nothing of it run: its combination
+    /// is not passed and nobody is blamed.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub untaken: bool,
+}
+
+/// Record 0122 (design D1, D7, D8; 60, 108, 114): one check's outcome in a
+/// run's end: passed, failed, a replay no counted pass proved, or none,
+/// with why.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum CheckOutcome {
+    Passed,
+    Failed,
+    Unproven,
+    None { why: String },
+}
+
+/// What a run's end reads as for its combination (86, 15).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum RunVerdict {
+    Passed,
+    Failed,
+    TimedOut,
+}
+
+impl Ended {
+    /// 66, 86, 15: its time limit ended it, a check failed, or every check
+    /// it was given passed; a check left undecided is no pass.
+    pub fn verdict(&self) -> RunVerdict {
+        if self.timed_out {
+            RunVerdict::TimedOut
+        } else if self.outcomes.values().all(|o| *o == CheckOutcome::Passed) {
+            RunVerdict::Passed
+        } else {
+            RunVerdict::Failed
+        }
+    }
 }
 
 /// 114, record 0105 (design D7): a run that left checks not run and
@@ -525,31 +653,32 @@ pub struct LostRun {
     pub not_run: Vec<NotRun>,
 }
 
-/// A run's state, from open to its own verdict.
+/// Record 0122 (design D1): a run's state, written in its branch's home,
+/// moving only forward.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum RunState {
-    /// Waiting for an executor of its system (87).
+    /// Waiting for an executor of its system (87), or for room.
     Open,
-    /// Its place is decided here and its run not yet confirmed started.
-    Starting,
-    Testing,
-    Passed,
-    Failed,
-    TimedOut,
+    /// Held by one claim, its checkout named.
+    Claimed,
+    /// Its checks started, since `running`.
+    Running,
+    /// Holding its report, under `ended`.
+    Ended,
+    /// Nothing of it left to do.
+    Closed,
 }
 
 impl RunState {
+    /// Its report is written: ended or closed.
     pub fn done(self) -> bool {
-        matches!(
-            self,
-            RunState::Passed | RunState::Failed | RunState::TimedOut
-        )
+        matches!(self, RunState::Ended | RunState::Closed)
     }
 
-    /// Holding a place on this host.
+    /// Holding a place on the host whose claim holds it.
     pub fn held(self) -> bool {
-        matches!(self, RunState::Starting | RunState::Testing)
+        matches!(self, RunState::Claimed | RunState::Running)
     }
 }
 
@@ -640,19 +769,22 @@ impl From<CandidateForm> for Candidate {
                 system: None,
                 checks: Vec::new(),
                 state: match f.state {
-                    CandidateState::Starting => RunState::Starting,
-                    CandidateState::Testing => RunState::Testing,
-                    CandidateState::Passed => RunState::Passed,
-                    CandidateState::Failed => RunState::Failed,
-                    CandidateState::TimedOut => RunState::TimedOut,
+                    CandidateState::Testing => RunState::Running,
                     CandidateState::Formed => RunState::Open,
+                    _ => RunState::Closed,
                 },
                 place: f.place,
                 run: f.run,
                 no_replay: false,
-                host: None,
                 declined: BTreeMap::new(),
                 lost: None,
+                opened: None,
+                claim: None,
+                running: None,
+                ended: None,
+                closed: None,
+                follows: None,
+                no_executor: false,
             });
         }
         Candidate {
@@ -696,6 +828,7 @@ impl Candidate {
         match self.state {
             CandidateState::Passed => "passed",
             CandidateState::TimedOut => "timed out",
+            CandidateState::NotPassed => "not passed",
             _ => "failed",
         }
     }
@@ -728,6 +861,19 @@ pub struct LandingIntent {
     /// unset (record 0083).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub covering: Option<CoveringVerdict>,
+    /// 152, rule core.5, record 0124 (design D10): the forge refused it,
+    /// the branch where it expected it: the forge's words and when. A
+    /// landing so refused is held, never pushed again by itself.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub refused: Option<LandingRefused>,
+}
+
+/// 152, record 0124 (design D10): a landing's refusal by the forge: its
+/// words, whole, and when.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LandingRefused {
+    pub words: String,
+    pub at: String,
 }
 
 /// An outcome decided and not yet pushed to its session (50, 51).
@@ -768,6 +914,8 @@ pub enum DecidedRecord {
         paths: Vec<String>,
         with: Vec<Contested>,
     },
+    /// 152, record 0124 (design D10): the forge refused its landing.
+    Refused { words: String },
 }
 
 impl DecidedRecord {
@@ -796,6 +944,7 @@ impl DecidedRecord {
                 logs,
             },
             DecidedRecord::Conflict { paths, with } => Decided::Conflict { paths, with },
+            DecidedRecord::Refused { words } => Decided::Refused { words },
         }
     }
 
@@ -804,6 +953,7 @@ impl DecidedRecord {
             DecidedRecord::Landed { .. } => "landed",
             DecidedRecord::Failed { .. } => "failed",
             DecidedRecord::Conflict { .. } => "conflict",
+            DecidedRecord::Refused { .. } => "refused",
         }
     }
 }
@@ -1218,6 +1368,45 @@ pub enum Event {
         /// dispatched: the forge's words saying its answer was not read.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         unanswered: Option<String>,
+    },
+    /// Record 0122 (design D1): a combination's run `run`, by its index,
+    /// opened.
+    Opened {
+        combination: Rev,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        system: Option<String>,
+        run: usize,
+    },
+    /// Record 0122 (design D1, D3): run `run` written running, from its own
+    /// start.
+    Running {
+        combination: Rev,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        system: Option<String>,
+        run: usize,
+    },
+    /// Record 0122 (design D1, D7): run `run` written ended; `why` where it
+    /// ended with checks undecided or nothing run, its cause.
+    Ended {
+        combination: Rev,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        system: Option<String>,
+        run: usize,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        why: Option<String>,
+    },
+    /// Record 0122 (design D1): run `run` written closed.
+    Closed {
+        combination: Rev,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        system: Option<String>,
+        run: usize,
+    },
+    /// 152, record 0124 (design D10): the forge refused the landing of
+    /// `ids` with the branch where it expected it, in the forge's words.
+    ForgeRefused {
+        ids: Vec<u64>,
+        words: String,
     },
     /// 77: a claim whose host showed no sign of life for the bound: its
     /// run has no outcome and is open again.
@@ -2802,6 +2991,149 @@ mod tests {
         let written = serde_json::to_string(&new).unwrap();
         assert!(written.ends_with(r#""handed_over_to":"b"}"#), "{written}");
         assert_eq!(serde_json::from_str::<LogLine>(&written).unwrap(), new);
+    }
+
+    /// Record 0122 (design D1): a run with every field of its life reads as
+    /// written and writes back the same, each outcome in its word and none
+    /// with why; a run with none of them writes none; and the log's
+    /// `opened`, `running`, `ended`, `closed` and `forge_refused` lines
+    /// round-trip, each written only where it holds a value.
+    #[test]
+    fn a_runs_life_reads_as_written() {
+        let written = r#"{
+  "system": "macos-arm64",
+  "checks": [
+    "a:test",
+    "b:test",
+    "c:test",
+    "d:test"
+  ],
+  "state": "open",
+  "place": "sluice/try/main/3",
+  "run": "r3",
+  "opened": "2026-11-16T09:00:00Z",
+  "claim": {
+    "by": "box",
+    "at": "2026-11-16T09:01:00Z"
+  },
+  "running": "2026-11-16T09:02:00Z",
+  "ended": {
+    "at": "2026-11-16T09:10:00Z",
+    "outcomes": {
+      "a:test": "passed",
+      "b:test": "failed",
+      "c:test": "unproven",
+      "d:test": {
+        "none": {
+          "why": "the run's report holds no outcome for it"
+        }
+      }
+    },
+    "timed_out": true,
+    "why": "a check had no outcome"
+  },
+  "closed": "2026-11-16T09:11:00Z",
+  "follows": 0
+}"#;
+        let run: SystemRun = serde_json::from_str(written).unwrap();
+        assert_eq!(run.opened.as_deref(), Some("2026-11-16T09:00:00Z"));
+        assert_eq!(run.claim, Some(Claim::new("box", "2026-11-16T09:01:00Z")));
+        assert_eq!(run.running.as_deref(), Some("2026-11-16T09:02:00Z"));
+        let ended = run.ended.as_ref().expect("ended");
+        assert_eq!(ended.outcomes["a:test"], CheckOutcome::Passed);
+        assert_eq!(ended.outcomes["b:test"], CheckOutcome::Failed);
+        assert_eq!(ended.outcomes["c:test"], CheckOutcome::Unproven);
+        assert_eq!(
+            ended.outcomes["d:test"],
+            CheckOutcome::None {
+                why: "the run's report holds no outcome for it".into()
+            }
+        );
+        assert!(ended.timed_out);
+        assert_eq!(run.closed.as_deref(), Some("2026-11-16T09:11:00Z"));
+        assert_eq!(run.follows, Some(0));
+        assert_eq!(serde_json::to_string_pretty(&run).unwrap(), written);
+
+        let bare = r#"{"checks":["a:test"],"state":"open"}"#;
+        let run: SystemRun = serde_json::from_str(bare).unwrap();
+        assert_eq!(
+            (
+                &run.opened,
+                &run.claim,
+                &run.running,
+                &run.ended,
+                &run.closed,
+                run.follows
+            ),
+            (&None, &None, &None, &None, &None, None)
+        );
+        assert_eq!(serde_json::to_string(&run).unwrap(), bare);
+        let ended = r#"{"at":"t"}"#;
+        let e: Ended = serde_json::from_str(ended).unwrap();
+        assert!(e.outcomes.is_empty() && !e.timed_out && e.why.is_none());
+        assert_eq!(serde_json::to_string(&e).unwrap(), ended);
+
+        let combination = Rev::new("c1");
+        let lines = [
+            (
+                Event::Opened {
+                    combination: combination.clone(),
+                    system: Some("linux-x64".into()),
+                    run: 0,
+                },
+                r#"{"schema":"sluice/log@1","at":"t","event":"opened","combination":"c1","system":"linux-x64","run":0}"#,
+            ),
+            (
+                Event::Running {
+                    combination: combination.clone(),
+                    system: None,
+                    run: 1,
+                },
+                r#"{"schema":"sluice/log@1","at":"t","event":"running","combination":"c1","run":1}"#,
+            ),
+            (
+                Event::Ended {
+                    combination: combination.clone(),
+                    system: None,
+                    run: 1,
+                    why: Some("box's claim lapsed".into()),
+                },
+                r#"{"schema":"sluice/log@1","at":"t","event":"ended","combination":"c1","run":1,"why":"box's claim lapsed"}"#,
+            ),
+            (
+                Event::Ended {
+                    combination: combination.clone(),
+                    system: None,
+                    run: 0,
+                    why: None,
+                },
+                r#"{"schema":"sluice/log@1","at":"t","event":"ended","combination":"c1","run":0}"#,
+            ),
+            (
+                Event::Closed {
+                    combination: combination.clone(),
+                    system: None,
+                    run: 0,
+                },
+                r#"{"schema":"sluice/log@1","at":"t","event":"closed","combination":"c1","run":0}"#,
+            ),
+            (
+                Event::ForgeRefused {
+                    ids: vec![4, 5],
+                    words: "remote: push declined due to repository rule violations".into(),
+                },
+                r#"{"schema":"sluice/log@1","at":"t","event":"forge_refused","ids":[4,5],"words":"remote: push declined due to repository rule violations"}"#,
+            ),
+        ];
+        for (event, json) in lines {
+            let line = LogLine {
+                schema: LOG_SCHEMA.into(),
+                at: "t".into(),
+                event,
+            };
+            assert_eq!(serde_json::to_string(&line).unwrap(), json);
+            assert_eq!(serde_json::from_str::<LogLine>(json).unwrap(), line);
+        }
     }
 
     /// A flaky failure recorded before its times and hosts reads with

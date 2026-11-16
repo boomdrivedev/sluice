@@ -441,6 +441,9 @@ pub struct Status {
     /// Record 0122 (design D11): where its queue lives, and its move while
     /// one is written; `None` for records with no home yet.
     pub home: Option<crate::overview::HomeView>,
+    /// 152, record 0124 (design D10): the branch's landing the forge
+    /// refused, held: its submissions and the forge's refusal.
+    pub landing_refused: Option<(Vec<u64>, crate::records::LandingRefused)>,
 }
 
 /// 133: what this host's rounds of a branch could not read of its remote,
@@ -685,6 +688,10 @@ impl Sluice<'_> {
                 let subject = req.subjects.get(k).cloned();
                 accepted.push(admit(l, req, id, act, session, head, subject, &now));
             }
+            // 152, 24, 67 (record 0124, design D10; rule core.48): a held
+            // landing whose submission a later one from its place withdrew
+            // goes with it, so nothing pushes it.
+            l.drop_left_landing();
             Ok(accepted)
         })?;
         let accepted = accepted
@@ -1217,6 +1224,9 @@ impl Sluice<'_> {
                     handed_over_to: None,
                 },
             );
+            // 152, 24 (record 0124, design D10; rule core.48): a held
+            // landing it was of goes with it, so nothing pushes it.
+            l.drop_left_landing();
             Ok(Ok(Withdrew::Now))
         })
     }
@@ -1512,6 +1522,17 @@ impl Sluice<'_> {
     /// the driver's next pass (66; design D4).
     pub fn in_play(&self, branch: &str) -> Result<bool> {
         let line = Line::load(branch, self.seams.state.read_held(branch)?)?;
+        // 152, record 0124 (design D10): a landing the forge refused holds
+        // the branch until a submitter or the operator acts: nothing of it
+        // is in play but its places to release.
+        if line
+            .doc
+            .landing
+            .as_ref()
+            .is_some_and(|l| l.refused.is_some())
+        {
+            return Ok(!line.doc.release.is_empty());
+        }
         Ok(line.subs.values().any(|s| !s.state.is_out())
             || line.doc.candidates.iter().any(|c| c.state.under_test())
             || !line.doc.release.is_empty())
@@ -1610,6 +1631,11 @@ impl Sluice<'_> {
             window: line.doc.window,
             parallel,
             held: line.doc.held.clone(),
+            landing_refused: line
+                .doc
+                .landing
+                .as_ref()
+                .and_then(|l| Some((l.ids.clone(), l.refused.clone()?))),
             copy: line.doc.copies.get(&self.peer.name).cloned(),
             finished: line.finished.len(),
             named: line
@@ -2190,6 +2216,10 @@ mod tests {
         }
 
         fn progress(&self, _: &RunHandle) -> Result<Progress> {
+            unreachable!("a submit runs nothing")
+        }
+
+        fn found(&self, _: &str) -> Result<Option<sluice_seams::Found>> {
             unreachable!("a submit runs nothing")
         }
 

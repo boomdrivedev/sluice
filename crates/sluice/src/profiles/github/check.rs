@@ -216,3 +216,150 @@ fn ruleset(app: u64, branch: &str, r: &Value) -> Finding {
     }
     ok(format!("{name} on {branch} lets only app {app} through"))
 }
+
+/// Record 0119 (design D14): `sluice forge check` for a policy naming
+/// `pool` on GitHub Actions, its signer's table `signer`: the pool's
+/// workflow on the signer's branch as `sluice init actions` writes it,
+/// `wants`; the app's permission to run workflows; the `sluice`
+/// environment, which only the signer's branch may deploy from; and the
+/// signer verifying the pool's workflow at its ref.
+pub fn pool(
+    app: &App,
+    repo: &Repo,
+    pool: &sluice_core::policy::Pool,
+    signer: Option<&(String, sluice_seams::Setting)>,
+    wants: &str,
+) -> Vec<Finding> {
+    use super::actions::{branch_of, field};
+    let mut found = Vec::new();
+    let workflow = match field(&pool.kind, "workflow") {
+        Ok(w) => w,
+        Err(e) => {
+            found.push(failed(format!("[pools.{}] {e:#}", pool.name)));
+            return found;
+        }
+    };
+    let git_ref = match signer.map(|s| (field(s, "workflow"), field(s, "ref"))) {
+        None => {
+            found.push(failed(format!(
+                "[pools.{}] names the signer {}, which [signers] does not name",
+                pool.name, pool.signer
+            )));
+            return found;
+        }
+        Some((Ok(w), Ok(r))) if w == workflow => {
+            found.push(ok(format!(
+                "the signer {} verifies {workflow} at {r}",
+                pool.signer
+            )));
+            r
+        }
+        Some((Ok(w), Ok(_))) => {
+            found.push(failed(format!(
+                "the signer {} verifies {w}, not the pool's {workflow}: name the same workflow",
+                pool.signer
+            )));
+            return found;
+        }
+        Some((w, r)) => {
+            let e = w.err().or(r.err()).expect("one failed");
+            found.push(failed(format!(
+                "[signers.{}] {e:#}: name the workflow and the ref it runs from",
+                pool.signer
+            )));
+            return found;
+        }
+    };
+    let branch = branch_of(&git_ref);
+    let path = format!(
+        "/repos/{}/{}/contents/{workflow}?ref={branch}",
+        repo.owner, repo.name
+    );
+    found.push(match app.get_found(&path, Bearer::Repo(repo)) {
+        Ok(None) => failed(format!(
+            "{branch} holds no {workflow}: sluice init actions writes it, to land on {branch}"
+        )),
+        Ok(Some(v)) => match content_of(&v) {
+            Some(had) if had == wants => ok(format!(
+                "{workflow} on {branch} is as sluice init actions writes it"
+            )),
+            Some(_) => failed(format!(
+                "{workflow} on {branch} is not as this sluice's init actions writes it: \
+                 sluice init actions --force writes it again"
+            )),
+            None => failed(format!("GitHub gave {workflow} on {branch} as no file")),
+        },
+        Err(e) => failed(format!("reading {workflow} on {branch}: {e:#}")),
+    });
+    found.push(match app.installation(repo) {
+        Ok(i) => match i.permissions.get("actions").map(String::as_str) {
+            Some("write") => ok(format!("the app may run {repo}'s workflows")),
+            other => failed(format!(
+                "the app may not run {repo}'s workflows (actions: {}): give it Actions read \
+                 and write",
+                other.unwrap_or("none")
+            )),
+        },
+        Err(e) => failed(format!("{e:#}")),
+    });
+    found.push(environment(app, repo, branch));
+    found
+}
+
+/// A file GitHub's contents API gave, decoded.
+fn content_of(v: &Value) -> Option<String> {
+    use base64::Engine;
+    let text: String = v["content"].as_str()?.split_whitespace().collect();
+    let bytes = base64::engine::general_purpose::STANDARD
+        .decode(text)
+        .ok()?;
+    String::from_utf8(bytes).ok()
+}
+
+/// Record 0119 (design D14): the `sluice` environment, whose secret the
+/// sign job alone reads, deployable from `branch` alone.
+fn environment(app: &App, repo: &Repo, branch: &str) -> Finding {
+    let at = format!("/repos/{}/{}/environments/sluice", repo.owner, repo.name);
+    let env = match app.get_found(&at, Bearer::Repo(repo)) {
+        Ok(Some(v)) => v,
+        Ok(None) => {
+            return failed(format!(
+                "{repo} has no environment named sluice: make one that only {branch} may deploy \
+                 from, holding SLUICE_APP_KEY and SLUICE_APP_ID"
+            ))
+        }
+        Err(e) => return failed(format!("reading {repo}'s sluice environment: {e:#}")),
+    };
+    let any = || {
+        failed(format!(
+            "any branch may use {repo}'s sluice environment, and so its key: let only {branch} \
+             deploy from it"
+        ))
+    };
+    let policy = &env["deployment_branch_policy"];
+    if policy.is_null() || policy["custom_branch_policies"] != Value::Bool(true) {
+        return any();
+    }
+    let at = format!("{at}/deployment-branch-policies");
+    let names: BTreeSet<String> = match app.get(&at, Bearer::Repo(repo)) {
+        Ok(v) => v["branch_policies"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter(|p| p["type"].as_str().unwrap_or("branch") == "branch")
+            .filter_map(|p| p["name"].as_str().map(str::to_string))
+            .collect(),
+        Err(e) => return failed(format!("reading the sluice environment's branches: {e:#}")),
+    };
+    if names.len() == 1 && names.contains(branch) {
+        ok(format!("only {branch} may use {repo}'s sluice environment"))
+    } else if names.is_empty() {
+        any()
+    } else {
+        let listed: Vec<&str> = names.iter().map(String::as_str).collect();
+        failed(format!(
+            "{repo}'s sluice environment may be used from {}: let only {branch} deploy from it",
+            listed.join(", ")
+        ))
+    }
+}

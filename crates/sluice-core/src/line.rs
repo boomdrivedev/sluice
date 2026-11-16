@@ -334,6 +334,36 @@ impl Line {
             .ok_or_else(|| anyhow!("no submission {id} to {}", self.branch))
     }
 
+    /// 152, 24, record 0124 (design D10; rule core.48): a landing the forge
+    /// refused is its submitters' to take out: once any of its submissions
+    /// has left the queue, withdrawn by its submitter, its planner, the
+    /// operator or a submission from its place, the landing is dropped and
+    /// the rest go back to the queue, to be formed again. The submissions
+    /// that left, where it was dropped; `None` where no held landing has
+    /// lost one, and nothing changes.
+    pub fn drop_left_landing(&mut self) -> Option<Vec<u64>> {
+        let landing = self.doc.landing.clone().filter(|l| l.refused.is_some())?;
+        let left: Vec<u64> = landing
+            .ids
+            .iter()
+            .copied()
+            .filter(|id| self.subs.get(id).is_none_or(|s| s.state.is_out()))
+            .collect();
+        if left.is_empty() {
+            return None;
+        }
+        self.doc.landing = None;
+        for id in &landing.ids {
+            if let Some(s) = self.subs.get_mut(id).filter(|s| s.state == State::Refused) {
+                s.state = State::Queued;
+                s.tested = None;
+                s.result = None;
+                s.covered_by = None;
+            }
+        }
+        Some(left)
+    }
+
     pub fn sub_mut(&mut self, id: u64) -> &mut Submission {
         let branch = &self.branch;
         self.subs

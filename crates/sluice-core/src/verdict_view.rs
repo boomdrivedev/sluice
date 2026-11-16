@@ -128,6 +128,7 @@ pub fn verdict_view(
         Standing::Testing
             | Standing::Passed
             | Standing::Landing
+            | Standing::Refused { .. }
             | Standing::Landed { .. }
             | Standing::Blamed { .. }
     );
@@ -148,6 +149,19 @@ fn standing(sub: &Submission, ahead: &[u64], log: &[LogLine]) -> Standing {
         State::Testing => Standing::Testing,
         State::Passed => Standing::Passed,
         State::Landing => Standing::Landing,
+        // 152, record 0124 (design D10): the forge's words, as its line says.
+        State::Refused => Standing::Refused {
+            words: log
+                .iter()
+                .rev()
+                .find_map(|l| match &l.event {
+                    crate::records::Event::ForgeRefused { ids, words } if ids.contains(&sub.id) => {
+                        Some(words.clone())
+                    }
+                    _ => None,
+                })
+                .unwrap_or_default(),
+        },
         State::Landed => Standing::Landed {
             landed_as: sub.landed_as.clone().unwrap_or_else(|| sub.head.clone()),
             beside: sub.beside == Some(crate::records::Beside::Landed),

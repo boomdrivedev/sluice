@@ -9,7 +9,6 @@ use std::time::Duration;
 use sluice_conformance::{policy, Harness, Rig, BRANCH};
 use sluice_core::records::{Event, RunState, State, SystemRun};
 use sluice_core::{Peer, Sluice, Started};
-use sluice_seams::Decided;
 
 /// The host a sluice over the fakes is, as its records name it.
 const HOST: &str = "this-host";
@@ -59,7 +58,10 @@ fn a_host_whose_engine_does_not_answer_claims_no_run_that_asks_for_one() {
     assert!(h.w().delivered().is_empty(), "nobody is blamed");
     let r = runs(&h);
     assert_eq!(r.len(), 1);
-    assert_eq!((r[0].state, r[0].host.clone()), (RunState::Open, None));
+    assert_eq!(
+        (r[0].state, r[0].holder().map(str::to_string)),
+        (RunState::Open, None)
+    );
     assert_ne!(h.sub(one).state, State::Failed);
     // Once a round, and only where a run would be claimed.
     assert_eq!(h.w().engine_looks().len(), 4);
@@ -120,7 +122,7 @@ fn a_host_says_once_for_each_reason_and_its_claim_clears_it() {
     h.w().engine_unmet(None);
     h.step();
     let r = &runs(&h)[0];
-    assert_eq!(r.state, RunState::Testing);
+    assert_eq!(r.state, RunState::Running);
     assert!(r.declined.is_empty(), "its claim clears its entry");
 }
 
@@ -219,7 +221,7 @@ fn a_host_whose_engine_answers_takes_the_run_another_turned_down() {
     assert_eq!(claims(&h), ["b"]);
     assert_eq!(h.w().requests().len(), 1);
     let r = &runs(&h)[0];
-    assert_eq!((r.host.as_deref(), r.state), (Some("b"), RunState::Testing));
+    assert_eq!((r.holder(), r.state), (Some("b"), RunState::Running));
 }
 
 /// satisfies: 107, 88; record 0074: a lead whose engine does not answer
@@ -264,42 +266,38 @@ fn a_run_no_host_takes_for_its_engine_is_not_passed_at_its_time_limit() {
     h.step();
     h.w().advance(chrono::Duration::minutes(29));
     h.step();
-    assert_ne!(h.sub(one).state, State::Failed, "within its time limit");
-    h.w().advance(chrono::Duration::minutes(2));
-    h.settle();
-    let sub = h.sub(one);
-    assert_eq!(sub.state, State::Failed);
-    assert_eq!(sub.result.as_deref(), Some("timed out"));
     let waited = format!(
         "no host that could run its tests as its policy asks took them: {HOST}: {NO_ENGINE}"
     );
-    assert!(!sub.failed.is_empty());
-    assert!(
-        sub.failed
-            .iter()
-            .all(|f| f.not_run.as_deref() == Some(waited.as_str())),
-        "{:?}",
-        sub.failed
-    );
+    assert!(!not_passed_for(&h, &waited), "within its time limit");
+    h.w().advance(chrono::Duration::minutes(2));
+    h.settle();
+    // Record 0122 (design D6): not passed, nobody blamed, no check failed,
+    // each check naming the host that turned it down and why.
+    assert!(not_passed_for(&h, &waited), "{:?}", h.events());
+    let sub = h.sub(one);
+    assert_ne!(sub.state, State::Failed);
+    assert!(sub.failed.is_empty(), "{:?}", sub.failed);
+    assert!(!h.events().iter().any(|e| matches!(e, Event::Blamed { .. })));
     assert!(h.w().requests().is_empty(), "nothing ever ran");
-    let told = h.delivered_to("agent-a");
-    assert_eq!(told.len(), 1);
-    assert!(matches!(
-        told[0].decided,
-        Decided::Failed {
-            timed_out: true,
-            ..
-        }
-    ));
-    let report = told[0].report.as_ref().expect("the notice's report");
     assert!(
-        report
-            .rows
-            .iter()
-            .any(|r| r.not_run.as_deref() == Some(waited.as_str())),
-        "{:?}",
-        report.rows
+        h.delivered_to("agent-a").is_empty(),
+        "nobody is told of a blame"
     );
+    assert!(h.w().results_log().is_empty());
+}
+
+/// Record 0122 (design D6): whether the branch's log says a run of a
+/// combination ended at the time limit for `why`, and the combination was
+/// read not passed.
+fn not_passed_for(h: &Harness, why: &str) -> bool {
+    let events = h.events();
+    events
+        .iter()
+        .any(|e| matches!(e, Event::Ended { why: Some(w), .. } if w == why))
+        && events
+            .iter()
+            .any(|e| matches!(e, Event::Result { result, failed, .. } if result == "not passed" && failed.is_empty()))
 }
 
 /// What the macOS sandbox's look says of a memory limit.
@@ -348,7 +346,10 @@ fn a_host_whose_executor_cannot_hold_the_limits_claims_none_and_says_why() {
         [(HOST.to_string(), SANDBOX_MEMORY.to_string())]
     );
     let r = &runs(&h)[0];
-    assert_eq!((r.state, r.host.clone()), (RunState::Open, None));
+    assert_eq!(
+        (r.state, r.holder().map(str::to_string)),
+        (RunState::Open, None)
+    );
     assert_ne!(h.sub(one).state, State::Failed);
     assert_eq!(
         waiting(&h),
@@ -390,7 +391,7 @@ fn a_host_whose_executor_holds_the_limits_takes_the_run_another_turned_down() {
         "the host that can claims it, and a nothing"
     );
     let r = &runs(&h)[0];
-    assert_eq!((r.host.as_deref(), r.state), (Some("b"), RunState::Testing));
+    assert_eq!((r.holder(), r.state), (Some("b"), RunState::Running));
 }
 
 /// satisfies: 84; the host-requirements spec's "Limits the executor
@@ -460,35 +461,19 @@ fn a_run_no_host_can_hold_the_limit_of_is_not_passed_at_its_time_limit() {
     h.step();
     h.w().advance(chrono::Duration::minutes(29));
     h.step();
-    assert_ne!(h.sub(one).state, State::Failed, "within its time limit");
-    h.w().advance(chrono::Duration::minutes(2));
-    h.settle();
-    let sub = h.sub(one);
-    assert_eq!(sub.state, State::Failed);
-    assert_eq!(sub.result.as_deref(), Some("timed out"));
     let waited = format!(
         "no host that could run its tests as its policy asks took them: {HOST}: {OPEN_MEMORY}"
     );
-    assert!(!sub.failed.is_empty());
-    assert!(
-        sub.failed
-            .iter()
-            .all(|f| f.not_run.as_deref() == Some(waited.as_str())),
-        "{:?}",
-        sub.failed
-    );
+    assert!(!not_passed_for(&h, &waited), "within its time limit");
+    h.w().advance(chrono::Duration::minutes(2));
+    h.settle();
+    // Record 0122 (design D6): not passed, nobody blamed, no check failed.
+    assert!(not_passed_for(&h, &waited), "{:?}", h.events());
+    let sub = h.sub(one);
+    assert_ne!(sub.state, State::Failed);
+    assert!(sub.failed.is_empty(), "{:?}", sub.failed);
     assert!(h.w().requests().is_empty(), "nothing ever ran");
-    let told = h.delivered_to("agent-a");
-    assert_eq!(told.len(), 1);
-    let report = told[0].report.as_ref().expect("the notice's report");
-    assert!(
-        report
-            .rows
-            .iter()
-            .any(|r| r.not_run.as_deref() == Some(waited.as_str())),
-        "{:?}",
-        report.rows
-    );
+    assert!(h.delivered_to("agent-a").is_empty());
 }
 
 /// The checks each run that left checks not run named, with why, in
@@ -543,8 +528,17 @@ fn a_pools_job_on_a_machine_with_no_engine_runs_nothing_and_is_counted() {
         [vec![("#gate".to_string(), NO_ENGINE.to_string())]]
     );
     assert_eq!(h.doc().candidates[0].not_run_runs, 1, "it counts");
+    // Record 0122 (design D7): the run ends with no outcome, its follow-up
+    // the lead's to open.
     let r = &runs(&h)[0];
-    assert_eq!((r.state, r.host.clone()), (RunState::Open, None));
+    assert_eq!(
+        (r.state, r.holder().map(str::to_string)),
+        (RunState::Closed, Some(claim.clone()))
+    );
+    assert!(r
+        .ended
+        .as_ref()
+        .is_some_and(|e| e.why.as_deref() == Some(NO_ENGINE)));
 
     // Nothing of the claim waits to start any more.
     let again = h.sluice().start_claimed(BRANCH, &claim, &mut releases);
@@ -567,8 +561,8 @@ fn a_pools_job_on_a_machine_whose_engine_answers_starts_its_tests() {
     assert_eq!(h.w().requests().len(), 1);
     let r = &runs(&h)[0];
     assert_eq!(
-        (r.state, r.host.as_deref()),
-        (RunState::Testing, Some(claim.as_str()))
+        (r.state, r.holder()),
+        (RunState::Running, Some(claim.as_str()))
     );
     assert!(not_run(&h).is_empty());
 }
@@ -587,10 +581,7 @@ fn a_run_claimed_in_one_round_reads_the_host_again_at_its_start() {
     h.w().unanswer_starts(1);
     assert!(on(&h, "a", Some("box")).step(BRANCH).is_err());
     let r = &runs(&h)[0];
-    assert_eq!(
-        (r.state, r.host.as_deref()),
-        (RunState::Starting, Some("a"))
-    );
+    assert_eq!((r.state, r.holder()), (RunState::Claimed, Some("a")));
     assert_eq!(h.w().made_places().len(), 1);
 
     h.w().engine_unmet(Some(NO_ENGINE));
@@ -602,8 +593,20 @@ fn a_run_claimed_in_one_round_reads_the_host_again_at_its_start() {
         not_run(&h),
         [vec![("#gate".to_string(), NO_ENGINE.to_string())]]
     );
+    // Record 0122 (design D7): the run ends with no outcome, and the lead
+    // opens its follow-up, which no host holds.
     let r = &runs(&h)[0];
-    assert_eq!((r.state, r.host.clone()), (RunState::Open, None));
+    assert_eq!(r.state, RunState::Closed);
+    assert!(r
+        .ended
+        .as_ref()
+        .is_some_and(|e| e.why.as_deref() == Some(NO_ENGINE)));
+    keeper(&h).step(BRANCH).unwrap();
+    let follow = &runs(&h)[1];
+    assert_eq!(
+        (follow.state, follow.holder(), follow.follows),
+        (RunState::Open, None, Some(0))
+    );
 }
 
 /// The results log, as the fake keeps it.

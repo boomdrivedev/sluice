@@ -161,6 +161,17 @@ fn main() {
             std::process::exit(3);
         }
     };
+    // Record 0119 (design D11): a sign job's record writes the records as
+    // the app its environment names.
+    let instance = match &cli.command {
+        Some(Command::Job {
+            command: sluice::JobCommand::Record { .. },
+        }) => sluice::job::with_app_from_env(instance).unwrap_or_else(|e| {
+            eprintln!("sluice: {e:#}");
+            std::process::exit(3);
+        }),
+        _ => instance,
+    };
     let settings = Settings::choose(
         cli.choices(),
         instance.telemetry.as_ref(),
@@ -188,6 +199,21 @@ fn main() {
                 .state
                 .reading_results(sluice::profiles::records::ResultsFrom::Asked),
             ..bound
+        };
+        // Record 0119 (design D11; rule core.49): a pool's job is its
+        // runner's one work, and holds its run's room in its own process,
+        // of no host's bound.
+        let bound = match &cli.command {
+            Some(Command::Job { .. }) => {
+                let common = bound.branch.common_dir()?;
+                Bound {
+                    tests: bound
+                        .tests
+                        .with_running(common.join("sluice-job").join("running")),
+                    ..bound
+                }
+            }
+            _ => bound,
         };
         let kept = held.map(|settings| Kept {
             dir,

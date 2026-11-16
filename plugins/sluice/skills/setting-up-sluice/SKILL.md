@@ -266,7 +266,7 @@ it ([peers](references/profiles/peers.md) sets up the keys). Without
 signers, sluice refuses the branch alone: `main takes pull requests,
 which only the host that keeps it on origin takes in, and its state is
 each host's own: name [signers] in .config/sluice.toml so its state is
-kept on origin (137)`.
+kept on origin, as `sluice init actions` names a pool's signer (137)`.
 
 ```toml
 [signers.box]
@@ -319,6 +319,7 @@ ruleset with the button left on.
 | how work reaches the queue | straight from a worktree, or pull requests | [pull-requests](references/profiles/pull-requests.md) |
 | running copies of landed revisions (`[preview]`) | a command per repository | [previews](references/profiles/previews.md) |
 | more than one host, or more than one system (`[signers]`, `[systems]`) | peers on the git remote, standing hosts signing with SSH keys | [peers](references/profiles/peers.md) |
+| runs no standing host takes, a burst or a system none runs (`[pools]`) | a pool on GitHub Actions, set up by `sluice init actions` | [GitHub Actions](https://agentplot.github.io/sluice/guides/github-actions/) |
 
 The rules per branch (`required`, `parallel`, `batch`, `hold`, `flaky`,
 `timeout`, `release_retries`, `trust`) and `[landing] subject` are in the
@@ -538,6 +539,19 @@ For more than one host or system, follow [peers](references/profiles/peers.md)'s
 file (checked first on each host, as *The host's file* says), then one
 landing that adds `[signers]` and rewrites `trust`, then each standing
 executor started as that page says.
+
+For runs no standing host takes, a burst or a system none of them runs,
+offer a pool on GitHub Actions, once the app is set up and the policy
+names `[signers]`; each workflow run spends the repository's Actions
+minutes, so the hosts take runs first. In a working copy of the branch
+the workflow runs from, run `sluice init actions`: it writes
+`.github/workflows/sluice.yml` and `sluice-pr.yml` and appends
+`[signers.forge]` and `[pools.forge]` where the policy names no pool on
+GitHub. Add `forge` to each branch's `trust` and name its `systems`. Then
+ask the user to give the app Actions read and write, and to make the
+`sluice` environment it prints, deployable from that branch alone,
+holding `SLUICE_APP_KEY` and `SLUICE_APP_ID`. Land the files, then
+`sluice forge check <branch>` reads all of it back.
 
 A pattern with `remote = "origin"` needs no push by hand: `sluice branch
 create <branch> --from main` makes each branch under it there as the app,

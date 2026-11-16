@@ -70,8 +70,11 @@ pub enum SignerKey {
         allowed: Vec<ssh::Allowed>,
         digest: String,
     },
-    /// A forge job's keyless identity, verified by the forge's profile.
-    Keyless,
+    /// 78, 79, record 0119 (design D13): a forge job's keyless identity,
+    /// its workflow at its ref in the branch's repository, verified
+    /// against the roots sluice carries; `None` where the policy's table
+    /// or the branch's remote names none, which verifies nothing.
+    Keyless(Option<crate::profiles::github::keyless::Identity>),
 }
 
 impl SignerKey {
@@ -98,7 +101,9 @@ impl SignerKey {
             SignerKey::Ssh { allowed, .. } => {
                 allowed.iter().any(|a| a.key.key_data() == key.key_data())
             }
-            SignerKey::Keyless => false,
+            // 78, record 0119 (design D13): a pool's job holds no key; its
+            // signer is listed by its identity, so a job may claim.
+            SignerKey::Keyless(identity) => identity.is_some(),
         }
     }
 
@@ -106,7 +111,7 @@ impl SignerKey {
     fn digest(&self) -> &str {
         match self {
             SignerKey::Ssh { digest, .. } => digest,
-            SignerKey::Keyless => "keyless",
+            SignerKey::Keyless(_) => "keyless",
         }
     }
 }
@@ -802,14 +807,35 @@ fn tempfile_path(git_dir: &Path, what: &str) -> Result<PathBuf> {
 /// alone, and a statement with none reads with no limits and no grant
 /// (19, 138; design D3).
 fn verify(signer: &str, key: &SignerKey, bytes: &[u8]) -> Result<Vec<ResultLine>> {
-    let envelope: Envelope = serde_json::from_slice(bytes).context("not a DSSE envelope")?;
-    let who = match key {
-        SignerKey::Ssh { allowed, .. } => ssh::verify(&envelope, allowed)?
-            .map(|a| a.principal.clone())
-            .ok_or_else(|| anyhow!("no key {signer} lists signed it"))?,
-        SignerKey::Keyless => bail!("{signer}'s keyless signatures are not verified on this host"),
+    let (s, who) = match key {
+        SignerKey::Ssh { allowed, .. } => {
+            let envelope: Envelope =
+                serde_json::from_slice(bytes).context("not a DSSE envelope")?;
+            let who = ssh::verify(&envelope, allowed)?
+                .map(|a| a.principal.clone())
+                .ok_or_else(|| anyhow!("no key {signer} lists signed it"))?;
+            (Statement::from_envelope(&envelope)?, who)
+        }
+        // 78, 79, record 0119 (design D13): a bundle verified against the
+        // roots sluice carries, by the signer's workflow and ref; one that
+        // does not verify is left out, naming the identity it carried.
+        SignerKey::Keyless(identity) => {
+            let identity = identity.as_ref().ok_or_else(|| {
+                anyhow!("[signers.{signer}] github names no workflow and ref this host can verify")
+            })?;
+            let bundle = std::str::from_utf8(bytes).context("not a Sigstore bundle")?;
+            let statement = crate::profiles::github::keyless::verify(bundle, identity)?;
+            let s: Statement = serde_json::from_value(statement)
+                .context("the bundle's statement is no run's")
+                .and_then(Statement::checked)?;
+            let who = s
+                .predicate
+                .claim
+                .clone()
+                .unwrap_or_else(|| signer.to_string());
+            (s, who)
+        }
     };
-    let s = Statement::from_envelope(&envelope)?;
     let run = s.predicate;
     let held = run.held.clone().unwrap_or_default();
     Ok(run
@@ -929,7 +955,7 @@ fn held_key(e: &Enforced) -> Option<HeldKey> {
     })
 }
 
-fn sha256_hex(bytes: &[u8]) -> String {
+pub(crate) fn sha256_hex(bytes: &[u8]) -> String {
     use sha2::{Digest, Sha256};
     Sha256::digest(bytes)
         .iter()
@@ -1305,6 +1331,17 @@ impl State for RemoteRefs {
     /// each under `refs/sluice/set-aside`. A set-aside only stops a result
     /// counting, so any host that submits may add one. 129 (design D16):
     /// held, as this host last fetched them, with no fetch.
+    /// Record 0119 (design D11; 109): added to `refs/sluice/runs/<signer>`
+    /// on top of whatever it holds.
+    fn add_signed(&self, _branch: &str, signer: &str, path: &str, record: &[u8]) -> Result<()> {
+        let files = BTreeMap::from([(path.to_string(), record.to_vec())]);
+        self.add(
+            &format!("refs/sluice/runs/{signer}"),
+            &files,
+            &format!("sluice: {signer}'s run {path}"),
+        )
+    }
+
     fn set_asides(&self) -> Result<Vec<u8>> {
         let commit = match self.held.get() {
             true => self.pushed.read_ref(&self.fetched(SET_ASIDE))?.map(|r| r.0),
@@ -1452,5 +1489,71 @@ impl State for RemoteRefs {
     ) -> Result<()> {
         self.own
             .put_progress_under(&self.locks, branch, candidate, tasks)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::profiles::github::keyless::Identity;
+
+    /// A bundle of the public-good instance, issued to prefix-dev's
+    /// workflow `action.yaml` on its `main`, its statement a conda
+    /// package's: the recorded one the forge tests read.
+    const PUBLIC_GOOD: &str = include_str!("../../tests/profiles/forge/public-good.sigstore.json");
+
+    /// 78, record 0119 (design D13; rule core.22): a `github` signer lists
+    /// a pool's job, which holds no key, so its job may claim, and one whose
+    /// table or remote names no workflow lists nothing; a bundle issued to
+    /// another workflow is left out, naming the identity it carried; one
+    /// issued to the signer's own workflow that holds no run's statement
+    /// counts for nothing; and a signer with no identity verifies nothing.
+    #[test]
+    fn a_github_signers_record_counts_only_from_its_own_workflow() {
+        let ours = SignerKey::Keyless(Some(Identity::workflow(
+            "acme",
+            "widgets",
+            ".github/workflows/sluice.yml",
+            "refs/heads/main",
+        )));
+        let key = ssh_key::PrivateKey::random(&mut rand_core::OsRng, ssh_key::Algorithm::Ed25519)
+            .unwrap();
+        assert!(ours.lists(key.public_key()));
+        assert!(!SignerKey::Keyless(None).lists(key.public_key()));
+
+        let said = format!(
+            "{:#}",
+            verify("forge", &ours, PUBLIC_GOOD.as_bytes()).unwrap_err()
+        );
+        assert!(
+            said.contains(
+                "prefix-dev/sigstore-example/.github/workflows/action.yaml@refs/heads/main"
+            ),
+            "the identity it carried: {said}"
+        );
+
+        let theirs = SignerKey::Keyless(Some(Identity::workflow(
+            "prefix-dev",
+            "sigstore-example",
+            ".github/workflows/action.yaml",
+            "refs/heads/main",
+        )));
+        let said = format!(
+            "{:#}",
+            verify("forge", &theirs, PUBLIC_GOOD.as_bytes()).unwrap_err()
+        );
+        assert!(
+            said.contains("the bundle's statement is no run's"),
+            "{said}"
+        );
+
+        let said = format!(
+            "{:#}",
+            verify("forge", &SignerKey::Keyless(None), PUBLIC_GOOD.as_bytes()).unwrap_err()
+        );
+        assert!(
+            said.contains("[signers.forge] github names no workflow and ref"),
+            "{said}"
+        );
     }
 }

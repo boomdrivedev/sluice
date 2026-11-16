@@ -62,10 +62,10 @@ use std::path::{Path, PathBuf};
 use anyhow::{anyhow, bail, Context as _, Result};
 use serde::{Deserialize, Serialize};
 use sluice_seams::{
-    log_tail, AtBound, Enforced, Equip, EquipStep, Equipped, HostRun, KeptOutTask, Limits, Network,
-    NotRun, Outcome, Part, Place, Progress, Proof, Reading, Reads, Refusals, Rev, RunHandle,
-    RunKind, RunReport, RunRequest, Running, Setting, Settings, Source, TaskLog, TaskProgress,
-    TaskResult, Tests, Through,
+    log_tail, AtBound, Enforced, Equip, EquipStep, Equipped, Found, HostRun, KeptOutTask, Limits,
+    Network, NotRun, Outcome, Part, Place, Progress, Proof, Reading, Reads, Refusals, Rev,
+    RunHandle, RunKind, RunReport, RunRequest, Running, Setting, Settings, Source, TaskLog,
+    TaskProgress, TaskResult, Tests, Through,
 };
 
 use super::moon::{self, Moon};
@@ -216,12 +216,12 @@ struct Meta {
 /// A pool the binding hands this profile, to start runs on (88; ADR 0034).
 pub trait Launcher {
     fn launch(&self, launch: &sluice_seams::Launch) -> Result<()>;
-    fn job_alive(
+    fn job(
         &self,
         kind: &(String, Setting),
         claim: &str,
         remote: Option<&str>,
-    ) -> Result<bool>;
+    ) -> Result<sluice_seams::Job>;
     fn wake(&self, kind: &(String, Setting), branch: &str, remote: Option<&str>) -> Result<()>;
 }
 
@@ -2123,6 +2123,19 @@ impl Tests for Checks {
         })
     }
 
+    /// Record 0122 (design D3): the supervisor's run for the checkout, by
+    /// its own files ([`crate::runs::Runs::found`]); a session's place,
+    /// whose runs are each their own, has none to find.
+    fn found(&self, place: &str) -> Result<Option<Found>> {
+        if crate::runs::is_session(place) {
+            return Ok(None);
+        }
+        Ok(self.runs.found(place)?.map(|since| Found {
+            run: RunHandle(place.to_string()),
+            since,
+        }))
+    }
+
     fn progress(&self, run: &RunHandle) -> Result<Progress> {
         let ended = match self.runs.state(&run.0)? {
             RunState::Running => return Ok(Progress::Running),
@@ -2233,17 +2246,17 @@ impl Tests for Checks {
         }
     }
 
-    fn job_alive(
+    fn job(
         &self,
         kind: &(String, Setting),
         claim: &str,
         remote: Option<&str>,
-    ) -> Result<bool> {
+    ) -> Result<sluice_seams::Job> {
         match &self.pool {
-            Some(p) => p.job_alive(kind, claim, remote),
-            // A host that cannot ask the pool reads its jobs as running:
-            // a claim lapses only by what is known of it (77).
-            None => Ok(true),
+            Some(p) => p.job(kind, claim, remote),
+            // A host that cannot ask the pool reads its jobs as waiting: a
+            // claim lapses only by what is known of it (77).
+            None => Ok(sluice_seams::Job::Queued),
         }
     }
 
@@ -2366,6 +2379,116 @@ impl Tests for Checks {
                     why: format!("{e:#}"),
                 });
             }
+            tracing::warn!(
+                sluice.task = %t.task,
+                sluice.hash = %t.hash,
+                "a key the combination's tree does not bear out is not signed: {e:#}"
+            );
+        }
+        Ok(proof)
+    }
+
+    /// Record 0119 (design D11; 109): for a moon run, each manifest its
+    /// keys' walk reads, the key's own and each dependency's, from the
+    /// stores [`proven`] reads, under `blobs/` as moon's store keeps them,
+    /// so the sign job holds each key to the same proof by its content with
+    /// nothing run.
+    ///
+    /// [`proven`]: Tests::proven
+    fn keep_proof(&self, run: &RunHandle, report: &RunReport, dir: &Path) -> Result<()> {
+        let meta: Meta = serde_json::from_value(self.runs.request(&run.0)?.meta)
+            .with_context(|| format!("reading run {}", run.0))?;
+        std::fs::create_dir_all(dir)?;
+        if meta.runner != "moon" {
+            return Ok(());
+        }
+        let own = meta.place.join(".moon/cache");
+        let store = meta.store.clone().unwrap_or_else(|| own.clone());
+        let read = std::cell::RefCell::new(BTreeMap::new());
+        let blob = |k: &str| {
+            let bytes = super::moon::blob_in(&store, k).or_else(|| {
+                (store != own)
+                    .then(|| super::moon::blob_in(&own, k))
+                    .flatten()
+            })?;
+            read.borrow_mut().insert(k.to_string(), bytes.clone());
+            Some(bytes)
+        };
+        let tree = |p: &str| super::moon::file_at(&meta.place, &meta.revision, p);
+        for t in report.tasks.iter().chain(&report.dependencies) {
+            // What the walk reads is kept whatever it finds; the sign job
+            // judges each key again.
+            let _ = super::moon::check_key(&t.hash, &t.task, &blob, &tree);
+        }
+        for (key, bytes) in read.into_inner() {
+            let at = dir.join("blobs").join(&key[..2]);
+            std::fs::create_dir_all(&at)?;
+            std::fs::write(at.join(&key[2..]), bytes)?;
+        }
+        Ok(())
+    }
+
+    /// Record 0119 (design D11; 78, 109; rule core.9): each key of a run
+    /// job's `report` checked against the tree of `revision`, which this
+    /// repository holds, by the manifests the job kept in `dir`, as
+    /// [`proven`] checks a run's own: a command runner's keys are sluice's
+    /// own; a moon key whose manifest the job kept none of is unkept where
+    /// it is a ran pass, and any other the tree does not bear out is
+    /// refused with why. The runner is the policy's, never the job's.
+    ///
+    /// [`proven`]: Tests::proven
+    fn proven_from(
+        &self,
+        dir: &Path,
+        revision: &sluice_seams::Rev,
+        tests: &sluice_seams::Settings,
+        report: &RunReport,
+    ) -> Result<Proof> {
+        let tasks = report.tasks.iter().chain(&report.dependencies);
+        if text(tests, "runner")? != Some("moon") {
+            return Ok(Proof {
+                proven: tasks.map(|t| t.task.clone()).collect(),
+                ..Proof::default()
+            });
+        }
+        let blob = |k: &str| super::moon::blob_in(dir, k);
+        let tree = |p: &str| super::moon::file_at(&self.common, revision.as_str(), p);
+        let checks = report.tasks.iter().map(|t| (t, true));
+        let dependencies = report.dependencies.iter().map(|t| (t, false));
+        let mut proof = Proof::default();
+        for (t, check) in checks.chain(dependencies) {
+            let e = match super::moon::check_key(&t.hash, &t.task, &blob, &tree) {
+                Ok(()) => {
+                    proof.proven.push(t.task.clone());
+                    continue;
+                }
+                Err(e) => e,
+            };
+            let ran_pass =
+                check && matches!(t.source, Source::Ran { .. }) && t.outcome == Outcome::Pass;
+            if let Some(missing) = e.downcast_ref::<moon::NoManifest>() {
+                if ran_pass {
+                    let whose = if missing.task == t.task {
+                        "it".to_string()
+                    } else {
+                        format!("{}, which it depends on", missing.task)
+                    };
+                    proof.unkept.push(NotRun {
+                        task: t.task.clone(),
+                        reason: format!(
+                            "it passed, but nothing the run job handed over proves it ran: \
+                             moon's manifest of {whose} is not among what it kept"
+                        ),
+                        key: Some(missing.key.clone()),
+                    });
+                }
+                continue;
+            }
+            proof.refused.push(sluice_seams::Refused {
+                task: t.task.clone(),
+                key: t.hash.clone(),
+                why: format!("{e:#}"),
+            });
             tracing::warn!(
                 sluice.task = %t.task,
                 sluice.hash = %t.hash,

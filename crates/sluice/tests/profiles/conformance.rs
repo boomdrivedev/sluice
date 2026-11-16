@@ -195,6 +195,10 @@ impl Tests for RecordedChecks {
         self.inner.progress(run)
     }
 
+    fn found(&self, place: &str) -> Result<Option<sluice_seams::Found>> {
+        self.inner.found(place)
+    }
+
     fn unmet(&self, limits: &sluice_seams::Limits) -> Result<Option<String>> {
         self.inner.unmet(limits)
     }
@@ -1060,7 +1064,7 @@ fn peers_a_finished_try_is_released_while_another_run_tests() {
     assert!(r.live_places().contains(&second));
     let doc = r.doc();
     let still = doc.candidates.iter().find(|c| c.id == both).unwrap();
-    assert_eq!(still.runs[0].state, RunState::Testing);
+    assert_eq!(still.runs[0].state, RunState::Running);
     let kept = sluice_seams::State::progress(&r.state, BRANCH).unwrap();
     assert!(
         kept.get(&both).is_some_and(|t| !t.is_empty()),

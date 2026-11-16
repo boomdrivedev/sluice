@@ -25,8 +25,8 @@ use sluice_seams::{
     LandingCommit, LastResult, Moved, Network, NotRun, Notification, Outcome, Part, Place,
     PreviewPlace, Progress, Proof, ReadRefused, Reading, Reads, ReleaseFailure, ReleasePolicy,
     Released, ResultAsk, Rev, RunHandle, RunKind, RunReport, RunRequest, Running, Session,
-    SessionPlace, Settings, Snapshot, Source, State, Submitter, TaskLog, TaskProgress, TaskResult,
-    Tests, Unanswered, Written,
+    SessionPlace, Settings, Snapshot, Source, State, Stopped, Submitter, TaskLog, TaskProgress,
+    TaskResult, Tests, Unanswered, Written,
 };
 
 /// A tree: path to content.
@@ -39,6 +39,24 @@ pub enum Crash {
     BeforeMove,
     /// The process stops after the branch moved, before it is recorded.
     AfterMove,
+    /// Record 0122 (design D3): the step stops once, after the next
+    /// checkout is made, before anything is written of it.
+    AfterCheckout,
+    /// Record 0122 (design D3): the step stops once, after the next run's
+    /// checks are started, before its `running` is written.
+    AfterStart,
+    /// Record 0122 (design D3): the step stops once, after the next run's
+    /// results are recorded, before its end is written.
+    AfterResults,
+    /// Record 0122 (design D3): the step stops once, after the next
+    /// checkout is released, before its run is written closed.
+    AfterRelease,
+    /// Record 0122 (design D3, D12): the step stops once, before the next
+    /// dispatch of a pool's job is sent.
+    BeforeDispatch,
+    /// Record 0122 (design D3, D12): the step stops once, after the next
+    /// dispatch of a pool's job is sent, before it is written.
+    AfterDispatch,
 }
 
 #[derive(Clone, Debug)]
@@ -89,6 +107,8 @@ struct RunState {
     lost: bool,
     killed: bool,
     report: Option<RunReport>,
+    /// Record 0122 (design D3): its own start, by the world's clock.
+    started: String,
 }
 
 impl RunState {
@@ -180,6 +200,11 @@ struct Inner {
     /// This host's refusal of each branch's intake (design D27).
     intake_refusals: BTreeMap<(String, String), Vec<u8>>,
     crash: Option<Crash>,
+    /// 152, record 0124 (design D10): each branch whose every move the forge
+    /// refuses, with its words, until cleared.
+    forge_refuses: BTreeMap<String, String>,
+    /// Each move the forge refused, by branch, in order.
+    refusals_of_moves: Vec<String>,
     // the check
     tasks: Vec<TaskDef>,
     fail_rules: Vec<(String, Predicate)>,
@@ -311,6 +336,9 @@ struct Inner {
     launch_fails: Option<bool>,
     /// The pool jobs that ended, by claim (77, 88).
     jobs_ended: BTreeSet<String>,
+    /// Record 0122 (design D12): each pool job's state as a test moved it,
+    /// by its claim.
+    jobs: BTreeMap<String, sluice_seams::Job>,
     /// Every branch a pool was woken for, in order (111).
     wakes: Vec<String>,
     /// The signer the host's results are recorded as signed by (78).
@@ -404,6 +432,9 @@ struct Inner {
     stop_carry: bool,
     /// Each branch's candidates' tasks, kept beside its records.
     progress: BTreeMap<String, BTreeMap<String, Vec<TaskProgress>>>,
+    /// Record 0119 (design D11): each record a pool's sign job added, by
+    /// its signer and path.
+    signed_adds: Vec<(String, String, Vec<u8>)>,
     results: Vec<u8>,
     set_asides: Vec<u8>,
     next_id: u64,
@@ -730,6 +761,21 @@ impl World {
         self.0.borrow().levels
     }
 
+    /// 152, record 0124 (design D10): from now the forge refuses each move
+    /// of `branch` with `words`, or, with `None`, takes them again.
+    pub fn forge_refuses(&self, branch: &str, words: Option<&str>) {
+        let mut inner = self.0.borrow_mut();
+        match words {
+            Some(w) => inner.forge_refuses.insert(branch.into(), w.into()),
+            None => inner.forge_refuses.remove(branch),
+        };
+    }
+
+    /// Each move the forge refused, by branch, in order.
+    pub fn refused_moves(&self) -> Vec<String> {
+        self.0.borrow().refusals_of_moves.clone()
+    }
+
     pub fn crash(&self, crash: Crash) {
         self.0.borrow_mut().crash = Some(crash);
     }
@@ -787,6 +833,12 @@ impl World {
     /// Runs leave `task` without a result, as a runner that skips it.
     pub fn skips(&self, task: &str) {
         self.0.borrow_mut().skip.insert(task.into());
+    }
+
+    /// Runs give `task` a result again, as a runner that no longer skips
+    /// it.
+    pub fn stops_skipping(&self, task: &str) {
+        self.0.borrow_mut().skip.remove(task);
     }
 
     /// The runner keeps `task` out of its CI mode: never run, missing, and
@@ -1107,6 +1159,14 @@ impl World {
         inner.full.insert(host);
     }
 
+    /// From now, this world's host has room again, as one whose other runs
+    /// have ended.
+    pub fn has_room(&self) {
+        let mut inner = self.0.borrow_mut();
+        let host = inner.host.clone();
+        inner.full.remove(&host);
+    }
+
     /// From now, `n` runs of other repositories go on this world's host,
     /// counted with its own against its bound (71).
     pub fn other_runs(&self, n: usize) {
@@ -1307,6 +1367,11 @@ impl World {
     }
 
     /// The pool's job under `claim` has ended: lost, cancelled, or done.
+    /// Record 0122 (design D12): the pool's job of `claim` stands as `job`.
+    pub fn move_job(&self, claim: &str, job: sluice_seams::Job) {
+        self.0.borrow_mut().jobs.insert(claim.into(), job);
+    }
+
     pub fn end_job(&self, claim: &str) {
         self.0.borrow_mut().jobs_ended.insert(claim.into());
     }
@@ -1356,6 +1421,17 @@ impl World {
     }
 
     /// The revisions runs were started on, in order of starting.
+    /// Record 0122 (design D3): each run's own start, by the world's clock,
+    /// in the order they started.
+    pub fn run_starts(&self) -> Vec<String> {
+        self.0
+            .borrow()
+            .runs
+            .iter()
+            .map(|r| r.started.clone())
+            .collect()
+    }
+
     pub fn started(&self) -> Vec<Rev> {
         self.requests().into_iter().map(|r| r.revision).collect()
     }
@@ -2174,6 +2250,12 @@ impl World {
         policy.remote_of(branch).ok().flatten()
     }
 
+    /// Record 0119 (design D11): each record a pool's sign job added, by
+    /// its signer and path.
+    pub fn signed_adds(&self) -> Vec<(String, String, Vec<u8>)> {
+        self.0.borrow().signed_adds.clone()
+    }
+
     pub fn results_log(&self) -> String {
         String::from_utf8(self.0.borrow().results.clone()).expect("records are text")
     }
@@ -2400,6 +2482,12 @@ impl Branch for FakeBranch {
         if found.as_ref() != Some(expected) {
             return Ok(Moved::Elsewhere(found));
         }
+        // 152, record 0124 (design D10): the forge refuses the move, the
+        // branch where it was expected.
+        if let Some(words) = inner.forge_refuses.get(branch).cloned() {
+            inner.refusals_of_moves.push(branch.to_string());
+            return Ok(Moved::Refused(words));
+        }
         inner.refs.insert(branch.into(), to.clone());
         inner.moves.push(MoveRecord {
             branch: branch.into(),
@@ -2577,6 +2665,7 @@ impl Tests for FakeTests {
         let nix_system = inner.nix_systems.get(&host).cloned();
         let live = inner.places.keys().cloned().collect();
         inner.live_at_start.push((request.place.name.clone(), live));
+        let started = inner.now.to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
         inner.runs.push(RunState {
             request: request.clone(),
             host,
@@ -2585,8 +2674,34 @@ impl Tests for FakeTests {
             lost: false,
             killed: false,
             report: None,
+            started,
         });
-        Ok(RunHandle(format!("run-{}", inner.runs.len() - 1)))
+        let run = RunHandle(format!("run-{}", inner.runs.len() - 1));
+        if inner.crash == Some(Crash::AfterStart) {
+            inner.crash = None;
+            return Err(Stopped(format!(
+                "crashed after starting a run in {}",
+                request.place.name
+            ))
+            .into());
+        }
+        Ok(run)
+    }
+
+    /// Record 0122 (design D3): the last run this host started in the
+    /// checkout, as the supervisor's files would say, and its own start.
+    fn found(&self, place: &str) -> Result<Option<sluice_seams::Found>> {
+        let inner = self.0 .0.borrow();
+        Ok(inner
+            .runs
+            .iter()
+            .enumerate()
+            .rev()
+            .find(|(_, r)| r.request.place.name == place && r.host == inner.host)
+            .map(|(n, r)| sluice_seams::Found {
+                run: RunHandle(format!("run-{n}")),
+                since: r.started.clone(),
+            }))
     }
 
     fn progress(&self, run: &RunHandle) -> Result<Progress> {
@@ -2604,11 +2719,13 @@ impl Tests for FakeTests {
         if r.lost || r.killed {
             return Ok(Progress::Lost);
         }
-        if let Some(report) = r.report {
-            return Ok(Progress::Finished(report));
-        }
+        // 60, 114, record 0122 (design D8): a run still going is never
+        // finished, whatever of it there is to read.
         if !r.complete {
             return Ok(Progress::Running);
+        }
+        if let Some(report) = r.report {
+            return Ok(Progress::Finished(report));
         }
         let report = World::evaluate(&mut inner, &r.request);
         inner.runs[n].report = Some(report.clone());
@@ -2710,6 +2827,15 @@ impl Tests for FakeTests {
     fn launch(&self, launch: &sluice_seams::Launch) -> Result<()> {
         let mut inner = self.0 .0.borrow_mut();
         let path = format!("dispatching {} for {}", launch.pool, launch.claim);
+        if inner.crash == Some(Crash::BeforeDispatch) {
+            inner.crash = None;
+            return Err(Stopped(format!("crashed before {path}")).into());
+        }
+        if inner.crash == Some(Crash::AfterDispatch) {
+            inner.crash = None;
+            inner.launches.push(launch.clone());
+            return Err(Stopped(format!("crashed after {path}")).into());
+        }
         match inner.launch_fails.take() {
             Some(false) => bail!("{path}: 404 Not Found"),
             Some(true) => {
@@ -2723,13 +2849,26 @@ impl Tests for FakeTests {
         }
     }
 
-    fn job_alive(
+    /// Record 0122 (design D12): the job's state as a test moved it; one
+    /// launched and not moved is queued, one ended with no record, and a
+    /// claim never launched has none.
+    fn job(
         &self,
         _kind: &(String, sluice_seams::Setting),
         claim: &str,
         _remote: Option<&str>,
-    ) -> Result<bool> {
-        Ok(!self.0 .0.borrow().jobs_ended.contains(claim))
+    ) -> Result<sluice_seams::Job> {
+        let inner = self.0 .0.borrow();
+        if let Some(job) = inner.jobs.get(claim) {
+            return Ok(job.clone());
+        }
+        if inner.jobs_ended.contains(claim) {
+            return Ok(sluice_seams::Job::Ended { recorded: false });
+        }
+        Ok(match inner.launches.iter().any(|l| l.claim == claim) {
+            true => sluice_seams::Job::Queued,
+            false => sluice_seams::Job::None,
+        })
     }
 
     fn wake(
@@ -2807,6 +2946,69 @@ impl Tests for FakeTests {
                 proof.refused.push(refuse(t));
             } else {
                 proof.proven.push(t.task.clone());
+            }
+        }
+        Ok(proof)
+    }
+
+    /// Record 0119 (design D11): the fake's proof of a key is a line of
+    /// `keys`, `<task> <key>`; a ran pass whose proof the world keeps none
+    /// of has no line.
+    fn keep_proof(
+        &self,
+        _run: &RunHandle,
+        report: &RunReport,
+        dir: &std::path::Path,
+    ) -> Result<()> {
+        let inner = self.0 .0.borrow();
+        let kept = |t: &&TaskResult| {
+            inner.no_proof.is_none()
+                || !(matches!(t.source, Source::Ran { .. }) && t.outcome == Outcome::Pass)
+        };
+        let lines: String = report
+            .tasks
+            .iter()
+            .chain(&report.dependencies)
+            .filter(kept)
+            .map(|t| format!("{} {}\n", t.task, t.hash))
+            .collect();
+        std::fs::create_dir_all(dir)?;
+        std::fs::write(dir.join("keys"), lines)?;
+        Ok(())
+    }
+
+    /// Record 0119 (design D11): a key is borne out where its run job kept
+    /// its line in `keys` and the world forged nothing of its task; a ran
+    /// pass with no line is unkept.
+    fn proven_from(
+        &self,
+        dir: &std::path::Path,
+        _revision: &Rev,
+        _tests: &sluice_seams::Settings,
+        report: &RunReport,
+    ) -> Result<Proof> {
+        let inner = self.0 .0.borrow();
+        let keys = std::fs::read_to_string(dir.join("keys")).unwrap_or_default();
+        let kept = |t: &TaskResult| keys.lines().any(|l| l == format!("{} {}", t.task, t.hash));
+        let mut proof = Proof::default();
+        for t in report.tasks.iter().chain(&report.dependencies) {
+            if inner.forged.contains(&t.task) {
+                proof.refused.push(sluice_seams::Refused {
+                    task: t.task.clone(),
+                    key: t.hash.clone(),
+                    why: format!(
+                        "{}: its record names an input the tree does not hold",
+                        t.task
+                    ),
+                });
+            } else if kept(t) {
+                proof.proven.push(t.task.clone());
+            } else if matches!(t.source, Source::Ran { .. }) && t.outcome == Outcome::Pass {
+                proof.unkept.push(NotRun {
+                    task: t.task.clone(),
+                    reason: "it passed, but nothing the run job handed over proves it ran".into(),
+                    key: Some(t.hash.clone()),
+                });
             }
         }
         Ok(proof)
@@ -3038,6 +3240,16 @@ impl Checkout for FakeCheckout {
         if let Some(words) = &inner.checkout_fails {
             bail!("{words}");
         }
+        // Record 0122 (design D3): a checkout this host made at `rev`, by a
+        // step that stopped before its run started, is the place.
+        if inner.places.get(name) == Some(rev) && inner.place_host.get(name) == Some(&inner.host) {
+            return Ok(Place {
+                name: name.into(),
+                path: format!("/fake/places/{name}").into(),
+                tmp: format!("/fake/tmp/{name}").into(),
+                env: Default::default(),
+            });
+        }
         // 32: two places on one host never collide.
         if inner.places.contains_key(name) || inner.worktrees.contains_key(name) {
             bail!("place {name} already exists");
@@ -3053,6 +3265,10 @@ impl Checkout for FakeCheckout {
         inner.made.push(name.into());
         let host = inner.host.clone();
         inner.place_host.insert(name.into(), host);
+        if inner.crash == Some(Crash::AfterCheckout) {
+            inner.crash = None;
+            return Err(Stopped(format!("crashed after making {name}")).into());
+        }
         Ok(Place {
             name: name.into(),
             path: format!("/fake/places/{name}").into(),
@@ -3217,6 +3433,11 @@ impl Checkout for FakeCheckout {
             bail!("the release command of {name} failed");
         }
         self.drop_place(name);
+        let mut inner = self.0 .0.borrow_mut();
+        if inner.crash == Some(Crash::AfterRelease) {
+            inner.crash = None;
+            return Err(Stopped(format!("crashed after releasing {name}")).into());
+        }
         Ok(())
     }
 
@@ -3982,10 +4203,25 @@ impl State for FakeState {
         Ok(!inner.unlisted.contains(&inner.host))
     }
 
+    fn add_signed(&self, branch: &str, signer: &str, path: &str, record: &[u8]) -> Result<()> {
+        let mut inner = self.0 .0.borrow_mut();
+        if World::route(&inner, branch)?.starts_with("here@") {
+            bail!("{branch}'s records hold no signer's runs, since its policy names no signer");
+        }
+        inner
+            .signed_adds
+            .push((signer.into(), path.into(), record.to_vec()));
+        Ok(())
+    }
+
     fn record_results(&self, lines: &[u8]) -> Result<()> {
         let mut inner = self.0 .0.borrow_mut();
         let Some(signer) = inner.signer.clone() else {
             inner.results.extend(lines);
+            if inner.crash == Some(Crash::AfterResults) {
+                inner.crash = None;
+                return Err(Stopped("crashed after recording results".into()).into());
+            }
             return Ok(());
         };
         // Signed with a key no policy lists, it verifies for no gate.
@@ -3997,6 +4233,10 @@ impl State for FakeState {
         for mut l in sluice_core::records::parse_lines::<sluice_core::records::ResultLine>(lines)? {
             l.signer = Some(signer.clone());
             inner.results.extend(sluice_core::records::to_line(&l));
+        }
+        if inner.crash == Some(Crash::AfterResults) {
+            inner.crash = None;
+            return Err(Stopped("crashed after recording results".into()).into());
         }
         Ok(())
     }
