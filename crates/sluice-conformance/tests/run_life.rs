@@ -842,3 +842,120 @@ fn a_run_no_live_executor_may_take_blames_no_one() {
     assert_eq!(again[0].runs[0].state, RunState::Open);
     assert_eq!(h.sub(one).state, State::Testing);
 }
+
+/// A branch whose records are on its remote, its required checks needing
+/// `macos-arm64`, which no host is, with a pool `forge` that runs them; the
+/// lead signs as `box`.
+fn with_pool() -> Harness {
+    let p = policy(false, "fail", 4).replace(
+        "trust = [\"open\", \"sandbox\", \"container\"]\n",
+        "trust = [\"box\", \"forge\"]\nremote = \"origin\"\nsystems = [\"macos-arm64\"]\n",
+    ) + "\n[signers.box]\nssh = \"box ssh-ed25519 AAAA\"\n\
+         \n[signers.forge]\ngithub = { workflow = \".github/workflows/sluice.yml\", ref = \"refs/heads/main\" }\n\
+         \n[pools.forge]\ngithub = { workflow = \".github/workflows/sluice.yml\" }\nsigner = \"forge\"\n\
+         runners = { macos-arm64 = \"macos-15\" }\n\
+         \n[systems]\nlinux-x64 = { os = \"linux\", arch = \"x86_64\" }\n\
+         macos-arm64 = { os = \"macos\", arch = \"aarch64\" }\n";
+    let h = Harness::new(&p);
+    h.w().signs_as("box");
+    h
+}
+
+/// The one run of the branch's first combination.
+fn pool_run(h: &Harness) -> SystemRun {
+    candidates(h)[0].runs.last().cloned().expect("a run")
+}
+
+/// satisfies: record 0122; 88, 107; the actions-pool spec's "A pool's run is
+/// claimed before its job is dispatched"
+#[test]
+fn a_pools_run_is_claimed_before_its_job_is_dispatched() {
+    let h = with_pool();
+    h.work("unit/a", "agent-a", &[("a/lib", Some("a2"))]);
+    h.submit("unit/a");
+    h.w().crash(Crash::BeforeDispatch);
+    assert!(lead(&h).step(BRANCH).is_err(), "the step stopped");
+    let run = pool_run(&h);
+    assert_eq!(run.state, RunState::Claimed);
+    let claim = run.claim.clone().expect("the pool's claim, written");
+    assert!(claim.by.starts_with("pool/forge/"), "{claim:?}");
+    assert_eq!(claim.dispatched, None);
+    assert!(h.w().launches().is_empty(), "nothing dispatched");
+
+    lead(&h).step(BRANCH).unwrap();
+    let launches = h.w().launches();
+    assert_eq!(launches.len(), 1);
+    assert_eq!(launches[0].claim, claim.by);
+    let run = pool_run(&h);
+    assert!(run.claim.as_ref().unwrap().dispatched.is_some());
+}
+
+/// satisfies: record 0122; 88, 134; rule core.29; the actions-pool spec's
+/// "A dispatch found done is not made again"
+#[test]
+fn a_pools_dispatch_found_done_is_not_made_again() {
+    let h = with_pool();
+    h.work("unit/a", "agent-a", &[("a/lib", Some("a2"))]);
+    h.submit("unit/a");
+    h.w().crash(Crash::AfterDispatch);
+    assert!(lead(&h).step(BRANCH).is_err(), "the step stopped");
+    assert_eq!(h.w().launches().len(), 1, "dispatched");
+    assert_eq!(pool_run(&h).claim.unwrap().dispatched, None);
+    for _ in 0..3 {
+        lead(&h).step(BRANCH).unwrap();
+    }
+    assert_eq!(h.w().launches().len(), 1, "found done, sent no more");
+    assert!(pool_run(&h).claim.unwrap().dispatched.is_some());
+}
+
+/// satisfies: record 0122; 88; the actions-pool spec's "A pool's run is
+/// running from its run job's start"
+#[test]
+fn a_pools_run_is_running_from_its_run_jobs_start() {
+    let h = with_pool();
+    h.work("unit/a", "agent-a", &[("a/lib", Some("a2"))]);
+    h.submit("unit/a");
+    lead(&h).step(BRANCH).unwrap();
+    let claim = pool_run(&h).claim.unwrap().by;
+    lead(&h).step(BRANCH).unwrap();
+    assert_eq!(pool_run(&h).state, RunState::Claimed, "queued, not running");
+    let since = "2026-10-11T09:03:00Z";
+    h.w().move_job(
+        &claim,
+        sluice_seams::Job::Running {
+            since: since.into(),
+        },
+    );
+    lead(&h).step(BRANCH).unwrap();
+    let run = pool_run(&h);
+    assert_eq!(run.state, RunState::Running);
+    assert_eq!(run.running.as_deref(), Some(since));
+    assert!(life(&h).contains(&("running", Some(0))));
+}
+
+/// satisfies: record 0122; 77, 88; the actions-pool spec's "A job that
+/// ended with no record"
+#[test]
+fn a_pools_job_ended_with_no_record_is_a_lapsed_claim() {
+    let h = with_pool();
+    h.work("unit/a", "agent-a", &[("a/lib", Some("a2"))]);
+    h.submit("unit/a");
+    lead(&h).step(BRANCH).unwrap();
+    let claim = pool_run(&h).claim.unwrap().by;
+    h.w()
+        .move_job(&claim, sluice_seams::Job::Ended { recorded: false });
+    lead(&h).step(BRANCH).unwrap();
+    let runs = candidates(&h)[0].runs.clone();
+    assert_eq!(runs[0].state, RunState::Closed);
+    let why = format!("{claim}'s claim lapsed");
+    assert_eq!(
+        runs[0].ended.as_ref().and_then(|e| e.why.as_deref()),
+        Some(why.as_str())
+    );
+    assert_eq!(runs[1].follows, Some(0));
+    let again = runs[1].claim.clone().expect("claimed for the pool again");
+    assert_ne!(again.by, claim, "under a new claim");
+    let launches = h.w().launches();
+    assert_eq!(launches.len(), 2);
+    assert_eq!(launches[1].claim, again.by);
+}

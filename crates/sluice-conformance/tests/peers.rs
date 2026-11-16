@@ -969,6 +969,21 @@ fn a_run_whose_dispatch_went_unanswered_is_claimed_once() {
         .iter()
         .any(|(host, state)| host.as_deref() == Some(first[0].as_str())
             && *state == sluice_core::records::RunState::Claimed));
+    // Record 0122 (design D3, D12): each claim was written before its
+    // dispatch, which is marked on it.
+    let written = {
+        let s = h.sluice();
+        let line =
+            sluice_core::line::Line::load(BRANCH, s.seams().state.read(BRANCH).unwrap()).unwrap();
+        line.doc.candidates[0].runs.clone()
+    };
+    for r in &written {
+        let k = r.claim.as_ref().expect("a claim");
+        assert!(
+            k.dispatched.as_deref().is_some_and(|d| d >= k.at.as_str()),
+            "{k:?}"
+        );
+    }
 
     // A round while the job may run launches nothing more.
     lead().step(BRANCH).unwrap();
@@ -989,8 +1004,9 @@ fn a_run_whose_dispatch_went_unanswered_is_claimed_once() {
     assert_eq!(claimed(&h).last(), Some(&(again.clone(), None)));
 }
 
-/// satisfies: 134; a launch the forge refused fails the round, and
-/// nothing is claimed.
+/// satisfies: 134; record 0122 (design D3, D12): a launch the forge
+/// refused fails the round, and nothing is claimed by a dispatch: the claim
+/// written before it ends with no outcome, naming the refusal.
 #[test]
 fn a_refused_launch_fails_the_round_with_nothing_claimed() {
     let h = with_pool();
@@ -1002,6 +1018,20 @@ fn a_refused_launch_fails_the_round_with_nothing_claimed() {
     assert!(format!("{e:#}").contains("404 Not Found"), "{e:#}");
     assert!(claimed(&h).is_empty(), "{:?}", claimed(&h));
     assert!(h.w().launches().is_empty());
+    let written = {
+        let s = h.sluice();
+        let line =
+            sluice_core::line::Line::load(BRANCH, s.seams().state.read(BRANCH).unwrap()).unwrap();
+        line.doc.candidates[0].runs.clone()
+    };
+    let refused = written
+        .iter()
+        .find(|r| r.holder().is_some_and(|h| h.starts_with("pool/")))
+        .expect("the claim written before its dispatch");
+    assert_eq!(refused.state, sluice_core::records::RunState::Closed);
+    let why = refused.ended.as_ref().and_then(|e| e.why.clone()).unwrap();
+    assert!(why.contains("the forge refused its dispatch"), "{why}");
+    assert!(why.contains("404 Not Found"), "{why}");
 }
 
 /// satisfies: 78, 79, 28, 29; S18: results signed by a signer the shared

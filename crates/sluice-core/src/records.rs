@@ -565,6 +565,11 @@ impl SystemRun {
 pub struct Claim {
     pub by: String,
     pub at: String,
+    /// 88, 134, record 0122 (design D3, D12): for a pool's claim, when its
+    /// job was dispatched, or found dispatched, after the claim was
+    /// written; a dispatch is never sent twice under one claim.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub dispatched: Option<String>,
 }
 
 impl Claim {
@@ -572,6 +577,7 @@ impl Claim {
         Claim {
             by: by.into(),
             at: at.into(),
+            dispatched: None,
         }
     }
 }
@@ -3024,13 +3030,7 @@ mod tests {
 }"#;
         let run: SystemRun = serde_json::from_str(written).unwrap();
         assert_eq!(run.opened.as_deref(), Some("2026-11-16T09:00:00Z"));
-        assert_eq!(
-            run.claim,
-            Some(Claim {
-                by: "box".into(),
-                at: "2026-11-16T09:01:00Z".into()
-            })
-        );
+        assert_eq!(run.claim, Some(Claim::new("box", "2026-11-16T09:01:00Z")));
         assert_eq!(run.running.as_deref(), Some("2026-11-16T09:02:00Z"));
         let ended = run.ended.as_ref().expect("ended");
         assert_eq!(ended.outcomes["a:test"], CheckOutcome::Passed);

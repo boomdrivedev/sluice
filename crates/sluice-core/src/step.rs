@@ -500,7 +500,8 @@ impl Sluice<'_> {
         self.perform_landing(branch)?;
         self.perform_releases(branch, releases)?;
         self.perform_outbox(branch)?;
-        self.perform_starts(branch, unmet, parts, releases)
+        self.perform_starts(branch, unmet, parts, releases)?;
+        self.perform_dispatches(branch)
     }
 
     /// 25, 34: release the places of candidates whose verdict was read or
@@ -2054,14 +2055,31 @@ impl Sluice<'_> {
                         .holder()
                         .expect("another's run names its host")
                         .to_string();
+                    // 88, record 0122 (design D12): a pool's job running is
+                    // written running, from its run job's own start.
+                    if r.state == RunState::Claimed {
+                        if let Some(since) =
+                            self.job_started(&host, &pools, rules.remote.as_deref())?
+                        {
+                            let x = line.candidate_mut(&c.id).expect("polled candidate");
+                            let xr = &mut x.runs[i];
+                            xr.state = RunState::Running;
+                            xr.running = Some(since);
+                            let system = xr.system.clone();
+                            line.log(
+                                now,
+                                Event::Running {
+                                    combination: c.revision.clone(),
+                                    system,
+                                    run: i,
+                                },
+                            );
+                            continue;
+                        }
+                    }
+                    let claimed = r.claim.as_ref().map(|k| k.at.as_str());
                     if r.state.held()
-                        && self.lapsed(
-                            &host,
-                            now,
-                            &pools,
-                            rules.remote.as_deref(),
-                            r.claim.as_ref().map(|c| c.at.as_str()),
-                        )?
+                        && self.lapsed(&host, now, &pools, rules.remote.as_deref(), claimed)?
                     {
                         line.log(
                             now,
@@ -3875,10 +3893,10 @@ impl Sluice<'_> {
         Ok(())
     }
 
-    /// 88, 107: start on a pool each open run of a candidate under test
-    /// that no live instance able to take it has room for by its last sign
-    /// of life, the policy's pools tried in order; the job's start is its
-    /// claim.
+    /// 88, 107, record 0122 (design D3, D12): claim for a pool each open
+    /// run of a candidate under test that no live instance able to take it
+    /// has room for by its last sign of life, the policy's pools tried in
+    /// order; its job is dispatched by [`Sluice::perform_dispatches`].
     #[allow(clippy::too_many_arguments)]
     fn launch_on_pools(
         &self,
@@ -3957,64 +3975,190 @@ impl Sluice<'_> {
                 t.2 -= 1;
                 continue;
             }
-            let pool = policy.pools.iter().find_map(|p| {
-                if !trusted(&p.signer) {
-                    return None;
-                }
-                let runner = match &run.system {
-                    Some(s) => p.runners.get(s).cloned(),
-                    None => p.runners.values().next().cloned(),
-                }?;
-                Some((p, runner))
+            // A pool with a runner of the run's system, whose signer the
+            // gate trusts.
+            let pool = policy.pools.iter().find(|p| {
+                trusted(&p.signer)
+                    && match &run.system {
+                        Some(s) => p.runners.contains_key(s),
+                        None => !p.runners.is_empty(),
+                    }
             });
-            let Some((pool, runner)) = pool else {
+            let Some(pool) = pool else {
                 continue;
             };
             let place = self.next_place(line);
             let claim = format!("pool/{}/{}", pool.name, line.doc.next_place - 1);
-            let c = line.candidate(&id).expect("a chain's candidate").clone();
-            let signer = policy
-                .signers
-                .get(&pool.signer)
-                .map(|s| s.identity.clone())
-                .expect("a pool's signer is one the policy names");
-            let launched = self.seams.tests.launch(&sluice_seams::Launch {
-                pool: pool.name.clone(),
-                kind: pool.kind.clone(),
-                signer,
-                runner,
-                remote: rules.remote.clone(),
-                branch: line.branch.clone(),
-                candidate: c.id.clone(),
-                combination: c.revision.clone(),
-                system: run.system.clone(),
-                claim: claim.clone(),
-            });
-            // 134: a dispatch whose answer was not read is never sent
-            // again: its run is claimed as dispatched, the claim's event
-            // carrying the forge's words, and the next round reads whether
-            // a job of the claim runs, lapsing it when none does (77, 88).
-            let unanswered = match launched {
-                Ok(()) => None,
-                Err(e) if sluice_seams::unanswered(&e) => Some(format!("{e:#}")),
-                Err(e) => return Err(e),
-            };
+            // 88, record 0122 (design D3, D12): the claim is written first;
+            // the job is dispatched by the round's perform, once the pool
+            // answers that no job of the claim is there.
             let x = line.candidate_mut(&id).expect("a chain's candidate");
             let r = &mut x.runs[i];
             r.state = RunState::Claimed;
             r.claim = Some(Claim::new(&claim, now));
             r.place = Some(place);
-            line.log(
-                now,
-                Event::Claimed {
-                    combination: c.revision.clone(),
-                    system: run.system.clone(),
-                    host: claim,
-                    unanswered,
-                },
-            );
         }
         Ok(())
+    }
+
+    /// 88, 107, 134, record 0122 (design D3, D12): each run of `branch`
+    /// written claimed by a pool's claim whose job is not yet dispatched
+    /// has it dispatched once the pool answers that no job of the claim is
+    /// there, and is marked dispatched, as it is where the pool answers
+    /// one is, sending nothing; the claim's event is logged with it,
+    /// carrying the forge's words where the dispatch's answer was not read,
+    /// which is never sent again. A dispatch the forge refused ends the run
+    /// with no outcome, naming the refusal, closed, its follow-up the lead's
+    /// to open, and fails the round with the forge's words.
+    fn perform_dispatches(&self, branch: &str) -> Result<()> {
+        let line = self.read_line(branch)?;
+        let undispatched: Vec<(Candidate, usize)> = line
+            .doc
+            .candidates
+            .iter()
+            .filter(|c| c.state.under_test())
+            .flat_map(|c| {
+                c.runs
+                    .iter()
+                    .enumerate()
+                    .filter(|(_, r)| {
+                        r.state == RunState::Claimed
+                            && r.claim.as_ref().is_some_and(|k| {
+                                k.by.starts_with("pool/") && k.dispatched.is_none()
+                            })
+                    })
+                    .map(|(i, _)| (c.clone(), i))
+                    .collect::<Vec<_>>()
+            })
+            .collect();
+        if undispatched.is_empty() {
+            return Ok(());
+        }
+        let Some(base) = line.doc.base.clone() else {
+            return Ok(());
+        };
+        let Some(policy) = self.policy_at(&base)? else {
+            return Ok(());
+        };
+        let rules = self.gate(branch, &base)?;
+        for (c, i) in undispatched {
+            let run = &c.runs[i];
+            let claim = run.holder().expect("a pool's claim").to_string();
+            let name = claim.split('/').nth(1).unwrap_or_default();
+            let Some(pool) = policy.pools.iter().find(|p| p.name == name) else {
+                continue;
+            };
+            let job = self
+                .seams
+                .tests
+                .job(&pool.kind, &claim, rules.remote.as_deref())?;
+            let unanswered = match job {
+                Job::None => {
+                    let runner = match &run.system {
+                        Some(s) => pool.runners.get(s).cloned(),
+                        None => pool.runners.values().next().cloned(),
+                    }
+                    .unwrap_or_default();
+                    let signer = policy
+                        .signers
+                        .get(&pool.signer)
+                        .map(|s| s.identity.clone())
+                        .expect("a pool's signer is one the policy names");
+                    let launched = self.seams.tests.launch(&sluice_seams::Launch {
+                        pool: pool.name.clone(),
+                        kind: pool.kind.clone(),
+                        signer,
+                        runner,
+                        remote: rules.remote.clone(),
+                        branch: branch.to_string(),
+                        candidate: c.id.clone(),
+                        combination: c.revision.clone(),
+                        system: run.system.clone(),
+                        claim: claim.clone(),
+                    });
+                    match launched {
+                        Ok(()) => None,
+                        Err(e) if sluice_seams::unanswered(&e) => Some(format!("{e:#}")),
+                        Err(e) if sluice_seams::stopped(&e) => return Err(e),
+                        Err(e) => {
+                            let why = format!("the forge refused its dispatch: {e:#}");
+                            self.update(branch, |l| {
+                                let now = self.now();
+                                let Some(xr) =
+                                    l.candidate_mut(&c.id).and_then(|x| x.runs.get_mut(i))
+                                else {
+                                    return Ok(());
+                                };
+                                if xr.state != RunState::Claimed || xr.holder() != Some(&claim) {
+                                    return Ok(());
+                                }
+                                xr.place = None;
+                                let none: Vec<NotRun> = given_checks(xr, &rules)
+                                    .into_iter()
+                                    .map(|task| NotRun {
+                                        task,
+                                        reason: why.clone(),
+                                        key: None,
+                                    })
+                                    .collect();
+                                end_run(l, &c.id, i, with_none(&none, &now), &now);
+                                Ok(())
+                            })?;
+                            return Err(e);
+                        }
+                    }
+                }
+                Job::Queued | Job::Running { .. } | Job::Ended { .. } => None,
+            };
+            self.update(branch, |l| {
+                let now = self.now();
+                let Some(x) = l.candidate_mut(&c.id) else {
+                    return Ok(());
+                };
+                let combination = x.revision.clone();
+                let Some(xr) = x.runs.get_mut(i) else {
+                    return Ok(());
+                };
+                let Some(k) = xr.claim.as_mut().filter(|k| k.by == claim) else {
+                    return Ok(());
+                };
+                k.dispatched = Some(now.clone());
+                let system = xr.system.clone();
+                l.log(
+                    &now,
+                    Event::Claimed {
+                        combination,
+                        system,
+                        host: claim.clone(),
+                        unanswered: unanswered.clone(),
+                    },
+                );
+                Ok(())
+            })?;
+        }
+        Ok(())
+    }
+
+    /// 88, record 0122 (design D12): the start of the run job of the pool's
+    /// job under `claim`, where it runs; `None` for any claim that is no
+    /// pool's, or whose job does not run.
+    fn job_started(
+        &self,
+        claim: &str,
+        pools: &[crate::policy::Pool],
+        remote: Option<&str>,
+    ) -> Result<Option<String>> {
+        let Some(rest) = claim.strip_prefix("pool/") else {
+            return Ok(None);
+        };
+        let name = rest.split('/').next().unwrap_or_default();
+        let Some(p) = pools.iter().find(|p| p.name == name) else {
+            return Ok(None);
+        };
+        Ok(match self.seams.tests.job(&p.kind, claim, remote)? {
+            Job::Running { since } => Some(since),
+            _ => None,
+        })
     }
 
     /// 66, 87, 107, record 0122 (design D6): whether a live executor may take

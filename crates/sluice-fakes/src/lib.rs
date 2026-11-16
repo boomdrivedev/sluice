@@ -51,6 +51,12 @@ pub enum Crash {
     /// Record 0122 (design D3): the step stops once, after the next
     /// checkout is released, before its run is written closed.
     AfterRelease,
+    /// Record 0122 (design D3, D12): the step stops once, before the next
+    /// dispatch of a pool's job is sent.
+    BeforeDispatch,
+    /// Record 0122 (design D3, D12): the step stops once, after the next
+    /// dispatch of a pool's job is sent, before it is written.
+    AfterDispatch,
 }
 
 #[derive(Clone, Debug)]
@@ -2812,6 +2818,15 @@ impl Tests for FakeTests {
     fn launch(&self, launch: &sluice_seams::Launch) -> Result<()> {
         let mut inner = self.0 .0.borrow_mut();
         let path = format!("dispatching {} for {}", launch.pool, launch.claim);
+        if inner.crash == Some(Crash::BeforeDispatch) {
+            inner.crash = None;
+            return Err(Stopped(format!("crashed before {path}")).into());
+        }
+        if inner.crash == Some(Crash::AfterDispatch) {
+            inner.crash = None;
+            inner.launches.push(launch.clone());
+            return Err(Stopped(format!("crashed after {path}")).into());
+        }
         match inner.launch_fails.take() {
             Some(false) => bail!("{path}: 404 Not Found"),
             Some(true) => {
