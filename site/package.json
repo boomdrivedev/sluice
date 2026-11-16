@@ -10,7 +10,7 @@
     "preview": "astro preview"
   },
   "dependencies": {
-    "@agentplot/site-theme": "github:agentplot/site-theme#v0.1.3",
+    "@agentplot/site-theme": "github:boomdrivedev/site-theme#v0.1.3",
     "@astrojs/markdown-remark": "7.3.1",
     "@astrojs/starlight": "0.42.6",
     "@fontsource/ibm-plex-mono": "5.3.0",
