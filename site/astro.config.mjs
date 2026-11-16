@@ -27,6 +27,10 @@ const dark = {
 export default defineConfig({
   site: "https://agentplot.github.io",
   base: "/sluice",
+  // A page that moved, from where links to it still point.
+  redirects: {
+    "/guides/github-actions": "/sluice/guides/pools/",
+  },
   markdown: {
     rehypePlugins: [
       [rehypeMermaid, { strategy: "img-svg", dark, launchOptions: { channel: "chromium" } }],

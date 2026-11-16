@@ -533,7 +533,7 @@ This guide runs sluice's tests on your machines. A pool on GitHub
 Actions takes the runs none of them takes, and runs each pull request's
 head on each of its systems; a combination that holds the same work
 reads those results by key, so a check that passed on the head runs
-nothing again ([Running checks on GitHub
-Actions](/sluice/guides/github-actions/)). It uses pull requests exactly
+nothing again ([Running checks on a
+pool](/sluice/guides/pools/#pull-requests)). It uses pull requests exactly
 as this guide does, and changes only where the work runs. Running
 sluice's rounds as jobs is [designed, not built](/sluice/roadmap/).
