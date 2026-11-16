@@ -55,7 +55,7 @@ pub fn run(
             out: dir,
         } => {
             let unwritten = Unwritten::over(seams.state);
-            let tests = seams.tests;
+            let (tests, checkout) = (seams.tests, seams.checkout);
             let s = Sluice::new(
                 Seams {
                     state: &unwritten,
@@ -87,7 +87,7 @@ pub fn run(
                 }
                 Err(why) => return no_report(&dir, &why, out),
             };
-            loop {
+            let ended = (|| loop {
                 match tests.progress(&run)? {
                     Progress::Running => {
                         if !pause.pause() {
@@ -106,7 +106,33 @@ pub fn run(
                         return hand_over(&dir, tests, &run, &report, out);
                     }
                 }
+            })();
+            // Record 0016, 123; rule core.10 (design D8 of the change
+            // `a-codebuild-fleet-runs-a-queues-checks`): the checkout the job
+            // made is released before it exits, whatever its run came to and
+            // when it is stopped, everything started in it ended first, by
+            // the release the policy names, its ports and scratch let go. A
+            // release that fails is said, and decides nothing of the run's
+            // outcome.
+            let place = match (&claim, &head) {
+                (Some(claim), _) => s
+                    .seams()
+                    .state
+                    .read(&branch)
+                    .and_then(|snap| sluice_core::line::Line::load(&branch, snap))?
+                    .doc
+                    .candidates
+                    .iter()
+                    .flat_map(|c| &c.runs)
+                    .find(|r| r.holder() == Some(claim.as_str()))
+                    .and_then(|r| r.place.clone()),
+                (None, Some(head)) => Some(sluice_core::step::head_place(&Rev::new(head))),
+                (None, None) => None,
+            };
+            if let Some(place) = place {
+                release_checkout(checkout, &place, &dir, out)?;
             }
+            ended
         }
         JobCommand::Sign {
             claim,
@@ -606,6 +632,33 @@ fn hand_over(
         dir.join(REPORT).display()
     )?;
     Ok(0)
+}
+
+/// Record 0016, 123 (design D8 of the change
+/// `a-codebuild-fleet-runs-a-queues-checks`): the run's checkout `place`
+/// released, or why it was not, said in the job's output and, beside the
+/// report, in the hand-over's `why`.
+fn release_checkout(
+    checkout: &dyn sluice_seams::Checkout,
+    place: &str,
+    dir: &Path,
+    out: &mut dyn Write,
+) -> Result<()> {
+    match checkout.release(place) {
+        Ok(()) => writeln!(out, "released its checkout {place}")?,
+        Err(e) => {
+            let why = format!("its checkout {place} was not released: {e:#}");
+            writeln!(out, "sluice job run: {why}")?;
+            std::fs::create_dir_all(dir)
+                .with_context(|| format!("making the job's directory {}", dir.display()))?;
+            let mut file = std::fs::OpenOptions::new()
+                .create(true)
+                .append(true)
+                .open(dir.join(WHY))?;
+            writeln!(file, "{why}")?;
+        }
+    }
+    Ok(())
 }
 
 /// Record 0119 (design D11): a run job whose run reported nothing says

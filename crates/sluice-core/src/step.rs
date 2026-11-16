@@ -223,6 +223,11 @@ enum Decided {
     Refused,
 }
 
+/// 113: the checkout a pull request's head is run in by a pool's job.
+pub fn head_place(head: &Rev) -> String {
+    format!("sluice/head/{head}")
+}
+
 impl Sluice<'_> {
     /// One round of `branch`'s work.
     pub fn step(&self, branch: &str) -> Result<Step> {
@@ -1308,7 +1313,7 @@ impl Sluice<'_> {
         let Some(part) = self.seams.tests.hold(RunKind::Queue)? else {
             return Ok(Started::AtBound);
         };
-        let name = format!("sluice/head/{head}");
+        let name = head_place(head);
         let place = match self
             .seams
             .checkout

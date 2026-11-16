@@ -9985,6 +9985,141 @@ fn job_run_writes_its_report_and_records_nothing() {
     assert!(!none.join("report.json").exists());
 }
 
+/// satisfies: record 0016, 123; rule core.10; the place-release spec's "A
+/// run that passed": `sluice job run` releases the checkout it made before
+/// it exits, by the release the policy names, the checkout gone with its
+/// ports and scratch; a release that fails is said in its output and its
+/// hand-over, deciding nothing of the run's outcome
+#[test]
+fn job_run_releases_its_checkout_before_it_exits() {
+    let f = Fakes::new();
+    let claim = pooled(&f, &["a"]);
+    let out = support::Scratch::new("job-run-release");
+    let dir = out.path().join("sluice-run");
+    let args = [
+        "job",
+        "run",
+        "--claim",
+        &claim,
+        "--branch",
+        "main",
+        "--out",
+        dir.to_str().unwrap(),
+    ];
+    let (code, said) = sluice(&f, &args);
+    assert_eq!(code, 0, "{said}");
+    let place = f
+        .world
+        .made_places()
+        .last()
+        .cloned()
+        .expect("a checkout made");
+    assert!(
+        said.contains(&format!("released its checkout {place}")),
+        "{said}"
+    );
+    assert_eq!(
+        f.world.release_attempts(),
+        std::slice::from_ref(&place),
+        "its release ran"
+    );
+    assert!(f.world.released_places().contains(&place));
+    assert!(
+        !f.world.live_places().contains(&place),
+        "gone, ports and all"
+    );
+    assert_eq!(f.world.live_runs(), 0);
+    assert!(dir.join("report.json").exists());
+    assert!(!dir.join("why").exists());
+
+    // A release that fails: said, beside the report, and the run's outcome
+    // stands.
+    let f = Fakes::new();
+    let claim = pooled(&f, &["a"]);
+    f.world.release_fails(Some("the stack would not stop"));
+    let dir = out.path().join("failed-release");
+    let args = [
+        "job",
+        "run",
+        "--claim",
+        &claim,
+        "--branch",
+        "main",
+        "--out",
+        dir.to_str().unwrap(),
+    ];
+    let (code, said) = sluice(&f, &args);
+    assert_eq!(code, 0, "{said}");
+    assert!(said.contains("1 passed, 0 failed"), "{said}");
+    assert!(
+        said.contains("was not released") && said.contains("the stack would not stop"),
+        "{said}"
+    );
+    assert!(dir.join("report.json").exists(), "the report stands");
+    let why = std::fs::read_to_string(dir.join("why")).unwrap();
+    assert!(
+        why.contains("was not released") && why.contains("the stack would not stop"),
+        "{why}"
+    );
+}
+
+/// satisfies: record 0016, 123; rule core.10; the place-release spec's "A
+/// job stopped while its run goes": it ends the run's process group, runs
+/// the release, says it kept no report, and exits
+#[test]
+fn job_run_stopped_releases_its_checkout() {
+    struct Stop;
+    impl Pause for Stop {
+        fn pause(&self) -> bool {
+            false
+        }
+    }
+    let f = Fakes::new();
+    let claim = pooled(&f, &["a"]);
+    f.world.hold_runs(true);
+    let out = support::Scratch::new("job-run-stopped");
+    let dir = out.path().join("sluice-run");
+    let (code, said) = sluice_with(
+        &f,
+        &Stop,
+        &[
+            "job",
+            "run",
+            "--claim",
+            &claim,
+            "--branch",
+            "main",
+            "--out",
+            dir.to_str().unwrap(),
+        ],
+    );
+    assert_eq!(code, sluice::STOPPED, "{said}");
+    let place = f
+        .world
+        .made_places()
+        .last()
+        .cloned()
+        .expect("a checkout made");
+    assert!(said.contains("no report: the job was stopped"), "{said}");
+    assert!(
+        said.contains(&format!("released its checkout {place}")),
+        "{said}"
+    );
+    assert_eq!(f.world.live_runs(), 0, "its run ended");
+    assert_eq!(
+        f.world.release_attempts(),
+        std::slice::from_ref(&place),
+        "its release ran"
+    );
+    assert!(!f.world.live_places().contains(&place));
+    assert!(!dir.join("report.json").exists());
+    let why = std::fs::read_to_string(dir.join("why")).unwrap();
+    assert!(
+        why.contains("the job was stopped before its run ended"),
+        "{why}"
+    );
+}
+
 /// `sluice job run` under `claim` on `main`, its directory under `out`.
 fn job_run(f: &Fakes, claim: &str, out: &std::path::Path) -> std::path::PathBuf {
     let dir = out.join("sluice-run");

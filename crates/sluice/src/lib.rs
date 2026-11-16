@@ -1284,8 +1284,9 @@ pub enum InitCommand {
 pub enum JobCommand {
     /// Start the run a claim holds, or a pull request's head, and keep its
     /// report and what proves its keys in --out; records nothing, writes
-    /// no state and holds no key. Exits 0 once the report is kept, and 3
-    /// with why where the run reported nothing.
+    /// no state and holds no key. Releases the checkout it made before it
+    /// exits, whatever its run came to and when it is stopped. Exits 0 once
+    /// the report is kept, and 3 with why where the run reported nothing.
     #[command(
         after_help = "Examples:\n  $ sluice job run --claim pool/forge/3 --branch main --out run\n  $ sluice job run --head 4f2c9e1 --branch main --system linux-x64 --out run"
     )]
@@ -1388,6 +1389,22 @@ pub fn stop_on_interrupt() -> Result<()> {
     );
     // SAFETY: the handler only stores to an atomic.
     unsafe { sigaction(Signal::SIGINT, &action) }?;
+    Ok(())
+}
+
+/// Record 0016 (design D8 of the change
+/// `a-codebuild-fleet-runs-a-queues-checks`): a pool stopping a job's run
+/// ends it as Ctrl-C does, so `sluice job run` ends its run and releases
+/// its checkout before it exits.
+pub fn stop_on_terminate() -> Result<()> {
+    use nix::sys::signal::{sigaction, SaFlags, SigAction, SigHandler, SigSet, Signal};
+    let action = SigAction::new(
+        SigHandler::Handler(interrupted),
+        SaFlags::empty(),
+        SigSet::empty(),
+    );
+    // SAFETY: the handler only stores to an atomic.
+    unsafe { sigaction(Signal::SIGTERM, &action) }?;
     Ok(())
 }
 

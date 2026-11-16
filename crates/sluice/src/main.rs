@@ -234,7 +234,16 @@ fn main() {
             std::process::exit(3);
         }
     };
-    if let Err(e) = sluice::stop_on_interrupt() {
+    let job_run = matches!(
+        cli.command,
+        Some(sluice::Command::Job {
+            command: sluice::JobCommand::Run { .. }
+        })
+    );
+    if let Err(e) = sluice::stop_on_interrupt().and_then(|()| match job_run {
+        true => sluice::stop_on_terminate(),
+        false => Ok(()),
+    }) {
         eprintln!("sluice: {e:#}");
         tell_json(json, &e);
         finish(telemetry);
