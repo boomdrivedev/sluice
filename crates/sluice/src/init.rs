@@ -4,6 +4,12 @@
 //! signer and the pool appended to the policy where it names no pool on
 //! GitHub, and what to set on GitHub said. It writes files and nothing
 //! else; they land as any change does.
+//!
+//! `sluice init codebuild` (record 0119; design D10 of the change
+//! `a-codebuild-fleet-runs-a-queues-checks`): the pool on a CodeBuild fleet,
+//! its CloudFormation template written and how to deploy it said; and, with
+//! `--stack`, the deployed stack's key read and its signer and pool
+//! appended to the policy where it names neither.
 
 use std::collections::BTreeMap;
 use std::io::Write;
@@ -12,6 +18,7 @@ use std::path::Path;
 use anyhow::{bail, Context, Result};
 use sluice_core::policy::POLICY_PATH;
 
+use crate::profiles::codebuild::template;
 use crate::profiles::github::workflows;
 use crate::FAILED;
 
@@ -251,4 +258,284 @@ pub fn actions(dir: &Path, force: bool, out: &mut dyn Write) -> Result<i32> {
         "  - land these files on {branch}, where the workflow runs from"
     )?;
     Ok(if left { FAILED } else { 0 })
+}
+
+/// The working copy's repository on GitHub, by its `origin`: what the
+/// template's builds clone.
+fn repository(dir: &Path) -> Result<String> {
+    let url = crate::profiles::pushed_refs::remote_url(dir, "origin")
+        .with_context(|| format!("reading {}'s origin", dir.display()))?;
+    let repo = crate::profiles::github::Repo::from_url(&url).ok_or_else(|| {
+        anyhow::anyhow!("origin ({url}) is no repository on GitHub, which the run builds clone")
+    })?;
+    Ok(repo.to_string())
+}
+
+/// The systems a CodeBuild pool runs: `asked`, by the policy's names, each
+/// a system CodeBuild runs on Linux; else each `[systems]` names that
+/// CodeBuild runs on Linux, the others said in `left`; else, where the
+/// policy names none, `linux-x64`.
+fn codebuild_systems(
+    policy: &toml::Table,
+    asked: &[String],
+    left: &mut Vec<String>,
+) -> Result<Vec<template::System>> {
+    let named = policy.get("systems").and_then(|s| s.as_table());
+    let of = |name: &str| -> Option<(String, String)> {
+        let s = named?.get(name)?.as_table()?;
+        let field = |k: &str| {
+            s.get(k)
+                .and_then(|v| v.as_str())
+                .unwrap_or_default()
+                .to_string()
+        };
+        Some((field("os"), field("arch")))
+    };
+    let known = |name: &str| match name {
+        "linux-x64" => Some(("linux".to_string(), "x86_64".to_string())),
+        "linux-arm64" => Some(("linux".to_string(), "aarch64".to_string())),
+        _ => None,
+    };
+    if !asked.is_empty() {
+        return asked
+            .iter()
+            .map(|name| {
+                let (os, arch) = of(name).or_else(|| known(name)).ok_or_else(|| {
+                    anyhow::anyhow!("{POLICY_PATH}'s [systems] names no system {name}")
+                })?;
+                template::System::linux(name, &os, &arch).ok_or_else(|| {
+                    anyhow::anyhow!("CodeBuild runs no Linux fleet for {name} ({os} {arch})")
+                })
+            })
+            .collect();
+    }
+    let Some(named) = named else {
+        return Ok(vec![template::System::linux(
+            "linux-x64",
+            "linux",
+            "x86_64",
+        )
+        .expect("linux")]);
+    };
+    let mut systems = Vec::new();
+    for name in named.keys() {
+        let (os, arch) = of(name).unwrap_or_default();
+        match template::System::linux(name, &os, &arch) {
+            Some(s) => systems.push(s),
+            None => left.push(format!("{name} ({os} {arch})")),
+        }
+    }
+    if systems.is_empty() {
+        bail!("{POLICY_PATH}'s [systems] names no system CodeBuild runs on Linux");
+    }
+    Ok(systems)
+}
+
+/// The policy at `dir`, its text and its table.
+fn read_policy(dir: &Path, command: &str) -> Result<(std::path::PathBuf, String, toml::Table)> {
+    let path = dir.join(POLICY_PATH);
+    let text = std::fs::read_to_string(&path).with_context(|| {
+        format!(
+            "{} holds no policy; sluice init {command} adds the pool to one",
+            path.display()
+        )
+    })?;
+    let table = text
+        .parse()
+        .with_context(|| format!("reading {POLICY_PATH}"))?;
+    Ok((path, text, table))
+}
+
+/// `sluice init codebuild` in the working copy at `dir` (design D10): the
+/// template written for `systems`, else each its policy's `[systems]`
+/// names that CodeBuild runs on Linux, each it leaves out said; one that
+/// differs left unless `force`, saying how and exiting 1; and how to
+/// deploy it, the secret to fill and the next step said.
+pub fn codebuild(dir: &Path, systems: &[String], force: bool, out: &mut dyn Write) -> Result<i32> {
+    let (_, _, policy) = read_policy(dir, "codebuild")?;
+    let mut left = Vec::new();
+    let systems = codebuild_systems(&policy, systems, &mut left)?;
+    let repository = repository(dir)?;
+    let wants = template::render(crate::VERSION, &repository, &systems);
+    let path = dir.join(template::PATH);
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent).with_context(|| format!("making {}", parent.display()))?;
+    }
+    let shown = template::PATH;
+    let mut differing = false;
+    match std::fs::read_to_string(&path) {
+        Ok(had) if had == wants => writeln!(out, "{shown}: as sluice writes it")?,
+        Ok(had) if !force => {
+            writeln!(
+                out,
+                "{shown}: left as it is; {}; --force writes it",
+                differs(&had, &wants)
+            )?;
+            differing = true;
+        }
+        _ => {
+            std::fs::write(&path, &wants).with_context(|| format!("writing {shown}"))?;
+            let names: Vec<&str> = systems.iter().map(|s| s.name.as_str()).collect();
+            writeln!(
+                out,
+                "{shown}: written, a fleet and a run project for {}",
+                names.join(", ")
+            )?;
+        }
+    }
+    for system in left {
+        writeln!(
+            out,
+            "{shown}: CodeBuild runs no Linux fleet for {system}; it is left out"
+        )?;
+    }
+    writeln!(out, "\nThen, in AWS:")?;
+    writeln!(
+        out,
+        "  - deploy it, as `sluice` or a name of your own:\n    aws cloudformation deploy \
+         --template-file {shown} --stack-name sluice --capabilities CAPABILITY_IAM \
+         --parameter-overrides LeadPrincipal=<the ARN the hosts that lead the branch reach AWS \
+         as> AppId=<sluice's app id> MaxCapacity=<the branch's parallel>"
+    )?;
+    writeln!(
+        out,
+        "  - fill the secret sluice-app-key with the app's private key:\n    aws \
+         secretsmanager put-secret-value --secret-id sluice-app-key --secret-string \
+         file://<the app's key>"
+    )?;
+    writeln!(
+        out,
+        "  - name the profile that assumes the stack's lead role as [aws] profile on each \
+         host that leads the branch"
+    )?;
+    writeln!(
+        out,
+        "  - then `sluice init codebuild --stack sluice`, which names the pool in {POLICY_PATH}"
+    )?;
+    Ok(if differing { FAILED } else { 0 })
+}
+
+/// `sluice init codebuild --stack <stack>` in the working copy at `dir`
+/// (design D10): the stack's key read by its alias with `GetPublicKey`,
+/// through the operator's own AWS chain, `profile` where named, in
+/// `region`, else the chain's; a key of another spec or usage refused;
+/// and `[signers.codebuild]`, naming the ARN KMS answers and the public
+/// half, and `[pools.codebuild]`, naming the region, the stack's sign
+/// project and its run project for each system, appended as text where the
+/// policy names neither, its own lines untouched.
+pub fn codebuild_stack(
+    dir: &Path,
+    systems: &[String],
+    stack: &str,
+    region: Option<&str>,
+    profile: Option<&str>,
+    out: &mut dyn Write,
+) -> Result<i32> {
+    use crate::profiles::codebuild::aws::Aws as _;
+    use crate::profiles::codebuild::sdk::{Chain, Sdk};
+    let (path, text, policy) = read_policy(dir, "codebuild --stack")?;
+    let named = |table: &str| {
+        policy
+            .get(table)
+            .and_then(|t| t.as_table())
+            .is_some_and(|t| t.contains_key("codebuild"))
+    };
+    match (named("signers"), named("pools")) {
+        (true, true) => {
+            writeln!(
+                out,
+                "{POLICY_PATH}: names [signers.codebuild] and [pools.codebuild] already"
+            )?;
+            return Ok(0);
+        }
+        (false, false) => {}
+        _ => bail!(
+            "{POLICY_PATH} names one of [signers.codebuild] and [pools.codebuild]; name both, or \
+             neither for sluice init codebuild --stack to append them"
+        ),
+    }
+    let mut left = Vec::new();
+    let systems = codebuild_systems(&policy, systems, &mut left)?;
+    let chain = Chain::of(&crate::instance::Aws {
+        profile: profile.map(String::from),
+    });
+    let region = match region {
+        Some(r) => r.to_string(),
+        None => chain.region().ok_or_else(|| {
+            anyhow::anyhow!("the AWS chain names no region: name the stack's with --region")
+        })?,
+    };
+    let aws = Sdk::new(
+        chain,
+        &region,
+        std::rc::Rc::new(crate::retry::Policy::command().recording_where_set()),
+    );
+    let alias = template::key_alias(stack);
+    let key = aws
+        .get_public_key(&alias)
+        .with_context(|| format!("reading the stack {stack}'s key, {alias}, in {region}"))?;
+    if key.spec != "ECC_NIST_P256" || key.usage != "SIGN_VERIFY" {
+        bail!(
+            "{alias} is a key of the spec {} and the usage {}; the stack's key signs as \
+             ECC_NIST_P256 with the usage SIGN_VERIFY",
+            key.spec,
+            key.usage
+        );
+    }
+    use base64::Engine as _;
+    let public = base64::engine::general_purpose::STANDARD.encode(&key.der);
+    crate::signing::kms::public_half(&public)
+        .with_context(|| format!("the public half KMS answered for {alias}"))?;
+    let mut appended = String::new();
+    if !policy.contains_key("systems") {
+        appended.push_str("\n[systems]\n");
+        for s in &systems {
+            let arch = match s.arch {
+                template::Arch::X86_64 => "x86_64",
+                template::Arch::Aarch64 => "aarch64",
+            };
+            appended.push_str(&format!(
+                "{} = {{ os = \"linux\", arch = \"{arch}\" }}\n",
+                s.name
+            ));
+        }
+    }
+    let names: Vec<String> = systems.iter().map(|s| format!("\"{}\"", s.name)).collect();
+    let runners: Vec<String> = systems
+        .iter()
+        .map(|s| format!("{} = \"{}\"", s.name, template::run_project(stack, &s.name)))
+        .collect();
+    appended.push_str(&format!(
+        "\n[signers.codebuild]\nkms = {{ key = \"{}\", public = \"{public}\" }}\n\
+         systems = [{}]\n\
+         \n[pools.codebuild]\ncodebuild = {{ region = \"{region}\", sign = \"{}\" }}\n\
+         signer = \"codebuild\"\nrunners = {{ {} }}\n",
+        key.arn,
+        names.join(", "),
+        template::sign_project(stack),
+        runners.join(", ")
+    ));
+    let separator = if text.ends_with('\n') { "" } else { "\n" };
+    let whole = format!("{text}{separator}{appended}");
+    sluice_core::policy::Policy::parse(&whole)
+        .with_context(|| format!("{POLICY_PATH} with the pool appended"))?;
+    std::fs::write(&path, whole).with_context(|| format!("appending to {POLICY_PATH}"))?;
+    writeln!(
+        out,
+        "{POLICY_PATH}: [signers.codebuild], naming the key {}, and [pools.codebuild] appended; \
+         a branch's `trust` names codebuild and its `systems` the systems its runs need",
+        key.arn
+    )?;
+    for system in left {
+        writeln!(
+            out,
+            "{POLICY_PATH}: CodeBuild runs no Linux fleet for {system}; the pool runs none of it"
+        )?;
+    }
+    writeln!(
+        out,
+        "\nThen `sluice pool check <branch>` reads the pool back. A branch on the fleet tests \
+         side by side: batch = false, and parallel the fleets' maximum."
+    )?;
+    Ok(0)
 }

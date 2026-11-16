@@ -37,6 +37,8 @@ pub struct Held {
     pub key: Option<(String, SigningKey)>,
     /// Who the calls are made as.
     pub identity: String,
+    /// The key's spec, where not `ECC_NIST_P256`.
+    pub spec: Option<String>,
 }
 
 #[derive(Clone)]
@@ -266,7 +268,7 @@ fn answer(held: &Mutex<Held>, r: &Request) -> Answer {
                 200,
                 json!({
                     "KeyId": KEY,
-                    "KeySpec": "ECC_NIST_P256",
+                    "KeySpec": held.spec.as_deref().unwrap_or("ECC_NIST_P256"),
                     "KeyUsage": "SIGN_VERIFY",
                     "PublicKey": public(key),
                     "SigningAlgorithms": ["ECDSA_SHA_256"],

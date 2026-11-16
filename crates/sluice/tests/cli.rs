@@ -10911,6 +10911,267 @@ fn init_actions_leaves_a_differing_workflow_unless_forced() {
     );
 }
 
+/// A working copy holding `policy`, its origin `acme/widgets` on GitHub,
+/// for `sluice init codebuild`.
+fn codebuild_copy(policy: &str) -> support::Scratch {
+    let dir = copy_with(policy);
+    for args in [
+        vec!["init", "-q"],
+        vec![
+            "remote",
+            "add",
+            "origin",
+            "https://github.com/acme/widgets.git",
+        ],
+    ] {
+        let out = support::git_command()
+            .current_dir(dir.path())
+            .args(&args)
+            .output()
+            .unwrap();
+        assert!(out.status.success(), "{out:?}");
+    }
+    dir
+}
+
+/// `sluice init codebuild` in `dir`, with `more` after it.
+fn init_codebuild(f: &Fakes, dir: &std::path::Path, more: &[&str]) -> (i32, String) {
+    let mut args = vec!["init", "codebuild", "--worktree", dir.to_str().unwrap()];
+    args.extend(more);
+    sluice(f, &args)
+}
+
+/// satisfies: record 0119 (design D10); C.8; the codebuild-pool spec's "A
+/// repository with no pool": the template for the systems given, one
+/// fleet and one run project each, naming the release that writes it and
+/// the repository its builds clone; how to deploy it, the secret to fill
+/// and `sluice init codebuild --stack` said; with no systems given, each
+/// `[systems]` names that CodeBuild runs on Linux, the others said
+#[test]
+fn init_codebuild_writes_the_stack() {
+    use sluice::profiles::codebuild::template::{self, System};
+    let f = setup();
+    let dir = codebuild_copy(INIT_POLICY);
+    let (code, said) = init_codebuild(&f, dir.path(), &["--systems", "linux-x64"]);
+    assert_eq!(code, 0, "{said}");
+    let written = std::fs::read_to_string(dir.path().join(".config/sluice-codebuild.yml")).unwrap();
+    let x64 = System::linux("linux-x64", "linux", "x86_64").unwrap();
+    assert_eq!(
+        written,
+        template::render(sluice::VERSION, "acme/widgets", std::slice::from_ref(&x64))
+    );
+    assert_eq!(written.matches("Type: AWS::CodeBuild::Fleet").count(), 1);
+    assert!(written.contains("RunLinuxX64:") && !written.contains("RunLinuxArm64:"));
+    assert!(
+        said.contains("written, a fleet and a run project for linux-x64"),
+        "{said}"
+    );
+    assert!(
+        said.contains("aws cloudformation deploy --template-file .config/sluice-codebuild.yml"),
+        "{said}"
+    );
+    assert!(
+        said.contains("aws secretsmanager put-secret-value --secret-id sluice-app-key"),
+        "{said}"
+    );
+    assert!(
+        said.contains("sluice init codebuild --stack sluice"),
+        "{said}"
+    );
+    assert_eq!(
+        std::fs::read_to_string(dir.path().join(POLICY_PATH)).unwrap(),
+        INIT_POLICY,
+        "the policy is the stack's to name"
+    );
+    let (code, said) = init_codebuild(&f, dir.path(), &["--systems", "linux-x64"]);
+    assert_eq!(code, 0, "{said}");
+    assert!(
+        said.contains("sluice-codebuild.yml: as sluice writes it"),
+        "{said}"
+    );
+
+    // The policy's systems: each CodeBuild runs on Linux, and the others
+    // named.
+    let systems = format!(
+        "{INIT_POLICY}\n[systems]\nlinux-x64 = {{ os = \"linux\", arch = \"x86_64\" }}\n\
+         linux-arm64 = {{ os = \"linux\", arch = \"aarch64\" }}\n\
+         macos-arm64 = {{ os = \"macos\", arch = \"aarch64\" }}\n"
+    );
+    let dir = codebuild_copy(&systems);
+    let (code, said) = init_codebuild(&f, dir.path(), &[]);
+    assert_eq!(code, 0, "{said}");
+    let written = std::fs::read_to_string(dir.path().join(".config/sluice-codebuild.yml")).unwrap();
+    assert!(written.contains("RunLinuxX64:") && written.contains("RunLinuxArm64:"));
+    assert!(
+        said.contains("a fleet and a run project for linux-arm64, linux-x64"),
+        "{said}"
+    );
+    assert!(
+        said.contains(
+            "CodeBuild runs no Linux fleet for macos-arm64 (macos aarch64); it is left out"
+        ),
+        "{said}"
+    );
+    let e = sluice_err(
+        &f,
+        &[
+            "init",
+            "codebuild",
+            "--worktree",
+            dir.path().to_str().unwrap(),
+            "--systems",
+            "macos-arm64",
+        ],
+    );
+    assert!(
+        e.contains("CodeBuild runs no Linux fleet for macos-arm64"),
+        "{e}"
+    );
+}
+
+/// satisfies: record 0119 (design D10); the codebuild-pool spec's "A
+/// template already there": one that differs is left, said how, exit 1,
+/// and written with `--force`
+#[test]
+fn init_codebuild_leaves_a_differing_template_unless_forced() {
+    use sluice::profiles::codebuild::template::{self, System};
+    let f = setup();
+    let dir = codebuild_copy(INIT_POLICY);
+    let x64 = System::linux("linux-x64", "linux", "x86_64").unwrap();
+    let wants = template::render(sluice::VERSION, "acme/widgets", std::slice::from_ref(&x64));
+    let edited = wants.replace("    Default: 4\n", "    Default: 12\n");
+    assert_ne!(edited, wants);
+    std::fs::write(dir.path().join(".config/sluice-codebuild.yml"), &edited).unwrap();
+    let (code, said) = init_codebuild(&f, dir.path(), &[]);
+    assert_eq!(code, FAILED, "{said}");
+    assert!(
+        said.contains("sluice-codebuild.yml: left as it is; line ")
+            && said.contains(
+                "holds \"Default: 12\", where sluice writes \"Default: 4\"; --force writes it"
+            ),
+        "{said}"
+    );
+    assert_eq!(
+        std::fs::read_to_string(dir.path().join(".config/sluice-codebuild.yml")).unwrap(),
+        edited
+    );
+    let (code, said) = init_codebuild(&f, dir.path(), &["--force"]);
+    assert_eq!(code, 0, "{said}");
+    assert_eq!(
+        std::fs::read_to_string(dir.path().join(".config/sluice-codebuild.yml")).unwrap(),
+        wants
+    );
+}
+
+/// satisfies: record 0119 (design D10); the codebuild-pool spec's "A
+/// deployed stack": the stack's key read by its alias, and the signer, its
+/// ARN and public half, and the pool, its region, sign project and run
+/// project, appended to the policy, its own lines untouched; again, nothing
+/// changes; a key of another spec refused, with nothing written
+#[test]
+fn init_codebuild_from_a_stack_appends_the_pool() {
+    if !alone("init_codebuild_from_a_stack_appends_the_pool") {
+        return;
+    }
+    let aws = support::aws::FakeAws::start();
+    let key = aws.with_key("alias/sluice-sign");
+    aws.point_here();
+    let f = setup();
+    let dir = codebuild_copy(INIT_POLICY);
+    let (code, said) = init_codebuild(
+        &f,
+        dir.path(),
+        &["--stack", "sluice", "--region", "us-east-1"],
+    );
+    assert_eq!(code, 0, "{said}");
+    assert!(said.contains(support::aws::KEY), "{said}");
+    assert!(said.contains("sluice pool check"), "{said}");
+    assert_eq!(aws.operations(), ["GetPublicKey"]);
+    let asked: serde_json::Value = serde_json::from_str(&aws.requests()[0].body).unwrap();
+    assert_eq!(asked["KeyId"], "alias/sluice-sign");
+    let policy = std::fs::read_to_string(dir.path().join(POLICY_PATH)).unwrap();
+    assert!(
+        policy.starts_with(INIT_POLICY),
+        "its own lines untouched: {policy}"
+    );
+    let p = sluice_core::policy::Policy::parse(&policy).expect("the policy parses");
+    let signer = &p.signers["codebuild"];
+    assert_eq!(signer.identity.0, "kms");
+    let sluice_seams::Setting::Tables(t) = &signer.identity.1 else {
+        panic!("{:?}", signer.identity)
+    };
+    assert_eq!(
+        t[0]["key"],
+        sluice_seams::Setting::Text(support::aws::KEY.into())
+    );
+    assert_eq!(
+        t[0]["public"],
+        sluice_seams::Setting::Text(support::aws::public(&key))
+    );
+    assert_eq!(p.pools.len(), 1);
+    let pool = &p.pools[0];
+    assert_eq!(
+        (pool.name.as_str(), pool.signer.as_str()),
+        ("codebuild", "codebuild")
+    );
+    assert_eq!(pool.kind.0, "codebuild");
+    let sluice_seams::Setting::Tables(t) = &pool.kind.1 else {
+        panic!("{:?}", pool.kind)
+    };
+    assert_eq!(
+        t[0]["region"],
+        sluice_seams::Setting::Text("us-east-1".into())
+    );
+    assert_eq!(
+        t[0]["sign"],
+        sluice_seams::Setting::Text("sluice-sign".into())
+    );
+    assert_eq!(
+        pool.runners,
+        std::collections::BTreeMap::from([(
+            "linux-x64".to_string(),
+            "sluice-run-linux-x64".to_string()
+        )])
+    );
+
+    let (code, said) = init_codebuild(
+        &f,
+        dir.path(),
+        &["--stack", "sluice", "--region", "us-east-1"],
+    );
+    assert_eq!(code, 0, "{said}");
+    assert!(
+        said.contains("names [signers.codebuild] and [pools.codebuild] already"),
+        "{said}"
+    );
+    assert_eq!(
+        std::fs::read_to_string(dir.path().join(POLICY_PATH)).unwrap(),
+        policy
+    );
+
+    // A key of another spec: refused, the policy as it was.
+    aws.held.lock().unwrap().spec = Some("RSA_2048".into());
+    let other = codebuild_copy(INIT_POLICY);
+    let e = sluice_err(
+        &f,
+        &[
+            "init",
+            "codebuild",
+            "--worktree",
+            other.path().to_str().unwrap(),
+            "--stack",
+            "sluice",
+            "--region",
+            "us-east-1",
+        ],
+    );
+    assert!(e.contains("RSA_2048") && e.contains("ECC_NIST_P256"), "{e}");
+    assert_eq!(
+        std::fs::read_to_string(other.path().join(POLICY_PATH)).unwrap(),
+        INIT_POLICY
+    );
+}
+
 /// satisfies: record 0119 (design D14); the actions-pool spec's "A pool the
 /// policy names is kept"
 #[test]

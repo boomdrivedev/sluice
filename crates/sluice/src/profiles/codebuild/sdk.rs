@@ -112,6 +112,24 @@ impl Chain {
     }
 }
 
+impl Chain {
+    /// The region the chain names, as the AWS tools find it: the
+    /// environment's, else the profile's; `None` where it names none.
+    pub fn region(&self) -> Option<String> {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .ok()?;
+        let mut chain = aws_config::default_provider::region::DefaultRegionChain::builder();
+        if let Some(profile) = &self.aws.profile {
+            chain = chain.profile_name(profile);
+        }
+        runtime
+            .block_on(chain.build().region())
+            .map(|r| r.to_string())
+    }
+}
+
 /// The calls of [`super::aws::Aws`] through the SDK, in one region, each
 /// under `policy`.
 pub struct Sdk {

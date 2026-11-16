@@ -1278,6 +1278,37 @@ pub enum InitCommand {
         #[arg(long)]
         force: bool,
     },
+    /// Write the CloudFormation template of a pool on a CodeBuild fleet,
+    /// its fleets, projects, key, bucket, rule and roles, and say how to
+    /// deploy it; a template that differs is left, exit 1, unless --force.
+    /// With --stack, read the deployed stack's key and append its signer
+    /// and pool to the policy where it names neither.
+    #[command(
+        after_help = "Examples:\n  $ sluice init codebuild\n  $ sluice init codebuild --systems linux-x64 linux-arm64\n  $ sluice init codebuild --stack sluice --region us-east-1"
+    )]
+    Codebuild {
+        /// The working copy to set up.
+        #[arg(long, default_value = ".")]
+        worktree: PathBuf,
+        /// The systems to run, by the policy's names; else each its
+        /// [systems] names that CodeBuild runs on Linux.
+        #[arg(long, num_args = 1..)]
+        systems: Vec<String>,
+        /// Write a template that differs from what sluice writes.
+        #[arg(long, conflicts_with = "stack")]
+        force: bool,
+        /// The stack the template was deployed as: its key read and the
+        /// pool named in the policy.
+        #[arg(long)]
+        stack: Option<String>,
+        /// With --stack, the stack's region; else the AWS chain's.
+        #[arg(long, requires = "stack")]
+        region: Option<String>,
+        /// With --stack, the AWS profile to read the stack's key as; else
+        /// the AWS chain's.
+        #[arg(long, requires = "stack")]
+        profile: Option<String>,
+    },
 }
 
 #[derive(Subcommand, Debug)]
@@ -2022,6 +2053,34 @@ pub fn run(
         Command::Init {
             command: InitCommand::Actions { worktree, force },
         } => init::actions(&worktree, force, out),
+        Command::Init {
+            command:
+                InitCommand::Codebuild {
+                    worktree,
+                    systems,
+                    force,
+                    stack: None,
+                    ..
+                },
+        } => init::codebuild(&worktree, &systems, force, out),
+        Command::Init {
+            command:
+                InitCommand::Codebuild {
+                    worktree,
+                    systems,
+                    stack: Some(stack),
+                    region,
+                    profile,
+                    ..
+                },
+        } => init::codebuild_stack(
+            &worktree,
+            &systems,
+            &stack,
+            region.as_deref(),
+            profile.as_deref(),
+            out,
+        ),
         Command::Step { branch, json } => {
             // Rule core.14 (design D10): the host process's round of the
             // branch, between its passes, printed as a step prints it.
