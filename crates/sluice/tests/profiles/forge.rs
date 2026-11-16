@@ -2501,7 +2501,7 @@ fn custom_environment() -> serde_json::Value {
 fn forge_check_names_a_pools_missing_workflow() {
     let clock = Clock::new();
     let (pool, signer) = actions_pool();
-    let wants = sluice::profiles::github::workflows::sluice("1.2.3");
+    let wants = sluice::profiles::github::workflows::sluice("1.2.3", &pool.runners);
     let fake = pool_forge(&clock, None, custom_environment(), &["main"]);
     let found = sluice::profiles::github::check::pool(
         &app(&fake, &clock),
@@ -2562,7 +2562,7 @@ fn forge_check_names_a_pools_missing_workflow() {
 fn forge_check_names_an_environment_any_branch_may_use() {
     let clock = Clock::new();
     let (pool, signer) = actions_pool();
-    let wants = sluice::profiles::github::workflows::sluice("1.2.3");
+    let wants = sluice::profiles::github::workflows::sluice("1.2.3", &pool.runners);
     let check = |environment: serde_json::Value, branches: &[&str]| -> Vec<String> {
         let fake = pool_forge(&clock, Some(&wants), environment, branches);
         let found = sluice::profiles::github::check::pool(

@@ -115,7 +115,7 @@ on. `sluice submit main` exits 2, and pushes and opens nothing:
 
 ```console
 $ sluice submit main
-refused: main takes pull requests, which only the host that keeps it on origin takes in, and its state is each host's own: name [signers] in .config/sluice.toml so its state is kept on origin (137)
+refused: main takes pull requests, which only the host that keeps it on origin takes in, and its state is each host's own: name [signers] in .config/sluice.toml so its state is kept on origin, as `sluice init actions` names a pool's signer (137)
 ```
 
 `sluice status main`, `sluice step main` and `sluice overview` say the

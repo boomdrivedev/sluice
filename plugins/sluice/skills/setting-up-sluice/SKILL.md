@@ -266,7 +266,7 @@ it ([peers](references/profiles/peers.md) sets up the keys). Without
 signers, sluice refuses the branch alone: `main takes pull requests,
 which only the host that keeps it on origin takes in, and its state is
 each host's own: name [signers] in .config/sluice.toml so its state is
-kept on origin (137)`.
+kept on origin, as `sluice init actions` names a pool's signer (137)`.
 
 ```toml
 [signers.box]

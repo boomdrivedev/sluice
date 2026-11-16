@@ -156,7 +156,7 @@ pub fn actions(dir: &Path, force: bool, out: &mut dyn Write) -> Result<i32> {
     };
     let version = crate::VERSION;
     let files = [
-        (workflows::SLUICE, workflows::sluice(version)),
+        (workflows::SLUICE, workflows::sluice(version, &runners)),
         (
             workflows::SLUICE_PR,
             workflows::sluice_pr(version, &runners),

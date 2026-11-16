@@ -1237,16 +1237,21 @@ impl Sluice<'_> {
     /// 113, record 0119 (design D11): start a run of `head`, a pull
     /// request's head onto `branch`, as `sluice-pr`'s run job runs it,
     /// under no claim: its checkout at the head, the branch's gate, tests
-    /// and limits read at the revision its records stand on (rule
-    /// core.15), on `system` where one is named. Nothing is written: a
-    /// head's run is no combination's, and its keys count by key alone
-    /// once signed (15). A checkout that cannot be made is
-    /// [`Started::Unmade`], and a start that fails [`Started::NotRun`].
+    /// and limits read at the branch's current revision (rule core.15), on
+    /// `system` where one is named. Nothing is written: a head's run is no
+    /// combination's, and its keys count by key alone once signed (15). A
+    /// checkout that cannot be made is [`Started::Unmade`], and a start
+    /// that fails [`Started::NotRun`].
     pub fn start_head(&self, branch: &str, head: &Rev, system: Option<&str>) -> Result<Started> {
-        let line = self.read_line(branch)?;
-        let Some(from) = self.start_from(branch, &line)? else {
-            bail!("{branch}'s records hold no revision yet");
-        };
+        let base = self
+            .seams
+            .branch
+            .read(branch)?
+            .ok_or_else(|| anyhow!("no branch {branch}"))?;
+        let policy = self
+            .policy_at(&base)?
+            .ok_or_else(|| anyhow!("{branch}'s revision {base} has no {POLICY_PATH}"))?;
+        let rules = self.gate(branch, &base)?;
         let Some(part) = self.seams.tests.hold(RunKind::Queue)? else {
             return Ok(Started::AtBound);
         };
@@ -1254,7 +1259,7 @@ impl Sluice<'_> {
         let place = match self
             .seams
             .checkout
-            .materialize(&name, head, &from.policy.checkout)
+            .materialize(&name, head, &policy.checkout)
         {
             Ok(place) => place,
             Err(e) if passes_through(&e) => return Err(e),
@@ -1263,11 +1268,11 @@ impl Sluice<'_> {
         let request = RunRequest {
             place,
             revision: head.clone(),
-            required: from.rules.required.clone(),
+            required: rules.required.clone(),
             since: None,
-            limit: from.rules.timeout,
-            limits: from.policy.limits.clone(),
-            tests: from.policy.tests.clone(),
+            limit: rules.timeout,
+            limits: policy.limits.clone(),
+            tests: policy.tests.clone(),
             command: None,
             replay: true,
             system: system.map(str::to_string),

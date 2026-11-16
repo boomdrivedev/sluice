@@ -27,9 +27,21 @@ const SLUICE_PR_TEMPLATE: &str = include_str!("workflows/sluice-pr.yml");
 const RUNNERS_LINE: &str =
     "        include: [{system: linux-x64, runner: ubuntu-24.04}] # the pool's runners";
 
-/// `sluice.yml` as sluice `version` writes it.
-pub fn sluice(version: &str) -> String {
-    SLUICE_TEMPLATE.replace("{{version}}", version)
+/// The line of `sluice.yml`'s template that stands for the pool's systems,
+/// whose head runs its `sign-head` job signs one each.
+const SYSTEMS_LINE: &str = "        system: [linux-x64] # the pool's systems";
+
+/// `sluice.yml` as sluice `version` writes it, its `sign-head` job signing
+/// a pull request's head run on each system of the pool's `runners`.
+pub fn sluice(version: &str, runners: &BTreeMap<String, String>) -> String {
+    let systems: Vec<&str> = runners.keys().map(String::as_str).collect();
+    let line = format!(
+        "        system: [{}] # the pool's systems",
+        systems.join(", ")
+    );
+    SLUICE_TEMPLATE
+        .replace(SYSTEMS_LINE, &line)
+        .replace("{{version}}", version)
 }
 
 /// `sluice-pr.yml` as sluice `version` writes it, one run job for each of
@@ -90,7 +102,11 @@ mod tests {
     /// neither, and both are rendered with the release that writes them.
     #[test]
     fn the_run_job_holds_no_identity_and_the_sign_job_runs_no_check() {
-        let w = sluice("1.2.3");
+        let runners = BTreeMap::from([
+            ("linux-x64".to_string(), "ubuntu-24.04".to_string()),
+            ("macos-arm64".to_string(), "macos-15".to_string()),
+        ]);
+        let w = sluice("1.2.3", &runners);
         assert!(w.contains("run-name: sluice ${{ inputs.claim"), "{w}");
         for input in ["claim:", "branch:", "combination:", "system:", "runner:"] {
             assert!(w.contains(&format!("      {input}")), "input {input}");
@@ -120,6 +136,20 @@ mod tests {
             assert!(sign.contains(needed), "the sign job lacks {needed}: {sign}");
         }
         assert!(!sign.contains("sluice job run"), "{sign}");
+        // A pull request's head run is signed on each of the pool's
+        // systems, as the sign job signs a claimed run.
+        let head = &j["sign-head"];
+        for needed in [
+            "if: github.event_name == 'workflow_run'",
+            "system: [linux-x64, macos-arm64]",
+            "environment: sluice",
+            "id-token: write",
+            "sluice job sign --head",
+            "sluice job record --head",
+        ] {
+            assert!(head.contains(needed), "sign-head lacks {needed}: {head}");
+        }
+        assert!(!head.contains("sluice job run"), "{head}");
         for line in w.lines().filter(|l| l.contains("uses: ")) {
             let at = line.split('@').nth(1).unwrap_or_default();
             assert!(
@@ -128,10 +158,6 @@ mod tests {
             );
         }
 
-        let runners = BTreeMap::from([
-            ("linux-x64".to_string(), "ubuntu-24.04".to_string()),
-            ("macos-arm64".to_string(), "macos-15".to_string()),
-        ]);
         let pr = sluice_pr("1.2.3", &runners);
         assert!(pr.contains(
             "include: [{system: linux-x64, runner: ubuntu-24.04}, {system: macos-arm64, runner: macos-15}]"

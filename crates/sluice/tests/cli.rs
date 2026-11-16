@@ -10211,7 +10211,10 @@ fn init_actions_writes_both_workflows_and_the_pool() {
     };
     let runners =
         std::collections::BTreeMap::from([("linux-x64".to_string(), "ubuntu-24.04".to_string())]);
-    assert_eq!(read("sluice.yml"), workflows::sluice(sluice::VERSION));
+    assert_eq!(
+        read("sluice.yml"),
+        workflows::sluice(sluice::VERSION, &runners)
+    );
     assert_eq!(
         read("sluice-pr.yml"),
         workflows::sluice_pr(sluice::VERSION, &runners)
@@ -10250,7 +10253,10 @@ fn init_actions_leaves_a_differing_workflow_unless_forced() {
     let dir = copy_with(INIT_POLICY);
     let at = dir.path().join(".github/workflows");
     std::fs::create_dir_all(&at).unwrap();
-    let edited = workflows::sluice(sluice::VERSION).replace("name: sluice\n", "name: ours\n");
+    let runners =
+        std::collections::BTreeMap::from([("linux-x64".to_string(), "ubuntu-24.04".to_string())]);
+    let edited =
+        workflows::sluice(sluice::VERSION, &runners).replace("name: sluice\n", "name: ours\n");
     std::fs::write(at.join("sluice.yml"), &edited).unwrap();
     let (code, said) = init_actions(&f, dir.path(), false);
     assert_eq!(code, FAILED, "{said}");
@@ -10268,7 +10274,7 @@ fn init_actions_leaves_a_differing_workflow_unless_forced() {
     assert_eq!(code, 0, "{said}");
     assert_eq!(
         std::fs::read_to_string(at.join("sluice.yml")).unwrap(),
-        workflows::sluice(sluice::VERSION)
+        workflows::sluice(sluice::VERSION, &runners)
     );
 }
 
@@ -10296,4 +10302,88 @@ fn init_actions_keeps_a_pool_the_policy_names() {
         pr.contains("include: [{system: macos-arm64, runner: macos-15-large}]"),
         "{pr}"
     );
+}
+
+/// satisfies: 113, 15; record 0119 (design D11): a pull request's head
+/// run, run and signed with no claim, has its bundle added among the
+/// pool's signer's runs, and no state is written.
+#[test]
+fn job_record_of_a_head_adds_its_bundle_with_no_claim() {
+    use base64::Engine as _;
+    let f = Fakes::new();
+    pooled(&f, &["a"]);
+    let head = f.world.tip("main");
+    let out = support::Scratch::new("job-head");
+    let ran = out.path().join("sluice-run");
+    let sign = out.path().join("sluice-sign");
+    let version = f.world.version("main");
+    for args in [
+        vec![
+            "job",
+            "run",
+            "--head",
+            head.as_str(),
+            "--branch",
+            "main",
+            "--system",
+            "macos-arm64",
+            "--out",
+            ran.to_str().unwrap(),
+        ],
+        vec![
+            "job",
+            "sign",
+            "--head",
+            head.as_str(),
+            "--branch",
+            "main",
+            "--system",
+            "macos-arm64",
+            "--from",
+            ran.to_str().unwrap(),
+            "--out",
+            sign.to_str().unwrap(),
+        ],
+    ] {
+        let (code, said) = sluice(&f, &args);
+        assert_eq!(code, 0, "{said}");
+    }
+    let run: sluice::signing::statement::Run =
+        serde_json::from_slice(&std::fs::read(sign.join("predicate.json")).unwrap()).unwrap();
+    assert_eq!(run.claim, None);
+    assert_eq!(run.combination, head);
+    let payload = base64::engine::general_purpose::STANDARD
+        .encode(serde_json::to_vec(&sluice::signing::statement::Statement::of(run)).unwrap());
+    let bundle = out.path().join("bundle.json");
+    std::fs::write(
+        &bundle,
+        serde_json::json!({
+            "dsseEnvelope": { "payloadType": "application/vnd.in-toto+json", "payload": payload, "signatures": [] },
+        })
+        .to_string(),
+    )
+    .unwrap();
+    let (code, said) = sluice(
+        &f,
+        &[
+            "job",
+            "record",
+            "--head",
+            head.as_str(),
+            "--branch",
+            "main",
+            "--bundle",
+            bundle.to_str().unwrap(),
+        ],
+    );
+    assert_eq!(code, 0, "{said}");
+    let adds = f.world.signed_adds();
+    assert_eq!(adds.len(), 1);
+    assert_eq!(adds[0].0, "forge");
+    assert!(
+        adds[0].1.starts_with(&format!("{head}/macos-arm64/")),
+        "{}",
+        adds[0].1
+    );
+    assert_eq!(f.world.version("main"), version, "no state written");
 }

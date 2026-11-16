@@ -1335,14 +1335,20 @@ pub enum JobCommand {
     /// Add the sign job's bundle to the signer's runs and write the run
     /// ended and closed under its claim in one write; with no bundle, the
     /// run ended with no outcome. Refused, exit 1 with nothing written,
-    /// where the claim no longer holds the run.
+    /// where the claim no longer holds the run. With --head, a pull
+    /// request's head run's bundle is added, under no claim, writing no
+    /// state.
     #[command(
-        after_help = "Example:\n  $ sluice job record --claim pool/forge/3 --branch main --bundle attestation.json"
+        after_help = "Examples:\n  $ sluice job record --claim pool/forge/3 --branch main --bundle attestation.json\n  $ sluice job record --head 4f2c9e1 --branch main --bundle attestation.json"
     )]
     Record {
         /// The claim the pool's job ran under.
-        #[arg(long)]
-        claim: String,
+        #[arg(long, conflicts_with = "head")]
+        claim: Option<String>,
+        /// A pull request's head, whose signed results are added with no
+        /// claim.
+        #[arg(long, required_unless_present = "claim", requires = "bundle")]
+        head: Option<String>,
         /// The branch the run's combination lands on.
         #[arg(long)]
         branch: String,

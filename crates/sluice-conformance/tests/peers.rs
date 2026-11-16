@@ -1270,3 +1270,97 @@ fn a_lead_with_no_live_run_writes_nothing_to_keep_it() {
     }
     assert_eq!(h.version(), version, "nothing written to keep it");
 }
+
+/// Record 0119 (design D11; 113): a branch whose gate trusts `trust`, its
+/// signers `box`, this rig's hosts, and `forge`, a pool's on GitHub.
+fn with_forge_signer(trust: &str) -> Harness {
+    let p = policy(false, "fail", 4).replace(
+        "trust = [\"open\", \"sandbox\", \"container\"]\n",
+        &format!("trust = {trust}\nremote = \"origin\"\n"),
+    ) + "\n[signers.box]\nssh = \"box ssh-ed25519 AAAA\"\n\
+         \n[signers.forge]\ngithub = { workflow = \".github/workflows/sluice.yml\", ref = \"refs/heads/main\" }\n";
+    let h = Harness::new(&p);
+    h.w().signs_as("box");
+    h
+}
+
+/// Record 0119 (design D11; 113): `head`, a pull request's head onto the
+/// branch, run as `sluice-pr`'s run job runs it, on host `job`, under no
+/// claim, and its results recorded signed by `signer`, as the records read
+/// back the bundle `sluice job record --head` adds.
+fn head_run(h: &Harness, head: &sluice_seams::Rev, signer: &str) {
+    use sluice_core::records::{to_line, ResultLine};
+    h.w().be_host("job");
+    let s = h.sluice();
+    let sluice_core::Started::Running(run) = s.start_head(BRANCH, head, None).unwrap() else {
+        panic!("the head's run started");
+    };
+    let sluice_seams::Progress::Finished(report) = s.seams().tests.progress(&run).unwrap() else {
+        panic!("the head's run finished");
+    };
+    let at = "2026-11-16T03:00:00Z";
+    let lines: Vec<u8> = report
+        .tasks
+        .iter()
+        .flat_map(|t| {
+            to_line(&ResultLine::of(
+                at,
+                t,
+                &report.executor,
+                BRANCH,
+                head,
+                None,
+                None,
+            ))
+        })
+        .collect();
+    h.w().signs_as(signer);
+    s.seams().state.record_results(&lines).unwrap();
+    h.w().signs_as("box");
+}
+
+/// satisfies: 15, 113, 108; record 0119 (design D11); S40: a pull
+/// request's head run, signed by a signer the gate trusts, counts for a
+/// combination by key: its replay is proven, and nothing runs again.
+#[test]
+fn s40_a_pull_requests_head_runs_count_by_key() {
+    let h = with_forge_signer("[\"box\", \"forge\"]");
+    let head = h.work("unit/a", "agent-a", &[("a/lib", Some("a2"))]);
+    head_run(&h, &head, "forge");
+    let ran = h.w().observed().len();
+    let one = h.submit("unit/a");
+    for _ in 0..6 {
+        on(&h, "a").step(BRANCH).unwrap();
+    }
+    assert_eq!(h.sub(one).state, State::Landed);
+    assert_eq!(h.w().observed().len(), ran, "nothing ran again");
+    assert!(!h
+        .events()
+        .iter()
+        .any(|e| matches!(e, Event::Unproven { .. })));
+    assert!(!h
+        .events()
+        .iter()
+        .any(|e| matches!(e, Event::Opened { run: 1, .. })));
+}
+
+/// satisfies: 15, 113, 108, 78; record 0119 (design D11): a head run
+/// signed by a signer the gate does not trust proves no replay, and its
+/// checks run again.
+#[test]
+fn a_head_run_by_an_untrusted_signer_counts_for_nothing() {
+    let h = with_forge_signer("[\"box\"]");
+    let head = h.work("unit/a", "agent-a", &[("a/lib", Some("a2"))]);
+    head_run(&h, &head, "forge");
+    let ran = h.w().observed().len();
+    let one = h.submit("unit/a");
+    for _ in 0..8 {
+        on(&h, "a").step(BRANCH).unwrap();
+    }
+    assert_eq!(h.sub(one).state, State::Landed);
+    assert!(h
+        .events()
+        .iter()
+        .any(|e| matches!(e, Event::Unproven { .. })));
+    assert!(h.w().observed().len() > ran, "its checks ran again");
+}

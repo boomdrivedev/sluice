@@ -549,7 +549,7 @@ its own state, so sluice refuses the branch alone, and reads every other
 branch as before:
 
 ```text
-main takes pull requests, which only the host that keeps it on origin takes in, and its state is each host's own: name [signers] in .config/sluice.toml so its state is kept on origin (137)
+main takes pull requests, which only the host that keeps it on origin takes in, and its state is each host's own: name [signers] in .config/sluice.toml so its state is kept on origin, as `sluice init actions` names a pool's signer (137)
 ```
 
 A submit to it exits 2 before anything is pushed or opened, and status,

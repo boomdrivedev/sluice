@@ -187,7 +187,7 @@ impl std::fmt::Display for NoIntake {
             f,
             "{branch} takes pull requests, which only the host that keeps it on {remote} takes \
              in, and its state is each host's own: name [signers] in .config/sluice.toml so its \
-             state is kept on {remote} (137)"
+             state is kept on {remote}, as `sluice init actions` names a pool's signer (137)"
         )
     }
 }
@@ -208,6 +208,11 @@ pub struct PullRequests {
     /// where the output is kept.
     pub log_lines: Option<usize>,
 }
+
+/// C.5, ADR 0044: the name of the check sluice posts on a request's head,
+/// and the prefix of its checks of each task, `sluice / <task>`, which the
+/// pull request driver posts under.
+pub const OWN_CHECK: &str = "sluice";
 
 /// What `trust` may list on a branch whose records are this host's.
 const TRUSTS: [&str; 4] = ["confined", "open", "sandbox", "container"];
@@ -609,7 +614,24 @@ impl Policy {
                             "[branches.\"{pattern}\".pull_requests] reviews must be at least 0, not {n}"
                         ),
                     },
-                    checks: p.checks,
+                    checks: {
+                        // 113, record 0119 (design D11): a head's runs count
+                        // by key through sluice; its own check is no other
+                        // system's.
+                        let own = format!("{OWN_CHECK} / ");
+                        if let Some(c) = p
+                            .checks
+                            .iter()
+                            .find(|c| *c == OWN_CHECK || c.starts_with(&own))
+                        {
+                            bail!(
+                                "[branches.\"{pattern}\".pull_requests] checks names {c:?}, a \
+                                 check sluice posts on a request's head itself: its runs count by \
+                                 key, so name only checks other systems post"
+                            );
+                        }
+                        p.checks
+                    },
                     log_lines: match p.log_lines {
                         None => None,
                         Some(n) if n >= 1 => Some(n as usize),
@@ -1255,6 +1277,42 @@ hold = "5m"
         assert!(p.rules_for("unit/x").unwrap().is_none());
     }
 
+    /// 113, record 0119 (design D11): a `pull_requests.checks` entry naming
+    /// sluice's own check, or one of its checks of a task, is refused,
+    /// naming it; another system's check reads.
+    #[test]
+    fn a_pull_request_table_naming_sluices_own_check_is_refused() {
+        let with = |checks: &str| {
+            Policy::parse(&format!(
+                "[signers.a]\nssh = \".config/sluice.signers\"\n\
+                 [branches.main]\nremote = \"origin\"\ntrust = [\"a\"]\n\
+                 [branches.main.pull_requests]\nchecks = {checks}\n"
+            ))
+        };
+        for (checks, named) in [
+            ("[\"ci/lint\", \"sluice\"]", "\"sluice\""),
+            (
+                "[\"sluice / root:test (linux-x64)\"]",
+                "\"sluice / root:test (linux-x64)\"",
+            ),
+        ] {
+            let e = format!("{:#}", with(checks).unwrap_err());
+            assert!(
+                e.contains(&format!(
+                    "[branches.\"main\".pull_requests] checks names {named}, a check sluice \
+                     posts on a request's head itself"
+                )),
+                "{e}"
+            );
+        }
+        let p = with("[\"ci/lint\", \"sluicey\"]").unwrap();
+        let main = p.rules_for("main").unwrap().unwrap();
+        assert_eq!(
+            main.pull_requests.as_ref().unwrap().checks,
+            vec!["ci/lint".to_string(), "sluicey".to_string()]
+        );
+    }
+
     /// 137, 56, S64 (design D22): a branch that takes pull requests on
     /// records each host keeps is refused alone, naming the branch, its
     /// remote and `[signers]`; every other branch reads, and the refused
@@ -1279,7 +1337,7 @@ hold = "5m"
             format!("{e:#}"),
             "main takes pull requests, which only the host that keeps it on origin takes in, \
              and its state is each host's own: name [signers] in .config/sluice.toml so its \
-             state is kept on origin (137)"
+             state is kept on origin, as `sluice init actions` names a pool's signer (137)"
         );
         assert!(unkept.rules_for("bolt/x").unwrap().is_some());
         assert_eq!(unkept.remote_of("main").unwrap().as_deref(), Some("origin"));

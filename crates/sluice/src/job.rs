@@ -139,14 +139,99 @@ pub fn run(
         }
         JobCommand::Record {
             claim,
+            head,
             branch,
             bundle,
             from,
         } => {
             let s = Sluice::new(seams, clock).as_peer(host.peer());
-            record(&s, &branch, &claim, bundle.as_deref(), from.as_deref(), out)
+            match (claim, head, bundle) {
+                (Some(claim), None, bundle) => {
+                    record(&s, &branch, &claim, bundle.as_deref(), from.as_deref(), out)
+                }
+                (None, Some(head), Some(bundle)) => {
+                    record_head(&s, &branch, &Rev::new(head), &bundle, out)
+                }
+                _ => bail!("sluice job record: give --claim, or --head with --bundle"),
+            }
         }
     }
+}
+
+/// The run a bundle's statement holds, read without verifying it: the
+/// readers of the signer's runs verify it (78).
+fn bundled_run(bytes: &[u8]) -> Result<crate::signing::statement::Run> {
+    use crate::signing::statement::Statement;
+    let text = std::str::from_utf8(bytes).context("the bundle is no JSON")?;
+    let statement = crate::profiles::github::keyless::statement_of(text)?;
+    let st: Statement = serde_json::from_value(statement)
+        .context("the bundle's statement is no run's")
+        .and_then(Statement::checked)?;
+    Ok(st.predicate)
+}
+
+/// The signer of `branch`'s pool `pool`, or of its one pool on GitHub where
+/// `pool` is `None`, from its policy at `at`.
+fn pool_signer(s: &Sluice<'_>, branch: &str, at: &Rev, pool: Option<&str>) -> Result<String> {
+    let policy = s
+        .policy_at(at)?
+        .ok_or_else(|| anyhow::anyhow!("{branch}'s revision {at} has no policy"))?;
+    let mut on_github = policy
+        .pools
+        .iter()
+        .filter(|p| pool.map_or(p.kind.0 == "github", |n| p.name == n));
+    match (on_github.next(), on_github.next()) {
+        (Some(p), None) => Ok(p.signer.clone()),
+        (None, _) => bail!(
+            "{branch}'s policy names no pool {}",
+            pool.unwrap_or("on GitHub")
+        ),
+        (Some(_), Some(_)) => bail!("{branch}'s policy names more than one pool on GitHub"),
+    }
+}
+
+/// Where a signed record of `run` of `combination` is kept among its
+/// signer's runs: by its combination, its system and its own digest.
+fn record_path(combination: &Rev, system: Option<&str>, bytes: &[u8]) -> String {
+    format!(
+        "{combination}/{}/{}.json",
+        system.filter(|s| !s.is_empty()).unwrap_or("any"),
+        &crate::profiles::remote_refs::sha256_hex(bytes)[..16]
+    )
+}
+
+/// 113, record 0119 (design D11): a pull request's head run's bundle,
+/// added among the pool's signer's runs, where its results count by key
+/// once read (15); no state is written, since a head's run is no
+/// combination's.
+fn record_head(
+    s: &Sluice<'_>,
+    branch: &str,
+    head: &Rev,
+    bundle: &Path,
+    out: &mut dyn Write,
+) -> Result<i32> {
+    let bytes = std::fs::read(bundle)
+        .with_context(|| format!("reading the bundle {}", bundle.display()))?;
+    let run = bundled_run(&bytes)?;
+    if run.claim.is_some() || run.combination != *head {
+        bail!(
+            "the bundle is of {} under {}, not of the head {head} under no claim",
+            run.combination,
+            run.claim.as_deref().unwrap_or("no claim")
+        );
+    }
+    let at = base_of(s, branch)?;
+    let signer = pool_signer(s, branch, &at, None)?;
+    let system = Some(run.claims.system.as_str());
+    let path = record_path(head, system, &bytes);
+    s.seams().state.add_signed(branch, &signer, &path, &bytes)?;
+    writeln!(
+        out,
+        "added {signer}'s {} signed results of the head {head}",
+        run.results.len()
+    )?;
+    Ok(0)
 }
 
 /// Record 0119 (design D11; 77, 109): the sign job's end of the run
@@ -164,7 +249,6 @@ fn record(
     from: Option<&Path>,
     out: &mut dyn Write,
 ) -> Result<i32> {
-    use crate::signing::statement::Statement;
     let snap = s.seams().state.read(branch)?;
     let doc = sluice_core::line::Line::load(branch, snap)?.doc;
     let held = doc.candidates.iter().find_map(|c| {
@@ -184,12 +268,7 @@ fn record(
         Some(path) => {
             let bytes = std::fs::read(path)
                 .with_context(|| format!("reading the bundle {}", path.display()))?;
-            let text = std::str::from_utf8(&bytes).context("the bundle is no JSON")?;
-            let statement = crate::profiles::github::keyless::statement_of(text)?;
-            let st: Statement = serde_json::from_value(statement)
-                .context("the bundle's statement is no run's")
-                .and_then(Statement::checked)?;
-            let run = st.predicate;
+            let run = bundled_run(&bytes)?;
             if run.claim.as_deref() != Some(claim) || run.combination != c.revision {
                 bail!(
                     "the bundle is of {} under {}, not of {claim}'s run of {}",
@@ -202,26 +281,13 @@ fn record(
                 .base
                 .clone()
                 .ok_or_else(|| anyhow::anyhow!("{branch}'s records hold no revision yet"))?;
-            let policy = s
-                .policy_at(&base)?
-                .ok_or_else(|| anyhow::anyhow!("{branch}'s revision {base} has no policy"))?;
             let pool = claim
                 .strip_prefix("pool/")
                 .and_then(|rest| rest.rsplit_once('/'))
                 .map(|(pool, _)| pool)
                 .ok_or_else(|| anyhow::anyhow!("{claim} is no pool's claim"))?;
-            let signer = policy
-                .pools
-                .iter()
-                .find(|p| p.name == pool)
-                .map(|p| p.signer.clone())
-                .ok_or_else(|| anyhow::anyhow!("{branch}'s policy names no pool {pool}"))?;
-            let path = format!(
-                "{}/{}/{}.json",
-                c.revision,
-                r.system.as_deref().unwrap_or("any"),
-                &crate::profiles::remote_refs::sha256_hex(&bytes)[..16]
-            );
+            let signer = pool_signer(s, branch, &base, Some(pool))?;
+            let path = record_path(&c.revision, r.system.as_deref(), &bytes);
             s.seams().state.add_signed(branch, &signer, &path, &bytes)?;
             let signed: Vec<sluice_core::SignedResult> = run
                 .results
@@ -272,13 +338,13 @@ struct Signed {
     claim: Option<String>,
 }
 
-/// The revision `branch`'s records stand on, whose gate a run is held to
-/// (rule core.15).
+/// `branch`'s current revision, whose gate a head's run is held to (rule
+/// core.15).
 fn base_of(s: &Sluice<'_>, branch: &str) -> Result<Rev> {
-    let snap = s.seams().state.read(branch)?;
-    let doc = sluice_core::line::Line::load(branch, snap)?.doc;
-    doc.base
-        .ok_or_else(|| anyhow::anyhow!("{branch}'s records hold no revision yet"))
+    s.seams()
+        .branch
+        .read(branch)?
+        .ok_or_else(|| anyhow::anyhow!("no branch {branch}"))
 }
 
 /// The run `claim` holds on `branch`, read from its records, the
