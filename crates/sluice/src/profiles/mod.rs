@@ -206,15 +206,50 @@ impl Bound {
                 }
             },
             tests: {
+                let (aws, alive) = (instance.aws.clone(), instance.peers.alive);
                 let checks = checks::Checks::new(&common, program, instance);
-                // 88: with sluice's app, GitHub Actions is the pool this
-                // host can start runs on; the binding hands it over (core.2).
-                match &app_for_pool {
-                    Some(app) => {
-                        checks.with_pool(Box::new(github::actions::Actions::new(app.clone(), dir)))
-                    }
+                // 88: with sluice's app, GitHub Actions is a pool this host
+                // can start runs on; the binding hands it over (core.2).
+                let checks = match &app_for_pool {
+                    Some(app) => checks.with_pool(
+                        "github",
+                        Box::new(github::actions::Actions::new(app.clone(), dir)),
+                    ),
                     None => checks,
-                }
+                };
+                // Record 0119 (design D5 of the change
+                // `a-codebuild-fleet-runs-a-queues-checks`): a CodeBuild
+                // fleet always, its credentials found at each call by the
+                // host's AWS chain; its run builds read the repository with
+                // a token of sluice's app, which a host with none cannot buy.
+                let reader = app_for_pool.clone().map(|app| {
+                    let dir = dir.to_path_buf();
+                    Box::new(move |remote: Option<&str>| {
+                        let remote = remote.unwrap_or("origin");
+                        let url = pushed_refs::remote_url(&dir, remote)?;
+                        let repo = github::Repo::from_url(&url).ok_or_else(|| {
+                            anyhow::anyhow!("{remote} ({url}) is no repository on GitHub")
+                        })?;
+                        Ok(app.reading(&repo)?.secret)
+                    }) as codebuild::Reader
+                });
+                let calls = retry.clone();
+                checks.with_pool(
+                    "codebuild",
+                    Box::new(codebuild::CodeBuild::new(
+                        Box::new(move |region| {
+                            Rc::new(codebuild::sdk::Sdk::new(
+                                codebuild::sdk::Chain::of(&aws),
+                                region,
+                                calls.clone(),
+                            )) as Rc<dyn codebuild::aws::Aws>
+                        }),
+                        reader,
+                        &common,
+                        &crate::instance::state_dir()?,
+                        alive,
+                    )),
+                )
             },
             branch,
             driver: Drivers {
