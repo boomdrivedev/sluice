@@ -136,6 +136,57 @@ impl FakeAws {
         arn
     }
 
+    /// The stack `stack` deployed for `repository` by this release, its
+    /// fleet for linux-x64 growing to `most` instances: its run and sign
+    /// projects and its fleet, as CodeBuild answers them.
+    pub fn deploy(&self, stack: &str, repository: &str, most: i32) {
+        use sluice::profiles::codebuild::template::{buildspecs, System};
+        let x64 = System::linux("linux-x64", "linux", "x86_64").unwrap();
+        let (run, sign) = buildspecs(sluice::VERSION, repository, &x64);
+        let fleet = format!("arn:aws:codebuild:{REGION}:{ACCOUNT}:fleet/{stack}-linux-x64:1");
+        let project = |name: &str, environment: Value, buildspec: &str, timeout: i32| {
+            json!({
+                "name": name,
+                "arn": format!("arn:aws:codebuild:{REGION}:{ACCOUNT}:project/{name}"),
+                "source": { "type": "NO_SOURCE", "buildspec": buildspec },
+                "environment": environment,
+                "timeoutInMinutes": timeout,
+                "serviceRole": format!("arn:aws:iam::{ACCOUNT}:role/{name}"),
+                "artifacts": { "type": "S3", "packaging": "ZIP", "location": "hand-over" },
+            })
+        };
+        let mut held = self.held.lock().unwrap();
+        held.projects.push(project(
+            &format!("{stack}-run-linux-x64"),
+            json!({
+                "type": "LINUX_EC2",
+                "image": "aws/codebuild/ami/amazonlinux-x86_64-base:latest",
+                "computeType": "BUILD_GENERAL1_MEDIUM",
+                "fleet": { "fleetArn": fleet },
+            }),
+            &run,
+            90,
+        ));
+        held.projects.push(project(
+            &format!("{stack}-sign"),
+            json!({
+                "type": "LINUX_CONTAINER",
+                "image": "aws/codebuild/amazonlinux-x86_64-standard:5.0",
+                "computeType": "BUILD_GENERAL1_SMALL",
+            }),
+            &sign,
+            20,
+        ));
+        held.fleets.push(json!({
+            "arn": fleet,
+            "name": format!("{stack}-linux-x64"),
+            "environmentType": "LINUX_EC2",
+            "computeType": "BUILD_GENERAL1_MEDIUM",
+            "baseCapacity": 1,
+            "scalingConfiguration": { "scalingType": "TARGET_TRACKING_SCALING", "maxCapacity": most },
+        }));
+    }
+
     /// `bytes` kept at `s3://<bucket>/<key>`.
     pub fn put_object(&self, bucket: &str, key: &str, bytes: &[u8]) {
         let at = format!("{bucket}/{key}");

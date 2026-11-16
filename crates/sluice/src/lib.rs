@@ -18,6 +18,7 @@ pub mod init;
 pub mod instance;
 pub mod job;
 pub mod overview;
+pub mod pool;
 pub mod preview;
 pub mod profiles;
 pub mod progress;
@@ -638,6 +639,12 @@ pub enum Command {
         #[command(subcommand)]
         command: InitCommand,
     },
+    /// The pools a branch's runs go to, read back from where they run.
+    #[command(after_help = "Example:\n  $ sluice pool check main")]
+    Pool {
+        #[command(subcommand)]
+        command: PoolCommand,
+    },
     /// Run by the workflow `sluice init actions` writes: a pool's job's
     /// run, its signature and its record (record 0119).
     #[command(
@@ -1246,6 +1253,28 @@ pub enum BranchCommand {
         /// One JSON document on stdout.
         #[arg(long)]
         json: bool,
+    },
+}
+
+#[derive(Subcommand, Debug)]
+pub enum PoolCommand {
+    /// Read each CodeBuild pool the policy at the branch's revision names
+    /// back from AWS: who the host reaches it as, each run project on a
+    /// reserved-capacity fleet of its system with the buildspec this
+    /// release writes and a timeout longer than the branch's, the sign
+    /// project's buildspec, and the key against the policy's half. Exits 1
+    /// naming each that fails; says where the branch does not test side by
+    /// side at the fleets' size.
+    #[command(
+        after_help = "Examples:\n  $ sluice pool check main\n  $ sluice pool check main --profile ops"
+    )]
+    Check {
+        /// The branch whose policy names the pools.
+        branch: String,
+        /// The AWS profile to read the pools as; else the host's
+        /// [aws] profile, else the AWS chain's.
+        #[arg(long)]
+        profile: Option<String>,
     },
 }
 
@@ -2698,6 +2727,15 @@ pub fn run(
                 serve();
             }
             Ok(code)
+        }
+        Command::Pool {
+            command: PoolCommand::Check { branch, profile },
+        } => {
+            let aws = match profile {
+                Some(p) => instance::Aws { profile: Some(p) },
+                None => instance::Instance::read()?.aws,
+            };
+            pool::check(&s, &branch, &aws, out)
         }
         Command::Forge {
             command: ForgeCommand::Check { branch, json },
