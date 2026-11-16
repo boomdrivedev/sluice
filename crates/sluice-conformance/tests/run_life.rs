@@ -605,3 +605,120 @@ fn a_passed_run_with_no_signed_result_stands_and_is_followed_up() {
     }
     assert_eq!(h.sub(one).state, State::Landed);
 }
+
+/// The marker of `host`'s last sign of life, as the remote holds it.
+fn beat_of(h: &Harness, host: &str) -> Option<String> {
+    use sluice_seams::State as _;
+    h.f.state.beats().unwrap().remove(host).map(|(m, _)| m)
+}
+
+/// `host` shows its sign of life with no round of the branch, as a host
+/// busy elsewhere does.
+fn beats(h: &Harness, host: &str) {
+    use sluice_seams::State as _;
+    h.f.state.beat(host, b"{}").unwrap();
+}
+
+/// satisfies: record 0122; 73, 77; the run-claims spec's "Every claim
+/// holder shows its sign of life", the lead among them
+#[test]
+fn a_lead_shows_its_sign_of_life_as_any_claim_holder() {
+    let h = signed();
+    h.w().hold_runs(true);
+    h.work("unit/a", "agent-a", &[("a/lib", Some("a2"))]);
+    let one = h.submit("unit/a");
+    on(&h, "a").step(BRANCH).unwrap();
+    assert_eq!(h.doc().lead.as_deref(), Some("a"));
+    assert_eq!(runs_of(&h, &[one])[0].holder(), Some("a"));
+    let first = beat_of(&h, "a").expect("the lead's sign of life");
+    h.w().advance(chrono::Duration::minutes(1));
+    on(&h, "a").step(BRANCH).unwrap();
+    let second = beat_of(&h, "a").expect("the lead's sign of life");
+    assert_ne!(first, second, "written each round");
+}
+
+/// satisfies: record 0122; 72, 73, 77; the run-life spec's "A change of
+/// lead changes no run", the lead moves under a running claim
+#[test]
+fn a_change_of_lead_keeps_a_live_claim() {
+    let h = signed();
+    h.w().hold_runs(true);
+    h.work("unit/a", "agent-a", &[("a/lib", Some("a2"))]);
+    let one = h.submit("unit/a");
+    on(&h, "a").step(BRANCH).unwrap();
+    assert_eq!(runs_of(&h, &[one])[0].holder(), Some("a"));
+    // a writes nothing of the branch for the lease, but stays alive; b
+    // takes the lead.
+    for _ in 0..7 {
+        h.w().advance(chrono::Duration::minutes(1));
+        beats(&h, "a");
+        on(&h, "b").step(BRANCH).unwrap();
+    }
+    assert_eq!(h.doc().lead.as_deref(), Some("b"));
+    for _ in 0..3 {
+        h.w().advance(chrono::Duration::minutes(1));
+        beats(&h, "a");
+        on(&h, "b").step(BRANCH).unwrap();
+    }
+    assert!(!h.events().iter().any(|e| matches!(e, Event::Lapsed { .. })));
+    assert_eq!(runs_of(&h, &[one])[0].holder(), Some("a"));
+    assert_eq!(runs_of(&h, &[one])[0].state, RunState::Running);
+    // a's run ends, and a writes its end under its own claim.
+    h.w().complete_all();
+    on(&h, "a").step(BRANCH).unwrap();
+    let run = &runs_of(&h, &[one])[0];
+    assert_eq!(run.state, RunState::Closed);
+    assert_eq!(
+        run.ended.as_ref().unwrap().outcomes.get("#gate"),
+        Some(&CheckOutcome::Passed)
+    );
+    for _ in 0..3 {
+        on(&h, "b").step(BRANCH).unwrap();
+    }
+    assert_eq!(h.sub(one).state, State::Landed);
+    assert_eq!(h.w().requests().len(), 1, "run once");
+}
+
+/// satisfies: record 0122; 73, 77; the run-life spec's "A change of lead
+/// changes no run", a lead that stops
+#[test]
+fn a_stopped_leads_claim_lapses_by_its_own_sign_of_life() {
+    let h = signed();
+    h.w().hold_runs(true);
+    h.work("unit/a", "agent-a", &[("a/lib", Some("a2"))]);
+    let one = h.submit("unit/a");
+    on(&h, "a").step(BRANCH).unwrap();
+    // a stops. b reads the branch, and takes it once the lease has passed.
+    on(&h, "b").step(BRANCH).unwrap();
+    h.w().advance(chrono::Duration::minutes(6));
+    on(&h, "b").step(BRANCH).unwrap();
+    assert_eq!(h.doc().lead.as_deref(), Some("b"));
+    // b's own observation of a's sign of life begins as it leads: nothing
+    // lapses before the bound of its own reading.
+    h.w().advance(chrono::Duration::minutes(1));
+    on(&h, "b").step(BRANCH).unwrap();
+    assert!(!h.events().iter().any(|e| matches!(e, Event::Lapsed { .. })));
+    h.w().advance(chrono::Duration::minutes(2));
+    on(&h, "b").step(BRANCH).unwrap();
+    assert!(h
+        .events()
+        .iter()
+        .any(|e| matches!(e, Event::Lapsed { host, .. } if host == "a")));
+    let runs = runs_of(&h, &[one]);
+    assert_eq!(runs[0].state, RunState::Closed);
+    let ended = runs[0].ended.as_ref().unwrap();
+    assert_eq!(ended.why.as_deref(), Some("a's claim lapsed"));
+    assert_eq!(
+        ended.outcomes.get("#gate"),
+        Some(&CheckOutcome::None {
+            why: "a's claim lapsed".into()
+        })
+    );
+    assert_eq!(runs[1].follows, Some(0));
+    assert_eq!(runs[1].checks, runs[0].checks);
+    for _ in 0..4 {
+        h.w().complete_all();
+        on(&h, "b").step(BRANCH).unwrap();
+    }
+    assert_eq!(h.sub(one).state, State::Landed);
+}

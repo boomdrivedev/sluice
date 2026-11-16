@@ -287,6 +287,9 @@ impl Sluice<'_> {
             round.record("sluice.step", "led");
             return Ok(Step::Led);
         }
+        // Record 0122 (design D5; 73, 77): the lead shows its sign of life
+        // each round, as every claim holder does.
+        self.alive_on(branch)?;
         info_span!("sluice.recover").in_scope(|| self.recover(branch, releases))?;
         let (unmet, parts) = match info_span!("sluice.decide").in_scope(|| self.decide(branch))? {
             Decided::Written(unmet, parts) => (unmet, parts),
@@ -1879,26 +1882,36 @@ impl Sluice<'_> {
         for c in testing {
             for (i, r) in c.runs.iter().enumerate() {
                 if !self.mine(r) {
-                    // 77: another instance's claim, open again once its
-                    // host has shown no sign of life for the bound.
+                    // 77, record 0122 (design D5, D7): another instance's
+                    // claim lapses only once its own holder has shown no
+                    // sign of life for the bound, by this instance's own
+                    // observation; its run ends with no outcome, naming
+                    // the claim, closed in the same write, and its holder
+                    // releases its checkout (81). Its follow-up holds its
+                    // checks.
                     let host = r
                         .holder()
                         .expect("another's run names its host")
                         .to_string();
                     if r.state.held() && self.lapsed(&host, now, &pools, rules.remote.as_deref())? {
-                        let x = line.candidate_mut(&c.id).expect("polled candidate");
-                        let xr = &mut x.runs[i];
-                        xr.state = RunState::Open;
-                        xr.claim = None;
-                        xr.place = None;
-                        xr.run = None;
                         line.log(
                             now,
                             Event::Lapsed {
                                 combination: c.revision.clone(),
-                                host,
+                                host: host.clone(),
                             },
                         );
+                        let why = format!("{host}'s claim lapsed");
+                        let none: Vec<NotRun> = given_checks(r, rules)
+                            .into_iter()
+                            .map(|task| NotRun {
+                                task,
+                                reason: why.clone(),
+                                key: None,
+                            })
+                            .collect();
+                        line.candidate_mut(&c.id).expect("polled candidate").runs[i].place = None;
+                        end_run(line, &c.id, i, with_none(&none, now), now);
                     }
                     continue;
                 }
@@ -3862,17 +3875,7 @@ impl Sluice<'_> {
         let unmet = Unmet::of(self.policy_at(&tip)?.map(|p| p.limits).unwrap_or_default());
         let me = self.peer.name.clone();
         let line = self.read_line(branch)?;
-        // 107, 71: the room a lead reads is the host's, every repository's
-        // runs counted.
-        let beat = serde_json::json!({
-            "host": me,
-            "signer": self.peer.signer,
-            "system": home,
-            "held": self.seams.tests.running()?.total(),
-            "bound": self.seams.tests.bound()?,
-            "at": self.now(),
-        });
-        self.seams.state.beat(&me, beat.to_string().as_bytes())?;
+        self.show_alive(home.as_deref())?;
 
         // 124: this host's copy follows the landings its rounds read, the
         // lead's among them, unless the read lacks the last (121).
@@ -4050,6 +4053,36 @@ impl Sluice<'_> {
             })?;
         }
         self.perform_starts(branch, Some(&unmet), parts, releases)
+    }
+
+    /// 77, 107, record 0122 (design D5): this host's sign of life, with the
+    /// room a lead reads, the host's, every repository's runs counted (71).
+    fn show_alive(&self, home: Option<&str>) -> Result<()> {
+        let beat = serde_json::json!({
+            "host": self.peer.name,
+            "signer": self.peer.signer,
+            "system": home,
+            "held": self.seams.tests.running()?.total(),
+            "bound": self.seams.tests.bound()?,
+            "at": self.now(),
+        });
+        self.seams
+            .state
+            .beat(&self.peer.name, beat.to_string().as_bytes())
+    }
+
+    /// Record 0122 (design D5; 73, 77): on a branch whose records are on its
+    /// remote, this host's sign of life, written in every round of its own,
+    /// the lead's among them; nothing on a branch in its own files.
+    fn alive_on(&self, branch: &str) -> Result<()> {
+        let Some(tip) = self.seams.branch.read(branch)? else {
+            return Ok(());
+        };
+        if !self.rules_at(branch, &tip)?.is_some_and(|r| r.signed) {
+            return Ok(());
+        }
+        let home = self.home_system(&tip)?;
+        self.show_alive(home.as_deref())
     }
 
     /// 124: level this host's copy of `branch` to `landed`, the landing

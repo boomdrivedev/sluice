@@ -292,8 +292,9 @@ fn runs_are_claimed_earliest_first() {
     assert_eq!(started[0].revision, first.revision);
 }
 
-/// satisfies: 77, 60; the run-claims spec's "A host stops mid-run" and
-/// "A late report"; S20
+/// satisfies: 77, 60; record 0122; the run-claims spec's "A host stops
+/// mid-run" and "A late report"; S20: the lapsed run ends with no outcome,
+/// its follow-up passes elsewhere, and the late report writes nothing
 #[test]
 fn s20_a_lapsed_claim_runs_again_elsewhere_and_its_late_report_is_not_written() {
     let h = peers();
@@ -308,8 +309,24 @@ fn s20_a_lapsed_claim_runs_again_elsewhere_and_its_late_report_is_not_written() 
         .events()
         .iter()
         .any(|e| matches!(e, Event::Lapsed { host, .. } if host == "b")));
-    assert_eq!(runs(&h)[0], (None, sluice_core::records::RunState::Open));
-    // c claims it again and passes it.
+    assert_eq!(
+        runs(&h),
+        [
+            (Some("b".into()), sluice_core::records::RunState::Closed),
+            (None, sluice_core::records::RunState::Open)
+        ]
+    );
+    let lapsed = {
+        let s = h.sluice();
+        let line =
+            sluice_core::line::Line::load(BRANCH, s.seams().state.read(BRANCH).unwrap()).unwrap();
+        line.doc.candidates[0].runs[0].clone()
+    };
+    assert_eq!(
+        lapsed.ended.as_ref().and_then(|e| e.why.as_deref()),
+        Some("b's claim lapsed")
+    );
+    // c claims its follow-up and passes it.
     h.w().hold_runs(false);
     as_signer(&h, "c", Some("box")).step(BRANCH).unwrap();
     as_signer(&h, "c", Some("box")).step(BRANCH).unwrap();
@@ -324,6 +341,7 @@ fn s20_a_lapsed_claim_runs_again_elsewhere_and_its_late_report_is_not_written() 
         as_signer(&h, "c", Some("box")).step(BRANCH).unwrap();
     }
     assert_eq!(h.sub(one).state, State::Landed);
+    assert_eq!(claims(&h), ["b", "c"], "b's late report took nothing back");
 }
 
 /// satisfies: 81, 123, 72, 73; the run-claims spec's "Back after a
@@ -342,7 +360,10 @@ fn a_place_left_by_a_lapsed_claim_is_released_by_its_host_as_the_lead() {
     keeper(&h).step(BRANCH).unwrap();
     h.w().advance(chrono::Duration::minutes(3));
     keeper(&h).step(BRANCH).unwrap();
-    assert_eq!(runs(&h), [(None, RunState::Open)]);
+    assert_eq!(
+        runs(&h),
+        [(Some("b".into()), RunState::Closed), (None, RunState::Open)]
+    );
     assert!(h.w().live_places().contains(&left[0]));
 
     assert!(!as_signer(&h, "b", Some("box")).keeps(BRANCH).unwrap());
@@ -364,7 +385,13 @@ fn a_place_left_by_a_lapsed_claim_is_released_by_its_host_as_the_lead() {
         .events()
         .iter()
         .any(|e| matches!(e, Event::Released { place, .. } if *place == left[0])));
-    assert_eq!(runs(&h), [(Some("b".into()), RunState::Running)]);
+    assert_eq!(
+        runs(&h),
+        [
+            (Some("b".into()), RunState::Closed),
+            (Some("b".into()), RunState::Running)
+        ]
+    );
 }
 
 /// satisfies: 74, 77; the run-claims spec's "A long run keeps its claim"
@@ -462,8 +489,9 @@ fn the_overview_shows_hosts_their_room_and_a_lapse() {
     as_signer(&h, "b", Some("box")).step(BRANCH).unwrap();
     let lead = keeper(&h);
     let hosts = lead.hosts().unwrap();
-    assert_eq!(hosts.len(), 1);
-    assert_eq!(hosts[0].host, "b");
+    // Record 0122 (design D5): the lead shows its sign of life too.
+    let names: Vec<&str> = hosts.iter().map(|x| x.host.as_str()).collect();
+    assert_eq!(names, ["b", "lead"]);
     assert_eq!(hosts[0].signer.as_deref(), Some("box"));
     assert_eq!(
         (hosts[0].held, hosts[0].room, hosts[0].lapsed),
