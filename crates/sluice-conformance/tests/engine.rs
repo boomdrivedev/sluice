@@ -549,11 +549,17 @@ fn a_pools_job_on_a_machine_with_no_engine_runs_nothing_and_is_counted() {
         [vec![("#gate".to_string(), NO_ENGINE.to_string())]]
     );
     assert_eq!(h.doc().candidates[0].not_run_runs, 1, "it counts");
+    // Record 0122 (design D7): the run ends with no outcome, its follow-up
+    // the lead's to open.
     let r = &runs(&h)[0];
     assert_eq!(
         (r.state, r.holder().map(str::to_string)),
-        (RunState::Open, None)
+        (RunState::Closed, Some(claim.clone()))
     );
+    assert!(r
+        .ended
+        .as_ref()
+        .is_some_and(|e| e.why.as_deref() == Some(NO_ENGINE)));
 
     // Nothing of the claim waits to start any more.
     let again = h.sluice().start_claimed(BRANCH, &claim, &mut releases);
@@ -608,10 +614,19 @@ fn a_run_claimed_in_one_round_reads_the_host_again_at_its_start() {
         not_run(&h),
         [vec![("#gate".to_string(), NO_ENGINE.to_string())]]
     );
+    // Record 0122 (design D7): the run ends with no outcome, and the lead
+    // opens its follow-up, which no host holds.
     let r = &runs(&h)[0];
+    assert_eq!(r.state, RunState::Closed);
+    assert!(r
+        .ended
+        .as_ref()
+        .is_some_and(|e| e.why.as_deref() == Some(NO_ENGINE)));
+    keeper(&h).step(BRANCH).unwrap();
+    let follow = &runs(&h)[1];
     assert_eq!(
-        (r.state, r.holder().map(str::to_string)),
-        (RunState::Open, None)
+        (follow.state, follow.holder(), follow.follows),
+        (RunState::Open, None, Some(0))
     );
 }
 

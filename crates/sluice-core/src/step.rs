@@ -4385,9 +4385,11 @@ fn read_runs(runs: &[SystemRun]) -> RunsRead {
         for &n in &chain {
             match &runs[n].ended {
                 Some(e) if runs[n].state.done() => {
+                    // 66: a run its time limit ended reads as timed out,
+                    // whatever of it failed.
                     read.timed_out |= e.timed_out;
                     for (check, outcome) in &e.outcomes {
-                        read.failed |= *outcome == CheckOutcome::Failed;
+                        read.failed |= *outcome == CheckOutcome::Failed && !e.timed_out;
                         last.insert(check, outcome);
                     }
                 }

@@ -57,6 +57,16 @@ fn a_check_that_could_not_run_records_nothing_and_runs_again() {
     assert!(results(&h).iter().all(|r| r.task != "a:test"));
     assert_ne!(h.sub(one).state, State::Failed);
     assert!(h.w().delivered().is_empty(), "nobody is blamed");
+    // Record 0122 (design D7): the run keeps every other check's outcome,
+    // and a follow-up holds the check that could not run, alone.
+    let runs = h.doc().candidates[0].runs.clone();
+    let ended = runs[0].ended.as_ref().expect("the run ended");
+    assert_eq!(
+        ended.outcomes.get("b:test"),
+        Some(&sluice_core::records::CheckOutcome::Passed)
+    );
+    assert_eq!(runs[1].follows, Some(0));
+    assert_eq!(runs[1].checks, ["a:test"]);
 
     h.w().cannot_run("a:test", None);
     h.settle();

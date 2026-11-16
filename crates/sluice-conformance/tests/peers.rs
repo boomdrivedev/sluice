@@ -225,8 +225,9 @@ fn a_full_host_claims_nothing() {
     assert!(claims(&h).is_empty());
 }
 
-/// satisfies: 71, 75: a claim whose start the host refuses at its bound
-/// runs nothing and is given up, open to another host
+/// satisfies: 71, 75; record 0122: a claim whose start the host refuses
+/// at its bound runs nothing and ends with no outcome, and its follow-up,
+/// which the lead opens, is open to another host
 #[test]
 fn a_claim_refused_at_the_bound_is_open_to_another_host() {
     use sluice_core::records::RunState;
@@ -236,10 +237,21 @@ fn a_claim_refused_at_the_bound_is_open_to_another_host() {
     as_signer(&h, "b", Some("box")).step(BRANCH).unwrap();
     assert_eq!(claims(&h), ["b"]);
     assert!(h.w().requests().is_empty(), "nothing of it ran");
-    assert_eq!(runs(&h), [(None, RunState::Open)]);
+    assert_eq!(runs(&h), [(Some("b".into()), RunState::Closed)]);
+    keeper(&h).step(BRANCH).unwrap();
+    assert_eq!(
+        runs(&h),
+        [(Some("b".into()), RunState::Closed), (None, RunState::Open)]
+    );
     as_signer(&h, "c", Some("box")).step(BRANCH).unwrap();
     assert_eq!(claims(&h), ["b", "c"]);
-    assert_eq!(runs(&h), [(Some("c".into()), RunState::Running)]);
+    assert_eq!(
+        runs(&h),
+        [
+            (Some("b".into()), RunState::Closed),
+            (Some("c".into()), RunState::Running)
+        ]
+    );
     assert_eq!(h.w().requests().len(), 1);
 }
 
@@ -604,10 +616,10 @@ fn a_run_no_listed_host_takes_is_not_passed_at_the_time_limit() {
     assert!(h.w().requests().is_empty());
 }
 
-/// satisfies: 87, 28; S18: a run whose result its host signed with a key
-/// the branch's policy no longer lists, read when it reports, is missing,
-/// never failed: it is open again, and a host whose key the branch lists
-/// settles it.
+/// satisfies: 87, 28; S18; record 0122: a run whose result its host signed
+/// with a key the branch's policy no longer lists, read when it reports, is
+/// missing, never failed: the run ends with no outcome for it, its
+/// follow-up is open, and a host whose key the branch lists settles it.
 #[test]
 fn s18_a_result_signed_with_a_key_the_branch_does_not_list_is_missing() {
     let h = peers();
@@ -625,7 +637,12 @@ fn s18_a_result_signed_with_a_key_the_branch_does_not_list_is_missing() {
         .events()
         .iter()
         .any(|e| matches!(e, Event::Uncounted { host, .. } if host == "a")));
-    assert_eq!(runs(&h), [(None, sluice_core::records::RunState::Open)]);
+    // a, which the branch no longer accepts, leads no more: it writes its
+    // own run's end, and the next lead opens the follow-up.
+    assert_eq!(
+        runs(&h),
+        [(Some("a".into()), sluice_core::records::RunState::Closed)]
+    );
     assert_ne!(h.sub(one).state, State::Failed);
     assert!(h.sub(one).failed.is_empty());
     // Design D8: a, which the branch no longer accepts, leads no more; b,
@@ -639,6 +656,10 @@ fn s18_a_result_signed_with_a_key_the_branch_does_not_list_is_missing() {
         on(&h, "a").step(BRANCH).unwrap();
     }
     assert_eq!(h.sub(one).state, State::Landed);
+    assert!(h
+        .events()
+        .iter()
+        .any(|e| matches!(e, Event::Opened { run: 1, .. })));
 }
 
 /// satisfies: 108, 78; S42: a key whose only pass was signed by a signer
@@ -704,6 +725,11 @@ fn s42_a_replay_no_trusted_signer_proved_runs_again() {
         .events()
         .iter()
         .any(|e| matches!(e, Event::Unproven { .. })));
+    // Record 0122 (design D7): a follow-up ran the unproven checks.
+    assert!(h
+        .events()
+        .iter()
+        .any(|e| matches!(e, Event::Opened { run: 1, .. })));
     assert!(h.w().requests().iter().any(|r| !r.replay));
     assert!(h.w().observed().len() > ran);
 }

@@ -265,10 +265,10 @@ fn run_states(h: &Harness) -> Vec<(sluice_core::records::RunState, bool, bool)> 
         .collect()
 }
 
-/// satisfies: 71, 16; the run-bound spec's "Two rounds race for one free
-/// run": a start the check seam refuses at the host's bound runs nothing,
-/// releases its place, records no run and blames no one, and a later
-/// round starts it
+/// satisfies: 71, 16; record 0122: the run-bound spec's "Two rounds race
+/// for one free run": a start the check seam refuses at the host's bound
+/// runs nothing, releases its place, records no run and blames no one; the
+/// run ends with no outcome, and a later round starts its follow-up
 #[test]
 fn a_start_refused_at_the_bound_waits_for_a_later_round() {
     use sluice_core::records::RunState;
@@ -281,7 +281,7 @@ fn a_start_refused_at_the_bound_waits_for_a_later_round() {
     h.step();
     assert!(h.w().started().is_empty(), "nothing of it ran");
     assert!(h.w().live_places().is_empty(), "its place was released");
-    assert_eq!(run_states(&h), [(RunState::Open, false, false)]);
+    assert_eq!(run_states(&h), [(RunState::Closed, false, false)]);
     assert!(h.w().results_log().is_empty(), "no run is recorded");
     assert!(!h
         .events()
@@ -291,15 +291,22 @@ fn a_start_refused_at_the_bound_waits_for_a_later_round() {
 
     h.step();
     assert_eq!(h.w().started().len(), 1);
-    assert_eq!(run_states(&h), [(RunState::Running, true, false)]);
+    assert_eq!(
+        run_states(&h),
+        [
+            (RunState::Closed, false, false),
+            (RunState::Running, true, false)
+        ]
+    );
     h.w().hold_runs(false);
     h.w().complete_all();
     h.settle();
     assert_eq!(h.sub(one).state, State::Landed);
 }
 
-/// satisfies: 71; a start refused at the bound starts no further run that
-/// round: the run decided behind it goes back to open with no place made
+/// satisfies: 71; record 0122: a start refused at the bound starts no
+/// further run that round: the run decided behind it ends with no outcome,
+/// no place made for it, and its follow-up starts in a later round
 #[test]
 fn a_refused_start_starts_no_further_run_that_round() {
     use sluice_core::records::RunState;
@@ -317,8 +324,8 @@ fn a_refused_start_starts_no_further_run_that_round() {
     assert_eq!(
         run_states(&h),
         [
-            (RunState::Open, false, false),
-            (RunState::Open, false, false)
+            (RunState::Closed, false, false),
+            (RunState::Closed, false, false)
         ]
     );
     h.step();

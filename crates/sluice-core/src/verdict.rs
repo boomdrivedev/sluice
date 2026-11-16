@@ -95,8 +95,9 @@ pub const NO_OUTCOME: &str = "the run's report holds no outcome for it";
 /// nowhere, has no outcome, [`NO_OUTCOME`], never a failed task; a
 /// required check the runner keeps out of its CI mode, by its own word in
 /// `kept_out`, is left without a result and is no pass, as before (15;
-/// ADR 0050). A tag of `given` names no check until the runner expands
-/// it, so the report is asked of no tag.
+/// ADR 0050), and so is a check the time limit cut off, in a run read as
+/// timed out (66). A tag of `given` names no check until the runner
+/// expands it, so the report is asked of no tag.
 pub fn read(
     report: &RunReport,
     results: &[ResultLine],
@@ -294,10 +295,11 @@ pub fn read(
         }
     }
     // 15, ADR 0050: a required check the runner keeps out of its CI mode
-    // is left without a result, and no pass.
+    // is left without a result, and no pass; so is one the time limit cut
+    // off, named as the limit left it in a run read as timed out (66).
     let mut none = Vec::new();
     for task in &report.missing {
-        if report.kept_out.contains(task) {
+        if report.kept_out.contains(task) || report.timed_out {
             failed.push(failed_task(task, "", None));
         } else {
             none.push(NotRun {
