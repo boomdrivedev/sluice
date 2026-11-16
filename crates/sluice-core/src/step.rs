@@ -458,6 +458,10 @@ impl Sluice<'_> {
         parts: Parts,
         releases: &mut Vec<ReleaseOutcome>,
     ) -> Result<()> {
+        // Record 0122 (design D3): an ended run's checkout is released, and
+        // the run closed, before its combination's landing takes its record
+        // out of the branch's.
+        self.perform_closes(branch, releases)?;
         self.perform_landing(branch)?;
         self.perform_releases(branch, releases)?;
         self.perform_outbox(branch)?;
@@ -475,6 +479,7 @@ impl Sluice<'_> {
     /// instance does, after a landing left unfinished is settled and
     /// before the round claims ([`Sluice::release_left`]).
     fn perform_releases(&self, branch: &str, releases: &mut Vec<ReleaseOutcome>) -> Result<()> {
+        self.perform_closes(branch, releases)?;
         let line = self.read_line(branch)?;
         let doc = &line.doc;
         let elsewhere = |f: &crate::records::FailedRelease| {
@@ -515,7 +520,7 @@ impl Sluice<'_> {
             .candidates
             .iter()
             .flat_map(|c| &c.runs)
-            .filter(|r| self.mine(r) && r.state.held())
+            .filter(|r| self.mine(r) && r.state != RunState::Open && r.state != RunState::Closed)
             .filter_map(|r| r.place.as_deref())
             .collect();
         let prefix = format!("sluice/try/{branch}/");
@@ -646,14 +651,7 @@ impl Sluice<'_> {
                             c.submissions.drain(..intent.ids.len());
                             c.on = intent.to.clone();
                             if c.submissions.is_empty() {
-                                if c.state.under_test() {
-                                    release.extend(
-                                        c.runs
-                                            .iter()
-                                            .filter(|r| self.mine(r))
-                                            .filter_map(|r| r.place.clone()),
-                                    );
-                                }
+                                release.extend(self.unclosed(c));
                                 return false;
                             }
                         }
@@ -1169,13 +1167,118 @@ impl Sluice<'_> {
         since: &str,
     ) -> Result<()> {
         self.update(branch, |l| {
-            if let Some(xr) = l.candidate_mut(cand).and_then(|x| x.runs.get_mut(i)) {
-                if xr.state == RunState::Claimed && xr.place.as_deref() == Some(place) {
-                    xr.state = RunState::Running;
-                    xr.run = Some(run.clone());
-                    xr.running = Some(since.to_string());
+            let now = self.now();
+            let Some(x) = l.candidate_mut(cand) else {
+                return Ok(());
+            };
+            let combination = x.revision.clone();
+            let Some(xr) = x.runs.get_mut(i) else {
+                return Ok(());
+            };
+            if xr.state != RunState::Claimed || xr.place.as_deref() != Some(place) {
+                return Ok(());
+            }
+            xr.state = RunState::Running;
+            xr.run = Some(run.clone());
+            xr.running = Some(since.to_string());
+            let system = xr.system.clone();
+            l.log(
+                &now,
+                Event::Running {
+                    combination,
+                    system,
+                    run: i,
+                },
+            );
+            Ok(())
+        })
+    }
+
+    /// Record 0122 (design D3): the checkout of each ended run this host
+    /// holds released, its proof the place profile no longer listing it,
+    /// then the run written closed, logged `closed`; a checkout the place
+    /// profile no longer lists is closed with no release command run, and
+    /// an ended run that made none is closed as it is. A release that
+    /// fails, or that is held, leaves its run ended, tried by the rounds
+    /// after as any release is (123); one tried already this round, in
+    /// `releases`, is passed over.
+    fn perform_closes(&self, branch: &str, releases: &mut Vec<ReleaseOutcome>) -> Result<()> {
+        let line = self.read_line(branch)?;
+        let ended: Vec<(String, usize, Option<String>)> = line
+            .doc
+            .candidates
+            .iter()
+            .flat_map(|c| {
+                c.runs
+                    .iter()
+                    .enumerate()
+                    .filter(|(_, r)| r.state == RunState::Ended && self.mine(r))
+                    .map(|(i, r)| (c.id.clone(), i, r.place.clone()))
+                    .collect::<Vec<_>>()
+            })
+            .collect();
+        if ended.is_empty() {
+            return Ok(());
+        }
+        let made = self.seams.checkout.made()?;
+        for (cand, i, place) in ended {
+            if let Some(p) = &place {
+                let tried = releases.iter().any(|o| o.place == *p);
+                let held = line
+                    .doc
+                    .failed_releases
+                    .iter()
+                    .any(|f| f.place == *p && f.stopped && !self.held_gone(p));
+                if tried || held {
+                    continue;
+                }
+                if made.contains(p) {
+                    let outcome = self.release_made(branch, p)?;
+                    let freed = outcome.how.freed();
+                    if outcome.how != Releasing::Released {
+                        releases.push(outcome);
+                    }
+                    if !freed {
+                        continue;
+                    }
                 }
             }
+            self.write_closed(branch, &cand, i, place.as_deref())?;
+        }
+        Ok(())
+    }
+
+    /// Record 0122 (design D1, D3): run `i` of candidate `cand`, ended with
+    /// its checkout `place` released, written closed and logged; nothing
+    /// where it is not ended so. Its checkout leaves the branch's places to
+    /// release.
+    fn write_closed(&self, branch: &str, cand: &str, i: usize, place: Option<&str>) -> Result<()> {
+        self.update(branch, |l| {
+            let now = self.now();
+            let Some(x) = l.candidate_mut(cand) else {
+                return Ok(());
+            };
+            let combination = x.revision.clone();
+            let Some(xr) = x.runs.get_mut(i) else {
+                return Ok(());
+            };
+            if xr.state != RunState::Ended || xr.place.as_deref() != place {
+                return Ok(());
+            }
+            xr.state = RunState::Closed;
+            xr.closed = Some(now.clone());
+            let system = xr.system.clone();
+            if let Some(p) = place {
+                l.doc.release.retain(|q| q != p);
+            }
+            l.log(
+                &now,
+                Event::Closed {
+                    combination,
+                    system,
+                    run: i,
+                },
+            );
             Ok(())
         })
     }
@@ -1226,11 +1329,18 @@ impl Sluice<'_> {
                 let xr = &mut x.runs[i];
                 xr.state = RunState::Ended;
                 xr.ended = Some(failing(&named, &now));
-                let left = xr.place.take();
+                let system = xr.system.clone();
                 x.failed.extend(named);
-                if let Some(p) = left.filter(|p| !l.doc.release.contains(p)) {
-                    l.doc.release.push(p);
-                }
+                let combination = x.revision.clone();
+                l.log(
+                    &now,
+                    Event::Ended {
+                        combination,
+                        system,
+                        run: i,
+                        why: None,
+                    },
+                );
             }
             Ok(())
         })?;
@@ -1801,8 +1911,9 @@ impl Sluice<'_> {
                 let over = seconds_between(opened, now).is_some_and(|s| s >= limit.as_secs_f64());
                 if over {
                     let me = self.peer.name.clone();
+                    let mut closing = Vec::new();
                     let x = line.candidate_mut(&c.id).expect("polled candidate");
-                    for r in x.runs.iter_mut() {
+                    for (n, r) in x.runs.iter_mut().enumerate() {
                         if r.state == RunState::Open
                             && (!ours(r, home)
                                 || r.declined.contains_key(&me)
@@ -1817,7 +1928,7 @@ impl Sluice<'_> {
                             let why = waited
                                 .clone()
                                 .unwrap_or_else(|| "no host that may take it took it".into());
-                            r.state = RunState::Ended;
+                            r.state = RunState::Closed;
                             r.ended = Some(Ended {
                                 at: now.to_string(),
                                 outcomes: checks
@@ -1825,8 +1936,10 @@ impl Sluice<'_> {
                                     .map(|c| (c.clone(), CheckOutcome::None { why: why.clone() }))
                                     .collect(),
                                 timed_out: true,
-                                why: Some(why),
+                                why: Some(why.clone()),
                             });
+                            r.closed = Some(now.to_string());
+                            closing.push((r.system.clone(), n, why));
                             x.failed.extend(checks.into_iter().map(|task| FailedTask {
                                 task,
                                 hash: String::new(),
@@ -1837,6 +1950,25 @@ impl Sluice<'_> {
                                 failed_by: Vec::new(),
                                 unsigned: None,
                             }));
+                        }
+                    }
+                    // Record 0122 (design D1): ended and closed in one write,
+                    // having made no checkout.
+                    for (system, n, why) in closing {
+                        for event in [
+                            Event::Ended {
+                                combination: c.revision.clone(),
+                                system: system.clone(),
+                                run: n,
+                                why: Some(why),
+                            },
+                            Event::Closed {
+                                combination: c.revision.clone(),
+                                system,
+                                run: n,
+                            },
+                        ] {
+                            line.log(now, event);
                         }
                     }
                 }
@@ -2266,17 +2398,25 @@ impl Sluice<'_> {
             timed_out: v.timed_out,
             why: None,
         };
+        // Record 0122 (design D3): its end, after its results and before
+        // its checkout's release, which [`Sluice::perform_closes`] makes.
         let x = line.candidate_mut(&c.id).expect("polled candidate");
         let xr = &mut x.runs[i];
         xr.state = RunState::Ended;
         xr.ended = Some(ended);
-        let place = xr.place.clone();
+        let system = xr.system.clone();
         x.failed.extend(v.failed);
         x.ran += v.ran;
         x.replayed += v.replayed;
-        if let Some(p) = place {
-            line.doc.release.push(p);
-        }
+        line.log(
+            now,
+            Event::Ended {
+                combination: c.revision.clone(),
+                system,
+                run: i,
+                why: None,
+            },
+        );
         Ok(())
     }
 
@@ -2425,14 +2565,11 @@ impl Sluice<'_> {
         let mut dropped = Vec::new();
         line.doc.candidates.retain(|c| {
             let keep = held.contains(&c.id);
-            if !keep && c.state.under_test() {
-                release.extend(
-                    c.runs
-                        .iter()
-                        .filter(|r| self.mine(r))
-                        .filter_map(|r| r.place.clone()),
-                );
-                dropped.push(c.id.clone());
+            if !keep {
+                release.extend(self.unclosed(c));
+                if c.state.under_test() {
+                    dropped.push(c.id.clone());
+                }
             }
             keep
         });
@@ -2910,6 +3047,8 @@ impl Sluice<'_> {
                 }
                 if !unsigned.is_empty() {
                     for (id, combination) in unsigned {
+                        let left = self.unclosed(line.candidate(&id).expect("a chain's candidate"));
+                        line.doc.release.extend(left);
                         let c = line.candidate_mut(&id).expect("a chain's candidate");
                         c.state = CandidateState::Formed;
                         c.runs.clear();
@@ -3076,6 +3215,15 @@ impl Sluice<'_> {
             let c = c.clone();
             line.log(
                 now,
+                Event::Claimed {
+                    combination: c.revision.clone(),
+                    system: c.runs[i].system.clone(),
+                    host: self.peer.name.clone(),
+                    unanswered: None,
+                },
+            );
+            line.log(
+                now,
                 Event::Testing {
                     combination: c.revision.clone(),
                     submissions: c.submissions.clone(),
@@ -3181,10 +3329,36 @@ impl Sluice<'_> {
             }
             let c = line.candidate_mut(&id).expect("a chain's candidate");
             c.state = CandidateState::Testing;
+            for r in &mut runs {
+                r.opened = Some(now.to_string());
+            }
             c.runs = runs;
             c.opened = Some(now.to_string());
             c.every_check = !every_known;
             let c = c.clone();
+            // Record 0122 (design D1): each run opened, and the one this
+            // host took claimed.
+            for (n, r) in c.runs.iter().enumerate() {
+                line.log(
+                    now,
+                    Event::Opened {
+                        combination: c.revision.clone(),
+                        system: r.system.clone(),
+                        run: n,
+                    },
+                );
+                if r.state == RunState::Claimed {
+                    line.log(
+                        now,
+                        Event::Claimed {
+                            combination: c.revision.clone(),
+                            system: r.system.clone(),
+                            host: self.peer.name.clone(),
+                            unanswered: None,
+                        },
+                    );
+                }
+            }
             line.sub_mut(c.newest()).tested = Some(Tested {
                 combination: c.revision.clone(),
                 on: c.on.clone(),
@@ -3200,6 +3374,17 @@ impl Sluice<'_> {
             );
         }
         Ok(parts)
+    }
+
+    /// Record 0122 (design D3): the checkouts of `c`'s runs this host holds
+    /// and has not closed, which go to the branch's places to release when
+    /// its record goes.
+    fn unclosed(&self, c: &Candidate) -> Vec<String> {
+        c.runs
+            .iter()
+            .filter(|r| self.mine(r) && r.state != RunState::Closed)
+            .filter_map(|r| r.place.clone())
+            .collect()
     }
 
     /// Whether `run` is this instance's: its claim names it, or the
@@ -3655,6 +3840,7 @@ impl Sluice<'_> {
                 }
                 Progress::Finished(report) => {
                     let report = self.after_run(&handle, &unmet.limits, report)?;
+                    let mut release_now = false;
                     self.update(branch, |l| {
                         let now = self.now();
                         let Some(x) = l.candidate(&c.id).cloned() else {
@@ -3676,13 +3862,20 @@ impl Sluice<'_> {
                             home.as_deref(),
                             &now,
                         )?;
-                        // This host releases its own place below.
-                        if let Some(p) = &place {
+                        // A run opened again leaves its place for this host
+                        // to release below; an ended one is released, then
+                        // closed, by [`Sluice::perform_closes`].
+                        let reopened = l
+                            .candidate(&c.id)
+                            .is_some_and(|x| x.runs[i].state == RunState::Open);
+                        release_now = false;
+                        if let Some(p) = place.as_ref().filter(|_| reopened) {
                             l.doc.release.retain(|q| q != p);
+                            release_now = true;
                         }
                         Ok(())
                     })?;
-                    if let Some(p) = place {
+                    if let Some(p) = place.filter(|_| release_now) {
                         let outcome = self.release_made(branch, &p)?;
                         if outcome.how != Releasing::Released {
                             releases.push(outcome);
@@ -3691,6 +3884,9 @@ impl Sluice<'_> {
                 }
             }
         }
+        // Record 0122 (design D3): this host's ended runs released, then
+        // closed.
+        self.perform_closes(branch, releases)?;
 
         // 75, 76, 71: claims, earliest first, up to this host's bound, of
         // candidates fetched from the remote (82); 81, 123: whatever the

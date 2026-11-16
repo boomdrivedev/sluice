@@ -10,7 +10,7 @@
 use std::time::Duration;
 
 use sluice_conformance::{policy, Crash, Harness, Rig, BRANCH};
-use sluice_core::records::{Candidate, RunState, State, SystemRun};
+use sluice_core::records::{Candidate, CheckOutcome, Event, RunState, State, SystemRun};
 use sluice_core::{Peer, Sluice};
 
 /// A branch whose records are on its remote, trusting the signer `box`.
@@ -135,4 +135,115 @@ fn a_checkout_made_before_the_start_is_used_once() {
     assert_eq!(h.releases_of(&place), 1);
     assert_eq!(h.w().made_places(), [place]);
     assert_eq!(h.w().started().len(), 1);
+}
+
+/// The run-life lines of the branch's log, in order, as `(word, run)`.
+fn life(h: &Harness) -> Vec<(&'static str, Option<usize>)> {
+    h.events()
+        .into_iter()
+        .filter_map(|e| match e {
+            Event::Opened { run, .. } => Some(("opened", Some(run))),
+            Event::Claimed { .. } => Some(("claimed", None)),
+            Event::Running { run, .. } => Some(("running", Some(run))),
+            Event::Ended { run, .. } => Some(("ended", Some(run))),
+            Event::Closed { run, .. } => Some(("closed", Some(run))),
+            _ => None,
+        })
+        .collect()
+}
+
+/// satisfies: record 0122; 75, 88; the run-life spec's "A run is in one of
+/// five states, written in its branch's home"
+#[test]
+fn a_runs_states_are_written_in_order() {
+    let h = local();
+    h.work("unit/a", "agent-a", &[("a/lib", Some("a2"))]);
+    let one = h.submit("unit/a");
+    // The round that reads the run's end stops before the branch moves, so
+    // the run's record is read as it ends, before its landing takes it.
+    h.w().crash(Crash::BeforeMove);
+    assert!(
+        (0..8).any(|_| h.sluice().step(BRANCH).is_err()),
+        "the round that lands stopped"
+    );
+    assert_eq!(
+        life(&h),
+        [
+            ("opened", Some(0)),
+            ("claimed", None),
+            ("running", Some(0)),
+            ("ended", Some(0)),
+            ("closed", Some(0)),
+        ]
+    );
+    let run = &runs_of(&h, &[one])[0];
+    assert_eq!(run.state, RunState::Closed);
+    assert!(run.opened.is_some() && run.running.is_some() && run.closed.is_some());
+    let ended = run.ended.as_ref().expect("its report under ended");
+    assert_eq!(ended.outcomes.get("#gate"), Some(&CheckOutcome::Passed));
+    h.settle();
+    assert_eq!(h.sub(one).state, State::Landed);
+}
+
+/// satisfies: record 0122; rule core.7; the run-life spec's "Each act leaves
+/// a proof the next reader checks", a host that stops after recording the
+/// results
+#[test]
+fn results_recorded_before_the_end_was_written_are_not_recorded_again() {
+    let h = local();
+    h.w().hold_runs(true);
+    h.work("unit/a", "agent-a", &[("a/lib", Some("a2"))]);
+    let one = h.submit("unit/a");
+    h.step();
+    assert_eq!(runs_of(&h, &[one])[0].state, RunState::Running);
+    h.w().complete_all();
+    h.w().crash(Crash::AfterResults);
+    assert!(h.sluice().step(BRANCH).is_err(), "the step stopped");
+    let recorded = h.results();
+    assert!(!recorded.is_empty(), "its results were recorded");
+    assert_eq!(runs_of(&h, &[one])[0].state, RunState::Running);
+
+    h.step();
+    let run = &runs_of(&h, &[one]);
+    assert!(
+        run.is_empty() || run[0].ended.is_some(),
+        "its end written from the same report"
+    );
+    assert_eq!(h.results(), recorded, "no result recorded twice");
+    assert_eq!(life(&h).iter().filter(|(w, _)| *w == "ended").count(), 1);
+    h.settle();
+    assert_eq!(h.sub(one).state, State::Landed);
+    assert_eq!(h.results(), recorded);
+}
+
+/// satisfies: record 0122; 123; rule core.16; the run-life spec's "Each act
+/// leaves a proof the next reader checks", a host that stops after
+/// releasing
+#[test]
+fn a_release_found_done_is_closed_and_not_run_again() {
+    let h = local();
+    h.w().hold_runs(true);
+    h.work("unit/a", "agent-a", &[("a/lib", Some("a2"))]);
+    let one = h.submit("unit/a");
+    h.step();
+    let place = runs_of(&h, &[one])[0].place.clone().expect("its checkout");
+    h.w().complete_all();
+    h.w().crash(Crash::AfterRelease);
+    assert!(h.sluice().step(BRANCH).is_err(), "the step stopped");
+    let run = &runs_of(&h, &[one])[0];
+    assert_eq!(run.state, RunState::Ended);
+    assert_eq!(h.releases_of(&place), 1);
+    assert!(h.w().live_places().is_empty(), "its checkout is gone");
+
+    h.step();
+    assert_eq!(h.releases_of(&place), 1, "no release command run again");
+    assert_eq!(
+        life(&h).iter().filter(|(w, _)| *w == "closed").count(),
+        1,
+        "{:?}",
+        life(&h)
+    );
+    h.settle();
+    assert_eq!(h.sub(one).state, State::Landed);
+    assert_eq!(h.releases_of(&place), 1);
 }
