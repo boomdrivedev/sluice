@@ -143,6 +143,9 @@ struct StartFrom {
     rules: Rules,
     /// The policy's name for the system this host is (85).
     home: Option<String>,
+    /// 88 (design D2): the claim a pool's job starts its run under, where
+    /// it is not this instance's own.
+    claim: Option<String>,
 }
 
 /// 140: how a queued entry's work was read beside the chain.
@@ -875,7 +878,7 @@ impl Sluice<'_> {
             // started, and the room held for it goes back.
             if let Some(found) = self.seams.tests.found(&name)? {
                 drop(held);
-                self.write_running(branch, &c.id, i, &name, &found.run, &found.since)?;
+                self.write_running(branch, &c.id, i, &name, None, &found.run, &found.since)?;
                 continue;
             }
             if held.is_none() && !given_out(&c.runs[i]) {
@@ -997,9 +1000,10 @@ impl Sluice<'_> {
         let Some((c, i)) = held else {
             return Ok(None);
         };
-        let Some(from) = self.start_from(branch, &line)? else {
+        let Some(mut from) = self.start_from(branch, &line)? else {
             return Ok(None);
         };
+        from.claim = Some(claim.to_string());
         let Some(part) = self.seams.tests.hold(RunKind::Queue)? else {
             let name = c.runs[i].place.clone().expect("a starting run has a place");
             self.reopen_made(branch, &c.id, i, &name, releases)?;
@@ -1029,6 +1033,7 @@ impl Sluice<'_> {
             );
         }
         Ok(Some(StartFrom {
+            claim: None,
             home: self.home_system(&base)?,
             verified: line.doc.verified,
             base,
@@ -1130,7 +1135,8 @@ impl Sluice<'_> {
                     Some(found) => found.since,
                     None => self.now(),
                 };
-                self.write_running(branch, &c.id, i, &name, &run, &since)?;
+                let claim = from.claim.as_deref();
+                self.write_running(branch, &c.id, i, &name, claim, &run, &since)?;
                 return Ok(Started::Running(run));
             }
             // Refused before anything of it ran: no run, no outcome.
@@ -1156,13 +1162,16 @@ impl Sluice<'_> {
 
     /// Record 0122 (design D3): run `i` of candidate `cand`, claimed into
     /// `place`, written running under `run` from its own start `since`;
-    /// nothing where it is no longer claimed into that place.
+    /// nothing where it is no longer claimed into that place under `claim`,
+    /// a pool's job's, or this instance's own where it is `None`.
+    #[allow(clippy::too_many_arguments)]
     fn write_running(
         &self,
         branch: &str,
         cand: &str,
         i: usize,
         place: &str,
+        claim: Option<&str>,
         run: &RunHandle,
         since: &str,
     ) -> Result<()> {
@@ -1175,9 +1184,12 @@ impl Sluice<'_> {
             let Some(xr) = x.runs.get_mut(i) else {
                 return Ok(());
             };
-            // 75 (design D2, D9): only under this host's own claim.
-            if xr.state != RunState::Claimed || xr.place.as_deref() != Some(place) || !self.mine(xr)
-            {
+            // 75 (design D2, D9): only under the claim the act is made under.
+            let held = match claim {
+                Some(c) => xr.holder() == Some(c),
+                None => self.mine(xr),
+            };
+            if xr.state != RunState::Claimed || xr.place.as_deref() != Some(place) || !held {
                 return Ok(());
             }
             xr.state = RunState::Running;
