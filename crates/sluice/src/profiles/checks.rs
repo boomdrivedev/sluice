@@ -431,6 +431,10 @@ impl RoomHandle {
     }
 }
 
+/// Record 0119 (design D11): the file of a run job's proof naming the
+/// runner its run named.
+const PROOF_RUNNER: &str = "runner";
+
 /// A part a start takes, as the room it was held of carries it: the room
 /// itself, or the host process's over the connection `sluice exec` or
 /// `sluice preview` held it on (design D12).
@@ -2386,6 +2390,47 @@ impl Tests for Checks {
             );
         }
         Ok(proof)
+    }
+
+    /// Record 0119 (design D11; 109): the runner the run named, in
+    /// `runner`, and, for a moon run, each manifest its keys' walk reads,
+    /// the key's own and each dependency's, from the stores [`proven`]
+    /// reads, under `blobs/` as moon's store keeps them, so the sign job
+    /// holds each key to the same proof by its content with nothing run.
+    ///
+    /// [`proven`]: Tests::proven
+    fn keep_proof(&self, run: &RunHandle, report: &RunReport, dir: &Path) -> Result<()> {
+        let meta: Meta = serde_json::from_value(self.runs.request(&run.0)?.meta)
+            .with_context(|| format!("reading run {}", run.0))?;
+        std::fs::create_dir_all(dir)?;
+        std::fs::write(dir.join(PROOF_RUNNER), &meta.runner)?;
+        if meta.runner != "moon" {
+            return Ok(());
+        }
+        let own = meta.place.join(".moon/cache");
+        let store = meta.store.clone().unwrap_or_else(|| own.clone());
+        let read = std::cell::RefCell::new(BTreeMap::new());
+        let blob = |k: &str| {
+            let bytes = super::moon::blob_in(&store, k).or_else(|| {
+                (store != own)
+                    .then(|| super::moon::blob_in(&own, k))
+                    .flatten()
+            })?;
+            read.borrow_mut().insert(k.to_string(), bytes.clone());
+            Some(bytes)
+        };
+        let tree = |p: &str| super::moon::file_at(&meta.place, &meta.revision, p);
+        for t in report.tasks.iter().chain(&report.dependencies) {
+            // What the walk reads is kept whatever it finds; the sign job
+            // judges each key again.
+            let _ = super::moon::check_key(&t.hash, &t.task, &blob, &tree);
+        }
+        for (key, bytes) in read.into_inner() {
+            let at = dir.join("blobs").join(&key[..2]);
+            std::fs::create_dir_all(&at)?;
+            std::fs::write(at.join(&key[2..]), bytes)?;
+        }
+        Ok(())
     }
 
     fn session_runs(&self) -> Result<Vec<HostRun>> {

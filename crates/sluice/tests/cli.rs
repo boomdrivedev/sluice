@@ -9765,3 +9765,140 @@ fn a_run_handed_over_keeps_following_and_counts_its_passes() {
     assert_eq!(afresh.passes(), 3);
     assert!(afresh.told(), "it says again nothing it said");
 }
+
+/// Record 0119 (design D11): `main` on `origin`, its runs for
+/// `macos-arm64`, which this world's hosts are not, taken by the `forge`
+/// pool on GitHub Actions; `a/` holds `a:test`, tagged `gate`.
+const POOLED: &str = "[tests]\nrunner = \"fake\"\n\n[checkout]\n\n\
+    [branches.main]\nrequired = [\"#gate\"]\nparallel = 4\ntimeout = \"20m\"\n\
+    trust = [\"box\", \"forge\"]\nremote = \"origin\"\nsystems = [\"macos-arm64\"]\n\
+    \n[signers.box]\nssh = \"box ssh-ed25519 AAAA\"\n\
+    \n[signers.forge]\ngithub = { workflow = \".github/workflows/sluice.yml\", ref = \"refs/heads/main\" }\n\
+    \n[pools.forge]\ngithub = { workflow = \".github/workflows/sluice.yml\" }\nsigner = \"forge\"\n\
+    runners = { macos-arm64 = \"macos-15\" }\n\
+    \n[systems]\nlinux-x64 = { os = \"linux\", arch = \"x86_64\" }\n\
+    macos-arm64 = { os = \"macos\", arch = \"aarch64\" }\n";
+
+/// Record 0119 (design D11): a world whose `main` has one submission whose
+/// run the lead, host `a` with no room of its own, claimed for the pool and
+/// dispatched; the world's host is then `runner`, the pool's job's. The
+/// claim is answered.
+fn pooled(f: &Fakes) -> String {
+    f.world
+        .init("main", &[(POLICY_PATH, POOLED), ("a/lib", "a1")]);
+    f.world.task("a:test", "a/");
+    let head = f.world.work(&f.world.tip("main"), &[("a/lib", Some("a2"))]);
+    f.world.session("unit/a", "agent-a", &head);
+    f.world.be_host("a");
+    f.world.signs_as("box");
+    f.world.no_room();
+    let lead = pool_lead(f);
+    lead.submit(&sluice_core::SubmitRequest {
+        head: sluice_core::SubmitHead::Worktree("unit/a".into()),
+        branch: "main".into(),
+        after: Vec::new(),
+        priority: 0,
+        subject: None,
+    })
+    .unwrap()
+    .expect("accepted");
+    lead.step("main").unwrap();
+    let launches = f.world.launches();
+    assert_eq!(launches.len(), 1, "the pool's job dispatched");
+    f.world.be_host("runner");
+    launches[0].claim.clone()
+}
+
+/// Host `a`, which leads `main` and has no room of its own.
+fn pool_lead(f: &Fakes) -> sluice_core::Sluice<'_> {
+    f.sluice().as_peer(sluice_core::Peer {
+        name: "a".into(),
+        lease: Duration::from_secs(300),
+        alive: Duration::from_secs(120),
+        signer: Some("box".into()),
+        systems: None,
+        expire_after: sluice_core::EXPIRE_AFTER,
+    })
+}
+
+/// The runs of `main`'s first combination, as its records hold them.
+fn pooled_runs(f: &Fakes) -> Vec<sluice_core::records::SystemRun> {
+    let snap = f.sluice().seams().state.read("main").unwrap();
+    let doc = sluice_core::line::Line::load("main", snap).unwrap().doc;
+    doc.candidates[0].runs.clone()
+}
+
+/// satisfies: record 0119 (design D11); 82, 88; the actions-pool spec's
+/// "A pool's run job records nothing"
+#[test]
+fn job_run_writes_its_report_and_records_nothing() {
+    let f = Fakes::new();
+    let claim = pooled(&f);
+    // The lead writes the run running from its run job's start, before
+    // the job reads its records (record 0122, design D12).
+    f.world.be_host("a");
+    let since = "2026-11-16T03:00:00Z".to_string();
+    f.world.move_job(
+        &claim,
+        sluice_seams::Job::Running {
+            since: since.clone(),
+        },
+    );
+    pool_lead(&f).step("main").unwrap();
+    f.world.be_host("runner");
+    let runs = pooled_runs(&f);
+    assert_eq!(runs[0].state, sluice_core::records::RunState::Running);
+    assert_eq!(runs[0].running.as_deref(), Some(since.as_str()));
+    let version = f.world.version("main");
+    let results = f.world.results_log();
+    let out = support::Scratch::new("job-run");
+    let dir = out.path().join("sluice-run");
+    let (code, said) = sluice(
+        &f,
+        &[
+            "job",
+            "run",
+            "--claim",
+            &claim,
+            "--branch",
+            "main",
+            "--out",
+            dir.to_str().unwrap(),
+        ],
+    );
+    assert_eq!(code, 0, "{said}");
+    assert!(said.contains("1 passed, 0 failed"), "{said}");
+    let report: sluice_seams::RunReport =
+        serde_json::from_slice(&std::fs::read(dir.join("report.json")).unwrap()).unwrap();
+    assert_eq!(report.tasks.len(), 1);
+    assert_eq!(report.tasks[0].task, "a:test");
+    assert_eq!(report.tasks[0].outcome, Outcome::Pass);
+    let keys = std::fs::read_to_string(dir.join("proof/keys")).unwrap();
+    assert!(keys.starts_with("a:test "), "{keys}");
+    assert_eq!(f.world.version("main"), version, "no state written");
+    assert_eq!(f.world.results_log(), results, "nothing recorded");
+    assert_eq!(pooled_runs(&f), runs, "the run as the lead left it");
+
+    // A claim that holds no run of the branch starts nothing, and says why.
+    let none = out.path().join("none");
+    let (code, said) = sluice(
+        &f,
+        &[
+            "job",
+            "run",
+            "--claim",
+            "pool/forge/99",
+            "--branch",
+            "main",
+            "--out",
+            none.to_str().unwrap(),
+        ],
+    );
+    assert_eq!(code, sluice::INTERNAL, "{said}");
+    let why = std::fs::read_to_string(none.join("why")).unwrap();
+    assert!(
+        why.contains("no run of main waits for its job under pool/forge/99"),
+        "{why}"
+    );
+    assert!(!none.join("report.json").exists());
+}

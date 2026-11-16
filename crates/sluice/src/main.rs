@@ -189,6 +189,21 @@ fn main() {
                 .reading_results(sluice::profiles::records::ResultsFrom::Asked),
             ..bound
         };
+        // Record 0119 (design D11; rule core.49): a pool's job is its
+        // runner's one work, and holds its run's room in its own process,
+        // of no host's bound.
+        let bound = match &cli.command {
+            Some(Command::Job { .. }) => {
+                let common = bound.branch.common_dir()?;
+                Bound {
+                    tests: bound
+                        .tests
+                        .with_running(common.join("sluice-job").join("running")),
+                    ..bound
+                }
+            }
+            _ => bound,
+        };
         let kept = held.map(|settings| Kept {
             dir,
             program,

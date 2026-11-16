@@ -189,6 +189,13 @@ fn given_out(run: &SystemRun) -> bool {
     run.holder().is_some_and(|h| h.starts_with("pool/"))
 }
 
+/// Design D4, record 0119 (design D11, D12): whether `run` waits for its
+/// holder to start it: claimed, or a pool's run the lead wrote running from
+/// its run job's start, which the job's `sluice job run` reads after it.
+fn waits_for_its_job(run: &SystemRun) -> bool {
+    run.state == RunState::Claimed || (run.state == RunState::Running && given_out(run))
+}
+
 /// What a round's decide step did.
 enum Decided {
     /// Its write was made; what the round looked at of the host, and the
@@ -1105,9 +1112,9 @@ impl Sluice<'_> {
     /// run is open again and [`Started::AtBound`] is answered.
     ///
     /// The one start of a claimed run: a round's starts come through it,
-    /// and `sluice job run`, of the change `actions-pool`, is to start its
-    /// pool job's run through it under the job's claim, so the job needs
-    /// nothing of its own to refuse at its start.
+    /// and `sluice job run` starts its pool job's run through it under the
+    /// job's claim, so the job needs nothing of its own to refuse at its
+    /// start (record 0119; design D11).
     pub fn start_claimed(
         &self,
         branch: &str,
@@ -1124,7 +1131,7 @@ impl Sluice<'_> {
             .find_map(|c| {
                 c.runs
                     .iter()
-                    .position(|r| r.state == RunState::Claimed && r.holder() == Some(claim))
+                    .position(|r| r.holder() == Some(claim) && waits_for_its_job(r))
                     .map(|i| (c.clone(), i))
             });
         let Some((c, i)) = held else {
@@ -1143,6 +1150,52 @@ impl Sluice<'_> {
         let unmet = Unmet::of(from.policy.limits.clone());
         self.start_run(branch, &from, &c, i, &unmet, part, releases)
             .map(Some)
+    }
+
+    /// 113, record 0119 (design D11): start a run of `head`, a pull
+    /// request's head onto `branch`, as `sluice-pr`'s run job runs it,
+    /// under no claim: its checkout at the head, the branch's gate, tests
+    /// and limits read at the revision its records stand on (rule
+    /// core.15), on `system` where one is named. Nothing is written: a
+    /// head's run is no combination's, and its keys count by key alone
+    /// once signed (15). A checkout that cannot be made is
+    /// [`Started::Unmade`], and a start that fails [`Started::NotRun`].
+    pub fn start_head(&self, branch: &str, head: &Rev, system: Option<&str>) -> Result<Started> {
+        let line = self.read_line(branch)?;
+        let Some(from) = self.start_from(branch, &line)? else {
+            bail!("{branch}'s records hold no revision yet");
+        };
+        let Some(part) = self.seams.tests.hold(RunKind::Queue)? else {
+            return Ok(Started::AtBound);
+        };
+        let name = format!("sluice/head/{head}");
+        let place = match self
+            .seams
+            .checkout
+            .materialize(&name, head, &from.policy.checkout)
+        {
+            Ok(place) => place,
+            Err(e) if passes_through(&e) => return Err(e),
+            Err(e) => return Ok(Started::Unmade(could_not_start(&e))),
+        };
+        let request = RunRequest {
+            place,
+            revision: head.clone(),
+            required: from.rules.required.clone(),
+            since: None,
+            limit: from.rules.timeout,
+            limits: from.policy.limits.clone(),
+            tests: from.policy.tests.clone(),
+            command: None,
+            replay: true,
+            system: system.map(str::to_string),
+        };
+        match self.seams.tests.start(&request, part) {
+            Ok(run) => Ok(Started::Running(run)),
+            Err(e) if e.downcast_ref::<AtBound>().is_some() => Ok(Started::AtBound),
+            Err(e) if passes_through(&e) => Err(e),
+            Err(e) => Ok(Started::NotRun(could_not_start(&e))),
+        }
     }
 
     /// What starting `branch`'s claimed runs reads of it, once: `None`

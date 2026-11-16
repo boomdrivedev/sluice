@@ -759,7 +759,8 @@ pub enum Outcome {
 
 /// Whether an outcome was observed in this run or answered from an
 /// earlier one (37, 38).
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum Source {
     /// Observed by an executor on `host`.
     Ran { host: String },
@@ -769,7 +770,7 @@ pub enum Source {
 
 /// One check's result in a run: its key is `(task, hash)` (glossary
 /// "key").
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TaskResult {
     pub task: String,
     pub hash: String,
@@ -865,7 +866,9 @@ pub struct FailedBy {
     pub by: Vec<String>,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+/// Record 0119 (design D11): what a pool's run job hands its sign job is
+/// this, as JSON.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RunReport {
     pub tasks: Vec<TaskResult>,
     /// 84: what the executor held the run to.
@@ -1140,6 +1143,15 @@ pub trait Tests {
     /// a task a check was failed by and a replay are never unkept, and a
     /// task in neither list is no pass.
     fn proven(&self, run: &RunHandle, report: &RunReport) -> Result<Proof>;
+
+    /// Record 0119 (design D11; 109): keep in `dir` what proves the keys
+    /// of `report`, run `run`'s, in the profile's own form, as a pool's run
+    /// job hands it to its sign job, which holds the run's place nowhere;
+    /// nothing is recorded. A profile whose keys need no proof keeps
+    /// nothing.
+    fn keep_proof(&self, _run: &RunHandle, _report: &RunReport, _dir: &Path) -> Result<()> {
+        Ok(())
+    }
 
     /// ADR 0035: the session runs running on this host, as `running`
     /// counts them, each with what its `sluice exec` kept of it: for a

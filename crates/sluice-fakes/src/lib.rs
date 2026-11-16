@@ -2942,6 +2942,32 @@ impl Tests for FakeTests {
         Ok(proof)
     }
 
+    /// Record 0119 (design D11): the fake's proof of a key is a line of
+    /// `keys`, `<task> <key>`; a ran pass whose proof the world keeps none
+    /// of has no line.
+    fn keep_proof(
+        &self,
+        _run: &RunHandle,
+        report: &RunReport,
+        dir: &std::path::Path,
+    ) -> Result<()> {
+        let inner = self.0 .0.borrow();
+        let kept = |t: &&TaskResult| {
+            inner.no_proof.is_none()
+                || !(matches!(t.source, Source::Ran { .. }) && t.outcome == Outcome::Pass)
+        };
+        let lines: String = report
+            .tasks
+            .iter()
+            .chain(&report.dependencies)
+            .filter(kept)
+            .map(|t| format!("{} {}\n", t.task, t.hash))
+            .collect();
+        std::fs::create_dir_all(dir)?;
+        std::fs::write(dir.join("keys"), lines)?;
+        Ok(())
+    }
+
     fn logs(&self, run: &RunHandle, tasks: &[String]) -> Result<Vec<TaskLog>> {
         Ok(tasks
             .iter()

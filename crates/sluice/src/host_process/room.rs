@@ -772,6 +772,10 @@ impl Tests for Roomed<'_> {
         self.inner.proven(run, report)
     }
 
+    fn keep_proof(&self, run: &RunHandle, report: &RunReport, dir: &Path) -> Result<()> {
+        self.inner.keep_proof(run, report, dir)
+    }
+
     fn session_runs(&self) -> Result<Vec<HostRun>> {
         self.inner.session_runs()
     }

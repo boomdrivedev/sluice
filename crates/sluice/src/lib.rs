@@ -15,6 +15,7 @@ pub mod host_process;
 pub mod host_settings;
 pub mod identity;
 pub mod instance;
+pub mod job;
 pub mod overview;
 pub mod preview;
 pub mod profiles;
@@ -32,6 +33,7 @@ pub mod words;
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::io::Write;
+use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
@@ -628,6 +630,15 @@ pub enum Command {
     Forge {
         #[command(subcommand)]
         command: ForgeCommand,
+    },
+    /// A pool's job, as the workflow `sluice init actions` writes runs it:
+    /// its run, its signature and its record (record 0119).
+    #[command(
+        after_help = "Example:\n  $ sluice job run --claim pool/forge/3 --branch main --out \"$RUNNER_TEMP/sluice-run\""
+    )]
+    Job {
+        #[command(subcommand)]
+        command: JobCommand,
     },
     /// Run by sluice's own git calls as their credential helper:
     /// `credential get`, git's credential protocol on stdin.
@@ -1244,6 +1255,34 @@ pub enum ForgeCommand {
     },
 }
 
+#[derive(Subcommand, Debug)]
+pub enum JobCommand {
+    /// Start the run a claim holds, or a pull request's head, and keep its
+    /// report and what proves its keys in --out; records nothing, writes
+    /// no state and holds no key. Exits 0 once the report is kept, and 3
+    /// with why where the run reported nothing.
+    #[command(
+        after_help = "Examples:\n  $ sluice job run --claim pool/forge/3 --branch main --out run\n  $ sluice job run --head 4f2c9e1 --branch main --system linux-x64 --out run"
+    )]
+    Run {
+        /// The claim the pool's job runs under, `pool/<pool>/<n>`.
+        #[arg(long, conflicts_with = "head")]
+        claim: Option<String>,
+        /// A pull request's head, run with no claim.
+        #[arg(long, required_unless_present = "claim")]
+        head: Option<String>,
+        /// The branch the run's combination, or the head, lands on.
+        #[arg(long)]
+        branch: String,
+        /// With --head, the system the policy names the runner as.
+        #[arg(long, requires = "head")]
+        system: Option<String>,
+        /// The directory the run's report and proof are kept in.
+        #[arg(long)]
+        out: PathBuf,
+    },
+}
+
 /// What a waiting command does between rounds.
 pub trait Pause {
     /// Wait for the next round; `false` when the wait was stopped.
@@ -1526,6 +1565,14 @@ pub fn run(
     pause: &dyn Pause,
     out: &mut dyn Write,
 ) -> Result<i32> {
+    // Record 0119 (design D11): a pool's job holds the records only as it
+    // read them, and writes none.
+    let cli = match cli.command {
+        Some(Command::Job { command }) => {
+            return job::run(command, seams, host, clock, pause, out);
+        }
+        command => Cli { command, ..cli },
+    };
     let s = Sluice::new(seams, clock).as_peer(host.peer());
     // 124: the hook reads the policy only as far as guarding needs.
     let s = match &cli.command {
@@ -1853,6 +1900,7 @@ pub fn run(
             worktree,
             json,
         } => confirm(&s, &keys, who.is_some(), &worktree, json, out),
+        Command::Job { .. } => unreachable!("a job is run before the instance"),
         Command::Step { branch, json } => {
             // Rule core.14 (design D10): the host process's round of the
             // branch, between its passes, printed as a step prints it.
