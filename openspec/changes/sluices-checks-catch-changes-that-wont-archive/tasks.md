@@ -9,7 +9,7 @@ number and rules by id.
 
 ## 1. The check is held to its cases
 
-- [ ] 1.1 Add `check-changes-cases.sh`, Flume's copied whole but for its header, and run it in `root:changes-cases`, tagged `check-fast`, with both scripts among the task's inputs. True when `sluice exec bolt/sluices-changes-are-checked-as-archived -- moon run root:changes-cases` passes, and fails naming "A modified requirement past OpenSpec's length" over a `check-changes.sh` whose spec validation is made to pass.
+- [x] 1.1 Add `check-changes-cases.sh`, Flume's copied whole but for its header, and run it in `root:changes-cases`, tagged `check-fast`, with both scripts among the task's inputs. True when `sluice exec bolt/sluices-changes-are-checked-as-archived -- moon run root:changes-cases` passes, and fails naming "A modified requirement past OpenSpec's length" over a `check-changes.sh` whose spec validation is made to pass.
 
 ## 2. The decision is written down
 

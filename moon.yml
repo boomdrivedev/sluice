@@ -72,6 +72,17 @@ tasks:
     inputs: ['/openspec/changes/**/*', '!/openspec/changes/archive/**/*', '/openspec/specs/**/*', '/openspec/config.yaml', '/check-changes.sh', '/devenv.nix', '/devenv.lock']
     tags: [check-fast]
     options: {runFromWorkspaceRoot: true}
+  # check-changes.sh does what core.61 asks of each open change: its cases,
+  # each a scratch tree of its own holding the changes a scenario of
+  # repository-gate's requirement names, a requirement past OpenSpec's 500
+  # characters among them, check its exit and its words
+  # (check-changes-cases.sh; record 0128 as amended 2026-11-16, core.61).
+  # It reads no file of the tree but the two scripts.
+  changes-cases:
+    command: 'sh check-changes-cases.sh'
+    inputs: ['/check-changes.sh', '/check-changes-cases.sh', '/devenv.nix', '/devenv.lock']
+    tags: [check-fast]
+    options: {runFromWorkspaceRoot: true}
   # The scene the plugins' screenshots are taken of, built --fast with the
   # sluice built here and asserted, so a change to sluice that breaks it
   # fails here and not at the next retake. It reads the tools it drives from
