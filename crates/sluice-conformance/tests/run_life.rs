@@ -567,6 +567,7 @@ fn a_passed_run_with_no_signed_result_stands_and_is_followed_up() {
                     .collect(),
                 timed_out: false,
                 why: None,
+                untaken: false,
             });
             r.place = None;
             r.run = None;
@@ -786,4 +787,58 @@ fn a_run_that_waited_for_room_has_its_whole_limit() {
         e,
         Event::Result { result, .. } if result != "passed"
     )));
+}
+
+/// satisfies: record 0122; 66, 87, 115; rule core.22; the run-life spec's
+/// "A run no live executor may take ends with no outcome" and "A
+/// combination whose run no executor took is not passed and blames no one"
+#[test]
+fn a_run_no_live_executor_may_take_blames_no_one() {
+    use sluice_core::records::CandidateState;
+    let h = on_macos();
+    h.work("unit/a", "agent-a", &[("a/lib", Some("a2"))]);
+    let one = h.submit("unit/a");
+    lead(&h).step(BRANCH).unwrap();
+    let first = candidates(&h)[0].clone();
+    assert_eq!(first.runs[0].system.as_deref(), Some("macos-arm64"));
+    h.w().advance(chrono::Duration::minutes(19));
+    lead(&h).step(BRANCH).unwrap();
+    assert_eq!(
+        candidates(&h)[0].runs[0].state,
+        RunState::Open,
+        "within its limit"
+    );
+    h.w().advance(chrono::Duration::minutes(2));
+    lead(&h).step(BRANCH).unwrap();
+    let c = candidates(&h)
+        .into_iter()
+        .find(|c| c.id == first.id)
+        .expect("the combination, read not passed");
+    assert_eq!(c.state, CandidateState::NotPassed);
+    let ended = c.runs[0].ended.as_ref().expect("its run ended");
+    assert!(ended.untaken);
+    assert_eq!(
+        ended.outcomes.get("#gate"),
+        Some(&CheckOutcome::None {
+            why: "no host that may take it was live".into()
+        })
+    );
+    assert_eq!(c.runs[0].state, RunState::Closed);
+    assert!(c.failed.is_empty(), "no check failed");
+    assert!(h.results().is_empty(), "results.jsonl gains nothing");
+    let sub = h.sub(one);
+    assert_eq!(sub.state, State::Queued, "not blamed, and queued");
+    assert!(sub.failed.is_empty());
+    assert!(!h.events().iter().any(|e| matches!(e, Event::Blamed { .. })));
+    assert_eq!(c.not_run_runs, 0, "it counts toward nothing");
+
+    // The next round forms it again.
+    lead(&h).step(BRANCH).unwrap();
+    let again = candidates(&h);
+    assert_eq!(again.len(), 1);
+    assert_ne!(again[0].id, first.id);
+    assert_eq!(again[0].revision, first.revision);
+    assert_eq!(again[0].state, CandidateState::Testing);
+    assert_eq!(again[0].runs[0].state, RunState::Open);
+    assert_eq!(h.sub(one).state, State::Testing);
 }

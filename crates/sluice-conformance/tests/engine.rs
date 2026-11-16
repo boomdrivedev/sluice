@@ -9,7 +9,6 @@ use std::time::Duration;
 use sluice_conformance::{policy, Harness, Rig, BRANCH};
 use sluice_core::records::{Event, RunState, State, SystemRun};
 use sluice_core::{Peer, Sluice, Started};
-use sluice_seams::Decided;
 
 /// The host a sluice over the fakes is, as its records name it.
 const HOST: &str = "this-host";
@@ -267,42 +266,38 @@ fn a_run_no_host_takes_for_its_engine_is_not_passed_at_its_time_limit() {
     h.step();
     h.w().advance(chrono::Duration::minutes(29));
     h.step();
-    assert_ne!(h.sub(one).state, State::Failed, "within its time limit");
-    h.w().advance(chrono::Duration::minutes(2));
-    h.settle();
-    let sub = h.sub(one);
-    assert_eq!(sub.state, State::Failed);
-    assert_eq!(sub.result.as_deref(), Some("timed out"));
     let waited = format!(
         "no host that could run its tests as its policy asks took them: {HOST}: {NO_ENGINE}"
     );
-    assert!(!sub.failed.is_empty());
-    assert!(
-        sub.failed
-            .iter()
-            .all(|f| f.not_run.as_deref() == Some(waited.as_str())),
-        "{:?}",
-        sub.failed
-    );
+    assert!(!not_passed_for(&h, &waited), "within its time limit");
+    h.w().advance(chrono::Duration::minutes(2));
+    h.settle();
+    // Record 0122 (design D6): not passed, nobody blamed, no check failed,
+    // each check naming the host that turned it down and why.
+    assert!(not_passed_for(&h, &waited), "{:?}", h.events());
+    let sub = h.sub(one);
+    assert_ne!(sub.state, State::Failed);
+    assert!(sub.failed.is_empty(), "{:?}", sub.failed);
+    assert!(!h.events().iter().any(|e| matches!(e, Event::Blamed { .. })));
     assert!(h.w().requests().is_empty(), "nothing ever ran");
-    let told = h.delivered_to("agent-a");
-    assert_eq!(told.len(), 1);
-    assert!(matches!(
-        told[0].decided,
-        Decided::Failed {
-            timed_out: true,
-            ..
-        }
-    ));
-    let report = told[0].report.as_ref().expect("the notice's report");
     assert!(
-        report
-            .rows
-            .iter()
-            .any(|r| r.not_run.as_deref() == Some(waited.as_str())),
-        "{:?}",
-        report.rows
+        h.delivered_to("agent-a").is_empty(),
+        "nobody is told of a blame"
     );
+    assert!(h.w().results_log().is_empty());
+}
+
+/// Record 0122 (design D6): whether the branch's log says a run of a
+/// combination ended at the time limit for `why`, and the combination was
+/// read not passed.
+fn not_passed_for(h: &Harness, why: &str) -> bool {
+    let events = h.events();
+    events
+        .iter()
+        .any(|e| matches!(e, Event::Ended { why: Some(w), .. } if w == why))
+        && events
+            .iter()
+            .any(|e| matches!(e, Event::Result { result, failed, .. } if result == "not passed" && failed.is_empty()))
 }
 
 /// What the macOS sandbox's look says of a memory limit.
@@ -466,35 +461,19 @@ fn a_run_no_host_can_hold_the_limit_of_is_not_passed_at_its_time_limit() {
     h.step();
     h.w().advance(chrono::Duration::minutes(29));
     h.step();
-    assert_ne!(h.sub(one).state, State::Failed, "within its time limit");
-    h.w().advance(chrono::Duration::minutes(2));
-    h.settle();
-    let sub = h.sub(one);
-    assert_eq!(sub.state, State::Failed);
-    assert_eq!(sub.result.as_deref(), Some("timed out"));
     let waited = format!(
         "no host that could run its tests as its policy asks took them: {HOST}: {OPEN_MEMORY}"
     );
-    assert!(!sub.failed.is_empty());
-    assert!(
-        sub.failed
-            .iter()
-            .all(|f| f.not_run.as_deref() == Some(waited.as_str())),
-        "{:?}",
-        sub.failed
-    );
+    assert!(!not_passed_for(&h, &waited), "within its time limit");
+    h.w().advance(chrono::Duration::minutes(2));
+    h.settle();
+    // Record 0122 (design D6): not passed, nobody blamed, no check failed.
+    assert!(not_passed_for(&h, &waited), "{:?}", h.events());
+    let sub = h.sub(one);
+    assert_ne!(sub.state, State::Failed);
+    assert!(sub.failed.is_empty(), "{:?}", sub.failed);
     assert!(h.w().requests().is_empty(), "nothing ever ran");
-    let told = h.delivered_to("agent-a");
-    assert_eq!(told.len(), 1);
-    let report = told[0].report.as_ref().expect("the notice's report");
-    assert!(
-        report
-            .rows
-            .iter()
-            .any(|r| r.not_run.as_deref() == Some(waited.as_str())),
-        "{:?}",
-        report.rows
-    );
+    assert!(h.delivered_to("agent-a").is_empty());
 }
 
 /// The checks each run that left checks not run named, with why, in

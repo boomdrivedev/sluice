@@ -831,21 +831,23 @@ fn a_run_no_executor_takes_reads_as_not_passed_at_the_time_limit() {
     for _ in 0..4 {
         s.step(BRANCH).unwrap();
     }
+    // Record 0122 (design D6): not passed, nobody blamed and no check
+    // failed; the macos-arm64 run's checks say no host that may take it was
+    // live, and the submission stays queued, formed again.
     let sub = h.sub(one);
-    assert_eq!(sub.state, State::Failed);
-    assert_eq!(sub.result.as_deref(), Some("timed out"));
-    let missing: Vec<(&str, Option<&str>)> = sub
-        .failed
+    assert_ne!(sub.state, State::Failed);
+    assert!(sub.failed.is_empty(), "{:?}", sub.failed);
+    let events = h.events();
+    assert!(!events.iter().any(|e| matches!(e, Event::Blamed { .. })));
+    assert!(events.iter().any(|e| matches!(
+        e,
+        Event::Ended { system: Some(s), why: Some(w), .. }
+            if s == "macos-arm64" && w == "no host that may take it was live"
+    )));
+    assert!(events
         .iter()
-        .map(|f| (f.task.as_str(), f.system.as_deref()))
-        .collect();
-    assert_eq!(
-        missing,
-        [
-            ("a:test", Some("macos-arm64")),
-            ("b:test", Some("macos-arm64"))
-        ]
-    );
+        .any(|e| matches!(e, Event::Result { result, .. } if result == "not passed")));
+    assert!(h.w().delivered().is_empty());
     // Each result names the system it ran on.
     assert!(results(&h)
         .iter()

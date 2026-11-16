@@ -572,6 +572,7 @@ fn a_verdict_the_state_alone_holds_lands_nothing() {
                     .collect(),
                 timed_out: false,
                 why: None,
+                untaken: false,
             });
             r.place = None;
             r.run = None;
@@ -640,7 +641,24 @@ fn a_run_no_listed_host_takes_is_not_passed_at_the_time_limit() {
     h.w().advance(chrono::Duration::minutes(2));
     on(&h, "a").step(BRANCH).unwrap();
     keeper(&h).step(BRANCH).unwrap();
-    assert_eq!(h.sub(one).state, State::Failed);
+    // Record 0122 (design D6): not passed, nobody blamed and no check
+    // failed, each check naming the hosts that turned the run down.
+    let sub = h.sub(one);
+    assert_ne!(sub.state, State::Failed);
+    assert!(sub.failed.is_empty(), "{:?}", sub.failed);
+    let events = h.events();
+    assert!(!events.iter().any(|e| matches!(e, Event::Blamed { .. })));
+    assert!(
+        events.iter().any(|e| matches!(
+            e,
+            Event::Ended { why: Some(w), .. } if w.contains("a: the branch's policy lists no key")
+                && w.contains("lead: no container engine answers")
+        )),
+        "{events:?}"
+    );
+    assert!(events
+        .iter()
+        .any(|e| matches!(e, Event::Result { result, .. } if result == "not passed")));
     assert!(h.w().requests().is_empty());
 }
 

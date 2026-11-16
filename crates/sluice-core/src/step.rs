@@ -1968,15 +1968,11 @@ impl Sluice<'_> {
                     let x = line.candidate_mut(&c.id).expect("polled candidate");
                     for (n, r) in x.runs.iter_mut().enumerate() {
                         if ending.contains(&n) {
-                            let checks = if r.checks.is_empty() {
-                                rules.required.clone()
-                            } else {
-                                r.checks.clone()
+                            let checks = given_checks(r, rules);
+                            let why = match r.declined.is_empty() {
+                                false => waited_for(&r.declined),
+                                true => NO_LIVE_HOST.to_string(),
                             };
-                            let waited = (!r.declined.is_empty()).then(|| waited_for(&r.declined));
-                            let why = waited
-                                .clone()
-                                .unwrap_or_else(|| "no host that may take it took it".into());
                             r.state = RunState::Closed;
                             r.ended = Some(Ended {
                                 at: now.to_string(),
@@ -1984,21 +1980,12 @@ impl Sluice<'_> {
                                     .iter()
                                     .map(|c| (c.clone(), CheckOutcome::None { why: why.clone() }))
                                     .collect(),
-                                timed_out: true,
+                                timed_out: false,
                                 why: Some(why.clone()),
+                                untaken: true,
                             });
                             r.closed = Some(now.to_string());
                             closing.push((r.system.clone(), n, why));
-                            x.failed.extend(checks.into_iter().map(|task| FailedTask {
-                                task,
-                                hash: String::new(),
-                                log: None,
-                                flaky: None,
-                                system: r.system.clone(),
-                                not_run: waited.clone(),
-                                failed_by: Vec::new(),
-                                unsigned: None,
-                            }));
                         }
                     }
                     // Record 0122 (design D1): ended and closed in one write,
@@ -2452,6 +2439,7 @@ impl Sluice<'_> {
             outcomes: outcomes_of(checks, &v, &report, &none),
             timed_out: v.timed_out,
             why: why.filter(|_| !v.timed_out && v.failed.is_empty()),
+            untaken: false,
         };
         let ended_why = ended.why.clone();
         // Record 0122 (design D3): its end, after its results and before
@@ -2488,6 +2476,10 @@ impl Sluice<'_> {
             CandidateState::Failed
         } else if read.timed_out {
             CandidateState::TimedOut
+        } else if read.untaken {
+            // 66, 87, record 0122 (design D6): a run no live executor may
+            // take ended at the limit: not passed, and nobody blamed.
+            CandidateState::NotPassed
         } else if read.waiting {
             // Record 0122 (design D7): each run ended with checks undecided
             // is followed up, holding only those; the verdict waits for it.
@@ -2613,7 +2605,18 @@ impl Sluice<'_> {
                 .find(|c| c.on == base && c.submissions == prefix);
             // 140: one whose carried work no longer forms on it is
             // obsolete, formed again and never landed without that work.
+            // Record 0122 (design D6): so is one read not passed for a run no
+            // live executor took, whose submissions form again from the round
+            // after the one that read it, which shows it.
             let reused = match reused {
+                Some(c)
+                    if c.state == CandidateState::NotPassed
+                        && !c.runs.iter().any(|r| {
+                            r.ended.as_ref().is_some_and(|e| e.untaken && e.at == now)
+                        }) =>
+                {
+                    None
+                }
                 Some(c) if self.carried(c)?.is_none() => None,
                 found => found,
             };
@@ -4494,6 +4497,9 @@ struct RunsRead {
     failed: bool,
     /// The time limit ended some run (66): read at once.
     timed_out: bool,
+    /// Some run ended with no live executor that may take it (66, 87;
+    /// design D6): read at once, with no follow-up.
+    untaken: bool,
     /// Some run has not ended, or ended with checks undecided.
     waiting: bool,
     /// Each run, by its index, ended with checks undecided and followed by
@@ -4519,6 +4525,7 @@ fn read_runs(runs: &[SystemRun]) -> RunsRead {
                     // 66: a run its time limit ended reads as timed out,
                     // whatever of it failed.
                     read.timed_out |= e.timed_out;
+                    read.untaken |= e.untaken;
                     for (check, outcome) in &e.outcomes {
                         read.failed |= *outcome == CheckOutcome::Failed && !e.timed_out;
                         last.insert(check, outcome);
@@ -4621,6 +4628,7 @@ fn with_none(none: &[NotRun], now: &str) -> Ended {
             .collect(),
         timed_out: false,
         why: none.first().map(|n| n.reason.clone()),
+        untaken: false,
     }
 }
 
@@ -4635,6 +4643,7 @@ fn failing(named: &[FailedTask], now: &str) -> Ended {
             .collect(),
         timed_out: false,
         why: None,
+        untaken: false,
     }
 }
 
@@ -4712,6 +4721,10 @@ fn outcomes_of(
     }
     outcomes
 }
+
+/// 66, 87, record 0122 (design D6): why a run no host turned down, with no
+/// live executor that may take it, ended at the time limit.
+const NO_LIVE_HOST: &str = "no host that may take it was live";
 
 /// Record 0074 (design D3): what a run no host took before its time
 /// limit waited for, each host that turned it down, for its engine or a

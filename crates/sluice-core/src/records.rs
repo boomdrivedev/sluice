@@ -584,6 +584,11 @@ pub struct Ended {
     pub timed_out: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub why: Option<String>,
+    /// 66, 87, record 0122 (design D6): ended at the time limit with no
+    /// live executor that may take it, nothing of it run: its combination
+    /// is not passed and nobody is blamed.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub untaken: bool,
 }
 
 /// Record 0122 (design D1, D7, D8; 60, 108, 114): one check's outcome in a
