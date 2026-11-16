@@ -44,3 +44,7 @@ Forming the chain again does not help: the same entries form the same tree, and 
 - An entry whose content the forge refuses holds its branch only until its submitter withdraws it or submits again from its place.
 - When the forge refuses every landing, the branch stalls where everyone can see it, with the forge's words, and no one is blamed.
 - sluice reads one more answer from a push, refused by the forge. It tells it apart from a branch found elsewhere by reading the branch after the refusal.
+
+## Amendment, 2026-11-16: built
+
+The change `a-runs-life-is-written-first-and-actions-runs-its-checks` builds this record. A landing the forge refuses is written in the landing with the forge's words, each of its submissions `refused`, a submission's state added under `sluice/submission@1`, and logged once, `forge_refused`. A wait on a refused submission ends at once with exit 6, saying the forge refused its landing in the forge's words. The refusal is owed to each submission's reader under `<id>:refused`, and decides no outcome. `sluice push <branch>` pushes the held landing again on the operator's word: it lands, or is held again with the forge's new words and exits 6. *Not taken:* exit 1 for a refused landing, which a reader takes as its submission failed.
