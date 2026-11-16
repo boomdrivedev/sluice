@@ -539,3 +539,69 @@ fn a_follow_up_run_has_a_limit_of_its_own() {
         Event::Result { result, .. } if result == "timed out"
     )));
 }
+
+/// satisfies: record 0122; 78; rule core.22; the run-life spec's "A run's
+/// written end stands", a passed run with no signed result
+#[test]
+fn a_passed_run_with_no_signed_result_stands_and_is_followed_up() {
+    use sluice_core::records::{CandidateState, Ended};
+    let h = signed();
+    h.w().hold_runs(true);
+    h.work("unit/a", "agent-a", &[("a/lib", Some("a2"))]);
+    let one = h.submit("unit/a");
+    on(&h, "a").step(BRANCH).unwrap();
+    // A host that can write the state writes the run ended passed, with no
+    // signed result behind it.
+    let state = h.sluice().seams().state;
+    let mut line = sluice_core::line::Line::load(BRANCH, state.read(BRANCH).unwrap()).unwrap();
+    for c in &mut line.doc.candidates {
+        c.state = CandidateState::Passed;
+        for r in &mut c.runs {
+            r.state = RunState::Ended;
+            r.ended = Some(Ended {
+                at: "2026-11-16T09:00:00Z".into(),
+                outcomes: r
+                    .checks
+                    .iter()
+                    .map(|c| (c.clone(), CheckOutcome::Passed))
+                    .collect(),
+                timed_out: false,
+                why: None,
+            });
+            r.place = None;
+            r.run = None;
+        }
+    }
+    {
+        let _g = state.lock(BRANCH).unwrap().unwrap();
+        assert!(matches!(
+            state.write(BRANCH, line.version, line.changes()).unwrap(),
+            sluice_seams::Written::Written(_)
+        ));
+    }
+    h.w().complete_all();
+    on(&h, "a").step(BRANCH).unwrap();
+    assert!(h
+        .events()
+        .iter()
+        .any(|e| matches!(e, Event::Unsigned { .. })));
+    let c = &candidates(&h)[0];
+    assert_eq!(c.state, CandidateState::Testing, "under test again");
+    let first = &c.runs[0];
+    assert!(first.state.done(), "its end stands: {first:?}");
+    assert_eq!(
+        first.ended.as_ref().unwrap().outcomes.get("#gate"),
+        Some(&CheckOutcome::Passed)
+    );
+    let follow = &c.runs[1];
+    assert_eq!(follow.follows, Some(0));
+    assert_eq!(follow.checks, ["#gate"]);
+    assert_ne!(h.sub(one).state, State::Landed);
+    assert!(h.w().moves().is_empty(), "nothing lands");
+
+    for _ in 0..4 {
+        h.w().complete_all();
+        on(&h, "a").step(BRANCH).unwrap();
+    }
+    assert_eq!(h.sub(one).state, State::Landed);
+}

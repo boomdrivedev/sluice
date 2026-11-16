@@ -3129,21 +3129,30 @@ impl Sluice<'_> {
                 let mut unsigned = Vec::new();
                 for id in judged {
                     let c = line.candidate(id).expect("a chain's candidate");
-                    if !signed_pass(c, &results, rules) {
-                        unsigned.push((c.id.clone(), c.revision.clone()));
+                    let missing = unsigned_checks(c, &results, rules);
+                    if !missing.is_empty() {
+                        unsigned.push((c.id.clone(), c.revision.clone(), missing));
                     }
                 }
                 if !unsigned.is_empty() {
-                    for (id, combination) in unsigned {
-                        let left = self.unclosed(line.candidate(&id).expect("a chain's candidate"));
-                        line.doc.release.extend(left);
+                    // 78, rule core.22, record 0122 (design D9): its runs
+                    // stand as written; it is under test again, open to
+                    // claims, and a follow-up holds each check with no
+                    // counted pass behind it.
+                    for (id, combination, missing) in unsigned {
                         let c = line.candidate_mut(&id).expect("a chain's candidate");
-                        c.state = CandidateState::Formed;
-                        c.runs.clear();
-                        c.opened = None;
-                        c.failed.clear();
+                        c.state = CandidateState::Testing;
                         c.passed_at = None;
-                        line.log(now, Event::Unsigned { combination });
+                        line.log(
+                            now,
+                            Event::Unsigned {
+                                combination: combination.clone(),
+                            },
+                        );
+                        self.follow_up(line, &id, &missing, now);
+                        self.seams
+                            .state
+                            .publish_candidate(&line.branch, &id, &combination)?;
                     }
                     return Ok(false);
                 }
@@ -4716,11 +4725,18 @@ impl Sluice<'_> {
     }
 }
 
-/// Design D8: whether the signed results bear out that `c` passed: every
-/// run of it has a result a signer the gate trusts signed for this very
-/// combination, each read as passing, a replay only through a trusted pass
-/// signed for its key on its system (108).
-fn signed_pass(c: &Candidate, results: &[ResultLine], rules: &Rules) -> bool {
+/// Design D8, record 0122 (design D9): the checks of `c` the signed results
+/// do not bear out, by the last run of each run and its follow-ups that
+/// read them passed, as `follow_up` takes them: a check passes only through
+/// a result a signer the gate trusts signed for this very combination,
+/// read as passing, a replay only through a trusted pass signed for its key
+/// on its system (108); a tag, through every such result of its runs, of
+/// which there is one at least. Empty where they bear out every pass.
+fn unsigned_checks(
+    c: &Candidate,
+    results: &[ResultLine],
+    rules: &Rules,
+) -> Vec<(usize, Vec<String>, bool)> {
     use crate::records::ResultKind;
     let trusted = |r: &ResultLine| {
         r.signer.as_deref().is_some_and(|s| {
@@ -4738,22 +4754,48 @@ fn signed_pass(c: &Candidate, results: &[ResultLine], rules: &Rules) -> bool {
                 && trusted(p)
         })
     };
-    c.runs.iter().all(|run| {
+    let counted = |r: &ResultLine| match (r.kind, r.outcome) {
+        (ResultKind::Replayed, _) => proven(&r.task, &r.hash, r.system.as_deref()),
+        (ResultKind::Ran, sluice_seams::Outcome::Pass) => true,
+        (ResultKind::Ran, sluice_seams::Outcome::Fail) => {
+            rules.flaky == crate::policy::Flaky::Pass
+                && proven(&r.task, &r.hash, r.system.as_deref())
+        }
+    };
+    let mut unsigned = Vec::new();
+    for root in (0..c.runs.len()).filter(|n| c.runs[*n].follows.is_none()) {
+        let system = c.runs[root].system.clone();
+        let mut chain = vec![root];
+        let mut cur = root;
+        while let Some(next) = c.runs.iter().position(|r| r.follows == Some(cur)) {
+            chain.push(next);
+            cur = next;
+        }
+        let mut last: BTreeMap<&String, &CheckOutcome> = BTreeMap::new();
+        for &n in &chain {
+            if let Some(e) = &c.runs[n].ended {
+                last.extend(e.outcomes.iter());
+            }
+        }
         let mine: Vec<&ResultLine> = results
             .iter()
             .filter(|r| r.combination == c.revision && trusted(r))
-            .filter(|r| run.system.is_none() || r.system == run.system)
+            .filter(|r| system.is_none() || r.system == system)
             .collect();
-        !mine.is_empty()
-            && mine.iter().all(|r| match (r.kind, r.outcome) {
-                (ResultKind::Replayed, _) => proven(&r.task, &r.hash, r.system.as_deref()),
-                (ResultKind::Ran, sluice_seams::Outcome::Pass) => true,
-                (ResultKind::Ran, sluice_seams::Outcome::Fail) => {
-                    rules.flaky == crate::policy::Flaky::Pass
-                        && proven(&r.task, &r.hash, r.system.as_deref())
-                }
-            })
-    })
+        let bears = |check: &str| match check.starts_with('#') {
+            true => !mine.is_empty() && mine.iter().all(|r| counted(r)),
+            false => mine.iter().any(|r| r.task == check && counted(r)),
+        };
+        let missing: Vec<String> = last
+            .into_iter()
+            .filter(|(check, o)| **o == CheckOutcome::Passed && !bears(check))
+            .map(|(check, _)| check.clone())
+            .collect();
+        if !missing.is_empty() {
+            unsigned.push((cur, missing, false));
+        }
+    }
+    unsigned
 }
 
 /// Whether a branch has anything a lead would do: a submission in the
