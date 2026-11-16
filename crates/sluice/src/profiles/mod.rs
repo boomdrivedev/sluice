@@ -349,6 +349,15 @@ fn forge_findings(
         branch,
         operator.as_deref(),
     ));
+    // Record 0119 (design D14): each pool on GitHub the policy names at
+    // the branch's revision, as `sluice init actions` sets it up.
+    if let Some((_, policy)) = branches.policy_of(branch)? {
+        let wants = github::workflows::sluice(crate::VERSION);
+        for pool in policy.pools.iter().filter(|p| p.kind.0 == "github") {
+            let signer = policy.signers.get(&pool.signer).map(|s| &s.identity);
+            found.extend(github::check::pool(&app, &repo, pool, signer, &wants));
+        }
+    }
     Ok(found)
 }
 

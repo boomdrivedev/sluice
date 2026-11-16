@@ -68,7 +68,7 @@ impl Actions {
 }
 
 /// A key of a `github = { ... }` table.
-fn field(kind: &(String, Setting), key: &str) -> Result<String> {
+pub(crate) fn field(kind: &(String, Setting), key: &str) -> Result<String> {
     if kind.0 != "github" {
         bail!("a {} pool is not GitHub Actions", kind.0);
     }
@@ -82,7 +82,7 @@ fn field(kind: &(String, Setting), key: &str) -> Result<String> {
 }
 
 /// The branch a ref names: `refs/heads/main` is `main`.
-fn branch_of(git_ref: &str) -> &str {
+pub(crate) fn branch_of(git_ref: &str) -> &str {
     git_ref.strip_prefix("refs/heads/").unwrap_or(git_ref)
 }
 

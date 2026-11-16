@@ -2437,3 +2437,162 @@ fn a_bundle_no_carried_root_verifies_counts_for_nothing() {
     let said = format!("{:#}", verify(&bundle, &identity).unwrap_err());
     assert!(said.contains("does not verify"), "{said}");
 }
+
+/// Record 0119 (design D14): `main`'s pool on GitHub Actions and its
+/// signer, as `sluice init actions` appends them.
+fn actions_pool() -> (sluice_core::policy::Pool, (String, sluice_seams::Setting)) {
+    let p = sluice_core::policy::Policy::parse(
+        "[tests]\nrunner = \"moon\"\n\n[branches.main]\nrequired = [\"#gate\"]\nremote = \"origin\"\n\
+         \n[systems]\nlinux-x64 = { os = \"linux\", arch = \"x86_64\" }\n\
+         \n[signers.forge]\ngithub = { workflow = \".github/workflows/sluice.yml\", ref = \"refs/heads/main\" }\n\
+         \n[pools.forge]\ngithub = { workflow = \".github/workflows/sluice.yml\" }\nsigner = \"forge\"\n\
+         runners = { linux-x64 = \"ubuntu-24.04\" }\n",
+    )
+    .expect("the policy parses");
+    (p.pools[0].clone(), p.signers["forge"].identity.clone())
+}
+
+/// The fake API answering for the pool's workflow on `main` with
+/// `workflow`, `None` for none, and for the `sluice` environment with
+/// `environment` and its branches `branches`; the app may run workflows.
+fn pool_forge(
+    clock: &Clock,
+    workflow: Option<&str>,
+    environment: serde_json::Value,
+    branches: &[&str],
+) -> Fake {
+    use base64::Engine;
+    let mut forge = Forge::new(clock);
+    forge.permissions["actions"] = json!("write");
+    let workflow = workflow.map(|w| base64::engine::general_purpose::STANDARD.encode(w));
+    let policies: Vec<serde_json::Value> = branches
+        .iter()
+        .map(|b| json!({ "name": b, "type": "branch" }))
+        .collect();
+    let minted = Mutex::new(0);
+    Fake::start(move |r: &Request| match r.path.as_str() {
+        "/repos/o/r/contents/.github/workflows/sluice.yml?ref=main" => match &workflow {
+            Some(w) => json(
+                200,
+                json!({ "type": "file", "encoding": "base64", "content": w }),
+            ),
+            None => json(404, json!({ "message": "Not Found" })),
+        },
+        "/repos/o/r/environments/sluice" => json(200, environment.clone()),
+        "/repos/o/r/environments/sluice/deployment-branch-policies" => json(
+            200,
+            json!({ "total_count": policies.len(), "branch_policies": policies }),
+        ),
+        _ => forge.answer(r, &minted),
+    })
+}
+
+/// The environment GitHub gives with custom branch policies.
+fn custom_environment() -> serde_json::Value {
+    json!({
+        "name": "sluice",
+        "deployment_branch_policy": { "protected_branches": false, "custom_branch_policies": true },
+    })
+}
+
+/// satisfies: record 0119 (design D14); the actions-pool spec's "forge
+/// check names what the pool lacks"
+#[test]
+fn forge_check_names_a_pools_missing_workflow() {
+    let clock = Clock::new();
+    let (pool, signer) = actions_pool();
+    let wants = sluice::profiles::github::workflows::sluice("1.2.3");
+    let fake = pool_forge(&clock, None, custom_environment(), &["main"]);
+    let found = sluice::profiles::github::check::pool(
+        &app(&fake, &clock),
+        &repo(),
+        &pool,
+        Some(&signer),
+        &wants,
+    );
+    assert_eq!(
+        failures(&found),
+        vec!["main holds no .github/workflows/sluice.yml: sluice init actions writes it, to land on main"],
+        "{found:?}"
+    );
+    assert!(found.iter().any(|f| f.ok
+        && f.what == "the signer forge verifies .github/workflows/sluice.yml at refs/heads/main"));
+    assert!(found
+        .iter()
+        .any(|f| f.ok && f.what == "the app may run o/r's workflows"));
+    assert!(found
+        .iter()
+        .any(|f| f.ok && f.what == "only main may use o/r's sluice environment"));
+
+    // As init writes it: all set. One that differs is named.
+    let fake = pool_forge(&clock, Some(&wants), custom_environment(), &["main"]);
+    let found = sluice::profiles::github::check::pool(
+        &app(&fake, &clock),
+        &repo(),
+        &pool,
+        Some(&signer),
+        &wants,
+    );
+    assert!(failures(&found).is_empty(), "{found:?}");
+    let fake = pool_forge(
+        &clock,
+        Some("name: ours\n"),
+        custom_environment(),
+        &["main"],
+    );
+    let found = sluice::profiles::github::check::pool(
+        &app(&fake, &clock),
+        &repo(),
+        &pool,
+        Some(&signer),
+        &wants,
+    );
+    let f = failures(&found);
+    assert_eq!(f.len(), 1, "{found:?}");
+    assert!(
+        f[0].contains("is not as this sluice's init actions writes it"),
+        "{}",
+        f[0]
+    );
+}
+
+/// satisfies: record 0119 (design D14); the actions-pool spec's "forge
+/// check names an environment any branch may use"
+#[test]
+fn forge_check_names_an_environment_any_branch_may_use() {
+    let clock = Clock::new();
+    let (pool, signer) = actions_pool();
+    let wants = sluice::profiles::github::workflows::sluice("1.2.3");
+    let check = |environment: serde_json::Value, branches: &[&str]| -> Vec<String> {
+        let fake = pool_forge(&clock, Some(&wants), environment, branches);
+        let found = sluice::profiles::github::check::pool(
+            &app(&fake, &clock),
+            &repo(),
+            &pool,
+            Some(&signer),
+            &wants,
+        );
+        failures(&found).into_iter().map(String::from).collect()
+    };
+    let any =
+        "any branch may use o/r's sluice environment, and so its key: let only main deploy from it";
+    assert_eq!(
+        check(
+            json!({ "name": "sluice", "deployment_branch_policy": null }),
+            &[]
+        ),
+        vec![any]
+    );
+    assert_eq!(
+        check(
+            json!({ "name": "sluice", "deployment_branch_policy": { "protected_branches": true, "custom_branch_policies": false } }),
+            &[]
+        ),
+        vec![any]
+    );
+    assert_eq!(
+        check(custom_environment(), &["dev", "main"]),
+        vec!["o/r's sluice environment may be used from dev, main: let only main deploy from it"]
+    );
+    assert!(check(custom_environment(), &["main"]).is_empty());
+}
