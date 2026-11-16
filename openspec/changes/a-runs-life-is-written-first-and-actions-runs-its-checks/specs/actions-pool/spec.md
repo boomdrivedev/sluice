@@ -1,3 +1,7 @@
+## Purpose
+
+A pool on GitHub Actions: the workflows `sluice init actions` writes, a run's two jobs and `sluice job`, what each job may hold, and how a pool's runs are claimed, dispatched, followed and ended (record 0119).
+
 ## ADDED Requirements
 
 ### Requirement: sluice init actions writes the workflows

@@ -27,11 +27,9 @@ A claim SHALL lapse once a reader has seen its host's sign of life
 unchanged for the sign-of-life bound, by the reader's own observation
 from when it first read that sign of life, never for the length of its
 run, never because the lead changed, and never because the reader took
-the lead. A pool's job's claim SHALL lapse once its job has ended with
-no record of its run. A lapsed claim's run SHALL end with no outcome,
-its checks held by a follow-up run, and a result reported under a claim
-its host no longer holds SHALL NOT be written. The claim holder's report
-SHALL be written whichever instance leads (60, 73, 77, 88).
+the lead. A lapsed claim's run SHALL end with no outcome, its checks
+held by a follow-up run, and a result reported under a claim its host
+no longer holds SHALL NOT be written (60, 73, 77).
 
 #### Scenario: A host stops mid-run
 - **WHEN** host A claimed a run of `main` and is switched off
@@ -44,6 +42,13 @@ SHALL be written whichever instance leads (60, 73, 77, 88).
 #### Scenario: A late report
 - **WHEN** host A returns after its claim lapsed and tries to report the run's result
 - **THEN** the result is not written to the branch's state, and the combination's outcome is the one its follow-up run reports
+
+## ADDED Requirements
+
+### Requirement: A live claim's report is written whichever instance leads
+The report of a run whose claim holds SHALL be written as the run's end
+by its claim holder, whichever instance leads the branch when it
+reports (60, 73, 88).
 
 #### Scenario: A new lead and a live claim
 - **WHEN** host B takes the lead of `main` while host A, showing its sign of life, holds a claim on a running run

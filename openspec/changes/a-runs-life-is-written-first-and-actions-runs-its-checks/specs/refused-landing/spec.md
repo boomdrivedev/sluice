@@ -1,3 +1,7 @@
+## Purpose
+
+A landing the forge refuses: told apart from a branch found elsewhere, held with the forge's words for its submitters to withdraw or replace, told to them, and pushed again only on the operator's word (record 0124).
+
 ## ADDED Requirements
 
 ### Requirement: A landing the forge refuses is told from a branch found elsewhere

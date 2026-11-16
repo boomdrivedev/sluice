@@ -21,15 +21,13 @@ for nothing.
 
 ### Requirement: A shared branch's run is taken only by a host whose signature its gate would count
 On a branch whose records are on its remote, a run SHALL be taken only by
-a host signing as a signer the branch's policy names, with a key that
-policy lists for it at the revision the round read, or by a pool whose
-jobs sign as a `github` signer the policy names; the name alone SHALL
-take nothing. A run no such host or pool takes SHALL stay open until the
-time limit, counted from when it opened, ends it with no outcome and
-reads its candidate not passed, blaming no one (87, 66; run-life). A
-result signed with an unlisted key SHALL be missing, never a fail, and
-its checks SHALL be held by a follow-up run (28, S18). The records seam,
-never the core, SHALL read the key.
+a host signing as a signer its policy names, with a key the policy
+lists for it at the revision the round read, or by a pool whose jobs
+sign as a `github` signer it names; the name alone SHALL take nothing.
+A run none takes SHALL end at the time limit with no outcome, its
+candidate not passed (87, 66). A result signed with an unlisted key
+SHALL be missing, never a fail (28, S18). The records seam SHALL read
+the key.
 
 #### Scenario: A host whose key the branch does not list takes no run
 - **WHEN** host a signs as a signer `main`'s gate trusts, with a key `main`'s policy does not list, and a submission waits on `main`

@@ -1,3 +1,7 @@
+## Purpose
+
+A run's life as its records hold it: the five states a run is written in before anything acts on it, who writes each, the proof each act leaves, its limit and its follow-up runs, and an end that stands once written (record 0122).
+
 ## ADDED Requirements
 
 ### Requirement: A run is in one of five states, written in its branch's home
