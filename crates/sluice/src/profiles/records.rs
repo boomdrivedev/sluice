@@ -612,11 +612,44 @@ impl Records {
                     };
                     SignerKey::ssh(&text).with_context(|| format!("[signers.{name}] ssh"))?
                 }
-                _ => SignerKey::Keyless,
+                // 78, record 0119 (design D13): a forge job's identity, its
+                // workflow at its ref in the repository the branch's remote
+                // names.
+                ("github", table) => SignerKey::Keyless(self.keyless(table, remote)),
+                _ => SignerKey::Keyless(None),
             };
             signers.insert(name.clone(), key);
         }
         Ok(signers)
+    }
+
+    /// 78, record 0119 (design D13): the keyless identity a `github` signer's
+    /// table names, `workflow` at `ref`, in the repository on GitHub the
+    /// branch's `remote` is; `None` where either names none.
+    fn keyless(
+        &self,
+        table: &Setting,
+        remote: Option<&str>,
+    ) -> Option<crate::profiles::github::keyless::Identity> {
+        let Setting::Tables(t) = table else {
+            return None;
+        };
+        let text = |key: &str| match t.first()?.get(key)? {
+            Setting::Text(v) => Some(v.clone()),
+            _ => None,
+        };
+        let workflow = text("workflow")?;
+        let git_ref = text("ref").unwrap_or_else(|| "refs/heads/main".into());
+        let url =
+            crate::profiles::pushed_refs::remote_url(&self.common, remote.unwrap_or("origin"))
+                .ok()?;
+        let repo = crate::profiles::github::Repo::from_url(&url)?;
+        Some(crate::profiles::github::keyless::Identity::workflow(
+            &repo.owner,
+            &repo.name,
+            &workflow,
+            &git_ref,
+        ))
     }
 
     /// The first remote opened, which keeps what this host has observed

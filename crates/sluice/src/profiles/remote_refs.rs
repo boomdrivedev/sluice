@@ -70,8 +70,11 @@ pub enum SignerKey {
         allowed: Vec<ssh::Allowed>,
         digest: String,
     },
-    /// A forge job's keyless identity, verified by the forge's profile.
-    Keyless,
+    /// 78, 79, record 0119 (design D13): a forge job's keyless identity,
+    /// its workflow at its ref in the branch's repository, verified
+    /// against the roots sluice carries; `None` where the policy's table
+    /// or the branch's remote names none, which verifies nothing.
+    Keyless(Option<crate::profiles::github::keyless::Identity>),
 }
 
 impl SignerKey {
@@ -98,7 +101,9 @@ impl SignerKey {
             SignerKey::Ssh { allowed, .. } => {
                 allowed.iter().any(|a| a.key.key_data() == key.key_data())
             }
-            SignerKey::Keyless => false,
+            // 78, record 0119 (design D13): a pool's job holds no key; its
+            // signer is listed by its identity, so a job may claim.
+            SignerKey::Keyless(identity) => identity.is_some(),
         }
     }
 
@@ -106,7 +111,7 @@ impl SignerKey {
     fn digest(&self) -> &str {
         match self {
             SignerKey::Ssh { digest, .. } => digest,
-            SignerKey::Keyless => "keyless",
+            SignerKey::Keyless(_) => "keyless",
         }
     }
 }
@@ -802,14 +807,34 @@ fn tempfile_path(git_dir: &Path, what: &str) -> Result<PathBuf> {
 /// alone, and a statement with none reads with no limits and no grant
 /// (19, 138; design D3).
 fn verify(signer: &str, key: &SignerKey, bytes: &[u8]) -> Result<Vec<ResultLine>> {
-    let envelope: Envelope = serde_json::from_slice(bytes).context("not a DSSE envelope")?;
-    let who = match key {
-        SignerKey::Ssh { allowed, .. } => ssh::verify(&envelope, allowed)?
-            .map(|a| a.principal.clone())
-            .ok_or_else(|| anyhow!("no key {signer} lists signed it"))?,
-        SignerKey::Keyless => bail!("{signer}'s keyless signatures are not verified on this host"),
+    let (s, who) = match key {
+        SignerKey::Ssh { allowed, .. } => {
+            let envelope: Envelope =
+                serde_json::from_slice(bytes).context("not a DSSE envelope")?;
+            let who = ssh::verify(&envelope, allowed)?
+                .map(|a| a.principal.clone())
+                .ok_or_else(|| anyhow!("no key {signer} lists signed it"))?;
+            (Statement::from_envelope(&envelope)?, who)
+        }
+        // 78, 79, record 0119 (design D13): a bundle verified against the
+        // roots sluice carries, by the signer's workflow and ref; one that
+        // does not verify is left out, naming the identity it carried.
+        SignerKey::Keyless(identity) => {
+            let identity = identity.as_ref().ok_or_else(|| {
+                anyhow!("[signers.{signer}] github names no workflow and ref this host can verify")
+            })?;
+            let bundle = std::str::from_utf8(bytes).context("not a Sigstore bundle")?;
+            let statement = crate::profiles::github::keyless::verify(bundle, identity)?;
+            let s: Statement =
+                serde_json::from_value(statement).context("the bundle's statement is no run's")?;
+            let who = s
+                .predicate
+                .claim
+                .clone()
+                .unwrap_or_else(|| signer.to_string());
+            (s, who)
+        }
     };
-    let s = Statement::from_envelope(&envelope)?;
     let run = s.predicate;
     let held = run.held.clone().unwrap_or_default();
     Ok(run
