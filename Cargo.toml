@@ -110,6 +110,16 @@ sigstore-trust-root = { version = "=0.15.1", default-features = false, features 
   "aws-lc-rs",
 ] }
 
+# A key-service signer's records (record 0119; design D7 of the change
+# `a-codebuild-fleet-runs-a-queues-checks`): ECDSA P-256 over a DSSE
+# envelope's encoding, as timber's key-service signer signs (timber record
+# 0017), verified from the public half the policy lists. Pinned exactly,
+# two weeks old at the least.
+p256 = { version = "=0.13.2", default-features = false, features = [
+  "ecdsa",
+  "pkcs8",
+] }
+
 # The tests' container engine over TLS: its certificates, made in each
 # test's scratch directory, and its server, on the ring provider ureq uses.
 rcgen = { version = "0.14", default-features = false, features = [
