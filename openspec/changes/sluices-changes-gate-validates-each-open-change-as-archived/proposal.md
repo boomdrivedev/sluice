@@ -21,7 +21,7 @@ Four of the tree's eight open changes are such changes today. Record
   archive writes. A change that fails is named with OpenSpec's words.
   Boomdrive's `check-changes.sh` (its record 0050, core.61) is the
   pattern it copies.
-- **The tree's open changes archive cleanly.** The two changes built
+- **The tree's open changes archive into valid specs.** The two changes built
   on the intake mark, `a-host-hands-over-only-to-the-host-its-mark-names`
   and `a-hand-overs-withdrawal-holds-no-request`, are removed, never
   archived: rule core.33 rules out the mark. In
@@ -39,8 +39,8 @@ None.
 
 ### Modified Capabilities
 
-- `repository-gate`: `root:changes` holds each open change to archiving
-  cleanly.
+- `repository-gate`: `root:changes` validates each open change as it
+  would archive.
 
 ## Impact
 

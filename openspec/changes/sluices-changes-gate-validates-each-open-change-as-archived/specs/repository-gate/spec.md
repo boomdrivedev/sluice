@@ -1,6 +1,6 @@
 ## ADDED Requirements
 
-### Requirement: Each open change archives cleanly
+### Requirement: Each open change is validated as it would archive
 
 `root:changes` SHALL fail where an open change under `openspec/changes`
 fails `openspec validate --strict`, where `openspec archive` refuses it,
@@ -13,7 +13,7 @@ fail nothing for a task left unchecked (principle 16 as amended
 #### Scenario: A change that adds a requirement its spec holds
 
 - **WHEN** an open change adds a requirement under a name its spec
-  already holds, in other words, and `moon run root:changes` runs
+  already holds, with other text, and `moon run root:changes` runs
 - **THEN** the task fails naming the change, with archive's words that
   the requirement already exists, and the tree's specs are as they were
 
@@ -26,6 +26,6 @@ fail nothing for a task left unchecked (principle 16 as amended
 
 #### Scenario: A change whose tasks are open
 
-- **WHEN** every open change archives cleanly, one with tasks left
+- **WHEN** every open change archives into valid specs, one with tasks left
   unchecked, and `moon run root:changes` runs
 - **THEN** the task passes
