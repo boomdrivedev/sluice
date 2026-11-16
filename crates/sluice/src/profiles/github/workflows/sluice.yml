@@ -128,11 +128,12 @@ jobs:
           if [ -n "$BUNDLE" ]; then
             set -- "$@" --bundle "$BUNDLE"
           fi
-          sluice job record "$@"
+          sluice job record "$@" --from "$RUNNER_TEMP/sluice-run"
         env:
           CLAIM: ${{ inputs.claim }}
           BRANCH: ${{ inputs.branch }}
           HEAD: ${{ github.event.workflow_run.head_sha }}
           BASE: ${{ github.event.workflow_run.pull_requests[0].base.ref }}
           BUNDLE: ${{ steps.attest.outputs.bundle-path }}
+          SLUICE_APP_ID: ${{ vars.SLUICE_APP_ID }}
           SLUICE_APP_KEY: ${{ secrets.SLUICE_APP_KEY }}

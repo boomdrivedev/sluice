@@ -2164,6 +2164,14 @@ pub trait State {
     /// 69: append to the repository's results log.
     fn record_results(&self, lines: &[u8]) -> Result<()>;
 
+    /// Record 0119 (design D11; 78, 109): add `record`, signed elsewhere, at
+    /// `path` among `signer`'s runs where `branch`'s records are, as a
+    /// pool's sign job adds its keyless bundle; only added to (109).
+    /// Records in one host's own files hold no signer's runs (78).
+    fn add_signed(&self, branch: &str, _signer: &str, _path: &str, _record: &[u8]) -> Result<()> {
+        anyhow::bail!("{branch}'s records hold no signer's runs, since its policy names no signer")
+    }
+
     /// Could-not-run-1 116: the results set aside, one JSON document per
     /// line, beside the results log and never in it.
     fn set_asides(&self) -> Result<Vec<u8>>;

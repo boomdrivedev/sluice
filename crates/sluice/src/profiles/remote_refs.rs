@@ -955,7 +955,7 @@ fn held_key(e: &Enforced) -> Option<HeldKey> {
     })
 }
 
-fn sha256_hex(bytes: &[u8]) -> String {
+pub(crate) fn sha256_hex(bytes: &[u8]) -> String {
     use sha2::{Digest, Sha256};
     Sha256::digest(bytes)
         .iter()
@@ -1331,6 +1331,17 @@ impl State for RemoteRefs {
     /// each under `refs/sluice/set-aside`. A set-aside only stops a result
     /// counting, so any host that submits may add one. 129 (design D16):
     /// held, as this host last fetched them, with no fetch.
+    /// Record 0119 (design D11; 109): added to `refs/sluice/runs/<signer>`
+    /// on top of whatever it holds.
+    fn add_signed(&self, _branch: &str, signer: &str, path: &str, record: &[u8]) -> Result<()> {
+        let files = BTreeMap::from([(path.to_string(), record.to_vec())]);
+        self.add(
+            &format!("refs/sluice/runs/{signer}"),
+            &files,
+            &format!("sluice: {signer}'s run {path}"),
+        )
+    }
+
     fn set_asides(&self) -> Result<Vec<u8>> {
         let commit = match self.held.get() {
             true => self.pushed.read_ref(&self.fetched(SET_ASIDE))?.map(|r| r.0),

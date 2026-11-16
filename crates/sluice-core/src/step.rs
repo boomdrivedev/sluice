@@ -189,6 +189,15 @@ fn given_out(run: &SystemRun) -> bool {
     run.holder().is_some_and(|h| h.starts_with("pool/"))
 }
 
+/// Record 0119 (design D11): one check's result as a pool's sign job
+/// signed it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct SignedResult {
+    pub check: String,
+    pub outcome: Outcome,
+    pub replayed: bool,
+}
+
 /// Design D4, record 0119 (design D11, D12): whether `run` waits for its
 /// holder to start it: claimed, or a pool's run the lead wrote running from
 /// its run job's start, which the job's `sluice job run` reads after it.
@@ -1150,6 +1159,79 @@ impl Sluice<'_> {
         let unmet = Unmet::of(from.policy.limits.clone());
         self.start_run(branch, &from, &c, i, &unmet, part, releases)
             .map(Some)
+    }
+
+    /// Record 0119 (design D11; 75, 77, 109): the run `claim` holds on
+    /// `branch`, ended as its pool's sign job ends it: each check the run
+    /// was given read from what the job signed, `signed`, a pass it ran
+    /// passed, a fail failed and a replay unproven, since a replay counts
+    /// only through a pass signed for its key (108; rule core.9), and a
+    /// check it signed nothing of with no outcome, for `why`. The run is
+    /// written ended and closed in one write, its checkout the job's
+    /// runner's, which went with it. `false`, with nothing written, where
+    /// the claim no longer holds the run (77).
+    pub fn end_claimed(
+        &self,
+        branch: &str,
+        claim: &str,
+        signed: &[SignedResult],
+        why: &str,
+    ) -> Result<bool> {
+        let _lock = self.seams.state.wait_lock(branch)?;
+        let line = self.read_line(branch)?;
+        let Some(base) = line.doc.base.clone() else {
+            return Ok(false);
+        };
+        let rules = self.gate(branch, &base)?;
+        self.update(branch, |l| {
+            let now = self.now();
+            let held = l.doc.candidates.iter().find_map(|c| {
+                c.runs
+                    .iter()
+                    .position(|r| r.holder() == Some(claim) && r.state.held())
+                    .map(|i| (c.id.clone(), i))
+            });
+            let Some((cand, i)) = held else {
+                return Ok(false);
+            };
+            let x = l.candidate_mut(&cand).expect("the candidate read");
+            let given = given_checks(&x.runs[i], &rules);
+            let mut outcomes: BTreeMap<String, CheckOutcome> = signed
+                .iter()
+                .map(|s| {
+                    let outcome = match () {
+                        _ if s.replayed => CheckOutcome::Unproven,
+                        _ if s.outcome == Outcome::Pass => CheckOutcome::Passed,
+                        _ => CheckOutcome::Failed,
+                    };
+                    (s.check.clone(), outcome)
+                })
+                .collect();
+            // A tag given is read by the checks it names, as a run's own
+            // report is read (outcomes_of); a check given that the job
+            // signed nothing of has no outcome.
+            for check in &given {
+                outcomes.entry(check.clone()).or_insert_with(|| {
+                    match check.starts_with('#') && !signed.is_empty() {
+                        true => CheckOutcome::Passed,
+                        false => CheckOutcome::None { why: why.into() },
+                    }
+                });
+            }
+            let undecided = outcomes
+                .values()
+                .any(|o| matches!(o, CheckOutcome::None { .. }));
+            x.runs[i].place = None;
+            let ended = Ended {
+                at: now.clone(),
+                outcomes,
+                timed_out: false,
+                why: undecided.then(|| why.to_string()),
+                untaken: false,
+            };
+            end_run(l, &cand, i, ended, &now);
+            Ok(true)
+        })
     }
 
     /// 113, record 0119 (design D11): start a run of `head`, a pull

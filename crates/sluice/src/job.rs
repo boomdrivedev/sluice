@@ -19,7 +19,7 @@ use sluice_seams::{
     State, TaskLog, TaskProgress, Written,
 };
 
-use crate::{JobCommand, Pause, INTERNAL, STOPPED};
+use crate::{JobCommand, Pause, FAILED, INTERNAL, STOPPED};
 
 /// The file of a run job's directory holding its run's report, as JSON.
 pub const REPORT: &str = "report.json";
@@ -137,7 +137,129 @@ pub fn run(
             };
             sign(&s, &branch, &target, &from, &dir, clock, out)
         }
+        JobCommand::Record {
+            claim,
+            branch,
+            bundle,
+            from,
+        } => {
+            let s = Sluice::new(seams, clock).as_peer(host.peer());
+            record(&s, &branch, &claim, bundle.as_deref(), from.as_deref(), out)
+        }
     }
+}
+
+/// Record 0119 (design D11; 77, 109): the sign job's end of the run
+/// `claim` holds: its bundle, where it signed one, added to the pool's
+/// signer's runs, then the run written ended, from the bundle's results,
+/// and closed in one write. Where the claim no longer holds the run,
+/// nothing is written and the record is refused; where it lapses between
+/// the two, the bundle stays among the signer's runs, which a run's keys
+/// count by alone (15).
+fn record(
+    s: &Sluice<'_>,
+    branch: &str,
+    claim: &str,
+    bundle: Option<&Path>,
+    from: Option<&Path>,
+    out: &mut dyn Write,
+) -> Result<i32> {
+    use crate::signing::statement::Statement;
+    let snap = s.seams().state.read(branch)?;
+    let doc = sluice_core::line::Line::load(branch, snap)?.doc;
+    let held = doc.candidates.iter().find_map(|c| {
+        c.runs
+            .iter()
+            .find(|r| r.holder() == Some(claim) && r.state.held())
+            .map(|r| (c, r))
+    });
+    let Some((c, r)) = held else {
+        writeln!(
+            out,
+            "sluice job record: {claim} no longer holds a run of {branch}; nothing is recorded"
+        )?;
+        return Ok(FAILED);
+    };
+    let (signed, why) = match bundle {
+        Some(path) => {
+            let bytes = std::fs::read(path)
+                .with_context(|| format!("reading the bundle {}", path.display()))?;
+            let text = std::str::from_utf8(&bytes).context("the bundle is no JSON")?;
+            let statement = crate::profiles::github::keyless::statement_of(text)?;
+            let st: Statement = serde_json::from_value(statement)
+                .context("the bundle's statement is no run's")
+                .and_then(Statement::checked)?;
+            let run = st.predicate;
+            if run.claim.as_deref() != Some(claim) || run.combination != c.revision {
+                bail!(
+                    "the bundle is of {} under {}, not of {claim}'s run of {}",
+                    run.combination,
+                    run.claim.as_deref().unwrap_or("no claim"),
+                    c.revision
+                );
+            }
+            let base = doc
+                .base
+                .clone()
+                .ok_or_else(|| anyhow::anyhow!("{branch}'s records hold no revision yet"))?;
+            let policy = s
+                .policy_at(&base)?
+                .ok_or_else(|| anyhow::anyhow!("{branch}'s revision {base} has no policy"))?;
+            let pool = claim
+                .strip_prefix("pool/")
+                .and_then(|rest| rest.rsplit_once('/'))
+                .map(|(pool, _)| pool)
+                .ok_or_else(|| anyhow::anyhow!("{claim} is no pool's claim"))?;
+            let signer = policy
+                .pools
+                .iter()
+                .find(|p| p.name == pool)
+                .map(|p| p.signer.clone())
+                .ok_or_else(|| anyhow::anyhow!("{branch}'s policy names no pool {pool}"))?;
+            let path = format!(
+                "{}/{}/{}.json",
+                c.revision,
+                r.system.as_deref().unwrap_or("any"),
+                &crate::profiles::remote_refs::sha256_hex(&bytes)[..16]
+            );
+            s.seams().state.add_signed(branch, &signer, &path, &bytes)?;
+            let signed: Vec<sluice_core::SignedResult> = run
+                .results
+                .iter()
+                .map(|r| sluice_core::SignedResult {
+                    check: r.check.clone(),
+                    outcome: r.outcome,
+                    replayed: r.replayed,
+                })
+                .collect();
+            (signed, "the sign job signed no outcome for it".to_string())
+        }
+        None => {
+            let why = from
+                .map(handed_dir)
+                .and_then(|d| std::fs::read_to_string(d.join(WHY)).ok())
+                .unwrap_or_else(|| "the run job kept no report".into());
+            (Vec::new(), why)
+        }
+    };
+    if !s.end_claimed(branch, claim, &signed, &why)? {
+        writeln!(
+            out,
+            "sluice job record: {claim}'s claim lapsed before its run's end was written"
+        )?;
+        return Ok(FAILED);
+    }
+    let passed = signed
+        .iter()
+        .filter(|r| !r.replayed && r.outcome == sluice_seams::Outcome::Pass)
+        .count();
+    writeln!(
+        out,
+        "ended {claim}'s run of {}: {passed} of {} signed results passed",
+        c.revision,
+        signed.len()
+    )?;
+    Ok(0)
 }
 
 /// What a sign job signs for: the combination's revision, or a head's,
@@ -351,6 +473,44 @@ fn no_report(dir: &Path, why: &str, out: &mut dyn Write) -> Result<i32> {
     std::fs::write(dir.join(WHY), why)?;
     writeln!(out, "sluice job run: no report: {why}")?;
     Ok(INTERNAL)
+}
+
+/// The variables a sign job's record names sluice's app by, from the
+/// `sluice` environment: its id, and its private key's text.
+pub const APP_ID_VAR: &str = "SLUICE_APP_ID";
+pub const APP_KEY_VAR: &str = "SLUICE_APP_KEY";
+
+/// Record 0119 (design D11): `instance`, where it names no app, given the
+/// app the sign job's environment names, its key kept in a file only this
+/// user reads for the command's life, so `sluice job record` writes the
+/// branch's records as sluice; as it was where the environment names none.
+pub fn with_app_from_env(
+    mut instance: crate::instance::Instance,
+) -> Result<crate::instance::Instance> {
+    use std::os::unix::fs::OpenOptionsExt;
+    let key = std::env::var(APP_KEY_VAR).unwrap_or_default();
+    if instance.forge.is_some() || key.trim().is_empty() {
+        return Ok(instance);
+    }
+    let app_id: u64 = std::env::var(APP_ID_VAR)
+        .with_context(|| format!("{APP_KEY_VAR} is set, and {APP_ID_VAR} names no app"))?
+        .trim()
+        .parse()
+        .with_context(|| format!("{APP_ID_VAR} is no app's id"))?;
+    let path = std::env::temp_dir().join(format!("sluice-app-{}.pem", std::process::id()));
+    let mut file = std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .mode(0o600)
+        .open(&path)
+        .with_context(|| format!("keeping the app's key in {}", path.display()))?;
+    file.write_all(key.as_bytes())?;
+    instance.forge = Some(crate::instance::Forge {
+        app_id,
+        source: crate::instance::Source::Key(path),
+        discovery: crate::instance::DISCOVERY,
+    });
+    Ok(instance)
 }
 
 /// Record 0119 (design D11): a branch's records as a pool's run job reads

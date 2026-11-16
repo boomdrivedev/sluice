@@ -1308,6 +1308,27 @@ pub enum JobCommand {
         #[arg(long)]
         out: PathBuf,
     },
+    /// Add the sign job's bundle to the signer's runs and write the run
+    /// ended and closed under its claim in one write; with no bundle, the
+    /// run ended with no outcome. Refused, exit 1 with nothing written,
+    /// where the claim no longer holds the run.
+    #[command(
+        after_help = "Example:\n  $ sluice job record --claim pool/forge/3 --branch main --bundle attestation.json"
+    )]
+    Record {
+        /// The claim the pool's job ran under.
+        #[arg(long)]
+        claim: String,
+        /// The branch the run's combination lands on.
+        #[arg(long)]
+        branch: String,
+        /// The bundle `actions/attest` made of the run's statement.
+        #[arg(long)]
+        bundle: Option<PathBuf>,
+        /// The run job's directory, which says why it holds no report.
+        #[arg(long)]
+        from: Option<PathBuf>,
+    },
 }
 
 /// What a waiting command does between rounds.

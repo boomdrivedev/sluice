@@ -432,6 +432,9 @@ struct Inner {
     stop_carry: bool,
     /// Each branch's candidates' tasks, kept beside its records.
     progress: BTreeMap<String, BTreeMap<String, Vec<TaskProgress>>>,
+    /// Record 0119 (design D11): each record a pool's sign job added, by
+    /// its signer and path.
+    signed_adds: Vec<(String, String, Vec<u8>)>,
     results: Vec<u8>,
     set_asides: Vec<u8>,
     next_id: u64,
@@ -2245,6 +2248,12 @@ impl World {
             return None;
         }
         policy.remote_of(branch).ok().flatten()
+    }
+
+    /// Record 0119 (design D11): each record a pool's sign job added, by
+    /// its signer and path.
+    pub fn signed_adds(&self) -> Vec<(String, String, Vec<u8>)> {
+        self.0.borrow().signed_adds.clone()
     }
 
     pub fn results_log(&self) -> String {
@@ -4192,6 +4201,17 @@ impl State for FakeState {
     fn verifies_own(&self, _: &str, _: &Rev) -> Result<bool> {
         let inner = self.0 .0.borrow();
         Ok(!inner.unlisted.contains(&inner.host))
+    }
+
+    fn add_signed(&self, branch: &str, signer: &str, path: &str, record: &[u8]) -> Result<()> {
+        let mut inner = self.0 .0.borrow_mut();
+        if World::route(&inner, branch)?.starts_with("here@") {
+            bail!("{branch}'s records hold no signer's runs, since its policy names no signer");
+        }
+        inner
+            .signed_adds
+            .push((signer.into(), path.into(), record.to_vec()));
+        Ok(())
     }
 
     fn record_results(&self, lines: &[u8]) -> Result<()> {

@@ -10032,3 +10032,147 @@ fn pooled_combination(f: &Fakes) -> Rev {
         .revision
         .clone()
 }
+
+/// `sluice job sign` under `claim` on `main`, from `from`, into `out`'s
+/// `sluice-sign`; and the bundle `actions/attest` would make of what it
+/// wrote, its signatures aside.
+fn job_sign(f: &Fakes, claim: &str, from: &std::path::Path, out: &std::path::Path) -> String {
+    use base64::Engine as _;
+    let sign = out.join("sluice-sign");
+    let (code, said) = sluice(
+        f,
+        &[
+            "job",
+            "sign",
+            "--claim",
+            claim,
+            "--branch",
+            "main",
+            "--from",
+            from.to_str().unwrap(),
+            "--out",
+            sign.to_str().unwrap(),
+        ],
+    );
+    assert_eq!(code, 0, "{said}");
+    let run: sluice::signing::statement::Run =
+        serde_json::from_slice(&std::fs::read(sign.join("predicate.json")).unwrap()).unwrap();
+    let statement = sluice::signing::statement::Statement::of(run);
+    let payload =
+        base64::engine::general_purpose::STANDARD.encode(serde_json::to_vec(&statement).unwrap());
+    serde_json::json!({
+        "mediaType": "application/vnd.dev.sigstore.bundle.v0.3+json",
+        "dsseEnvelope": {
+            "payloadType": "application/vnd.in-toto+json",
+            "payload": payload,
+            "signatures": [],
+        },
+    })
+    .to_string()
+}
+
+/// `sluice job record` under `claim` on `main`, with `bundle` where given.
+fn job_record(f: &Fakes, claim: &str, bundle: Option<&std::path::Path>) -> (i32, String) {
+    let mut args = vec!["job", "record", "--claim", claim, "--branch", "main"];
+    if let Some(b) = bundle {
+        args.extend(["--bundle", b.to_str().unwrap()]);
+    }
+    sluice(f, &args)
+}
+
+/// satisfies: record 0119 (design D11); 77, 109; the actions-pool spec's
+/// "A record under a lapsed claim is refused"
+#[test]
+fn job_record_under_a_lapsed_claim_is_refused() {
+    use sluice_core::records::{CheckOutcome, RunState};
+    // Under the claim that holds the run: the bundle among the pool's
+    // signer's runs, and the run ended from it and closed in one write.
+    let f = Fakes::new();
+    let claim = pooled(&f, &["a"]);
+    let out = support::Scratch::new("job-record");
+    let ran = job_run(&f, &claim, out.path());
+    let bundle = out.path().join("bundle.json");
+    std::fs::write(&bundle, job_sign(&f, &claim, &ran, out.path())).unwrap();
+    let version = f.world.version("main");
+    let (code, said) = job_record(&f, &claim, Some(&bundle));
+    assert_eq!(code, 0, "{said}");
+    assert_eq!(f.world.version("main"), version + 1, "one write");
+    let adds = f.world.signed_adds();
+    assert_eq!(adds.len(), 1);
+    assert_eq!(adds[0].0, "forge");
+    let combination = pooled_combination(&f);
+    assert!(
+        adds[0]
+            .1
+            .starts_with(&format!("{combination}/macos-arm64/")),
+        "{}",
+        adds[0].1
+    );
+    assert_eq!(adds[0].2, std::fs::read(&bundle).unwrap());
+    let run = pooled_runs(&f)[0].clone();
+    assert_eq!(run.state, RunState::Closed);
+    let ended = run.ended.expect("ended");
+    assert_eq!(
+        ended.outcomes.get("a:test"),
+        Some(&CheckOutcome::Passed),
+        "{ended:?}"
+    );
+
+    // A claim that lapsed: refused, with nothing written.
+    let f = Fakes::new();
+    let claim = pooled(&f, &["a"]);
+    let out = support::Scratch::new("job-record-lapsed");
+    let ran = job_run(&f, &claim, out.path());
+    let bundle = out.path().join("bundle.json");
+    std::fs::write(&bundle, job_sign(&f, &claim, &ran, out.path())).unwrap();
+    f.world.be_host("a");
+    f.world
+        .move_job(&claim, sluice_seams::Job::Ended { recorded: false });
+    pool_lead(&f).step("main").unwrap();
+    f.world.be_host("runner");
+    let lapsed = pooled_runs(&f)[0].clone();
+    assert_eq!(
+        lapsed.state,
+        RunState::Closed,
+        "the lead ended the lapsed claim"
+    );
+    let version = f.world.version("main");
+    let (code, said) = job_record(&f, &claim, Some(&bundle));
+    assert_eq!(code, sluice::FAILED, "{said}");
+    assert!(said.contains("no longer holds a run of main"), "{said}");
+    assert_eq!(f.world.version("main"), version, "nothing written");
+    assert!(f.world.signed_adds().is_empty(), "no bundle added");
+    assert_eq!(pooled_runs(&f)[0], lapsed);
+
+    // With no bundle, after a run job that kept no report: ended with no
+    // outcome, for why the run job gave.
+    let f = Fakes::new();
+    let claim = pooled(&f, &["a"]);
+    let out = support::Scratch::new("job-record-none");
+    let ran = out.path().join("sluice-run");
+    std::fs::create_dir_all(&ran).unwrap();
+    std::fs::write(ran.join("why"), "the runner had no room for the run").unwrap();
+    let (code, said) = sluice(
+        &f,
+        &[
+            "job",
+            "record",
+            "--claim",
+            &claim,
+            "--branch",
+            "main",
+            "--from",
+            out.path().to_str().unwrap(),
+        ],
+    );
+    assert_eq!(code, 0, "{said}");
+    let run = pooled_runs(&f)[0].clone();
+    assert_eq!(run.state, RunState::Closed);
+    assert_eq!(
+        run.ended.unwrap().outcomes["#gate"],
+        CheckOutcome::None {
+            why: "the runner had no room for the run".into()
+        }
+    );
+    assert!(f.world.signed_adds().is_empty());
+}

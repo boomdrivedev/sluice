@@ -1163,6 +1163,13 @@ impl State for Records {
         Ok(())
     }
 
+    fn add_signed(&self, branch: &str, signer: &str, path: &str, record: &[u8]) -> Result<()> {
+        match self.route(branch)? {
+            None => self.local.add_signed(branch, signer, path, record),
+            Some(r) => r.add_signed(branch, signer, path, record),
+        }
+    }
+
     fn set_asides(&self) -> Result<Vec<u8>> {
         let mut bytes = self.local.set_asides()?;
         let remotes: Vec<Rc<RemoteRefs>> = self.remotes.borrow().values().cloned().collect();

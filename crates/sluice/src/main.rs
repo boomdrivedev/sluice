@@ -161,6 +161,17 @@ fn main() {
             std::process::exit(3);
         }
     };
+    // Record 0119 (design D11): a sign job's record writes the records as
+    // the app its environment names.
+    let instance = match &cli.command {
+        Some(Command::Job {
+            command: sluice::JobCommand::Record { .. },
+        }) => sluice::job::with_app_from_env(instance).unwrap_or_else(|e| {
+            eprintln!("sluice: {e:#}");
+            std::process::exit(3);
+        }),
+        _ => instance,
+    };
     let settings = Settings::choose(
         cli.choices(),
         instance.telemetry.as_ref(),
