@@ -17,4 +17,4 @@ number and rules by id.
 
 ## 3. The specs archive clean
 
-- [ ] 3.1 Archive the change into `openspec/specs/repository-gate/spec.md`. True when `sluice exec bolt/sluices-changes-are-checked-as-archived -- moon run root:changes` passes before the archive, and `sluice exec bolt/sluices-changes-are-checked-as-archived -- moon run root:specs` after it.
+- [x] 3.1 Archive the change into `openspec/specs/repository-gate/spec.md`. True when `sluice exec bolt/sluices-changes-are-checked-as-archived -- moon run root:changes` passes before the archive, and `sluice exec bolt/sluices-changes-are-checked-as-archived -- moon run root:specs` after it.

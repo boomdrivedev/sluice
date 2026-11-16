@@ -275,3 +275,30 @@ fail nothing for a task left unchecked (principle 16 as amended
 - **WHEN** every open change archives into valid specs, one with tasks left
   unchecked, and `moon run root:changes` runs
 - **THEN** the task passes
+
+#### Scenario: A modified requirement past OpenSpec's length
+
+- **WHEN** an open change modifies a requirement to more than 500
+  characters of text, and `moon run root:changes` runs
+- **THEN** the task fails naming the change and the spec its archive
+  writes, with OpenSpec's words that the requirement is very long
+
+#### Scenario: An open change that does not validate
+
+- **WHEN** an open change adds a requirement with no scenario, and
+  `moon run root:changes` runs
+- **THEN** the task fails naming the change and the requirement
+
+### Requirement: The archive check is held to its cases
+
+`root:changes-cases` SHALL run `check-changes.sh` over a scratch tree for
+each scenario of "Each open change is validated as it would archive",
+its changes written as data, and SHALL fail naming the case where
+the check's exit or its words are not as the scenario says (record 0128;
+rule core.61).
+
+#### Scenario: The check's cases hold
+
+- **WHEN** `moon run root:changes-cases` runs
+- **THEN** it passes, saying every case holds, and the tree's specs and
+  changes are as they were before it ran
