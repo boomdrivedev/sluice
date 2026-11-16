@@ -79,8 +79,9 @@ issuer match `[signers.<name>] github` at the branch's revision (78, 79).
 
 - **WHEN** a bundle's certificate names `sluice.yml` on a pull request's
   ref
-- **THEN** the record counts for nothing, and the log names the identity
-  it carried (`a_bundle_from_a_pull_requests_ref_counts_for_nothing` in
+- **THEN** the record counts for nothing, and why, which the reading
+  process's warning that leaves it out gives, names the identity it
+  carried (`a_bundle_from_a_pull_requests_ref_counts_for_nothing` in
   `crates/sluice/tests/profiles/forge.rs`)
 
 #### Scenario: A bundle no root sluice carries verifies

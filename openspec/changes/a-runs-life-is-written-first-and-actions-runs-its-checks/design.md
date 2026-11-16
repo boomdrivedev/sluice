@@ -352,7 +352,12 @@ identity, `verify` calls the verifier, and `SignerKey::lists` holds for a
 pool's signer, so `counts_here` lets a pool's job claim. Verification
 calls no service, as 78 asks ("from the records alone"); the roots
 change with the crate's release, and a bundle no carried root verifies
-counts for nothing, with why.
+counts for nothing, with why. A record that does not verify is left out
+with a warning in the reading process's own log, naming why and the
+identity its certificate carried; the records seam's read writes
+nothing to the branch, so its log holds no line for it, and the run
+whose pass it was reads as one with no signed result, its follow-up
+holding the check (D7, D9).
 
 *Not taken:* trusted roots fetched by TUF and cached on the host,
 `actions-pool`'s D1, which calls a service at a read and gives the host
