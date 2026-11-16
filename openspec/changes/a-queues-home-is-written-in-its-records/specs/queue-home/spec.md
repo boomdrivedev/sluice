@@ -27,12 +27,6 @@ host's own `home.json` of it, then the state's on each remote that may
 hold it as last fetched (129), and SHALL route the branch by its policy
 only where neither holds a home. A process that keeps running SHALL read
 the home again at each of its passes, never keeping it for its life.
-Where this host's own home of a branch is open while a live remote home
-of it came from this host's own files, the one queue is in two homes,
-and that branch alone SHALL be refused, naming both (26). A host's own
-open home beside a remote home that another host's queue or a policy
-opened is a queue not yet moved: the branch SHALL be read in this
-host's own files, and its round SHALL move it.
 
 #### Scenario: A policy that names another home does not move the reading
 
@@ -43,6 +37,15 @@ host's own files, and its round SHALL move it.
 
 - **WHEN** another host's queue of `bolt/x` is open on origin and this host holds no records of `bolt/x`
 - **THEN** a submit to `bolt/x` on this host writes its submission on origin under origin's next number
+
+### Requirement: One queue in two homes is told apart from a queue not yet moved
+
+Where this host's own home of a branch is open while a live remote home
+of it came from this host's own files, the one queue is in two homes,
+and that branch alone SHALL be refused, naming both (26). A host's own
+open home beside a remote home that another host's queue or a policy
+opened is a queue not yet moved: the branch SHALL be read in this
+host's own files, and its round SHALL move it.
 
 #### Scenario: Two open homes
 
