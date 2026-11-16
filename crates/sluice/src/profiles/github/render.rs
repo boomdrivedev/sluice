@@ -87,6 +87,9 @@ pub fn head(view: &VerdictView, cx: &Context) -> String {
         Standing::Testing => format!("testing on {b}"),
         Standing::Passed => format!("passed on {b}, waiting on the combinations ahead"),
         Standing::Landing => format!("passed on {b}, landing"),
+        Standing::Refused { words } => {
+            format!("passed on {b}, held: the forge refused its landing: {words}")
+        }
         Standing::Landed {
             landed_as,
             beside: false,

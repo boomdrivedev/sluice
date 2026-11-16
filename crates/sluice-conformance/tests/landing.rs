@@ -180,3 +180,75 @@ fn each_landing_is_the_revision_the_branch_must_then_contain() {
     }
     assert_eq!(h.w().moves().len(), 2);
 }
+
+/// What GitHub's push protection says of a landing it refuses.
+const DECLINED: &str = "remote: error: GH013: Repository rule violations found for refs/heads/bolt/x.\nremote: - Push cannot contain secrets";
+
+/// The `forge_refused` lines of the branch's log, by their submissions and
+/// words.
+fn forge_refused(h: &Harness) -> Vec<(Vec<u64>, String)> {
+    h.events()
+        .into_iter()
+        .filter_map(|e| match e {
+            Event::ForgeRefused { ids, words } => Some((ids, words)),
+            _ => None,
+        })
+        .collect()
+}
+
+/// satisfies: 152, 24, 45; rule core.5; record 0124: a landing the forge
+/// refuses with the branch where it expected it is pushed once and held,
+/// with the forge's words, its submission refused
+#[test]
+fn a_landing_the_forge_refused_is_pushed_once_and_held() {
+    let h = Harness::bolt();
+    let base = h.tip();
+    h.w().forge_refuses(BRANCH, Some(DECLINED));
+    h.work("unit/a", "agent-a", &[("a/lib", Some("a2"))]);
+    let one = h.submit("unit/a");
+    for _ in 0..6 {
+        h.step();
+    }
+    assert_eq!(h.w().refused_moves(), [BRANCH], "pushed once");
+    assert_eq!(h.tip(), base, "the branch stays where it was");
+    assert_eq!(h.sub(one).state, State::Refused);
+    let landing = h.doc().landing.expect("the landing is held");
+    let refused = landing.refused.expect("with the forge's refusal");
+    assert_eq!(refused.words, DECLINED);
+    assert_eq!(forge_refused(&h), [(vec![one], DECLINED.to_string())]);
+    assert!(h.w().moves().is_empty());
+    assert!(h
+        .w()
+        .delivered()
+        .iter()
+        .all(|d| d.id != format!("{one}:failed")));
+    assert!(
+        !h.sluice().in_play(BRANCH).unwrap(),
+        "nothing of it is in play"
+    );
+}
+
+/// satisfies: 152, 7; record 0124: while a landing the forge refused is
+/// held, nothing is formed on its branch and the submissions behind it wait
+#[test]
+fn the_submissions_behind_a_held_landing_wait() {
+    let h = Harness::bolt();
+    h.w().forge_refuses(BRANCH, Some(DECLINED));
+    h.work("unit/a", "agent-a", &[("a/lib", Some("a2"))]);
+    let one = h.submit("unit/a");
+    for _ in 0..4 {
+        h.step();
+    }
+    assert_eq!(h.sub(one).state, State::Refused);
+    let (forms, started) = (h.w().forms(), h.w().started().len());
+    h.work("unit/b", "agent-b", &[("b/lib", Some("b2"))]);
+    let two = h.submit("unit/b");
+    for _ in 0..4 {
+        assert_eq!(h.step(), Step::Stepped);
+    }
+    assert_eq!(h.sub(two).state, State::Waiting);
+    assert_eq!(h.w().forms(), forms, "nothing formed");
+    assert_eq!(h.w().started().len(), started, "nothing started");
+    assert_eq!(h.w().refused_moves().len(), 1, "nothing pushed again");
+    assert_eq!(h.sub(one).state, State::Refused);
+}

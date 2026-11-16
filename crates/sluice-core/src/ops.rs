@@ -1512,6 +1512,17 @@ impl Sluice<'_> {
     /// the driver's next pass (66; design D4).
     pub fn in_play(&self, branch: &str) -> Result<bool> {
         let line = Line::load(branch, self.seams.state.read_held(branch)?)?;
+        // 152, record 0124 (design D10): a landing the forge refused holds
+        // the branch until a submitter or the operator acts: nothing of it
+        // is in play but its places to release.
+        if line
+            .doc
+            .landing
+            .as_ref()
+            .is_some_and(|l| l.refused.is_some())
+        {
+            return Ok(!line.doc.release.is_empty());
+        }
         Ok(line.subs.values().any(|s| !s.state.is_out())
             || line.doc.candidates.iter().any(|c| c.state.under_test())
             || !line.doc.release.is_empty())

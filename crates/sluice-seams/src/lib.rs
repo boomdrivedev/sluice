@@ -1665,6 +1665,12 @@ pub enum Standing {
     /// Its combination passed; the combinations ahead have yet to (18).
     Passed,
     Landing,
+    /// 152, record 0124 (design D10): its combination passed and the forge
+    /// refused its landing, with the branch where the landing expected it:
+    /// held, with the forge's words.
+    Refused {
+        words: String,
+    },
     Landed {
         landed_as: Rev,
         /// 140: landed beside the chain, with no check run.

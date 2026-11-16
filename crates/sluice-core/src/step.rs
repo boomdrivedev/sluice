@@ -36,8 +36,8 @@ use crate::policy::{Rules, POLICY_PATH};
 use crate::records::{
     Beside, BesideWhy, BranchHold, Candidate, CandidateState, CheckOutcome, Claim, ConflictRecord,
     CopyBehind, DecidedRecord, Ended, Event, FailedTask, Held, HomeState, LandingCommitRecord,
-    LandingIntent, LostRun, Moving, OutboxItem, Recorded, ResultKind, ResultLine, RunState, State,
-    SystemRun, Tested, HERE,
+    LandingIntent, LandingRefused, LostRun, Moving, OutboxItem, Recorded, ResultKind, ResultLine,
+    RunState, State, SystemRun, Tested, HERE,
 };
 use crate::refused::Refusal;
 use crate::release::{ReleaseOutcome, Releasing};
@@ -183,6 +183,9 @@ enum Decided {
     Held,
     /// Its write was refused (62).
     Contended,
+    /// 152, record 0124 (design D10): the branch's landing the forge
+    /// refused is held: nothing was formed, started or landed.
+    Refused,
 }
 
 impl Sluice<'_> {
@@ -306,6 +309,16 @@ impl Sluice<'_> {
                 })?;
                 round.record("sluice.step", "held");
                 return Ok(Step::Held);
+            }
+            Decided::Refused => {
+                // 152, record 0124 (design D10): the held landing pushes
+                // nothing; outcomes are still pushed and places released.
+                info_span!("sluice.perform").in_scope(|| {
+                    self.perform_releases(branch, releases)?;
+                    self.perform_outbox(branch)
+                })?;
+                round.record("sluice.step", "refused");
+                return Ok(Step::Stepped);
             }
         };
         info_span!("sluice.perform")
@@ -565,6 +578,11 @@ impl Sluice<'_> {
         let Some(intent) = line.doc.landing.clone() else {
             return Ok(());
         };
+        // 152, rule core.5, record 0124 (design D10): a landing the forge
+        // refused is never pushed again by itself.
+        if intent.refused.is_some() {
+            return Ok(());
+        }
         let span = info_span!(
             "sluice.land",
             sluice.branch = branch,
@@ -711,7 +729,38 @@ impl Sluice<'_> {
                 }
                 Ok(())
             }
-            Moved::Refused(words) => bail!("the forge refused {branch}'s landing: {words}"),
+            Moved::Refused(words) => {
+                // 152, rule core.5, record 0124 (design D10): the forge
+                // refused the landing with the branch where it expected
+                // it: held with the forge's words, its submissions refused,
+                // logged once, and pushed again only on the operator's word.
+                span.record("sluice.outcome", "forge_refused");
+                self.update(branch, |l| {
+                    if l.doc.landing.as_ref() != Some(&intent) {
+                        return Ok(());
+                    }
+                    if let Some(landing) = l.doc.landing.as_mut() {
+                        landing.refused = Some(LandingRefused {
+                            words: words.clone(),
+                            at: now.clone(),
+                        });
+                    }
+                    for id in &intent.ids {
+                        let s = l.sub_mut(*id);
+                        if s.state == State::Landing {
+                            s.state = State::Refused;
+                        }
+                    }
+                    l.log(
+                        &now,
+                        Event::ForgeRefused {
+                            ids: intent.ids.clone(),
+                            words: words.clone(),
+                        },
+                    );
+                    Ok(())
+                })
+            }
             Moved::Elsewhere(found) => {
                 span.record("sluice.outcome", "refused");
                 info!(
@@ -1484,10 +1533,30 @@ impl Sluice<'_> {
     /// Everything a round decides, written in one write.
     fn decide(&self, branch: &str) -> Result<Decided> {
         let mut line = self.read_line(branch)?;
-        if line.doc.landing.is_some() {
-            bail!("{branch} has a landing left unfinished");
-        }
         let now = self.now();
+        if let Some(landing) = &line.doc.landing {
+            if landing.refused.is_none() {
+                bail!("{branch} has a landing left unfinished");
+            }
+            // 152, record 0124 (design D10): while the forge's refusal of the
+            // branch's landing stands, nothing is formed, started or landed
+            // on the branch, and the submissions behind the landing wait.
+            let held: BTreeSet<u64> = landing.ids.iter().copied().collect();
+            let mut changed = false;
+            for s in line.subs.values_mut() {
+                if !s.state.is_out() && !held.contains(&s.id) && s.state != State::Waiting {
+                    s.state = State::Waiting;
+                    changed = true;
+                }
+            }
+            if !changed {
+                return Ok(Decided::Refused);
+            }
+            return Ok(match self.write(&line)? {
+                Written::Written(_) => Decided::Refused,
+                Written::Refused => Decided::Contended,
+            });
+        }
         // Design D2: before any run is read, and before a round that holds
         // the branch returns.
         self.drop_withdrawn(&mut line)?;
@@ -3013,6 +3082,7 @@ impl Sluice<'_> {
             // 23, 140: the branch it lands as is covered by the verdict
             // that covered the revision it landed on (rule core.39).
             covering: Some(covering),
+            refused: None,
         });
         Ok(true)
     }
@@ -3246,6 +3316,7 @@ impl Sluice<'_> {
                 commits,
                 beside: false,
                 covering,
+                refused: None,
             });
             Ok(true)
         }

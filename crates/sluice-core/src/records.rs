@@ -108,6 +108,10 @@ pub enum State {
     Passed,
     /// Its landing is written and the branch is being moved.
     Landing,
+    /// 152, record 0124 (design D10): its landing the forge refused, with
+    /// the branch where the landing expected it: held, its submitter's to
+    /// withdraw or replace, and pushed again only on the operator's word.
+    Refused,
     Landed,
     /// Blamed for a failure (17).
     Failed,
@@ -137,6 +141,7 @@ impl State {
             State::Testing => "testing",
             State::Passed => "passed",
             State::Landing => "landing",
+            State::Refused => "refused",
             State::Landed => "landed",
             State::Failed => "failed",
             State::Conflict => "conflict",
@@ -843,6 +848,19 @@ pub struct LandingIntent {
     /// unset (record 0083).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub covering: Option<CoveringVerdict>,
+    /// 152, rule core.5, record 0124 (design D10): the forge refused it,
+    /// the branch where it expected it: the forge's words and when. A
+    /// landing so refused is held, never pushed again by itself.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub refused: Option<LandingRefused>,
+}
+
+/// 152, record 0124 (design D10): a landing's refusal by the forge: its
+/// words, whole, and when.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LandingRefused {
+    pub words: String,
+    pub at: String,
 }
 
 /// An outcome decided and not yet pushed to its session (50, 51).
