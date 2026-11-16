@@ -2332,3 +2332,108 @@ fn the_list_says_whether_it_changed() {
     assert!(moved.changed);
     assert_eq!(moved.pulls.len(), 2);
 }
+
+// 78, 79, 141; record 0119 (design D13): keyless bundles verified against
+// the roots sluice carries, from the records alone.
+
+/// A recorded bundle under `tests/profiles/forge/`: `public-good`, a
+/// GitHub Actions workflow's signature on the public-good instance, from
+/// sigstore-rust's tests (prefix-dev/sigstore-example's `action.yaml`);
+/// `github`, a signature of GitHub's own instance, timestamped with no log
+/// entry; `staging`, one of Sigstore's staging instance, which sluice
+/// carries no root of.
+fn recorded_bundle(name: &str) -> String {
+    let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("tests/profiles/forge")
+        .join(format!("{name}.sigstore.json"));
+    std::fs::read_to_string(&path).unwrap()
+}
+
+/// The identity of the workflow the public-good bundle was signed by, run
+/// from `git_ref`.
+fn signers_workflow(git_ref: &str) -> sluice::profiles::github::keyless::Identity {
+    sluice::profiles::github::keyless::Identity::workflow(
+        "prefix-dev",
+        "sigstore-example",
+        ".github/workflows/action.yaml",
+        git_ref,
+    )
+}
+
+/// 78, record 0119 (design D13): a bundle the signer's workflow signed on
+/// its ref, logged on the public-good instance, verifies against the root
+/// sluice carries, and holds its statement.
+#[test]
+fn a_bundle_from_the_signers_workflow_counts() {
+    use sluice::profiles::github::keyless::verify;
+    let statement = verify(
+        &recorded_bundle("public-good"),
+        &signers_workflow("refs/heads/main"),
+    )
+    .unwrap();
+    assert_eq!(
+        statement["predicateType"],
+        "https://schemas.conda.org/attestations-publish-1.schema.json"
+    );
+    assert_eq!(
+        statement["subject"][0]["name"],
+        "signed-package-2.1.0-hb0f4dca_0.conda"
+    );
+}
+
+/// 78, record 0119 (design D13): a bundle of GitHub's own instance, with an
+/// RFC 3161 timestamp and no transparency log entry, verifies against
+/// GitHub's root, which sluice carries, by the identity it was issued.
+#[test]
+fn a_bundle_of_githubs_own_instance_counts() {
+    use sluice::profiles::github::keyless::{verify, Identity};
+    let identity = Identity {
+        uri: "https://dotcom.releases.github.com".into(),
+        issuer: None,
+    };
+    let statement = verify(&recorded_bundle("github"), &identity).unwrap();
+    assert_eq!(
+        statement["predicateType"],
+        "https://in-toto.io/attestation/release/v0.2"
+    );
+    let other = Identity {
+        uri: "https://github.com/o/r/.github/workflows/sluice.yml@refs/heads/main".into(),
+        issuer: Some(sluice::profiles::github::keyless::GITHUB_ISSUER.into()),
+    };
+    assert!(verify(&recorded_bundle("github"), &other).is_err());
+}
+
+/// 78, 79, rule core.22, record 0119 (design D13): a bundle signed by the
+/// workflow on any ref but the signer's, a pull request's among them,
+/// counts for nothing, naming the identity it carried.
+#[test]
+fn a_bundle_from_a_pull_requests_ref_counts_for_nothing() {
+    use sluice::profiles::github::keyless::verify;
+    let err = verify(
+        &recorded_bundle("public-good"),
+        &signers_workflow("refs/pull/7/merge"),
+    )
+    .unwrap_err();
+    let said = format!("{err:#}");
+    assert!(said.contains("does not verify"), "{said}");
+    assert!(said.contains("refs/pull/7/merge"), "{said}");
+    assert!(
+        said.contains("prefix-dev/sigstore-example/.github/workflows/action.yaml@refs/heads/main"),
+        "the identity it carried: {said}"
+    );
+}
+
+/// 78, record 0119 (design D13): a bundle no root sluice carries verifies,
+/// one of Sigstore's staging instance, counts for nothing, with why.
+#[test]
+fn a_bundle_no_carried_root_verifies_counts_for_nothing() {
+    use sluice::profiles::github::keyless::{statement_of, verify, Identity};
+    let bundle = recorded_bundle("staging");
+    assert!(statement_of(&bundle).is_ok(), "a statement it holds");
+    let identity = Identity {
+        uri: "https://github.com/sigstore-conformance/extremely-dangerous-public-oidc-beacon/.github/workflows/extremely-dangerous-oidc-beacon.yml@refs/heads/main".into(),
+        issuer: None,
+    };
+    let said = format!("{:#}", verify(&bundle, &identity).unwrap_err());
+    assert!(said.contains("does not verify"), "{said}");
+}

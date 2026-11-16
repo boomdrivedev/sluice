@@ -41,6 +41,8 @@ weir-bounded.workspace = true
 base64.workspace = true
 ssh-key.workspace = true
 sha2.workspace = true
+sigstore-verify.workspace = true
+sigstore-trust-root.workspace = true
 
 # A profile's acceptance tests that name its tool live under a profile
 # directory (rule core.1).

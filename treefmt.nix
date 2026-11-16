@@ -20,6 +20,9 @@ _: {
     "*.png"
     # Test keys, kept byte for byte.
     "*.pem"
+    # Sigstore bundles recorded as their signers' tools wrote them, kept
+    # byte for byte (record 0119; design D13).
+    "crates/sluice/tests/profiles/forge/*.sigstore.json"
     # The page the social image is rendered from, kept as drawn; Biome's
     # HTML support is experimental.
     "docs/brand/social-preview.html"
