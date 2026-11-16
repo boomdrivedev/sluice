@@ -1428,6 +1428,22 @@ impl Places {
         if listed.locked.is_some() || listed.head.as_ref() != Some(rev) {
             return Ok(None);
         }
+        // Holding nothing beyond its revision, as git made it: nothing ran
+        // in it.
+        let path_text = path
+            .to_str()
+            .ok_or_else(|| anyhow!("{} is not UTF-8", path.display()))?;
+        let status = self.git(&[
+            "-C",
+            path_text,
+            "status",
+            "--porcelain",
+            "--untracked-files=all",
+            "--ignored",
+        ])?;
+        if !status.status.success() || !status.stdout.is_empty() {
+            return Ok(None);
+        }
         let tmp = self.scratch(name, &made);
         if !tmp.exists() {
             self.make_scratch(&tmp)?;
@@ -1548,19 +1564,49 @@ impl Places {
                 )
             });
         }
-        let out = self.git(&[
-            "worktree",
-            "remove",
-            "--force",
-            path.to_str()
-                .ok_or_else(|| anyhow!("{} is not UTF-8", path.display()))?,
-        ])?;
+        let path_text = path
+            .to_str()
+            .ok_or_else(|| anyhow!("{} is not UTF-8", path.display()))?;
+        // 123, rule core.16, record 0122 (design D4): `git worktree add`
+        // locks the checkout `initializing` until it is done, and an add
+        // stopped part way leaves the lock, which every removal refuses.
+        // A checkout sluice made, locked so, is unlocked, removed and
+        // pruned; one locked for any other reason is a hold sluice keeps,
+        // and its release fails naming the lock and git's words.
+        let locked = self.worktree_entry(path)?.and_then(|l| l.locked);
+        if locked.as_deref() == Some(INITIALIZING) {
+            let out = self.git(&["worktree", "unlock", path_text])?;
+            if !out.status.success() {
+                bail!(
+                    "git worktree unlock {}: {}",
+                    path.display(),
+                    String::from_utf8_lossy(&out.stderr).trim()
+                );
+            }
+        }
+        let out = self.git(&["worktree", "remove", "--force", path_text])?;
         if !out.status.success() {
-            bail!(
-                "git worktree remove {}: {}",
-                path.display(),
-                String::from_utf8_lossy(&out.stderr).trim()
-            );
+            let said = String::from_utf8_lossy(&out.stderr).trim().to_string();
+            match locked.filter(|l| l != INITIALIZING) {
+                Some(why) => bail!(
+                    "{} is locked ({}), a hold sluice keeps: git worktree remove: {said}",
+                    path.display(),
+                    match why.is_empty() {
+                        true => "no reason given".to_string(),
+                        false => format!("reason: {why}"),
+                    }
+                ),
+                None => bail!("git worktree remove {}: {said}", path.display()),
+            }
+        }
+        if locked.is_some() {
+            let out = self.git(&["worktree", "prune"])?;
+            if !out.status.success() {
+                bail!(
+                    "git worktree prune: {}",
+                    String::from_utf8_lossy(&out.stderr).trim()
+                );
+            }
         }
         Ok(())
     }
@@ -1785,6 +1831,10 @@ pub const PREVIEW: &str = "preview/";
 /// `.previews/`, which a sluice that predates previews never reads.
 /// What a place's record says made it.
 const METHOD: &str = "git-worktree";
+
+/// Record 0122 (design D4): the reason `git worktree add` locks a checkout
+/// with until it is done.
+const INITIALIZING: &str = "initializing";
 
 /// `[checkout] method`, which a policy need not name, is the one there is
 /// or is refused with the reason (ADR 0013).

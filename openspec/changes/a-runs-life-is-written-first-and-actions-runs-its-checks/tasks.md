@@ -51,7 +51,7 @@ design's decisions by D-number.
 
 ## 5. A checkout git left locked
 
-- [ ] 5.1 `Places::materialize` and `Places::release` read a checkout sluice made from `git worktree list --porcelain`: locked `initializing`, it is unlocked, removed with `--force` and pruned, then made again or let go; locked for any other reason, its release fails naming the lock and git's words, and it is held (123; core.16; D4). Tests in `crates/sluice/tests/profiles/places.rs`: `a_checkout_git_left_locked_initializing_is_released`, `a_checkout_git_left_locked_initializing_is_made_again` and `a_checkout_locked_for_another_reason_is_held`, each leaving the lock as git leaves it (`git worktree lock --reason`). True when `sluice exec bolt/sluice-is-refactored-and-runs-on-pools -- cargo test -p sluice --features tools --test places locked` passes.
+- [x] 5.1 `Places::materialize` and `Places::release` read a checkout sluice made from `git worktree list --porcelain`: locked `initializing`, it is unlocked, removed with `--force` and pruned, then made again or let go; locked for any other reason, its release fails naming the lock and git's words, and it is held (123; core.16; D4). Tests in `crates/sluice/tests/profiles/places.rs`: `a_checkout_git_left_locked_initializing_is_released`, `a_checkout_git_left_locked_initializing_is_made_again` and `a_checkout_locked_for_another_reason_is_held`, each leaving the lock as git leaves it (`git worktree lock --reason`). True when `sluice exec bolt/sluice-is-refactored-and-runs-on-pools -- cargo test -p sluice --features tools --test places locked` passes.
 
 ## 6. A landing the forge refuses
 

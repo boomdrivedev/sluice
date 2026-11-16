@@ -193,6 +193,72 @@ fn a_git_worktree_place_left_by_a_crash() {
     left_behind(&repo, &again);
 }
 
+/// Lock the checkout of `place` as `git worktree lock --reason` does.
+fn lock_checkout(repo: &Repo, place: &Place, reason: &str) {
+    repo.git(&[
+        "worktree",
+        "lock",
+        "--reason",
+        reason,
+        place.path.to_str().unwrap(),
+    ]);
+    assert!(repo
+        .git(&["worktree", "list", "--porcelain"])
+        .lines()
+        .any(|l| l == format!("locked {reason}")));
+}
+
+/// 123, rule core.16, record 0122 (design D4): a checkout git left locked
+/// `initializing`, as an add stopped part way leaves it, is unlocked,
+/// removed and pruned by its release.
+#[test]
+fn a_checkout_git_left_locked_initializing_is_released() {
+    let _spawns = spawns();
+    let (repo, rev) = scratch("places-locked-release");
+    let p = places(&repo);
+    let place = p.materialize(NAME, &rev, &Settings::new()).unwrap();
+    lock_checkout(&repo, &place, "initializing");
+    p.release(NAME).unwrap();
+    left_behind(&repo, &place);
+}
+
+/// 25, 59, record 0122 (design D4): a checkout git left locked
+/// `initializing` is undone and made again under its name.
+#[test]
+fn a_checkout_git_left_locked_initializing_is_made_again() {
+    let _spawns = spawns();
+    let (repo, rev) = scratch("places-locked-again");
+    let p = places(&repo);
+    let place = p.materialize(NAME, &rev, &Settings::new()).unwrap();
+    lock_checkout(&repo, &place, "initializing");
+    let again = p.materialize(NAME, &rev, &Settings::new()).unwrap();
+    holds_the_candidate(&repo, &again, &rev);
+    let listed = repo.git(&["worktree", "list", "--porcelain"]);
+    assert!(!listed.lines().any(|l| l.starts_with("locked")), "{listed}");
+    p.release(NAME).unwrap();
+    left_behind(&repo, &again);
+}
+
+/// 123, record 0122 (design D4): a checkout locked for any other reason is
+/// a hold sluice keeps: its release fails naming the lock and git's words,
+/// and the checkout stays.
+#[test]
+fn a_checkout_locked_for_another_reason_is_held() {
+    let _spawns = spawns();
+    let (repo, rev) = scratch("places-locked-held");
+    let p = places(&repo);
+    let place = p.materialize(NAME, &rev, &Settings::new()).unwrap();
+    lock_checkout(&repo, &place, "a person looks at it");
+    let err = format!("{:#}", p.release(NAME).unwrap_err());
+    assert!(err.contains("locked"), "{err}");
+    assert!(err.contains("a person looks at it"), "{err}");
+    assert!(err.contains("git worktree remove"), "{err}");
+    assert!(place.path.is_dir(), "the checkout stays");
+    repo.git(&["worktree", "unlock", place.path.to_str().unwrap()]);
+    p.release(NAME).unwrap();
+    left_behind(&repo, &place);
+}
+
 /// 34: releasing a place ends the run in it before removing it.
 #[test]
 fn releasing_a_place_ends_its_run() {
