@@ -1,120 +1,142 @@
 # Verify: a-queues-home-is-written-in-its-records
 
-Verified on `change/a-queues-home-is-written-in-its-records` at `9be7d303`,
+Verified on `change/a-queues-home-is-written-in-its-records` at `bbc6a183`,
 cut from `bolt/sluice-is-refactored-and-runs-on-pools` (merge base
-`d6d11623`; the bolt has since gained only `6558679a`, a policy key, and its
-landing), on 2026-11-14 with sluice 0.93.2.
+`d6d11623`; the bolt's head `74deef00` adds only `6558679a`, a policy key,
+and its landing), on 2026-11-15 with sluice 0.93.2 and moon 2.6.1.
 
 ## Outcome
 
-**Ready to archive.** The bolt's gate passes whole, and so does the tools
-tier that main's gate adds. Every one of the 27 tasks is ticked, and its
-check passes. Every scenario of the four delta specs has a test that
-passes, and `openspec validate --strict` finds the change valid.
+**Not ready to archive.** The bolt's gate fails on one test of `cli:test`,
+`host_process.rs`'s `a_state_folder_made_again_ends_the_host_process`, and
+cargo stopped there, so the `cli:test` targets after it did not run. Every
+other task of the gate passes. Every one of the 28 tasks is ticked, and
+each test a task names exists where the task says. Every scenario of the
+four delta specs maps to a test, and `openspec validate --strict` finds
+the change valid. Task 5.6, the one task whose check the gate cannot run,
+holds at this commit.
 
 ## Whole checks
 
 `sluice exec bolt/sluice-is-refactored-and-runs-on-pools` ran the bolt's
-gate, `#check-fast` (S66), once at `9be7d303`. It exited 0 with 12 tasks
-passed, and recorded 12 results under their keys for `9be7d30`:
+gate, `#check-fast` (S66), once at `bbc6a183`. The root `moon.yml` changed,
+so every project was affected: 30 tasks ran. The command exited 1 with 29
+tasks passed and `cli:test` failed, and recorded 30 results under their keys
+for `bbc6a18`.
 
 | Task | Outcome |
 |---|---|
-| site:prose, site:rules, nix:typecheck, root:adrs, root:changes | passed |
-| root:format, root:lint | passed |
+| site:prose, site:rules, nix:lint, nix:test, nix:typecheck | passed |
+| root:adrs, root:changes, root:format (`a11560d7`), root:lint, root:marketplace, root:openspec-claude, root:release, root:specs, root:toolchain, root:versions | passed |
 | core:test (164), fakes:test (17), seams:test (5) | passed |
 | conformance:test (every target, `homes`, `peers` and `reading` among them) | passed |
-| cli:test (`--test cli`: 223 passed, 0 failed; every other target whole) | passed |
+| plugin-board:engine-types, plugin-board:test, plugin-board:typecheck, plugin-board:validate | passed |
+| plugin-herdr:manifest, plugin-herdr:test-sh (138, 3 skipped), plugin-herdr:test-dash (138, 3 skipped) | passed |
+| plugin-sluice:hooks, plugin-sluice:lay-out, plugin-sluice:validate | passed |
+| **cli:test** (`b2e63f13`) | **failed** |
 
 moon warned on each task that it could not package task outputs into
-`.moon/cache/outputs/` under the place. It recorded each pass all the same,
-and nothing in this change touches that.
+`.moon/cache/outputs/` under the place. It recorded each result all the
+same.
+
+### The failure
+
+`cargo test -p sluice -- --skip sandbox` ran the crate's unit tests (all
+passed), `checks`, `cli` (223 passed, 0 failed), `conformance`, `equip`,
+`equip_tools`, `exec` and `forge`, then `host_process`, where 38 passed and
+1 failed:
+
+```
+---- a_state_folder_made_again_ends_the_host_process stdout ----
+thread 'a_state_folder_made_again_ends_the_host_process' panicked at crates/sluice/tests/host_process.rs:468:5:
+it wrote into the new folder: ["start.lock", "repositories"]
+test result: FAILED. 38 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out; finished in 87.90s
+error: test failed, to rerun pass `-p sluice --test host_process`
+```
+
+The test (135, design D6 of the host process's build) moves the host
+process's state folder aside and moves a fresh empty folder into its path,
+then waits up to five seconds for the host process to end and asserts it
+left the fresh folder empty. Here something wrote `start.lock` and the index
+`repositories` into it. Those are the host process index's start lock and
+its list (`crates/sluice/src/host_process/index.rs`), written by a host
+process's tick or by a client reaching for or starting one. The test's own
+`follow`, a wait's follower, is still held as the process ends.
+
+This change does not touch that test or `crates/sluice/src/host_process/`.
+Its one edit to `crates/sluice/src/lib.rs` is to status by number and to
+the wait's `Reading::read`, neither of which writes the host's state folder.
+The crates are byte for byte as they were at `9be7d303`, whose gate ran
+`cli:test` whole and passed. So this reads as a race in the test, or in the
+host process's end, that shows under the host's load: the gate ran
+`cli:test` beside both plugin-herdr suites for about eight minutes. It is
+still a failure of the gate. Whatever its cause, it is the code stage's to
+fix or to account for, and this stage ran the gate only once.
+
+Because cargo stops at the first failing target, these targets of
+`cli:test` did not run in this gate: `instance`, `landed`, `local_files`
+(task 1.3's `a_branchs_home_is_read_and_written_with_its_records`),
+`local_refs`, `moon`, `moon_telemetry`, `overview_watch`, `peers`,
+`places`, `plugin_docs`, `previews`, `previews_tools`, `protect`,
+`pull_requests`, `pushed_refs`, `reader_tick`, `remote_branch`,
+`remote_refs`, `runs`, `sessions`, `stack`, `telemetry`, `telemetry_logs`,
+`usage` and `worktrunk`. Those built without `--features tools` run no test
+of the tools tier.
 
 ## The tools tier
 
 `#check-fast` runs no test built with `--features tools`, but the checks of
 tasks 1.4 to 1.6, 2.4, 2.5, 3.2, 4.4, 4.6 and 4.7 are tests of that tier.
-So `cli:tools`' own command ran once through sluice against the bolt, with
-`--no-fail-fast`:
-`sluice exec bolt/sluice-is-refactored-and-runs-on-pools -- cargo test -p sluice --features tools --no-fail-fast --test instance … --test overview_watch -- --skip sandbox`.
-It exited 0, with 664 tests passed and none failed:
-
-| Target | Passed |
-|---|---|
-| conformance | 60 |
-| equip_tools | 7 |
-| exec | 17 (3 sandbox tests skipped) |
-| forge | 48 |
-| instance | 12 |
-| landed | 1 |
-| local_refs | 17 |
-| moon | 32 (3 sandbox tests skipped), and 1 more |
-| overview_watch | 10 |
-| peers | 13 |
-| places | 47 |
-| previews_tools | 10 |
-| protect | 28 |
-| pull_requests | 157 |
-| pushed_refs | 53 |
-| remote_branch | 34 |
-| remote_refs | 37 |
-| stack | 3 (1 sandbox test skipped) |
-| worktrunk | 77 |
-
-Each test a tools-tier task names passed there:
-
-- 1.4: `a_branchs_home_is_read_from_its_records_not_its_policy`,
-  `a_host_with_no_records_of_a_branch_finds_its_home_on_the_remote` and
-  `two_open_homes_refuse_the_branch_naming_both`.
-- 1.5: `the_first_write_writes_the_home_its_policy_chose`.
-- 1.6: `remote_branch.rs`'s `an_idle_branch_on_a_remote_is_passed_over_with_no_git`,
-  which the change leaves as it is at the base, with 1.4's, 1.5's and 2.5's
-  home tests.
-- 2.4: `a_hosts_queue_moves_to_its_remote_with_its_numbers`,
-  `a_number_the_remote_holds_is_carried_under_the_next` and
-  `a_carry_stopped_after_the_remote_was_written_is_closed_by_the_next`.
-- 2.5: `a_branch_comes_home_each_host_taking_its_own_submissions`.
-- 3.2: `a_wait_follows_its_submission_to_its_queues_new_home`.
-- 4.4: `a_host_the_branch_does_not_accept_takes_no_request_in`.
-- 4.6: `remote_branch.rs`'s `a_policy_refused_on_the_remote_is_cleared_by_a_push`,
-  which the change leaves as it is at the base.
-- 4.7: `peers.rs`'s `a_run_is_claimed_and_run_by_the_other_host`, whose lead
-  is trusted but its signer may claim only a system the gate does not ask
-  for (79), and `pull_requests.rs`'s
-  `the_keeper_and_the_check_name_different_hosts`, whose host C signs as
-  `b`.
+This stage did not run it. Between `9be7d303` and this commit, only the
+root `moon.yml` (task 5.6) and this change's `tasks.md` and report differ.
+At `9be7d303`, `cli:tools`' own command ran through sluice against the bolt
+with `--no-fail-fast` and passed whole, 664 tests and none failed, each test
+those tasks name among them.
 
 ## Tasks
 
-All 27 tasks in `tasks.md` are ticked, and each test a task names exists
-where the task says. Each one passed in the run that holds it:
+All 28 tasks in `tasks.md` are ticked, and each test a task names exists
+where the task says:
 
-- In `#check-fast`, the 33 tests of 1.1 to 1.3, 2.1 to 2.3, 2.5's
-  conformance half, 3.1, 3.3, 4.1, 4.3, 4.5, 5.1 and 5.5, and 4.6's
-  `--test homes --test peers` whole.
-- In the tools run, the 14 tests of 1.4 to 1.6, 2.4, 2.5, 3.2, 4.4, 4.6
-  and 4.7.
+- 1.1: `records.rs`. 1.2: `sluice-fakes/src/lib.rs`. 1.3: `tests/local_files.rs`.
+- 1.4, 1.5, 2.4, 2.5: `tests/remote_refs.rs`. 1.6, 4.6: `tests/remote_branch.rs`.
+- 2.1 to 2.3, 2.5's second half, 3.1: `sluice-conformance/tests/homes.rs`.
+- 3.2, 4.7's first test: `tests/peers.rs`. 3.3, 5.5: `tests/cli.rs`.
+- 4.1, 4.3: `sluice-conformance/tests/peers.rs`.
+- 4.4, 4.7's second test: `tests/profiles/pull_requests.rs`.
+- 4.5: `instance.rs` and `policy.rs`. 5.1: `sluice-conformance/tests/reading.rs`.
 
-2.6, 5.2, 5.3 and 5.4 hold by `root:lint`, `site:prose`, `root:adrs` and
-`site:rules`, each passed in the gate.
+In this gate, the tests of 1.1, 1.2, 2.1 to 2.3, 2.5's conformance half,
+3.1, 3.3, 4.1, 4.2, 4.3, 4.5, 5.1 and 5.5, and 4.6's `--test homes
+--test peers`, passed. 1.3's test did not run (see above). 2.6, 5.2, 5.3
+and 5.4 hold by `root:lint`, `site:prose`, `root:adrs` and `site:rules`,
+each passed. No `migrate`, `left_behind`, `forget_left_behind`,
+`adopt_left_behind`, `leave_behind` or `sluice-remote/moved/` remains in
+the crates or the site. The `left_behind` in `tests/profiles/places.rs` is a
+place's and unrelated.
 
-The two code fixes behind 1.6 and 4.6 are as their tasks say:
+### Task 5.6
 
-- `Records::held_home` (`crates/sluice/src/profiles/records.rs`) reads a
-  remote's `home.json` through `remote_refs::fetched_home`, from the ref
-  this host last fetched, with no profile of the remote opened (129; rule
-  core.31).
-- `Sluice::keeps` (`crates/sluice-core/src/step.rs`) reads the rules at the
-  branch's revision before it answers for a home in this host's own files,
-  so a refused policy refuses the round first (124, 56; record 0069; rule
-  core.15).
+`root:format`'s inputs leave out each path `.gitignore` names and
+`.ruff_cache/`. `.gitignore`'s unanchored entries (`.devenv/`,
+`.moon/cache/`, `.devenv.flake.nix`, `devenv.local.nix`,
+`.pre-commit-config.yaml`) are left out only at the root, which is the only
+place in a place's tree where they exist. In this gate, `root:format`
+passed under sluice against the bolt in this place under key `a11560d7`.
+The place holds `.claude/settings.json`, `.mcp.json`, `.devenv/`,
+`.moon/cache/`, `.ruff_cache/` and `target/`. A sandboxed run keeps no
+manifest, so `moon run root:format` ran once in the place's shell and gave
+the same key, `a11560d7`. Its manifest in the repository's moon store hashes
+to the key, names `root:format`, and names 1441 inputs, each one a file of
+`bbc6a183`'s tree with that file's content. That is the reading the
+signer's `check_key` makes.
 
 ## Specs
 
 `openspec validate a-queues-home-is-written-in-its-records --strict` finds
 the change valid. The MODIFIED and REMOVED requirements of `peer-lead` and
 `remote-records` name requirements `openspec/specs/` holds, and `queue-home`
-is a new capability. Each scenario maps to a test that passed:
+is a new capability. Each scenario maps to a test:
 
 | Spec: scenario | Test |
 |---|---|
@@ -144,7 +166,6 @@ is a new capability. Each scenario maps to a test that passed:
 | peer-lead: Nothing live | `a_lead_with_no_live_run_writes_nothing_to_keep_it` |
 | remote-records: Signers move the state to the remote; No signers, no change | `the_first_write_writes_the_home_its_policy_chose` |
 
-The REMOVED requirement's code is gone. No `migrate`, `left_behind`,
-`forget_left_behind`, `adopt_left_behind`, `leave_behind` or
-`sluice-remote/moved/` remains (the `left_behind` in
-`tests/profiles/places.rs` is a place's, unrelated), and `root:lint` passes.
+The conformance tests in this table passed in this gate. The tests in
+`remote_refs.rs`, `peers.rs` and `pull_requests.rs` are tools-tier tests,
+covered as described under "The tools tier".
