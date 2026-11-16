@@ -4222,10 +4222,10 @@ impl Sluice<'_> {
             let Some(pool) = policy.pools.iter().find(|p| p.name == name) else {
                 continue;
             };
-            let job = self
-                .seams
-                .tests
-                .job(&pool.kind, &claim, rules.remote.as_deref())?;
+            let job =
+                self.seams
+                    .tests
+                    .job(&pool.kind, &pool.runners, &claim, rules.remote.as_deref())?;
             let unanswered = match job {
                 Job::None => {
                     let runner = match &run.system {
@@ -4329,10 +4329,12 @@ impl Sluice<'_> {
         let Some(p) = pools.iter().find(|p| p.name == name) else {
             return Ok(None);
         };
-        Ok(match self.seams.tests.job(&p.kind, claim, remote)? {
-            Job::Running { since } => Some(since),
-            _ => None,
-        })
+        Ok(
+            match self.seams.tests.job(&p.kind, &p.runners, claim, remote)? {
+                Job::Running { since } => Some(since),
+                _ => None,
+            },
+        )
     }
 
     /// 66, 87, 107, record 0122 (design D6): whether a live executor may take
@@ -4438,17 +4440,25 @@ impl Sluice<'_> {
             // Record 0122 (design D12): a job that ended with no record, or
             // none of the claim's title past the sign-of-life bound since
             // the claim, is a lapsed claim.
-            return Ok(match self.seams.tests.job(&p.kind, host, remote)? {
-                Job::Ended { recorded: false } => {
-                    Some(format!("{host}'s job ended with no record of its run"))
-                }
-                Job::Ended { recorded: true } => None,
-                Job::None => claimed
-                    .and_then(|at| seconds_between(at, now))
-                    .is_none_or(|s| s >= self.peer.alive.as_secs_f64())
-                    .then(lapsed),
-                Job::Queued | Job::Running { .. } => None,
-            });
+            return Ok(
+                match self.seams.tests.job(&p.kind, &p.runners, host, remote)? {
+                    // Design D5 of the change
+                    // `a-codebuild-fleet-runs-a-queues-checks`: the pool's own
+                    // words where it gives why, in place of these.
+                    Job::Ended {
+                        recorded: false,
+                        why,
+                    } => Some(why.unwrap_or_else(|| {
+                        format!("{host}'s job ended with no record of its run")
+                    })),
+                    Job::Ended { recorded: true, .. } => None,
+                    Job::None => claimed
+                        .and_then(|at| seconds_between(at, now))
+                        .is_none_or(|s| s >= self.peer.alive.as_secs_f64())
+                        .then(lapsed),
+                    Job::Queued | Job::Running { .. } => None,
+                },
+            );
         }
         let marker = self
             .seams

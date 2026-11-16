@@ -1059,8 +1059,13 @@ fn a_pools_job_ended_with_no_record_is_a_lapsed_claim() {
     let one = h.submit("unit/a");
     lead(&h).step(BRANCH).unwrap();
     let claim = pool_run(&h).claim.unwrap().by;
-    h.w()
-        .move_job(&claim, sluice_seams::Job::Ended { recorded: false });
+    h.w().move_job(
+        &claim,
+        sluice_seams::Job::Ended {
+            recorded: false,
+            why: None,
+        },
+    );
     lead(&h).step(BRANCH).unwrap();
     let runs = candidates(&h)[0].runs.clone();
     assert_eq!(runs[0].state, RunState::Closed);

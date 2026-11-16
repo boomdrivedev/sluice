@@ -219,6 +219,7 @@ pub trait Launcher {
     fn job(
         &self,
         kind: &(String, Setting),
+        runners: &BTreeMap<String, String>,
         claim: &str,
         remote: Option<&str>,
     ) -> Result<sluice_seams::Job>;
@@ -2249,11 +2250,12 @@ impl Tests for Checks {
     fn job(
         &self,
         kind: &(String, Setting),
+        runners: &BTreeMap<String, String>,
         claim: &str,
         remote: Option<&str>,
     ) -> Result<sluice_seams::Job> {
         match &self.pool {
-            Some(p) => p.job(kind, claim, remote),
+            Some(p) => p.job(kind, runners, claim, remote),
             // A host that cannot ask the pool reads its jobs as waiting: a
             // claim lapses only by what is known of it (77).
             None => Ok(sluice_seams::Job::Queued),

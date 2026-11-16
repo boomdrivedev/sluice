@@ -2855,6 +2855,7 @@ impl Tests for FakeTests {
     fn job(
         &self,
         _kind: &(String, sluice_seams::Setting),
+        _runners: &BTreeMap<String, String>,
         claim: &str,
         _remote: Option<&str>,
     ) -> Result<sluice_seams::Job> {
@@ -2863,7 +2864,10 @@ impl Tests for FakeTests {
             return Ok(job.clone());
         }
         if inner.jobs_ended.contains(claim) {
-            return Ok(sluice_seams::Job::Ended { recorded: false });
+            return Ok(sluice_seams::Job::Ended {
+                recorded: false,
+                why: None,
+            });
         }
         Ok(match inner.launches.iter().any(|l| l.claim == claim) {
             true => sluice_seams::Job::Queued,

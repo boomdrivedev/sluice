@@ -10192,8 +10192,13 @@ fn job_record_under_a_lapsed_claim_is_refused() {
     let bundle = out.path().join("bundle.json");
     std::fs::write(&bundle, job_sign(&f, &claim, &ran, out.path())).unwrap();
     f.world.be_host("a");
-    f.world
-        .move_job(&claim, sluice_seams::Job::Ended { recorded: false });
+    f.world.move_job(
+        &claim,
+        sluice_seams::Job::Ended {
+            recorded: false,
+            why: None,
+        },
+    );
     pool_lead(&f).step("main").unwrap();
     f.world.be_host("runner");
     let lapsed = pooled_runs(&f)[0].clone();
