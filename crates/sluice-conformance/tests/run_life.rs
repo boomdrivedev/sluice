@@ -287,3 +287,47 @@ fn a_claim_holder_writes_its_own_runs_states() {
     }
     assert_eq!(h.sub(one).state, State::Landed);
 }
+
+/// satisfies: record 0122; 60, 114; the run-life spec's "A run's report is
+/// read only once the run has ended": its runner's word that a check
+/// passed, there to read while the run goes, is neither recorded nor read
+#[test]
+fn a_report_is_not_read_while_its_run_goes() {
+    use sluice_seams::{TaskProgress, TaskState};
+    let h = local();
+    h.w().hold_runs(true);
+    h.work(
+        "unit/a",
+        "agent-a",
+        &[("a/lib", Some("a2")), ("b/lib", Some("b2"))],
+    );
+    let one = h.submit("unit/a");
+    h.step();
+    let combination = candidates(&h)[0].revision.clone();
+    h.w().says_tasks(
+        &combination,
+        &[TaskProgress {
+            target: "a:test".into(),
+            state: TaskState::Passed,
+            started: None,
+            ended: None,
+            exit: Some(0),
+        }],
+    );
+    for _ in 0..3 {
+        h.w().advance(chrono::Duration::minutes(1));
+        h.step();
+    }
+    assert!(h.results().is_empty(), "nothing of the run recorded");
+    assert!(!h.events().iter().any(|e| matches!(
+        e,
+        Event::Ran { .. } | Event::Result { .. } | Event::Ended { .. }
+    )));
+    assert_eq!(runs_of(&h, &[one])[0].state, RunState::Running);
+    assert_eq!(h.sub(one).state, State::Testing);
+
+    h.w().complete_all();
+    h.settle();
+    assert_eq!(h.sub(one).state, State::Landed);
+    assert!(!h.results().is_empty());
+}

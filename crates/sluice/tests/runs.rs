@@ -143,6 +143,37 @@ fn found_reads_a_started_run_and_when_it_began() {
     assert_eq!(r.found("p1").unwrap(), None);
 }
 
+/// 60, 114, record 0122 (design D8): a run is never finished while its
+/// supervisor holds it, even with a result to read in its directory; once
+/// it has ended, its own result is read.
+#[test]
+fn a_run_still_going_is_never_finished() {
+    let dir = Scratch::new("runs-going");
+    let r = runs(dir.path());
+    r.start("p1", &request(dir.path(), "sleep 1.5; exit 3", None))
+        .unwrap();
+    wait_for(&r.dir("p1").join("pgid"));
+    let early = serde_json::json!({
+        "exit": 0, "signal": null, "timed_out": false,
+        "started": "2026-11-13T09:00:00.000Z", "ended": "2026-11-13T09:00:01.000Z"
+    });
+    std::fs::write(
+        r.dir("p1").join("result.json"),
+        serde_json::to_vec(&early).unwrap(),
+    )
+    .unwrap();
+    assert_eq!(r.state("p1").unwrap(), RunState::Running);
+    std::thread::sleep(Duration::from_millis(300));
+    assert_eq!(r.state("p1").unwrap(), RunState::Running);
+    match wait(&r, "p1") {
+        RunState::Finished(e) => {
+            assert_eq!(e.exit, Some(3), "its own result: {e:?}");
+            assert!(!e.passed());
+        }
+        other => panic!("{other:?}"),
+    }
+}
+
 /// 66: a run over its time limit is ended with everything it started, a
 /// member that ignores TERM included, and recorded as timed out.
 #[test]

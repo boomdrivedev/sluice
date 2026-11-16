@@ -2656,11 +2656,13 @@ impl Tests for FakeTests {
         if r.lost || r.killed {
             return Ok(Progress::Lost);
         }
-        if let Some(report) = r.report {
-            return Ok(Progress::Finished(report));
-        }
+        // 60, 114, record 0122 (design D8): a run still going is never
+        // finished, whatever of it there is to read.
         if !r.complete {
             return Ok(Progress::Running);
+        }
+        if let Some(report) = r.report {
+            return Ok(Progress::Finished(report));
         }
         let report = World::evaluate(&mut inner, &r.request);
         inner.runs[n].report = Some(report.clone());

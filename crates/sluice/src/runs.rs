@@ -378,18 +378,19 @@ impl Runs {
     /// reported: it is lost, as one whose supervisor stopped is (60), and
     /// no one reading it fails for it. [`Runs::start`] writes the request
     /// first, so a run started reads as going until it ends.
+    ///
+    /// 60, 114, record 0122 (design D8): a run is finished only once its
+    /// supervisor has let go of it, its group ended and `result.json`
+    /// written last: while a supervisor holds it, it goes, whatever its
+    /// directory holds, so no report of it is read before its end.
     pub fn state(&self, name: &str) -> Result<RunState> {
         let dir = self.dir(name);
         if !dir.join("request.json").exists() {
             return Ok(RunState::Lost);
         }
-        if let Some(ended) = read_ended(&dir)? {
-            return Ok(RunState::Finished(ended));
-        }
         if self.supervised(&dir)? {
             return Ok(RunState::Running);
         }
-        // The supervisor may have written its result between the two reads.
         if let Some(ended) = read_ended(&dir)? {
             return Ok(RunState::Finished(ended));
         }

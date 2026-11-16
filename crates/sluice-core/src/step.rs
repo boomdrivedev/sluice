@@ -1885,10 +1885,15 @@ impl Sluice<'_> {
                     }
                     continue;
                 }
+                // 60, 114, record 0122 (design D8): a report is read only
+                // for a running run under this host's own claim, through
+                // the handle its running wrote.
                 if r.state != RunState::Running {
                     continue;
                 }
-                let run = r.run.clone().expect("a running run has a handle");
+                let Some(run) = r.run.clone() else {
+                    continue;
+                };
                 match self.seams.tests.progress(&run)? {
                     Progress::Running => {}
                     Progress::Lost => {
@@ -3821,7 +3826,11 @@ impl Sluice<'_> {
             })
             .collect();
         for (c, i) in mine {
-            let handle = c.runs[i].run.clone().expect("a running run has a handle");
+            // 60, 114, record 0122 (design D8): through the handle its
+            // running wrote, and only that.
+            let Some(handle) = c.runs[i].run.clone() else {
+                continue;
+            };
             let place = c.runs[i].place.clone();
             match self.seams.tests.progress(&handle)? {
                 Progress::Running => {}
