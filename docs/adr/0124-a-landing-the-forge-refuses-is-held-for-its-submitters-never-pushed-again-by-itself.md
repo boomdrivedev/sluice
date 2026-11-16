@@ -48,3 +48,14 @@ Forming the chain again does not help: the same entries form the same tree, and 
 ## Amendment, 2026-11-16: built
 
 The change `a-runs-life-is-written-first-and-actions-runs-its-checks` builds this record. A landing the forge refuses is written in the landing with the forge's words, each of its submissions `refused`, a submission's state added under `sluice/submission@1`, and logged once, `forge_refused`. A wait on a refused submission ends at once with exit 6, saying the forge refused its landing in the forge's words. The refusal is owed to each submission's reader under `<id>:refused`, and decides no outcome. `sluice push <branch>` pushes the held landing again on the operator's word: it lands, or is held again with the forge's new words and exits 6. *Not taken:* exit 1 for a refused landing, which a reader takes as its submission failed.
+
+## Amendment, 2026-11-16: every record of an entry carries the refusal
+
+Sources: boomdrive-design's second ruling of 2026-11-16 on flume's change `a-submission-the-forge-refused-waits-on-its-caller` (flume record 0071 as amended that day): "sluice will put refused {words, at}, read from the branch's held landing, on every submission record it prints: status --all, status <id>, the inbox and wait." sluice at `44e33d4`: `decided_document` in `crates/sluice/src/lib.rs` added no `refused` and no `notice` to a refused entry's record, and `owed_on` in `crates/sluice-core/src/owed.rs` passed over a refused entry, so `sluice inbox` never handed over the `<id>:refused` the round records.
+
+The build shows the refusal on each entry the landing carries, and tells it as an outcome is told (152, 50):
+
+- **Every document of the entry.** `sluice status <branch> [--all] --json`, `sluice status <n> --json`, each element of `sluice inbox --json`, `sluice wait --json` and a waiting submit give a refused entry's record with `refused`, the forge's `words` and when (`at`), read from the branch's held landing as the wait reads it, and `notice`, the words the round pushed for the refusal. The wait's document is built as the status's is, so it gives every decided entry's `notice` too, as the submission-wait spec's "The document is the submission's record" has it.
+- **Told as an outcome is told.** `sluice inbox` hands over a refusal owed under `<id>:refused` while its entry is refused, its words read from the held landing once the round has pushed it, and every document of the entry gives its `delivery` under that key. It still decides no outcome: `Submission::decided` gives none for it.
+
+*Not taken:* `Submission::decided` giving the refusal as an outcome, which every reader of an outcome would then read as decided, against "the refusal decides no outcome"; the documents' words read from the delivery's message, which a done delivery no longer holds.
