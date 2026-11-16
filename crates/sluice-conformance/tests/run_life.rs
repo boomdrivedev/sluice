@@ -722,3 +722,68 @@ fn a_stopped_leads_claim_lapses_by_its_own_sign_of_life() {
     }
     assert_eq!(h.sub(one).state, State::Landed);
 }
+
+/// A branch whose records are on its remote, its required checks needing
+/// `macos-arm64`, which the fakes' host is not.
+fn on_macos() -> Harness {
+    let p = policy(false, "fail", 4).replace(
+        "trust = [\"open\", \"sandbox\", \"container\"]\n",
+        "trust = [\"box\"]\nremote = \"origin\"\nsystems = [\"macos-arm64\"]\n",
+    ) + "\n[signers.box]\nssh = \"box ssh-ed25519 AAAA\"\n\n[systems]\n\
+         linux-x64 = { os = \"linux\", arch = \"x86_64\" }\n\
+         macos-arm64 = { os = \"macos\", arch = \"aarch64\" }\n";
+    let h = Harness::new(&p);
+    h.w().signs_as("box");
+    h
+}
+
+/// Instance `name`, taking the runs of `systems` (`[runs] systems`).
+fn taking<'a>(h: &'a Harness, name: &str, systems: &[&str]) -> Sluice<'a> {
+    h.w().be_host(name);
+    h.sluice().as_peer(Peer {
+        name: name.into(),
+        lease: Duration::from_secs(300),
+        alive: Duration::from_secs(120),
+        signer: Some("box".into()),
+        systems: Some(systems.iter().map(|s| s.to_string()).collect()),
+        expire_after: sluice_core::EXPIRE_AFTER,
+    })
+}
+
+/// satisfies: record 0122; 66, 87; the run-life spec's "A run's time limit
+/// counts from its own running", a run that waited for room
+#[test]
+fn a_run_that_waited_for_room_has_its_whole_limit() {
+    let h = on_macos();
+    h.w().hold_runs(true);
+    h.work("unit/a", "agent-a", &[("a/lib", Some("a2"))]);
+    let one = h.submit("unit/a");
+    // The lead is no host of macos-arm64; m, the one that is, has no room
+    // for 30 minutes of a 20-minute limit.
+    lead(&h).step(BRANCH).unwrap();
+    for _ in 0..6 {
+        let m = taking(&h, "m", &["macos-arm64"]);
+        h.w().no_room();
+        m.step(BRANCH).unwrap();
+        lead(&h).step(BRANCH).unwrap();
+        h.w().advance(chrono::Duration::minutes(5));
+    }
+    assert_eq!(runs_of(&h, &[one])[0].state, RunState::Open, "it waits");
+    // m has room: it runs 10 minutes and passes.
+    let m = taking(&h, "m", &["macos-arm64"]);
+    h.w().has_room();
+    m.step(BRANCH).unwrap();
+    assert_eq!(runs_of(&h, &[one])[0].state, RunState::Running);
+    h.w().advance(chrono::Duration::minutes(10));
+    h.w().complete_all();
+    taking(&h, "m", &["macos-arm64"]).step(BRANCH).unwrap();
+    for _ in 0..3 {
+        lead(&h).step(BRANCH).unwrap();
+    }
+    assert_eq!(h.sub(one).state, State::Landed);
+    assert!(h.sub(one).failed.is_empty());
+    assert!(!h.events().iter().any(|e| matches!(
+        e,
+        Event::Result { result, .. } if result != "passed"
+    )));
+}

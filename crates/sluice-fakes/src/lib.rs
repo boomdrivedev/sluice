@@ -1127,6 +1127,14 @@ impl World {
         inner.full.insert(host);
     }
 
+    /// From now, this world's host has room again, as one whose other runs
+    /// have ended.
+    pub fn has_room(&self) {
+        let mut inner = self.0.borrow_mut();
+        let host = inner.host.clone();
+        inner.full.remove(&host);
+    }
+
     /// From now, `n` runs of other repositories go on this world's host,
     /// counted with its own against its bound (71).
     pub fn other_runs(&self, n: usize) {

@@ -1605,14 +1605,7 @@ impl Sluice<'_> {
         for head in &gone {
             self.seams.state.unpublish_head(branch, head)?;
         }
-        self.poll(
-            &mut line,
-            &rules,
-            &unmet.limits,
-            home.as_deref(),
-            listed,
-            &now,
-        )?;
+        self.poll(&mut line, &rules, &unmet, home.as_deref(), listed, &now)?;
         // 122: work the branch already holds, landed by a landing this
         // queue did not make, is landed there; nothing is formed of it.
         self.land_found(&mut line, &tip, &now)?;
@@ -1861,11 +1854,12 @@ impl Sluice<'_> {
         &self,
         line: &mut Line,
         rules: &Rules,
-        limits: &Limits,
+        unmet: &Unmet,
         home: Option<&str>,
         listed: bool,
         now: &str,
     ) -> Result<()> {
+        let limits = &unmet.limits;
         let pools = match &line.doc.base {
             Some(base) if rules.signed => {
                 self.policy_at(base)?.map(|p| p.pools).unwrap_or_default()
@@ -1946,25 +1940,34 @@ impl Sluice<'_> {
                     }
                 }
             }
-            // 66, 87: a run no executor here takes, for a system this host
-            // is not, one it turned down for what it lacks (record 0074) or,
-            // on a branch whose records are on its remote, one whose result
-            // signed here the gate would not count, is read as not passed
-            // once the time limit has gone; each of its checks says who
-            // turned it down and why, where any did.
+            // 66, 87, record 0122 (design D6): an open run no live executor
+            // may take, by its system, by the branch's signers or because
+            // each live host of it turned it down for what it lacks (record
+            // 0074), is read as not passed once the time limit has gone
+            // since it opened; each of its checks says who turned it down
+            // and why, where any did. A run a live executor may take is
+            // under no limit while it waits: its limit counts from its own
+            // running, as its executor holds it (66).
             let x = line.candidate(&c.id).expect("polled candidate").clone();
-            if let (Some(limit), Some(opened)) = (rules.timeout, x.opened.as_deref()) {
-                let over = seconds_between(opened, now).is_some_and(|s| s >= limit.as_secs_f64());
-                if over {
-                    let me = self.peer.name.clone();
+            let mut ending = BTreeSet::new();
+            if let Some(limit) = rules.timeout {
+                for (n, r) in x.runs.iter().enumerate() {
+                    let opened = r.opened.as_deref().or(x.opened.as_deref());
+                    let over = r.state == RunState::Open
+                        && opened
+                            .and_then(|o| seconds_between(o, now))
+                            .is_some_and(|s| s >= limit.as_secs_f64());
+                    if over && !self.takeable(r, home, rules, listed, unmet, &pools, now)? {
+                        ending.insert(n);
+                    }
+                }
+            }
+            {
+                if !ending.is_empty() {
                     let mut closing = Vec::new();
                     let x = line.candidate_mut(&c.id).expect("polled candidate");
                     for (n, r) in x.runs.iter_mut().enumerate() {
-                        if r.state == RunState::Open
-                            && (!ours(r, home)
-                                || r.declined.contains_key(&me)
-                                || !self.counts_here(r, home, rules, listed))
-                        {
+                        if ending.contains(&n) {
                             let checks = if r.checks.is_empty() {
                                 rules.required.clone()
                             } else {
@@ -3534,7 +3537,10 @@ impl Sluice<'_> {
 
     /// Design D4: name this host, with what the round's look found it
     /// lacks, on each open run it may take, where it has not said so for
-    /// that reason already, logging each once.
+    /// that reason already, logging each once. 78, 87, record 0122 (design
+    /// D6): a host signing as a signer the gate trusts with a key the
+    /// branch's policy does not list says so too, on each open run it would
+    /// take with a listed key, so no lead waits on it.
     fn note_declined(
         &self,
         line: &mut Line,
@@ -3544,9 +3550,10 @@ impl Sluice<'_> {
         unmet: &Unmet,
         now: &str,
     ) {
-        let Some(why) = unmet.found() else {
+        let Some(why) = self.declines(rules, listed, unmet) else {
             return;
         };
+        let why = why.as_str();
         let me = &self.peer.name;
         let mut said = Vec::new();
         for c in line
@@ -3556,7 +3563,7 @@ impl Sluice<'_> {
             .filter(|c| c.state.under_test())
         {
             for r in &mut c.runs {
-                if !self.may_claim(r, home, rules, listed)
+                if !self.may_claim(r, home, rules, true)
                     || r.declined.get(me).is_some_and(|w| w == why)
                 {
                     continue;
@@ -3573,6 +3580,21 @@ impl Sluice<'_> {
         for e in said {
             line.log(now, e);
         }
+    }
+
+    /// Design D4, record 0122 (design D6): why this host turns down the
+    /// open runs it would otherwise take: what the round's look found it
+    /// lacks, or, on a branch whose records are on its remote, that it
+    /// signs as a signer the gate trusts with a key the branch's policy
+    /// does not list. `None` where it turns down none.
+    fn declines(&self, rules: &Rules, listed: bool, unmet: &Unmet) -> Option<String> {
+        if let Some(why) = unmet.found() {
+            return Some(why.to_string());
+        }
+        let signer = self.peer.signer.as_deref()?;
+        (rules.signed && !listed && rules.claims.contains_key(signer)).then(|| {
+            format!("the branch's policy lists no key this host signs with for the signer {signer}")
+        })
     }
 
     /// 75, 79, 87, 107: whether this instance may take `run`: open and
@@ -3815,6 +3837,72 @@ impl Sluice<'_> {
         Ok(())
     }
 
+    /// 66, 87, 107, record 0122 (design D6): whether a live executor may take
+    /// `run`: this host, where it may claim it and meets what the branch's
+    /// runs ask of it; a host whose sign of life has not lapsed by this
+    /// host's own observation, that takes the run's system, signs as a
+    /// signer the gate trusts and has not turned the run down; or a pool the
+    /// policy lists for the run's system, `pools`, whose signer the gate
+    /// trusts.
+    #[allow(clippy::too_many_arguments)]
+    fn takeable(
+        &self,
+        run: &SystemRun,
+        home: Option<&str>,
+        rules: &Rules,
+        listed: bool,
+        unmet: &Unmet,
+        pools: &[crate::policy::Pool],
+        now: &str,
+    ) -> Result<bool> {
+        if self.may_claim(run, home, rules, listed) && self.meets(unmet) {
+            return Ok(true);
+        }
+        let trusted = |signer: &str| {
+            rules
+                .claims
+                .get(signer)
+                .is_some_and(|(confined, _)| !rules.confined || *confined)
+        };
+        if !rules.signed {
+            return Ok(false);
+        }
+        if pools.iter().any(|p| {
+            trusted(&p.signer)
+                && match &run.system {
+                    Some(s) => p.runners.contains_key(s),
+                    None => !p.runners.is_empty(),
+                }
+        }) {
+            return Ok(true);
+        }
+        for (host, (_, beat)) in self.seams.state.beats()? {
+            if host == self.peer.name
+                || host.starts_with("pool/")
+                || run.declined.contains_key(&host)
+            {
+                continue;
+            }
+            let v: serde_json::Value = serde_json::from_slice(&beat).unwrap_or_default();
+            if !v["signer"].as_str().is_some_and(trusted) {
+                continue;
+            }
+            let takes = match &run.system {
+                None => true,
+                Some(s) => {
+                    v["system"].as_str() == Some(s.as_str())
+                        || v["systems"]
+                            .as_array()
+                            .is_some_and(|l| l.iter().any(|x| x.as_str() == Some(s.as_str())))
+                }
+            };
+            if takes && !self.lapsed(&host, now, &[], None)? {
+                return Ok(true);
+            }
+        }
+        Ok(false)
+    }
+
     /// 77: whether `host` has shown no sign of life for the bound, by this
     /// host's own observation of its beats; a pool's job, by its pool
     /// (88).
@@ -4045,7 +4133,7 @@ impl Sluice<'_> {
             }
         }
         // Design D4: the runs it turned down for what it lacks say so.
-        if unmet.found().is_some() {
+        if self.declines(&rules, listed, &unmet).is_some() {
             self.update(branch, |l| {
                 let now = self.now();
                 self.note_declined(l, &rules, home.as_deref(), listed, &unmet, &now);
@@ -4062,6 +4150,7 @@ impl Sluice<'_> {
             "host": self.peer.name,
             "signer": self.peer.signer,
             "system": home,
+            "systems": self.peer.systems,
             "held": self.seams.tests.running()?.total(),
             "bound": self.seams.tests.bound()?,
             "at": self.now(),
