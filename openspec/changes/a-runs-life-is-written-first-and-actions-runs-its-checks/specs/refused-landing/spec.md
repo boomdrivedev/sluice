@@ -47,7 +47,7 @@ refusal SHALL decide no submission's outcome (152; record 0124).
 - **WHEN** the forge refuses #2021's landing on `bolt/x` for a test key
   it reads as a secret, and three rounds run after it
 - **THEN** the landing was pushed once, `log.jsonl` holds one
-  `landing-refused` line with the forge's words, and `sluice status
+  `forge_refused` line with the forge's words, and `sluice status
   bolt/x` shows the landing held with them
   (`a_landing_the_forge_refused_is_pushed_once_and_held` in
   `crates/sluice-conformance/tests/landing.rs`)
@@ -58,7 +58,9 @@ refusal SHALL decide no submission's outcome (152; record 0124).
 - **THEN** nothing is formed for #2022 while the landing is held, and its
   status says it waits behind the landing the forge refused
   (`the_submissions_behind_a_held_landing_wait` in
-  `crates/sluice-conformance/tests/landing.rs`)
+  `crates/sluice-conformance/tests/landing.rs`;
+  `a_landing_the_forge_refused_is_told_with_its_words` in
+  `crates/sluice/tests/cli.rs`)
 
 ### Requirement: A held landing's submissions are their submitters'
 
@@ -110,7 +112,9 @@ words.
   carrying the forge's words, and `sluice status 2021` says `held: the
   forge refused its landing:` with them
   (`a_held_landing_is_owed_to_its_submitter` in
-  `crates/sluice-conformance/tests/landing.rs`)
+  `crates/sluice-conformance/tests/landing.rs`;
+  `a_landing_the_forge_refused_is_told_with_its_words` in
+  `crates/sluice/tests/cli.rs`)
 
 ### Requirement: The operator pushes a held landing again
 

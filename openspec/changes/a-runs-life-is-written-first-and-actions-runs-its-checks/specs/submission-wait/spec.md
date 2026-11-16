@@ -36,6 +36,9 @@ exist SHALL exit 1 with the not-found error document under `--json`.
   wait <n>` waits
 - **THEN** it exits 6 at once, printing `the forge refused its landing:`
   with the forge's words, and its document is the submission's record
-  with the landing's refusal
+  with the landing's refusal, `refused` holding the forge's `words` and
+  when (`at`); a waiting `sluice submit` exits 6 the same way
   (`a_wait_on_a_landing_the_forge_refused_exits_6` in
-  `crates/sluice/tests/remote_branch.rs`)
+  `crates/sluice/tests/remote_branch.rs`;
+  `a_landing_the_forge_refused_is_told_with_its_words` in
+  `crates/sluice/tests/cli.rs`)

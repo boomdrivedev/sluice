@@ -558,6 +558,12 @@ fn a_wait_on_a_landing_the_forge_refused_exits_6() {
     assert_eq!(out.status.code(), Some(6), "{}", text(&out));
     let doc: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
     assert_eq!(doc["state"], "refused", "{doc}");
+    assert!(
+        doc["refused"]["words"]
+            .as_str()
+            .is_some_and(|w| w.contains(words)),
+        "{doc}"
+    );
     assert_eq!(s.states(), ["refused"]);
 }
 

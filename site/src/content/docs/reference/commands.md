@@ -1560,7 +1560,7 @@ it. A key refused or not found gives the error document, with its
 | `2` | a conflict, or a refusal |
 | `4` | withdrawn, and none of its work landed |
 | `5` | `sluice wait --timeout` ran out; the submission stays queued |
-| `6` | the forge refused its landing: held, with the forge's words, until `sluice push` or a withdrawal ([above](#sluice-push)) |
+| `6` | the forge refused its landing: held, with the forge's words, until `sluice push` or a withdrawal ([above](#sluice-push)). Under `--json`, the submission's record carries `refused`, the forge's `words` and `at` |
 | `130` | stopped with Ctrl-C; the submission stays queued |
 
 A submission has landed once its branch holds its work, and nothing that

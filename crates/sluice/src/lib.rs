@@ -4025,7 +4025,7 @@ fn wait_on(
                         let line = progress::testing_line(&branch, c, waiting.clock.now(), None);
                         writeln!(out, "{line}")?;
                     }
-                    None => match detail(&branch, sub, None, &mut BTreeSet::new()) {
+                    None => match detail(&branch, sub, None, None, &mut BTreeSet::new()) {
                         d if d.is_empty() => writeln!(out, "#{id} {}", sub.state.word())?,
                         d => writeln!(out, "#{id} {} · {d}", sub.state.word())?,
                     },
@@ -4258,11 +4258,19 @@ fn report(
         }
         s
     };
+    // 152, record 0124 (design D10): held, with the forge's refusal.
+    let refusal = match sub.state {
+        State::Refused => landing_refusal(s, branch, id)?,
+        _ => None,
+    };
     if json {
         let mut doc = with_carried(with_copy(serde_json::to_value(sub)?, copy)?, by);
         // 51, D13: a decided submission's delivery, where it has one.
         if let Some(delivery) = delivery {
             doc["delivery"] = delivery;
+        }
+        if let Some(r) = &refusal {
+            doc["refused"] = serde_json::json!({ "words": r.words, "at": r.at });
         }
         writeln!(out, "{}", serde_json::to_string_pretty(&doc)?)?;
         return Ok(exit_for(sub));
@@ -4468,14 +4476,7 @@ fn report(
         }
         // 152, record 0124 (design D10): held, with the forge's words.
         State::Refused => {
-            let words = log
-                .iter()
-                .rev()
-                .find_map(|l| match &l.event {
-                    Event::ForgeRefused { ids, words } if ids.contains(&id) => Some(words.clone()),
-                    _ => None,
-                })
-                .unwrap_or_default();
+            let words = refusal.map(|r| r.words).unwrap_or_default();
             writeln!(out, "held: the forge refused its landing: {words}")?;
         }
         _ => writeln!(out, "{}", sub.state.word())?,
@@ -6150,6 +6151,34 @@ fn s_state<'a>(s: &'a Sluice<'a>) -> &'a dyn sluice_seams::State {
     s.seams().state
 }
 
+/// 152, record 0124 (design D10): the forge's refusal of the landing that
+/// holds `branch`'s submission `id`, as the branch's records keep it, or,
+/// once the landing has gone from them, as its `forge_refused` line logged
+/// it.
+fn landing_refusal(
+    s: &Sluice<'_>,
+    branch: &str,
+    id: u64,
+) -> Result<Option<sluice_core::records::LandingRefused>> {
+    let snap = sluice_seams::State::read(s_state(s), branch)?;
+    let log = sluice_core::line::Line::read_log(&snap)?;
+    let line = sluice_core::line::Line::load(branch, snap)?;
+    if let Some(landing) = line.doc.landing.as_ref().filter(|l| l.ids.contains(&id)) {
+        if let Some(r) = &landing.refused {
+            return Ok(Some(r.clone()));
+        }
+    }
+    Ok(log.iter().rev().find_map(|l| match &l.event {
+        Event::ForgeRefused { ids, words } if ids.contains(&id) => {
+            Some(sluice_core::records::LandingRefused {
+                words: words.clone(),
+                at: l.at.clone(),
+            })
+        }
+        _ => None,
+    }))
+}
+
 fn exit_for(sub: &Submission) -> i32 {
     match sub.state {
         State::Landed => LANDED,
@@ -6175,10 +6204,21 @@ fn failed_name(f: &sluice_core::records::FailedTask) -> String {
     name
 }
 
+/// A branch's landing the forge refused, held: its submissions and the
+/// forge's refusal (152; record 0124).
+type HeldLanding = (Vec<u64>, sluice_core::records::LandingRefused);
+
 /// What a row says of `s` after its columns, naming the submissions it
-/// names as `names` and `said` do.
-fn detail(branch: &str, s: &Submission, names: Option<&Names>, said: &mut BTreeSet<u64>) -> String {
-    let shown = detail_of_state(branch, s, names, said);
+/// names as `names` and `said` do; `held`, the branch's landing the forge
+/// refused, where the reader read it.
+fn detail(
+    branch: &str,
+    s: &Submission,
+    held: Option<&HeldLanding>,
+    names: Option<&Names>,
+    said: &mut BTreeSet<u64>,
+) -> String {
+    let shown = detail_of_state(branch, s, held, names, said);
     // 140: what work no check reads at the branch's revision waits behind,
     // until it lands.
     match &s.beside {
@@ -6197,6 +6237,7 @@ fn detail(branch: &str, s: &Submission, names: Option<&Names>, said: &mut BTreeS
 fn detail_of_state(
     branch: &str,
     s: &Submission,
+    held: Option<&HeldLanding>,
     names: Option<&Names>,
     said: &mut BTreeSet<u64>,
 ) -> String {
@@ -6238,9 +6279,30 @@ fn detail_of_state(
                 format!("{} with {}", c.paths.join(", "), hashes(&ids, names, said))
             })
             .unwrap_or_default(),
-        State::Waiting => format!("after {}", hashes(&s.after, names, said)),
-        // 152, record 0124 (design D10).
-        State::Refused => "held: the forge refused its landing".to_string(),
+        State::Waiting => {
+            let after =
+                (!s.after.is_empty()).then(|| format!("after {}", hashes(&s.after, names, said)));
+            // 152, record 0124 (design D10): what it waits behind while the
+            // branch's landing the forge refused is held.
+            let behind = held
+                .filter(|(ids, _)| !ids.contains(&s.id))
+                .map(|(ids, _)| {
+                    format!(
+                        "waits behind the landing the forge refused of {}",
+                        hashes(ids, names, said)
+                    )
+                });
+            [after, behind]
+                .into_iter()
+                .flatten()
+                .collect::<Vec<_>>()
+                .join(" · ")
+        }
+        // 152, record 0124 (design D10): held, with the forge's words.
+        State::Refused => match held {
+            Some((_, refused)) => format!("held: the forge refused its landing: {}", refused.words),
+            None => "held: the forge refused its landing".to_string(),
+        },
         // 120, 137: withdrawn at a hand-over of intake, which holds no
         // request: the host it went to.
         State::Withdrawn => s
@@ -6386,7 +6448,13 @@ fn write_status(
             s.state.word(),
             s.from.agent,
             s.from.worktree,
-            detail(&status.branch, s, Some(names), &mut said),
+            detail(
+                &status.branch,
+                s,
+                status.landing_refused.as_ref(),
+                Some(names),
+                &mut said
+            ),
         );
         writeln!(out, "{}", line.trim_end())?;
     }

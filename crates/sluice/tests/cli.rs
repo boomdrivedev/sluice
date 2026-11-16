@@ -144,6 +144,72 @@ fn submit_waits_and_lands() {
     );
 }
 
+/// satisfies: 152, 50, 51; record 0124 (design D10); the refused-landing
+/// spec's "The submitter's notice" and "The submissions behind it", and the
+/// submission-wait spec's "A landing the forge refused": a waiting submit
+/// whose landing the forge refuses while it waits exits 6 with the forge's
+/// words; a wait's document is the submission's record with the refusal;
+/// `sluice status <n>` gives the refused submission's row with the words,
+/// and a submission queued behind it waits behind the held landing
+#[test]
+fn a_landing_the_forge_refused_is_told_with_its_words() {
+    let f = setup();
+    let words = "remote: error: GH013: Repository rule violations found for refs/heads/main.";
+    f.world.forge_refuses(BRANCH, Some(words));
+    work(
+        &f,
+        "unit/touches",
+        "crw-1-unit-1",
+        &[("plugin/lib/plan.py", Some("touched"))],
+    );
+    let (code, out) = sluice(&f, &["submit", BRANCH, "--worktree", "unit/touches"]);
+    assert_eq!(code, sluice::REFUSED, "{out}");
+    assert!(
+        out.contains(&format!("held: the forge refused its landing: {words}")),
+        "{out}"
+    );
+
+    let (code, out) = sluice(&f, &["wait", "1", "--json"]);
+    assert_eq!(code, sluice::REFUSED, "{out}");
+    let doc: serde_json::Value = serde_json::from_str(&out).unwrap();
+    assert_eq!(doc["state"], "refused", "{doc}");
+    assert_eq!(doc["id"], 1, "{doc}");
+    assert_eq!(doc["refused"]["words"], words, "{doc}");
+    assert!(doc["refused"]["at"].is_string(), "{doc}");
+
+    work(
+        &f,
+        "unit/cards",
+        "crw-1-unit-2",
+        &[("tests/t_cards.py", Some("cards 2"))],
+    );
+    let (code, out) = sluice(
+        &f,
+        &["submit", BRANCH, "--worktree", "unit/cards", "--no-wait"],
+    );
+    assert_eq!(code, 0, "{out}");
+    sluice(&f, &["step", BRANCH]);
+    let (code, out) = sluice(&f, &["status", "1"]);
+    assert_eq!(code, 0, "{out}");
+    let row = out
+        .lines()
+        .find(|l| l.trim_start().starts_with("#1 "))
+        .unwrap_or_else(|| panic!("#1's row: {out}"));
+    assert!(
+        row.ends_with(&format!("held: the forge refused its landing: {words}")),
+        "{row}"
+    );
+    let (_, out) = sluice(&f, &["status", "2"]);
+    let row = out
+        .lines()
+        .find(|l| l.trim_start().starts_with("#2 "))
+        .unwrap_or_else(|| panic!("#2's row: {out}"));
+    assert!(
+        row.ends_with("waits behind the landing the forge refused of #1 unit/touches"),
+        "{row}"
+    );
+}
+
 #[test]
 fn submit_fails_and_names_the_combination() {
     let f = setup();
