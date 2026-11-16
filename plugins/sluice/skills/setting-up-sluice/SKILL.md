@@ -319,7 +319,7 @@ ruleset with the button left on.
 | how work reaches the queue | straight from a worktree, or pull requests | [pull-requests](references/profiles/pull-requests.md) |
 | running copies of landed revisions (`[preview]`) | a command per repository | [previews](references/profiles/previews.md) |
 | more than one host, or more than one system (`[signers]`, `[systems]`) | peers on the git remote, standing hosts signing with SSH keys | [peers](references/profiles/peers.md) |
-| runs no standing host takes, a burst or a system none runs (`[pools]`) | a pool on GitHub Actions, set up by `sluice init actions`; or a CodeBuild fleet in the project's own AWS account, set up by `sluice init codebuild`, which can take every run of a branch whose `trust` names only its signer | [running checks on a pool](https://agentplot.github.io/sluice/guides/pools/) |
+| runs no standing host takes, a burst or a system none runs (`[pools]`) | a pool on GitHub Actions, set up by `sluice init actions`; or a CodeBuild fleet in the project's own AWS account, set up by `sluice init codebuild`, which can take every run of a branch whose `trust` names its signer beside the leading hosts' signer with `systems = []` | [running checks on a pool](https://agentplot.github.io/sluice/guides/pools/) |
 
 The rules per branch (`required`, `parallel`, `batch`, `hold`, `flaky`,
 `timeout`, `release_retries`, `trust`) and `[landing] subject` are in the

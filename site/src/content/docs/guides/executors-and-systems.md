@@ -153,9 +153,9 @@ and claims go earliest combination first. A pool takes a run no host
 takes, a burst or a system no box runs, in a job of its own, and holds
 no part of any host's bound. sluice has two. GitHub Actions starts one
 workflow run for each run. A CodeBuild fleet of your own starts one
-build on a warm instance for each run, and takes every run of a branch
-whose gate trusts only its signer: [Running checks on a
-pool](/sluice/guides/pools/).
+build on a warm instance for each run. It takes every run of a branch
+whose gate trusts its signer beside a leading hosts' signer that may
+claim no system: [Running checks on a pool](/sluice/guides/pools/).
 
 ## Watching it
 

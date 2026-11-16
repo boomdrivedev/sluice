@@ -1133,7 +1133,9 @@ walks through it.
 
 Reads each CodeBuild pool the policy at the branch's revision names back
 from AWS, as the host's [`[aws] profile`](/sluice/reference/configuration/#aws)
-reaches it, or `--profile <p>`. It says who it reaches AWS as. Each run
+reaches it, or `--profile <p>`. It fails where the branch's `trust`
+names no signer a host signs as, since no host can then lead it. It
+says who it reaches AWS as. Each run
 project must run on a reserved-capacity fleet of its system, with the
 buildspec this release writes and a timeout longer than the branch's.
 The sign project's buildspec must be the one this release writes. The

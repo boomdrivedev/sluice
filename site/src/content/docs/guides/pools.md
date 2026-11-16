@@ -32,9 +32,10 @@ signs as a signer the branch's `trust` names. A host that may take the
 run and has room takes it first. A pool's runs hold no part of any
 host's bound.
 
-A gate that trusts only the pool's signer sends it every run: no host
-of yours signs as a signer the gate trusts, so none takes one. That is
-how a branch runs every check on a CodeBuild fleet.
+A gate that trusts the pool's signer, and a signer of your hosts that
+may claim no system, sends the pool every run. Your hosts lead the
+branch, since the gate trusts their signer, and take none of its runs.
+That is how a branch runs every check on a CodeBuild fleet.
 
 A run the pool can't take either, with no runner named for its system,
 waits for a host. When the branch's `timeout` passes with nothing able
@@ -211,7 +212,7 @@ Then name the pool in the policy, from the stack you deployed:
 
 ```console
 $ sluice init codebuild --stack sluice --region us-east-1
-.config/sluice.toml: [signers.codebuild], naming the key arn:aws:kms:us-east-1:111122223333:key/1234abcd-12ab-34cd-56ef-1234567890ab, and [pools.codebuild] appended; a branch's `trust` names codebuild and its `systems` the systems its runs need
+.config/sluice.toml: [signers.codebuild], naming the key arn:aws:kms:us-east-1:111122223333:key/1234abcd-12ab-34cd-56ef-1234567890ab, and [pools.codebuild] appended; a branch's `trust` names codebuild and the signer its leading hosts sign as, that signer's `systems = []` so it claims no run, and the branch's `systems` the systems its runs need
 ```
 
 It reads the stack's key with your own AWS credentials, `--profile`
@@ -235,27 +236,43 @@ region, its sign project and the run project for each system.
 
 ### Test side by side
 
-A fleet runs as many runs at once as it has instances. Set the
-branch's `trust` to `codebuild` alone, so every run goes to the fleet,
-and test each combination side by side at the fleet's size:
+A host of yours leads the branch, running its rounds and starting each
+run on the fleet. A host leads a branch whose queue is on its remote
+only when it signs as a signer the branch's gate trusts. A branch whose
+`trust` names only the pool's signer has no host to lead it, and nothing
+happens. Name the signer your leading hosts sign as, with
+`systems = []`, and trust it beside `codebuild`:
 
 ```toml
+[signers.lead]
+ssh = ".config/sluice.leads"   # each leading host's key
+systems = []                   # it may claim no run
+
 [branches.main]
 remote = "origin"
-trust = ["codebuild"]
+trust = ["lead", "codebuild"]
 systems = ["linux-x64"]
 batch = false
 parallel = 8
 ```
 
-`batch = false` tests each combination as it forms, rather than
-waiting to test the deepest, and `parallel` at the fleet's maximum keeps
-every instance busy. See [Parallel and batch](/sluice/guides/parallel-and-batch/).
+A signer whose `systems` is empty claims no run and counts for no
+result, whatever the run's system. So the leading hosts take none of the
+branch's runs, whatever executors they have, and the fleet's results
+are the only ones that land anything. A host can't sign as `codebuild`:
+its one key is the key in AWS KMS.
+
+A fleet runs as many runs at once as it has instances, so test each
+combination side by side at the fleet's size. `batch = false` tests each
+combination as it forms, rather than waiting to test the deepest, and
+`parallel` at the fleet's maximum keeps every instance busy. See
+[Parallel and batch](/sluice/guides/parallel-and-batch/).
 
 `sluice pool check main` reads the pool back from AWS:
 
 ```console
 $ sluice pool check main
+ok      main is led by a host signing as lead
 ok      [pools.codebuild] is reached in us-east-1 as arn:aws:sts::111122223333:assumed-role/sluice-lead/host-a
 ok      sluice-run-linux-x64 runs linux-x64 on the reserved-capacity fleet sluice-linux-x64, LINUX_EC2
 ok      sluice-run-linux-x64's buildspec is as sluice 1.2.3 writes it, cloning acme/widgets
@@ -264,8 +281,9 @@ ok      sluice-sign's buildspec is as sluice 1.2.3 writes it
 ok      the key arn:aws:kms:us-east-1:111122223333:key/1234abcd-12ab-34cd-56ef-1234567890ab is ECC_NIST_P256, SIGN_VERIFY, and its public half is the one [signers.codebuild] lists
 ```
 
-It fails naming each that does not hold, and says, failing nothing,
-where the branch doesn't test side by side at the fleet's size. Land the
+It fails naming each that does not hold, a branch whose trust names no
+signer a host signs as among them. Where the branch doesn't test side by
+side at the fleet's size, it says so, failing nothing. Land the
 policy, and the next round starts the first run on the fleet.
 
 ### What a run does
