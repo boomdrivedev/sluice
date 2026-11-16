@@ -253,10 +253,11 @@ done) </dev/null >>"$ROOT/driver.log" 2>&1 &
 echo $! >"$ROOT/driver.pid"
 
 # Ready: the check as above; #C under test alone with three tasks passed and one running, #D queued, so the agent's
-# check holds the queue back; the blame and the landing recent.
+# check holds the queue back; the blame and the landing recent. The room is read by its four counts alone, beside
+# which it names the runs waiting, the turn and each repository's runs (150).
 ready() {
   checking && sluice overview --json | jq -e --argjson c "$C" --argjson d "$D" --argjson a "$A" --argjson b "$B" '
-    .room == {bound: 2, queue: 1, sessions: 1, reserve: 0} and
+    (.room | {bound, queue, sessions, reserve}) == {bound: 2, queue: 1, sessions: 1, reserve: 0} and
     (.branches[] | select(.branch == "main") |
     ([.candidates[] | select(.state == "testing" and .submissions == [$c]) | .tasks] | first // []) as $t |
     ([$t[] | select(.state == "passed")] | length) >= 3 and

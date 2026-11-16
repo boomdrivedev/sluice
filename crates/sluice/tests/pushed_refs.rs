@@ -1473,8 +1473,9 @@ fn a_second_push_carries_the_first_ones_lease() {
 }
 
 /// 134, 24, 45: a push the remote answered at the ref is the move refused
-/// and made once, whatever the remote said besides; so is one whose lease
-/// git found stale.
+/// and made once, whatever the remote said besides: with the branch where
+/// the move expected it, refused by the forge in its words whole (152,
+/// rule core.5, record 0124); so is one whose lease git found stale.
 #[test]
 fn a_push_refused_at_the_ref_is_made_once() {
     let repo = Repo::new("refused-at-the-ref");
@@ -1498,13 +1499,13 @@ fn a_push_refused_at_the_ref_is_made_once() {
     let url = format!("{}/o/r.git", fake.url());
     let identity = Rc::new(FakeIdentity::new(&url, "fake-token"));
     let p = as_identity(&repo, &identity);
-    let err = format!(
-        "{:#}",
-        p.move_to("main", &rev(base.clone()), &to).unwrap_err()
-    );
-    assert!(err.contains("protected branch hook declined"), "{err}");
-    assert!(err.contains("error: 403 Forbidden"), "{err}");
-    assert_eq!(pushes(&fake).len(), 1, "one push: {err}");
+    let words = match p.move_to("main", &rev(base.clone()), &to).unwrap() {
+        Moved::Refused(words) => words,
+        other => panic!("{other:?}"),
+    };
+    assert!(words.contains("protected branch hook declined"), "{words}");
+    assert!(words.contains("error: 403 Forbidden"), "{words}");
+    assert_eq!(pushes(&fake).len(), 1, "one push: {words}");
     assert_eq!(identity.renewed.get(), 0);
 
     let fake = {
