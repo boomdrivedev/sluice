@@ -10176,3 +10176,124 @@ fn job_record_under_a_lapsed_claim_is_refused() {
     );
     assert!(f.world.signed_adds().is_empty());
 }
+
+/// A working copy holding `policy` as its policy, for `sluice init`.
+fn copy_with(policy: &str) -> support::Scratch {
+    let dir = support::Scratch::new("init-actions");
+    std::fs::create_dir_all(dir.path().join(".config")).unwrap();
+    std::fs::write(dir.path().join(POLICY_PATH), policy).unwrap();
+    dir
+}
+
+/// `sluice init actions` in `dir`, `--force` where asked.
+fn init_actions(f: &Fakes, dir: &std::path::Path, force: bool) -> (i32, String) {
+    let mut args = vec!["init", "actions", "--worktree", dir.to_str().unwrap()];
+    if force {
+        args.push("--force");
+    }
+    sluice(f, &args)
+}
+
+const INIT_POLICY: &str = "[tests]\nrunner = \"moon\"\n\n# The queue's gate.\n\
+    [branches.main]\nrequired = [\"#gate\"]\nremote = \"origin\"\n";
+
+/// satisfies: record 0119 (design D14); C.8; the actions-pool spec's
+/// "sluice init actions sets the pool up"
+#[test]
+fn init_actions_writes_both_workflows_and_the_pool() {
+    use sluice::profiles::github::workflows;
+    let f = setup();
+    let dir = copy_with(INIT_POLICY);
+    let (code, said) = init_actions(&f, dir.path(), false);
+    assert_eq!(code, 0, "{said}");
+    let read = |name: &str| {
+        std::fs::read_to_string(dir.path().join(".github/workflows").join(name)).unwrap()
+    };
+    let runners =
+        std::collections::BTreeMap::from([("linux-x64".to_string(), "ubuntu-24.04".to_string())]);
+    assert_eq!(read("sluice.yml"), workflows::sluice(sluice::VERSION));
+    assert_eq!(
+        read("sluice-pr.yml"),
+        workflows::sluice_pr(sluice::VERSION, &runners)
+    );
+    let policy = std::fs::read_to_string(dir.path().join(POLICY_PATH)).unwrap();
+    assert!(
+        policy.starts_with(INIT_POLICY),
+        "the file's own lines untouched: {policy}"
+    );
+    let p = sluice_core::policy::Policy::parse(&policy).expect("the policy parses");
+    assert_eq!(p.pools.len(), 1);
+    assert_eq!(p.pools[0].name, "forge");
+    assert_eq!(p.pools[0].signer, "forge");
+    assert_eq!(p.pools[0].runners, runners);
+    assert!(p.signers.contains_key("forge"));
+    assert!(said.contains("Actions, read and write"), "{said}");
+    assert!(said.contains("environment named `sluice`"), "{said}");
+
+    // Again: nothing changes.
+    let (code, said) = init_actions(&f, dir.path(), false);
+    assert_eq!(code, 0, "{said}");
+    assert!(said.contains("sluice.yml: as sluice writes it"), "{said}");
+    assert!(said.contains("names its pool on GitHub already"), "{said}");
+    assert_eq!(
+        std::fs::read_to_string(dir.path().join(POLICY_PATH)).unwrap(),
+        policy
+    );
+}
+
+/// satisfies: record 0119 (design D14); the actions-pool spec's "A
+/// workflow that differs is left unless forced"
+#[test]
+fn init_actions_leaves_a_differing_workflow_unless_forced() {
+    use sluice::profiles::github::workflows;
+    let f = setup();
+    let dir = copy_with(INIT_POLICY);
+    let at = dir.path().join(".github/workflows");
+    std::fs::create_dir_all(&at).unwrap();
+    let edited = workflows::sluice(sluice::VERSION).replace("name: sluice\n", "name: ours\n");
+    std::fs::write(at.join("sluice.yml"), &edited).unwrap();
+    let (code, said) = init_actions(&f, dir.path(), false);
+    assert_eq!(code, FAILED, "{said}");
+    assert!(
+        said.contains("sluice.yml: left as it is; line 8 holds \"name: ours\", where sluice writes \"name: sluice\"; --force writes it"),
+        "{said}"
+    );
+    assert_eq!(
+        std::fs::read_to_string(at.join("sluice.yml")).unwrap(),
+        edited
+    );
+    assert!(at.join("sluice-pr.yml").exists(), "the other is written");
+
+    let (code, said) = init_actions(&f, dir.path(), true);
+    assert_eq!(code, 0, "{said}");
+    assert_eq!(
+        std::fs::read_to_string(at.join("sluice.yml")).unwrap(),
+        workflows::sluice(sluice::VERSION)
+    );
+}
+
+/// satisfies: record 0119 (design D14); the actions-pool spec's "A pool the
+/// policy names is kept"
+#[test]
+fn init_actions_keeps_a_pool_the_policy_names() {
+    let f = setup();
+    let policy = format!(
+        "{INIT_POLICY}\n[systems]\nmacos-arm64 = {{ os = \"macos\", arch = \"aarch64\" }}\n\
+         \n[signers.ci]\ngithub = {{ workflow = \".github/workflows/sluice.yml\", ref = \"refs/heads/main\" }}\n\
+         \n[pools.ci]\ngithub = {{ workflow = \".github/workflows/sluice.yml\" }}\nsigner = \"ci\"\n\
+         runners = {{ macos-arm64 = \"macos-15-large\" }}\n"
+    );
+    let dir = copy_with(&policy);
+    let (code, said) = init_actions(&f, dir.path(), false);
+    assert_eq!(code, 0, "{said}");
+    assert_eq!(
+        std::fs::read_to_string(dir.path().join(POLICY_PATH)).unwrap(),
+        policy,
+        "the policy as it was"
+    );
+    let pr = std::fs::read_to_string(dir.path().join(".github/workflows/sluice-pr.yml")).unwrap();
+    assert!(
+        pr.contains("include: [{system: macos-arm64, runner: macos-15-large}]"),
+        "{pr}"
+    );
+}

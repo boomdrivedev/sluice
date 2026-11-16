@@ -14,6 +14,7 @@ pub mod host_count;
 pub mod host_process;
 pub mod host_settings;
 pub mod identity;
+pub mod init;
 pub mod instance;
 pub mod job;
 pub mod overview;
@@ -630,6 +631,12 @@ pub enum Command {
     Forge {
         #[command(subcommand)]
         command: ForgeCommand,
+    },
+    /// Set sluice up in this working copy.
+    #[command(after_help = "Example:\n  $ sluice init actions")]
+    Init {
+        #[command(subcommand)]
+        command: InitCommand,
     },
     /// A pool's job, as the workflow `sluice init actions` writes runs it:
     /// its run, its signature and its record (record 0119).
@@ -1252,6 +1259,23 @@ pub enum ForgeCommand {
         /// One JSON document on stdout.
         #[arg(long)]
         json: bool,
+    },
+}
+
+#[derive(Subcommand, Debug)]
+pub enum InitCommand {
+    /// Write the workflows a pool on GitHub Actions runs, append its signer
+    /// and pool to the policy where it names no pool on GitHub, and say what
+    /// to set on GitHub. A workflow that differs is left, exit 1, unless
+    /// --force.
+    #[command(after_help = "Examples:\n  $ sluice init actions\n  $ sluice init actions --force")]
+    Actions {
+        /// The working copy to set up.
+        #[arg(long, default_value = ".")]
+        worktree: PathBuf,
+        /// Write a workflow that differs from what sluice writes.
+        #[arg(long)]
+        force: bool,
     },
 }
 
@@ -1949,6 +1973,9 @@ pub fn run(
             json,
         } => confirm(&s, &keys, who.is_some(), &worktree, json, out),
         Command::Job { .. } => unreachable!("a job is run before the instance"),
+        Command::Init {
+            command: InitCommand::Actions { worktree, force },
+        } => init::actions(&worktree, force, out),
         Command::Step { branch, json } => {
             // Rule core.14 (design D10): the host process's round of the
             // branch, between its passes, printed as a step prints it.
