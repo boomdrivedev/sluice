@@ -12,12 +12,12 @@ bun run dev            # http://localhost:4321/sluice/
 bun run build          # dist/, with every internal link checked
 ```
 
-The prose is checked by [Vale](https://vale.sh) from the repository root,
-with the rules in `styles/Sluice` and the settings in `.vale.ini`:
-`devenv shell -- prose`, or `moon run site:prose`, which the fast tier
-runs. The generated `decisions/` pages are left out, since a decision
-record says what was weighed, and so is the rules page, whose rules are
-`docs/architecture/core.md`'s own words.
+A writer can run [Vale](https://vale.sh) over the prose from the
+repository root, with the rules in `styles/Sluice` and the settings in
+`.vale.ini`: `devenv shell -- prose`. No task of the gate reads the pages
+(record 0127). The generated `decisions/` pages are left out, since a
+decision record says what was weighed, and so is the rules page, whose
+rules are `docs/architecture/core.md`'s own words.
 
 ## Where the pages live
 
@@ -29,7 +29,7 @@ from the directories in `astro.config.mjs`:
 | `index.mdx` | the start page: why, the four steps, install, quick start |
 | `guides/` | the walkthrough |
 | `reference/` | configuration, commands, state, telemetry |
-| `architecture/` | how sluice is built; `rules.md` is **made** from the rule list of `docs/architecture/core.md` by `scripts/rules.mjs` and committed, and `moon run site:rules` fails when the two differ |
+| `architecture/` | how sluice is built; `rules.md` is **generated** from the rule list of `docs/architecture/core.md` by `scripts/rules.mjs` before every build and dev; not committed |
 | `decisions/` | **generated**: one page per record in `docs/adr/`, by `scripts/adrs.mjs` before every build and dev; not committed |
 | `many-hosts/` | the multi-host design, marked as under review and not built |
 | `roadmap.md` | what is built and what is designed |

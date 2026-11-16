@@ -1,8 +1,7 @@
 // Writes the site's rules page, src/content/docs/architecture/rules.md,
 // from the rule list of docs/architecture/core.md, each rule's id linked to
-// core.md's details. The page is committed; `--check` writes nothing and
-// fails when the committed page is not what core.md makes (site:rules).
-// Change a rule in core.md, then run `node site/scripts/rules.mjs`.
+// core.md's details. Run before every build and dev (package.json); the
+// page is not committed (record 0127).
 import { readFileSync, writeFileSync } from "node:fs";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -26,8 +25,8 @@ if (!/\*\*\[core\.\d+\]\(/.test(rules)) throw new Error("core.md: no rule in `##
 
 const page = [
   "---",
-  "# Written by site/scripts/rules.mjs from docs/architecture/core.md; site:rules",
-  "# fails when the two differ. Change core.md, then run the script.",
+  "# Written by site/scripts/rules.mjs from docs/architecture/core.md at each",
+  "# build and dev; change core.md.",
   "title: Rules",
   "description: The rules that bind every change to the repository, cited by clause and decision.",
   `editUrl: https://github.com/agentplot/sluice/edit/main/docs/architecture/core.md`,
@@ -44,19 +43,5 @@ const page = [
   "",
 ].join("\n");
 
-if (process.argv.includes("--check")) {
-  let committed = "";
-  try {
-    committed = readFileSync(target, "utf8");
-  } catch {}
-  if (committed !== page) {
-    console.error(
-      "site/src/content/docs/architecture/rules.md differs from what docs/architecture/core.md makes; run `node site/scripts/rules.mjs` and commit it.",
-    );
-    process.exit(1);
-  }
-  console.log("rules: the page matches docs/architecture/core.md");
-} else {
-  writeFileSync(target, page);
-  console.log("rules: written from docs/architecture/core.md");
-}
+writeFileSync(target, page);
+console.log("rules: written from docs/architecture/core.md");
