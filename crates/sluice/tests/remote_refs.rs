@@ -1934,7 +1934,7 @@ fn kms_record(key: &p256::ecdsa::SigningKey, claim: &str) -> Vec<u8> {
 /// signed by the listed key with a high S, reads on another host as signed
 /// by the signer, verified by the public half the policy lists alone; no
 /// AWS service is reached, since nothing but git and the half is read; and
-/// the signer lists a pool's job, which holds no SSH key, so it may claim.
+/// the signer lists no host's SSH key.
 #[test]
 fn a_kms_record_verifies_by_the_listed_half_alone() {
     use sluice_seams::State as _;
@@ -1961,7 +1961,8 @@ fn a_kms_record_verifies_by_the_listed_half_alone() {
     assert_eq!(l.signer.as_deref(), Some("codebuild"));
     assert_eq!(l.host.as_deref(), Some("pool/codebuild/4"));
     assert_eq!(l.system.as_deref(), Some("linux-x64"));
-    assert!(SignerKey::kms(KMS_KEY, &kms_public(&kms_key))
+    // No host's SSH key is a kms signer's key.
+    assert!(!SignerKey::kms(KMS_KEY, &kms_public(&kms_key))
         .unwrap()
         .lists(key().public_key()));
 }
@@ -2014,4 +2015,43 @@ fn a_kms_record_by_another_key_counts_for_nothing() {
         why.contains("[signers.codebuild]") && why.contains("key/another"),
         "{why}"
     );
+}
+
+/// 78, 87, rule core.60 (boomdrive-design's ruling of 2026-11-16 on the
+/// change `a-codebuild-fleet-runs-a-queues-checks`): a kms signer's one key
+/// is its key in KMS, so a host signing as one, with any SSH key, is
+/// verified as no signer of the branch's: it is not accepted, leads
+/// nothing and claims nothing.
+#[test]
+fn a_kms_record_is_never_a_hosts() {
+    let kms_key = p256::ecdsa::SigningKey::random(&mut rand_core::OsRng);
+    let a = Repo::new("rr-kms-host");
+    a.write(
+        ".config/sluice.toml",
+        &format!(
+            "[signers.codebuild]\nkms = {{ key = \"{KMS_KEY}\", public = \"{}\" }}\n\
+             \n[branches.main]\nremote = \"origin\"\ntrust = [\"codebuild\"]\n",
+            kms_public(&kms_key)
+        ),
+    );
+    a.git(&["add", "-A"]);
+    a.git(&["commit", "-q", "-m", "a kms signer"]);
+    let _bare = a.bare_origin();
+    let keys = Scratch::new("rr-kms-host-key");
+    let path = keys.path().join("signing");
+    key()
+        .write_openssh_file(&path, ssh_key::LineEnding::LF)
+        .unwrap();
+    use std::os::unix::fs::PermissionsExt;
+    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).unwrap();
+    let r = sluice::profiles::records::Records::new(
+        &a.dir().join(".git"),
+        sluice::profiles::branches::Branches::open_as(a.dir(), None, recorded()).unwrap(),
+        Some(sluice::instance::Signing {
+            signer: "codebuild".into(),
+            key: path,
+        }),
+    );
+    let main = Rev::new(a.rev("main"));
+    assert!(!r.verifies_own("main", &main).unwrap());
 }

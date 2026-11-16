@@ -68,6 +68,10 @@ What the code does at 44e33d4e:
 ### D1. The policy names a CodeBuild pool and a `kms` signer
 
 ```toml
+[signers.lead]
+ssh = ".config/sluice.leads"
+systems = []
+
 [signers.codebuild]
 kms = { key = "arn:aws:kms:us-east-1:111122223333:key/1234abcd-12ab-34cd-56ef-1234567890ab", public = "MFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAE…" }
 systems = ["linux-x64"]
@@ -92,10 +96,25 @@ runners = { linux-x64 = "sluice-run-linux-x64" }
   rule that a pool signs as a signer of its own kind becomes that
   pairing; any other pairing is refused naming both.
 
-A gate that trusts only `codebuild` has every run go to the pool: no
-standing host signs as a signer it trusts, so `takeable` finds none
-(107). The guide says to set `batch = false` and `parallel` to the
-fleet's maximum (D10, D11).
+A branch on the fleet trusts `codebuild` and `lead`, the signer its
+leading hosts sign as, which may claim no system: `trust = ["lead",
+"codebuild"]`. A branch whose trust names only pools' signers has no
+host that can lead it, since a host leads a branch held on its remote
+only signing as a signer its gate trusts (rule core.60, clause 137;
+record 0093 as amended), and forms nothing. `lead`'s signature is
+accepted, so its hosts lead; its `systems = []` claims no run and counts
+for no result, whatever the run's system, one naming none included, so
+every run goes to the pool (107) and the pool's results are the only
+ones that land anything, whatever executors the leading hosts have. The
+guide says to set `batch = false` and `parallel` to the fleet's maximum
+(D10, D11).
+
+*Not taken:* a host the policy names leading the branch untrusted,
+which loosens record 0093 as amended ("A machine whose signature the
+branch does not accept leads none of its rounds and runs none of its
+checks") where the empty list reaches the same within it; trusting the
+leading hosts' signer for its systems, so a host that gained an executor
+would land code on its own results.
 
 *Not taken:* the fleet's ARN in `runners`, with the lead passing it as
 `fleetOverride` to one project for every system. A project per system
@@ -247,9 +266,10 @@ verifies with `p256`. `SignerKey` gains `Kms { key, public }`, read from
 record whose `keyid` is not the listed ARN or whose signature the half
 does not verify counting for nothing, with why in the reading process's
 own warning, as a keyless record that does not verify (D13 of the
-Actions change). `SignerKey::lists` holds for a pool's `kms` signer, so
-a pool's job claims. The statement is sluice's run statement, as every
-signer signs today.
+Actions change). A `kms` signer's one listed key is its key in KMS, so
+`SignerKey::lists` lists no host's SSH key for it: a host signing as one
+is not accepted, leads nothing and claims nothing (rule core.60). The
+statement is sluice's run statement, as every signer signs today.
 
 sluice never asks KMS for a public half: 78 reads a run from the records
 alone, so a `kms` signer with no `public` is refused (D1), where timber's
@@ -350,8 +370,10 @@ untouched.
 
 ### D11. `sluice pool check <branch>`
 
-For each CodeBuild pool the policy at the branch's revision names, it
-reports, with the host's chain: the identity the host reaches AWS as;
+It names a branch whose trust names no signer a host can sign as, which
+no host can lead (D1), so that misconfiguration is told and never idles
+silently. For each CodeBuild pool the policy at the branch's revision
+names, it reports, with the host's chain: the identity the host reaches AWS as;
 each runner project on a reserved-capacity fleet of its system's
 environment, its buildspec as `sluice init codebuild` writes it for this
 release, and its timeout longer than the branch's `timeout`; the sign

@@ -4015,16 +4015,11 @@ impl Sluice<'_> {
         let Some(signer) = &self.peer.signer else {
             return false;
         };
-        let Some((may_confine, systems)) = rules.claims.get(signer) else {
+        let Some((may_confine, _)) = rules.claims.get(signer) else {
             return false;
         };
         let system = run.system.as_deref().or(home);
-        listed
-            && (!rules.confined || *may_confine)
-            && match (system, systems) {
-                (Some(s), Some(list)) => list.iter().any(|x| x == s),
-                _ => true,
-            }
+        listed && (!rules.confined || *may_confine) && rules.may_claim(signer, system)
     }
 
     /// 78, 87: whether `branch`'s policy at `tip`, the revision the round
@@ -4131,11 +4126,14 @@ impl Sluice<'_> {
                 room,
             ));
         }
-        let trusted = |signer: &str| {
+        // 79: a host whose signer may claim no run of the system takes none
+        // (boomdrive-design's ruling of 2026-11-16).
+        let trusted = |signer: &str, system: Option<&str>| {
             rules
                 .claims
                 .get(signer)
                 .is_some_and(|(confined, _)| !rules.confined || *confined)
+                && rules.may_claim(signer, system)
         };
         let mut lead_room = self.free_runs()?;
         let open: Vec<(String, usize)> = chain
@@ -4160,7 +4158,9 @@ impl Sluice<'_> {
             }
             let taker = rooms.iter_mut().find(|(signer, system, room)| {
                 *room > 0
-                    && signer.as_deref().is_some_and(&trusted)
+                    && signer
+                        .as_deref()
+                        .is_some_and(|s| trusted(s, run.system.as_deref()))
                     && (run.system.is_none() || *system == run.system)
             });
             if let Some(t) = taker {
@@ -4170,7 +4170,7 @@ impl Sluice<'_> {
             // A pool with a runner of the run's system, whose signer the
             // gate trusts.
             let pool = policy.pools.iter().find(|p| {
-                trusted(&p.signer)
+                trusted(&p.signer, run.system.as_deref())
                     && match &run.system {
                         Some(s) => p.runners.contains_key(s),
                         None => !p.runners.is_empty(),
@@ -4404,11 +4404,14 @@ impl Sluice<'_> {
         if self.may_claim(run, home, rules, listed) && self.meets(unmet) {
             return Ok(true);
         }
+        // 79: a signer that may claim no run of the system takes none
+        // (boomdrive-design's ruling of 2026-11-16).
         let trusted = |signer: &str| {
             rules
                 .claims
                 .get(signer)
                 .is_some_and(|(confined, _)| !rules.confined || *confined)
+                && rules.may_claim(signer, run.system.as_deref())
         };
         if !rules.signed {
             return Ok(false);

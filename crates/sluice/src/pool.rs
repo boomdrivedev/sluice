@@ -88,6 +88,35 @@ pub fn check(
     if policy.pools.is_empty() {
         lines.push(Line::Failed(format!("{branch}'s policy names no pool")));
     }
+    // Rule core.60 (boomdrive-design's ruling of 2026-11-16): a host leads
+    // a branch held on its remote only signing as a signer its gate trusts,
+    // and a host signs as an `ssh` signer alone; a gate that trusts only
+    // pools' signers has no lead, and its branch forms nothing.
+    let hosts: Vec<&String> = rules
+        .trust
+        .iter()
+        .filter(|t| {
+            policy
+                .signers
+                .get(*t)
+                .is_some_and(|s| s.identity.0 == "ssh")
+        })
+        .collect();
+    match (rules.signed, hosts.as_slice()) {
+        (true, []) => lines.push(Line::Failed(format!(
+            "{branch}'s trust names no signer a host signs as, so no host can lead it and it \
+             forms nothing: trust the signer its leading hosts sign as beside the pool's, \
+             with systems = [] so it claims no run"
+        ))),
+        (true, leads) => {
+            let names: Vec<&str> = leads.iter().map(|s| s.as_str()).collect();
+            lines.push(Line::Ok(format!(
+                "{branch} is led by a host signing as {}",
+                names.join(" or ")
+            )));
+        }
+        (false, _) => {}
+    }
     for pool in &policy.pools {
         match pool.kind.0.as_str() {
             "codebuild" => lines.extend(fleet(&policy, &rules, pool, aws)?),

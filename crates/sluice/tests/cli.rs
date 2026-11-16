@@ -11172,13 +11172,15 @@ fn init_codebuild_from_a_stack_appends_the_pool() {
     );
 }
 
-/// `main` on `origin` trusting the CodeBuild pool `codebuild` alone, its
-/// key's public half `public`, testing as `rules` say.
+/// `main` on `origin` trusting the CodeBuild pool `codebuild`, its key's
+/// public half `public`, and `lead`, its leading hosts' signer, which may
+/// claim no system, testing as `rules` say.
 fn fleet_policy(public: &str, rules: &str) -> String {
     format!(
         "[tests]\nrunner = \"fake\"\n\n[checkout]\n\n\
          [branches.main]\nrequired = [\"#gate\"]\n{rules}timeout = \"45m\"\n\
-         trust = [\"codebuild\"]\nremote = \"origin\"\nsystems = [\"linux-x64\"]\n\
+         trust = [\"lead\", \"codebuild\"]\nremote = \"origin\"\nsystems = [\"linux-x64\"]\n\
+         \n[signers.lead]\nssh = \"lead ssh-ed25519 AAAA\"\nsystems = []\n\
          \n[signers.codebuild]\nkms = {{ key = \"{key}\", public = \"{public}\" }}\nsystems = [\"linux-x64\"]\n\
          \n[pools.codebuild]\ncodebuild = {{ region = \"us-east-1\", sign = \"sluice-sign\" }}\nsigner = \"codebuild\"\n\
          runners = {{ linux-x64 = \"sluice-run-linux-x64\" }}\n\
@@ -11219,6 +11221,7 @@ fn pool_check_says_a_fleet_tests_side_by_side() {
     assert_eq!(code, 0, "{said}");
     assert!(!said.contains("failed"), "{said}");
     for line in [
+        "ok      main is led by a host signing as lead",
         "ok      [pools.codebuild] is reached in us-east-1 as arn:aws:sts::111122223333:assumed-role/sluice-lead/host",
         "ok      sluice-run-linux-x64 runs linux-x64 on the reserved-capacity fleet sluice-linux-x64, LINUX_EC2",
         "ok      sluice-run-linux-x64's buildspec is as sluice",
@@ -11249,6 +11252,38 @@ fn pool_check_says_a_fleet_tests_side_by_side() {
     let (code, said) = sluice(&f, &["pool", "check", "main"]);
     assert_eq!(code, 0, "{said}");
     assert!(!said.contains("note"), "{said}");
+}
+
+/// satisfies: record 0119 (design D11); rule core.60; the codebuild-pool
+/// spec's "A branch no host can lead": `main` trusting the pool's signer
+/// alone, `sluice pool check main` says no host can lead it and exits 1
+#[test]
+fn pool_check_names_a_branch_no_host_can_lead() {
+    if !alone("pool_check_names_a_branch_no_host_can_lead") {
+        return;
+    }
+    let (_aws, key) = fleet_deployed();
+    let f = Fakes::new();
+    let policy = fleet_policy(
+        &support::aws::public(&key),
+        "batch = false\nparallel = 10\n",
+    )
+    .replace(
+        "trust = [\"lead\", \"codebuild\"]",
+        "trust = [\"codebuild\"]",
+    );
+    f.world.init("main", &[(POLICY_PATH, policy.as_str())]);
+    let (code, said) = sluice(&f, &["pool", "check", "main"]);
+    assert_eq!(code, FAILED, "{said}");
+    assert!(
+        said.contains(
+            "failed  main's trust names no signer a host signs as, so no host can lead it and it \
+             forms nothing: trust the signer its leading hosts sign as beside the pool's, with \
+             systems = [] so it claims no run"
+        ),
+        "{said}"
+    );
+    assert_eq!(said.matches("failed").count(), 1, "{said}");
 }
 
 /// satisfies: record 0119 (design D11); the codebuild-pool spec's "A key

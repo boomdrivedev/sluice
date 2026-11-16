@@ -124,10 +124,11 @@ impl SignerKey {
             // 78, record 0119 (design D13): a pool's job holds no key; its
             // signer is listed by its identity, so a job may claim.
             SignerKey::Keyless(identity) => identity.is_some(),
-            // Record 0119 (design D7): a pool's sign build holds no SSH
-            // key; its signer is listed by its key in the key service, so
-            // its job may claim.
-            SignerKey::Kms { .. } => true,
+            // Record 0119 (design D7; boomdrive-design's ruling of
+            // 2026-11-16): a kms signer's one listed key is its key in the
+            // key service, so no host signs as one: whatever SSH key it
+            // holds, it is not accepted, leads nothing and claims nothing.
+            SignerKey::Kms { .. } => false,
         }
     }
 

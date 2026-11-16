@@ -1,22 +1,21 @@
 ## ADDED Requirements
 
-### Requirement: A gate that trusts only a pool's signer runs every run on the pool
+### Requirement: A gate that trusts a pool's signer and a lead that may claim nothing runs every run on the pool
 
-A branch whose gate trusts only the signer of a pool the policy names
-SHALL have every run of its combinations started on that pool, one job
-per run on the runner the pool names for the run's system, whatever
-room a standing host has, since no standing host signs as a signer the
-gate trusts (107, 87). Each such run SHALL hold no part of any host's
-bound (71; record 0119).
+A branch whose gate trusts a pool's signer and its leading hosts'
+signer, one naming `systems = []`, SHALL be led by such a host and SHALL
+have every run started on the pool, one job per run, whatever room
+those hosts have, since their signer may claim no run (79, 87, 107).
+Each such run SHALL hold no part of any host's bound (71; record 0119).
 
-#### Scenario: A box with room beside a pool
+#### Scenario: A lead with room beside a pool
 
-- **WHEN** `main` trusts only `codebuild`, the pool `codebuild` signs as
-  `codebuild`, a box signing as `box` is live with room, and two
-  combinations of `main` open
-- **THEN** each combination's run is claimed by `pool/codebuild/<n>`,
-  none is claimed by the box, and the box's count of runs under test is
-  unchanged
+- **WHEN** `main` trusts `lead`, whose `systems = []`, and `codebuild`,
+  the pool `codebuild` signs as `codebuild`, two hosts signing as `lead`
+  are live with room on `linux-x64`, and two combinations of `main` open
+- **THEN** one of them leads `main`, each combination's run is claimed by
+  `pool/codebuild/<n>`, none is claimed by either host, and no part of
+  either host's bound is held for them
   (`a_gate_trusting_only_a_pools_signer_runs_every_run_on_its_pool` in
   `crates/sluice-conformance/tests/run_life.rs`)
 
@@ -292,6 +291,20 @@ exit non-zero naming each that fails (record 0119).
   `[signers.codebuild] kms.public`
 - **THEN** `sluice pool check main` names the key and exits non-zero
   (`pool_check_names_a_key_the_policy_does_not_list` in
+  `crates/sluice/tests/cli.rs`)
+
+### Requirement: sluice pool check names a branch no host can lead
+
+`sluice pool check <branch>` SHALL fail, naming it, where the branch's
+trust names no signer a host can sign as, which no host can lead (rule
+core.60; record 0119).
+
+#### Scenario: A gate that trusts only the pool's signer
+
+- **WHEN** `main` trusts only `codebuild`, the pool's `kms` signer
+- **THEN** `sluice pool check main` says no host can lead it and exits
+  non-zero
+  (`pool_check_names_a_branch_no_host_can_lead` in
   `crates/sluice/tests/cli.rs`)
 
 ### Requirement: sluice pool check says a fleet tests side by side

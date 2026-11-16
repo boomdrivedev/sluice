@@ -229,15 +229,28 @@ impl Rules {
     /// the branch trusts the signer, and every claim it relies on is one
     /// the signer may make.
     pub fn trusts_signed(&self, signer: &str, confined: bool, system: Option<&str>) -> bool {
-        let Some((may_confine, systems)) = self.claims.get(signer) else {
+        let Some((may_confine, _)) = self.claims.get(signer) else {
             return false;
         };
         if self.confined && !(confined && *may_confine) {
             return false;
         }
-        match (system, systems) {
-            (Some(s), Some(list)) => list.iter().any(|x| x == s),
-            _ => true,
+        self.may_claim(signer, system)
+    }
+
+    /// 79 (boomdrive-design's ruling of 2026-11-16 on the change
+    /// `a-codebuild-fleet-runs-a-queues-checks`): whether `signer`, one the
+    /// gate trusts, may claim a run of `system`, `None` for a run naming
+    /// none: every system where it names none, those it names otherwise,
+    /// and none at all where it names an empty list, whatever the run's
+    /// system. Such a signer's hosts lead a branch held on its remote and
+    /// claim, and count for, nothing of it.
+    pub fn may_claim(&self, signer: &str, system: Option<&str>) -> bool {
+        match (self.claims.get(signer), system) {
+            (None, _) => false,
+            (Some((_, None)), _) => true,
+            (Some((_, Some(list))), Some(s)) => list.iter().any(|x| x == s),
+            (Some((_, Some(list))), None) => !list.is_empty(),
         }
     }
 
@@ -2076,6 +2089,38 @@ checks = ["codeql"]
             e.contains("[pools.codebuild]") && e.contains("linux-arm64"),
             "{e}"
         );
+    }
+
+    /// 79 (boomdrive-design's ruling of 2026-11-16 on task 4.6): a signer
+    /// the gate trusts with `systems = []` may claim no run and counts for
+    /// no result, whatever the run's system, one naming none included; one
+    /// naming systems claims those, and one naming none every system.
+    #[test]
+    fn a_signer_that_may_claim_no_system_claims_nothing() {
+        let p = Policy::parse(
+            &format!(
+                "{}\n[signers.lead]\nssh = \"lead ssh-ed25519 AAAA\"\nsystems = []\n",
+                with_kms(&kms(KEY_ARN, P256))
+            )
+            .replace(
+                "trust = [\"box\", \"forge\"]\nconfined = true\n",
+                "trust = [\"lead\", \"codebuild\", \"sessions\"]\n",
+            ),
+        )
+        .unwrap();
+        let main = p.rules_for("main").unwrap().unwrap();
+        assert_eq!(main.claims["lead"].1, Some(Vec::new()));
+        for system in [None, Some("linux-x64"), Some("macos-arm64")] {
+            assert!(!main.may_claim("lead", system), "{system:?}");
+            assert!(!main.trusts_signed("lead", false, system), "{system:?}");
+        }
+        assert!(main.may_claim("codebuild", Some("linux-x64")));
+        assert!(main.may_claim("codebuild", None));
+        assert!(!main.may_claim("codebuild", Some("macos-arm64")));
+        assert!(
+            main.may_claim("sessions", None) && main.may_claim("sessions", Some("macos-arm64"))
+        );
+        assert!(!main.may_claim("box", Some("linux-x64")), "untrusted");
     }
 
     #[test]

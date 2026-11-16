@@ -22,6 +22,12 @@ signer with no identity or two SHALL be refused.
   (`a_kms_signer_names_its_key_and_public_half` in
   `crates/sluice-core/src/policy.rs`)
 
+#### Scenario: A signer that may claim no system
+- **WHEN** `[signers.lead]` has `systems = []` and `main` trusts it
+- **THEN** a host signing as `lead` claims no run of `main`, whatever the run's system, one naming none included, and a result it signed counts for nothing
+  (`a_signer_that_may_claim_no_system_claims_nothing` in
+  `crates/sluice-core/src/policy.rs`)
+
 #### Scenario: A KMS signer by an alias or with no public half
 - **WHEN** `[signers.codebuild] kms` names an alias's ARN, a bare key id, no `public`, or a public half that is no P-256 key
 - **THEN** the policy is refused, naming `signers.codebuild` and the field
@@ -113,6 +119,15 @@ the reading process's warning that leaves it out SHALL say why (78, 79).
   signed, with a high S, and the host reaches no AWS service
 - **THEN** its pass reads as signed by `codebuild`
   (`a_kms_record_verifies_by_the_listed_half_alone` in
+  `crates/sluice/tests/remote_refs.rs`)
+
+#### Scenario: A host signing as a KMS signer
+
+- **WHEN** a host's `[signing]` names `codebuild`, a `kms` signer, with
+  an SSH key
+- **THEN** the branch's policy lists none of its keys: it is not
+  accepted, leads nothing and claims nothing
+  (`a_kms_record_is_never_a_hosts` in
   `crates/sluice/tests/remote_refs.rs`)
 
 #### Scenario: A record by another key

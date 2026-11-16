@@ -1202,3 +1202,82 @@ fn a_pools_read_refused_is_logged_once_and_lapses_nothing() {
     assert_eq!(run.state, RunState::Running);
     assert_eq!(run.claim.unwrap().by, claim);
 }
+
+/// A branch whose records are on its remote, its gate trusting `lead`, the
+/// signer its leading host signs as, which may claim no system, and
+/// `codebuild`, the `kms` signer of the CodeBuild pool `codebuild` that
+/// runs `linux-x64`, testing two combinations side by side.
+fn on_a_fleet() -> Harness {
+    let p = policy(false, "fail", 2).replace(
+        "trust = [\"open\", \"sandbox\", \"container\"]\n",
+        "trust = [\"lead\", \"codebuild\"]\nremote = \"origin\"\nsystems = [\"linux-x64\"]\n",
+    ) + "\n[signers.lead]\nssh = \"lead ssh-ed25519 AAAA\"\nsystems = []\n\
+         \n[signers.codebuild]\nkms = { key = \"arn:aws:kms:us-east-1:111122223333:key/1234abcd-12ab-34cd-56ef-1234567890ab\", public = \"MFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAEg44RRacS1htcK8s6X92E7lTYn8f6s5LC4GIxCQv+9fg1UWxDvETlpCR7yLWZ337t0Q/nT0nGEvEP5rLDBHhtTg==\" }\n\
+         systems = [\"linux-x64\"]\n\
+         \n[pools.codebuild]\ncodebuild = { region = \"us-east-1\", sign = \"sluice-sign\" }\nsigner = \"codebuild\"\n\
+         runners = { linux-x64 = \"sluice-run-linux-x64\" }\n\
+         \n[systems]\nlinux-x64 = { os = \"linux\", arch = \"x86_64\" }\n";
+    let h = Harness::new(&p);
+    h.w().signs_as("lead");
+    h.w().platform("linux", "x86_64");
+    h
+}
+
+/// Host `name`, signing as `lead`.
+fn leading<'a>(h: &'a Harness, name: &str) -> Sluice<'a> {
+    h.w().be_host(name);
+    h.sluice().as_peer(Peer {
+        name: name.into(),
+        lease: Duration::from_secs(300),
+        alive: Duration::from_secs(120),
+        signer: Some("lead".into()),
+        systems: None,
+        expire_after: sluice_core::EXPIRE_AFTER,
+    })
+}
+
+/// satisfies: 71, 79, 87, 107; record 0119; the codebuild-pool spec's "A
+/// lead with room beside a pool": a gate trusting a pool's signer and the
+/// lead's, which may claim no system, has every run of its combinations
+/// claimed by the pool; the lead, of the run's system and with room, leads
+/// the branch and claims none, holding no part of its bound for them
+/// (boomdrive-design's ruling of 2026-11-16)
+#[test]
+fn a_gate_trusting_only_a_pools_signer_runs_every_run_on_its_pool() {
+    let h = on_a_fleet();
+    // The lead, and a second host of the same signer, live with room.
+    leading(&h, "a").step(BRANCH).unwrap();
+    leading(&h, "b").step(BRANCH).unwrap();
+    let beats = h.sluice().seams().state.beats().unwrap();
+    assert!(beats.contains_key("b"), "b is live: {:?}", beats.keys());
+    h.work("unit/a", "agent-a", &[("a/lib", Some("a2"))]);
+    h.submit("unit/a");
+    h.work("unit/b", "agent-b", &[("b/lib", Some("b2"))]);
+    h.submit("unit/b");
+    for host in ["a", "b", "a", "b"] {
+        leading(&h, host).step(BRANCH).unwrap();
+    }
+    assert_eq!(h.doc().lead.as_deref(), Some("a"), "the host leads");
+    let c = candidates(&h);
+    assert_eq!(c.len(), 2, "two combinations open: {c:?}");
+    let mut claims = Vec::new();
+    for combination in &c {
+        assert_eq!(combination.runs.len(), 1, "{combination:?}");
+        let run = &combination.runs[0];
+        assert_eq!(run.system.as_deref(), Some("linux-x64"));
+        let claim = run.claim.as_ref().expect("claimed").by.clone();
+        assert!(claim.starts_with("pool/codebuild/"), "{claim}");
+        claims.push(claim);
+    }
+    let launches = h.w().launches();
+    assert_eq!(launches.len(), 2);
+    for (l, claim) in launches.iter().zip(&claims) {
+        assert_eq!(l.kind.0, "codebuild");
+        assert_eq!(l.runner, "sluice-run-linux-x64");
+        assert_eq!(&l.claim, claim);
+    }
+    assert!(h.w().started().is_empty(), "neither host started one");
+    // A host that leads nothing holds a part only to look for a run it may
+    // claim, and gives it back at once (rule core.49): none stays held.
+    assert_eq!(h.w().parts_held(), 0, "no part of a bound held for them");
+}
