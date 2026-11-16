@@ -465,8 +465,13 @@ mod tests {
     /// 71, 135 (design D6, D12): a room made afresh, as a host process
     /// that starts after another stopped, counts the runs whose supervisors
     /// still hold them, and a run begun from a part names its directory.
+    /// It reads the supervisor's lock as free once it lets it go, so it
+    /// runs alone.
     #[test]
     fn a_new_room_counts_the_runs_still_supervised() {
+        if !alone("host_count::tests::a_new_room_counts_the_runs_still_supervised") {
+            return;
+        }
         use crate::host_process::room::{Asked, Asker, Room};
         let s = Scratch::new("afresh");
         let dir = s.run_dir("outlived");
