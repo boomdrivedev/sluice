@@ -21,7 +21,8 @@ host, gated on every test tier in a sandbox.
 | Telemetry over OTLP, opt-in | ✓ | ✓ |
 | Many hosts sharing one queue on the git remote, with signed results: [executors and systems](/sluice/guides/executors-and-systems/) | ✓ | ✓ |
 | A check required on several systems | ✓ | ✓ |
-| Runs no host takes, on GitHub Actions, signed by the workflow itself: [GitHub Actions](/sluice/guides/github-actions/) | ✓ | ✓ |
+| Runs no host takes, on GitHub Actions, signed by the workflow itself: [pools](/sluice/guides/pools/#github-actions) | ✓ | ✓ |
+| A queue's checks on a CodeBuild fleet of your own, signed by a key in AWS KMS: [pools](/sluice/guides/pools/#a-codebuild-fleet) | ✓ | ✓ |
 
 ## Designed, not built
 

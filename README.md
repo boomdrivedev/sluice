@@ -54,12 +54,14 @@ session](https://agentplot.github.io/sluice/guides/claude-code/#the-queue-in-you
 [The herdr plugin](https://agentplot.github.io/sluice/guides/herdr/) adds a
 view beside your agents' panes. It is not released yet.
 
-**On GitHub Actions.** With [sluice's GitHub
+**On a pool.** With [sluice's GitHub
 App](https://agentplot.github.io/sluice/guides/github-app/) set up,
 `sluice init actions` lets GitHub Actions take the runs your own hosts
 don't, a burst or a system none of them runs, each signed by the
-workflow itself: [running checks on GitHub
-Actions](https://agentplot.github.io/sluice/guides/github-actions/).
+workflow itself. `sluice init codebuild` sets up a CodeBuild fleet in
+your own AWS account instead, which can take every run of a branch,
+each signed by a key in AWS KMS: [running checks on a
+pool](https://agentplot.github.io/sluice/guides/pools/).
 
 **By hand.** Start from a repository laid out with a working copy per
 branch, as [one working copy per
