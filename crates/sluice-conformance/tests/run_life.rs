@@ -247,3 +247,43 @@ fn a_release_found_done_is_closed_and_not_run_again() {
     assert_eq!(h.sub(one).state, State::Landed);
     assert_eq!(h.releases_of(&place), 1);
 }
+
+/// Instance `a`, leading with no room of its own, so other hosts take its
+/// runs.
+fn lead(h: &Harness) -> Sluice<'_> {
+    let s = on(h, "a");
+    h.w().no_room();
+    s
+}
+
+/// The run-life lines a step of `s` adds to the branch's log.
+fn written_by(h: &Harness, s: Sluice<'_>) -> Vec<&'static str> {
+    let before = life(h).len();
+    s.step(BRANCH).expect("a step runs");
+    life(h)[before..].iter().map(|(w, _)| *w).collect()
+}
+
+/// satisfies: record 0122; 75, 77; rule core.14; the run-life spec's "A
+/// run's state is written by its claim holder or the lead that opened it"
+#[test]
+fn a_claim_holder_writes_its_own_runs_states() {
+    let h = signed();
+    h.w().hold_runs(true);
+    h.work("unit/a", "agent-a", &[("a/lib", Some("a2"))]);
+    let one = h.submit("unit/a");
+    // A leads with no room of its own; B takes the run.
+    assert_eq!(written_by(&h, lead(&h)), ["opened"]);
+    assert_eq!(written_by(&h, on(&h, "b")), ["claimed", "running"]);
+    let run = &runs_of(&h, &[one])[0];
+    assert_eq!((run.state, run.holder()), (RunState::Running, Some("b")));
+    h.w().complete_all();
+    assert_eq!(written_by(&h, lead(&h)), Vec::<&str>::new());
+    assert_eq!(written_by(&h, on(&h, "b")), ["ended", "closed"]);
+    let run = &runs_of(&h, &[one])[0];
+    assert_eq!(run.state, RunState::Closed);
+    assert!(run.ended.is_some());
+    for _ in 0..4 {
+        assert!(written_by(&h, lead(&h)).is_empty());
+    }
+    assert_eq!(h.sub(one).state, State::Landed);
+}

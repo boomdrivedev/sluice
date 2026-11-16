@@ -1175,7 +1175,9 @@ impl Sluice<'_> {
             let Some(xr) = x.runs.get_mut(i) else {
                 return Ok(());
             };
-            if xr.state != RunState::Claimed || xr.place.as_deref() != Some(place) {
+            // 75 (design D2, D9): only under this host's own claim.
+            if xr.state != RunState::Claimed || xr.place.as_deref() != Some(place) || !self.mine(xr)
+            {
                 return Ok(());
             }
             xr.state = RunState::Running;
@@ -1262,7 +1264,8 @@ impl Sluice<'_> {
             let Some(xr) = x.runs.get_mut(i) else {
                 return Ok(());
             };
-            if xr.state != RunState::Ended || xr.place.as_deref() != place {
+            // 75 (design D2, D9): only under this host's own claim.
+            if xr.state != RunState::Ended || xr.place.as_deref() != place || !self.mine(xr) {
                 return Ok(());
             }
             xr.state = RunState::Closed;
