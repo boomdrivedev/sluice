@@ -1202,6 +1202,18 @@ impl State for RemoteRefs {
         keep_file(&self.own_file("intake", branch)?, doc)
     }
 
+    fn pool_refusal(&self, branch: &str) -> Result<Option<Vec<u8>>> {
+        match std::fs::read(self.own_file("pool", branch)?) {
+            Ok(b) => Ok(Some(b)),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
+            Err(e) => Err(e.into()),
+        }
+    }
+
+    fn keep_pool_refusal(&self, branch: &str, doc: Option<&[u8]>) -> Result<()> {
+        keep_file(&self.own_file("pool", branch)?, doc)
+    }
+
     fn refusal(&self, branch: &str) -> Result<Option<Vec<u8>>> {
         match std::fs::read(self.refusal_file(branch)?) {
             Ok(b) => Ok(Some(b)),

@@ -1128,3 +1128,77 @@ fn a_pools_job_ended_with_its_why_lapses_with_it() {
     assert_eq!(runs[1].follows, Some(0), "a follow-up holds its checks");
     assert!(runs[1].claim.is_some());
 }
+
+/// satisfies: 77, 133; rule core.28; the codebuild-pool spec's "The pool
+/// refuses every read for a while": a lead's reads of a running pool run's
+/// job fail for three rounds with one cause, then answer; the branch's log
+/// holds one line of the cause and one of its end, and the run is still
+/// running under its claim
+#[test]
+fn a_pools_read_refused_is_logged_once_and_lapses_nothing() {
+    let h = with_pool();
+    h.work("unit/a", "agent-a", &[("a/lib", Some("a2"))]);
+    h.submit("unit/a");
+    lead(&h).step(BRANCH).unwrap();
+    let claim = pool_run(&h).claim.unwrap().by;
+    let since = "2026-10-11T09:03:00Z";
+    h.w().move_job(
+        &claim,
+        sluice_seams::Job::Running {
+            since: since.into(),
+        },
+    );
+    lead(&h).step(BRANCH).unwrap();
+    assert_eq!(pool_run(&h).state, RunState::Running);
+
+    let said = "BatchGetBuilds: AccessDeniedException: User: \
+                arn:aws:sts::111122223333:assumed-role/sluice-lead/host is not authorized to \
+                perform: codebuild:BatchGetBuilds";
+    h.w().refuse_jobs(Some(said));
+    for _ in 0..3 {
+        lead(&h).step(BRANCH).unwrap();
+        let run = pool_run(&h);
+        assert_eq!(run.state, RunState::Running, "read as it stood");
+        assert_eq!(run.claim.as_ref().unwrap().by, claim);
+    }
+    h.w().refuse_jobs(None);
+    lead(&h).step(BRANCH).unwrap();
+
+    let refused: Vec<Event> = h
+        .events()
+        .into_iter()
+        .filter(|e| matches!(e, Event::ReadRefused { pool: true, .. }))
+        .collect();
+    assert_eq!(
+        refused,
+        [Event::ReadRefused {
+            host: "a".into(),
+            remote: "forge".into(),
+            asked: "pool forge's jobs".into(),
+            said: said.into(),
+            intake: false,
+            pool: true,
+        }]
+    );
+    let again: Vec<Event> = h
+        .events()
+        .into_iter()
+        .filter(|e| matches!(e, Event::ReadAgain { pool: true, .. }))
+        .collect();
+    assert_eq!(again.len(), 1, "{again:?}");
+    let Event::ReadAgain { rounds, remote, .. } = &again[0] else {
+        unreachable!()
+    };
+    assert_eq!(remote, "forge");
+    assert!(*rounds >= 3, "{rounds}");
+    assert!(
+        !h.events().iter().any(|e| matches!(
+            e,
+            Event::Lapsed { .. } | Event::ReadRefused { pool: false, .. }
+        )),
+        "nothing lapsed, and no read of the remote refused"
+    );
+    let run = pool_run(&h);
+    assert_eq!(run.state, RunState::Running);
+    assert_eq!(run.claim.unwrap().by, claim);
+}

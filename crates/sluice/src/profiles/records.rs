@@ -997,6 +997,20 @@ impl State for Records {
         }
     }
 
+    fn pool_refusal(&self, branch: &str) -> Result<Option<Vec<u8>>> {
+        match self.route(branch)? {
+            None => self.local.pool_refusal(branch),
+            Some(r) => r.pool_refusal(branch),
+        }
+    }
+
+    fn keep_pool_refusal(&self, branch: &str, doc: Option<&[u8]>) -> Result<()> {
+        match self.route(branch)? {
+            None => self.local.keep_pool_refusal(branch, doc),
+            Some(r) => r.keep_pool_refusal(branch, doc),
+        }
+    }
+
     fn read_finished(&self, branch: &str, name: &str) -> Result<Option<Vec<u8>>> {
         match self.route(branch)? {
             None => self.local.read_finished(branch, name),

@@ -2016,6 +2016,21 @@ pub trait State {
         Ok(())
     }
 
+    /// 77, 133, rule core.28 (design D5 of the change
+    /// `a-codebuild-fleet-runs-a-queues-checks`): this host's document of a
+    /// standing refusal of the reads of `branch`'s pools' jobs, beside its
+    /// refusal of the remote and in the same form; kept on this host alone,
+    /// so it decides nothing.
+    fn pool_refusal(&self, _branch: &str) -> Result<Option<Vec<u8>>> {
+        Ok(None)
+    }
+
+    /// Keep `doc` as this host's document of a refusal of `branch`'s pools'
+    /// reads, or, with `None`, remove it.
+    fn keep_pool_refusal(&self, _branch: &str, _doc: Option<&[u8]>) -> Result<()> {
+        Ok(())
+    }
+
     /// 77, 107: rewrite this host's sign of life, `beat` its document:
     /// its signer, its systems and the room it has. Only this host writes
     /// its own.

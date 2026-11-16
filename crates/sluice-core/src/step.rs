@@ -281,6 +281,10 @@ impl Sluice<'_> {
             return Ok(Step::Busy);
         };
         let stepped = self.step_held(branch, round, releases);
+        // 77, 133 (design D5 of the change
+        // `a-codebuild-fleet-runs-a-queues-checks`): what the round met of
+        // its pools' reads, once its own writes are done.
+        self.write_pool_lines(branch);
         match &stepped {
             Ok(_) => self.note_read_again(branch),
             Err(e) => {
@@ -2182,6 +2186,7 @@ impl Sluice<'_> {
         listed: bool,
         now: &str,
     ) -> Result<()> {
+        let branch = &line.branch.clone();
         let limits = &unmet.limits;
         let pools = match &line.doc.base {
             Some(base) if rules.signed => {
@@ -2214,7 +2219,7 @@ impl Sluice<'_> {
                     // written running, from its run job's own start.
                     if r.state == RunState::Claimed {
                         if let Some(since) =
-                            self.job_started(&host, &pools, rules.remote.as_deref())?
+                            self.job_started(branch, &host, &pools, rules.remote.as_deref())?
                         {
                             let x = line.candidate_mut(&c.id).expect("polled candidate");
                             let xr = &mut x.runs[i];
@@ -2234,7 +2239,14 @@ impl Sluice<'_> {
                     }
                     let claimed = r.claim.as_ref().map(|k| k.at.as_str());
                     let lapse = match r.state.held() {
-                        true => self.lapse(&host, now, &pools, rules.remote.as_deref(), claimed)?,
+                        true => self.lapse(
+                            branch,
+                            &host,
+                            now,
+                            &pools,
+                            rules.remote.as_deref(),
+                            claimed,
+                        )?,
                         false => None,
                     };
                     if let Some(why) = lapse {
@@ -4082,6 +4094,7 @@ impl Sluice<'_> {
         chain: &[String],
         now: &str,
     ) -> Result<()> {
+        let branch = &line.branch.clone();
         if !rules.signed {
             return Ok(());
         }
@@ -4098,7 +4111,7 @@ impl Sluice<'_> {
         for (host, (_, beat)) in self.seams.state.beats()? {
             if host == self.peer.name
                 || host.starts_with("pool/")
-                || self.lapsed(&host, now, &[], None, None)?
+                || self.lapsed(branch, &host, now, &[], None, None)?
             {
                 continue;
             }
@@ -4222,10 +4235,25 @@ impl Sluice<'_> {
             let Some(pool) = policy.pools.iter().find(|p| p.name == name) else {
                 continue;
             };
-            let job =
-                self.seams
-                    .tests
-                    .job(&pool.kind, &pool.runners, &claim, rules.remote.as_deref())?;
+            // 77, 133 (design D5 of the change
+            // `a-codebuild-fleet-runs-a-queues-checks`): a job the pool
+            // could not be asked of is read as it stood: nothing is started
+            // for it this round.
+            let job = match self.seams.tests.job(
+                &pool.kind,
+                &pool.runners,
+                &claim,
+                rules.remote.as_deref(),
+            ) {
+                Ok(job) => {
+                    self.note_pool_read(branch);
+                    job
+                }
+                Err(e) => {
+                    self.note_pool_refused(branch, &pool.name, &format!("{e:#}"));
+                    continue;
+                }
+            };
             let unanswered = match job {
                 Job::None => {
                     let runner = match &run.system {
@@ -4318,6 +4346,7 @@ impl Sluice<'_> {
     /// pool's, or whose job does not run.
     fn job_started(
         &self,
+        branch: &str,
         claim: &str,
         pools: &[crate::policy::Pool],
         remote: Option<&str>,
@@ -4329,10 +4358,22 @@ impl Sluice<'_> {
         let Some(p) = pools.iter().find(|p| p.name == name) else {
             return Ok(None);
         };
+        // 77, 133 (design D5): a job the pool could not be asked of is read
+        // as it stood, still claimed.
         Ok(
-            match self.seams.tests.job(&p.kind, &p.runners, claim, remote)? {
-                Job::Running { since } => Some(since),
-                _ => None,
+            match self.seams.tests.job(&p.kind, &p.runners, claim, remote) {
+                Ok(Job::Running { since }) => {
+                    self.note_pool_read(branch);
+                    Some(since)
+                }
+                Ok(_) => {
+                    self.note_pool_read(branch);
+                    None
+                }
+                Err(e) => {
+                    self.note_pool_refused(branch, &p.name, &format!("{e:#}"));
+                    None
+                }
             },
         )
     }
@@ -4396,7 +4437,7 @@ impl Sluice<'_> {
                             .is_some_and(|l| l.iter().any(|x| x.as_str() == Some(s.as_str())))
                 }
             };
-            if takes && !self.lapsed(&host, now, &[], None, None)? {
+            if takes && !self.lapsed("", &host, now, &[], None, None)? {
                 return Ok(true);
             }
         }
@@ -4408,13 +4449,16 @@ impl Sluice<'_> {
     /// (88).
     fn lapsed(
         &self,
+        branch: &str,
         host: &str,
         now: &str,
         pools: &[crate::policy::Pool],
         remote: Option<&str>,
         claimed: Option<&str>,
     ) -> Result<bool> {
-        Ok(self.lapse(host, now, pools, remote, claimed)?.is_some())
+        Ok(self
+            .lapse(branch, host, now, pools, remote, claimed)?
+            .is_some())
     }
 
     /// [`Sluice::lapsed`], with why `host`'s claim lapsed where it did: a
@@ -4424,6 +4468,7 @@ impl Sluice<'_> {
     /// claim lapsed.
     fn lapse(
         &self,
+        branch: &str,
         host: &str,
         now: &str,
         pools: &[crate::policy::Pool],
@@ -4440,25 +4485,36 @@ impl Sluice<'_> {
             // Record 0122 (design D12): a job that ended with no record, or
             // none of the claim's title past the sign-of-life bound since
             // the claim, is a lapsed claim.
-            return Ok(
-                match self.seams.tests.job(&p.kind, &p.runners, host, remote)? {
-                    // Design D5 of the change
-                    // `a-codebuild-fleet-runs-a-queues-checks`: the pool's own
-                    // words where it gives why, in place of these.
-                    Job::Ended {
-                        recorded: false,
-                        why,
-                    } => Some(why.unwrap_or_else(|| {
-                        format!("{host}'s job ended with no record of its run")
-                    })),
-                    Job::Ended { recorded: true, .. } => None,
-                    Job::None => claimed
-                        .and_then(|at| seconds_between(at, now))
-                        .is_none_or(|s| s >= self.peer.alive.as_secs_f64())
-                        .then(lapsed),
-                    Job::Queued | Job::Running { .. } => None,
-                },
-            );
+            // 77, 133 (design D5 of the change
+            // `a-codebuild-fleet-runs-a-queues-checks`): a job the pool
+            // could not be asked of is read as it stood, and lapses nothing.
+            let job = match self.seams.tests.job(&p.kind, &p.runners, host, remote) {
+                Ok(job) => {
+                    self.note_pool_read(branch);
+                    job
+                }
+                Err(e) => {
+                    self.note_pool_refused(branch, &p.name, &format!("{e:#}"));
+                    return Ok(None);
+                }
+            };
+            return Ok(match job {
+                // Design D5 of the change
+                // `a-codebuild-fleet-runs-a-queues-checks`: the pool's own
+                // words where it gives why, in place of these.
+                Job::Ended {
+                    recorded: false,
+                    why,
+                } => Some(
+                    why.unwrap_or_else(|| format!("{host}'s job ended with no record of its run")),
+                ),
+                Job::Ended { recorded: true, .. } => None,
+                Job::None => claimed
+                    .and_then(|at| seconds_between(at, now))
+                    .is_none_or(|s| s >= self.peer.alive.as_secs_f64())
+                    .then(lapsed),
+                Job::Queued | Job::Running { .. } => None,
+            });
         }
         let marker = self
             .seams

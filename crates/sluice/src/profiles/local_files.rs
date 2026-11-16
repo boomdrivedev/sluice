@@ -40,6 +40,9 @@ const PROGRESS: &str = ".progress";
 const REFUSED: &str = ".refused";
 /// 133 (design D27): this host's refusal of each branch's intake.
 const INTAKE_REFUSED: &str = ".intake";
+/// This host's refusal of the reads of a branch's pools' jobs (design D5
+/// of the change `a-codebuild-fleet-runs-a-queues-checks`).
+const POOL_REFUSED: &str = ".pool";
 const PROGRESS_SCHEMA: &str = "sluice/progress@1";
 
 /// One candidate's tasks as kept: the candidate is named inside, since a
@@ -666,6 +669,14 @@ impl State for LocalFiles {
 
     fn keep_intake_refusal(&self, branch: &str, doc: Option<&[u8]>) -> Result<()> {
         self.keep_kept(INTAKE_REFUSED, branch, doc)
+    }
+
+    fn pool_refusal(&self, branch: &str) -> Result<Option<Vec<u8>>> {
+        self.read_kept(POOL_REFUSED, branch)
+    }
+
+    fn keep_pool_refusal(&self, branch: &str, doc: Option<&[u8]>) -> Result<()> {
+        self.keep_kept(POOL_REFUSED, branch, doc)
     }
 
     fn progress(&self, branch: &str) -> Result<BTreeMap<String, Vec<TaskProgress>>> {

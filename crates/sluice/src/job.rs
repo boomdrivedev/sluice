@@ -720,6 +720,10 @@ impl State for Unwritten<'_> {
         self.inner.intake_refusal(branch)
     }
 
+    fn pool_refusal(&self, branch: &str) -> Result<Option<Vec<u8>>> {
+        self.inner.pool_refusal(branch)
+    }
+
     fn beats(&self) -> Result<BTreeMap<String, (String, Vec<u8>)>> {
         self.inner.beats()
     }
