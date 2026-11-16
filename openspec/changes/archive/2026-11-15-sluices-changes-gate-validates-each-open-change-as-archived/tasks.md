@@ -21,4 +21,4 @@ number and rules by id.
 
 ## 4. The specs archive clean
 
-- [ ] 4.1 Archive the change into `openspec/specs/repository-gate/spec.md`. True when `sluice exec bolt/sluices-checks-read-no-markdown -- moon run root:changes` passes before the archive, and `sluice exec bolt/sluices-checks-read-no-markdown -- moon run root:specs` after it.
+- [x] 4.1 Archive the change into `openspec/specs/repository-gate/spec.md`. True when `sluice exec bolt/sluices-checks-read-no-markdown -- moon run root:changes` passes before the archive, and `sluice exec bolt/sluices-checks-read-no-markdown -- moon run root:specs` after it.
