@@ -252,3 +252,60 @@ fn the_submissions_behind_a_held_landing_wait() {
     assert_eq!(h.w().refused_moves().len(), 1, "nothing pushed again");
     assert_eq!(h.sub(one).state, State::Refused);
 }
+
+/// satisfies: 152, 67, 5; record 0124: a submission from the place of a
+/// submission whose landing the forge refused withdraws it, which clears
+/// the held landing, and the new submission lands
+#[test]
+fn a_submission_from_its_place_clears_a_held_landing() {
+    let h = Harness::bolt();
+    h.w().forge_refuses(BRANCH, Some(DECLINED));
+    h.work("unit/a", "agent-a", &[("a/lib", Some("a2"))]);
+    let one = h.submit("unit/a");
+    for _ in 0..4 {
+        h.step();
+    }
+    assert_eq!(h.sub(one).state, State::Refused);
+    // The submitter replaces its work, the secret taken out.
+    h.w().forge_refuses(BRANCH, None);
+    let head = h.work_on("unit/a", &h.tip(), &[("a/lib", Some("a3"))]);
+    let two = h.submit("unit/a");
+    assert_eq!(h.sub(one).state, State::Withdrawn);
+    h.step();
+    assert!(h.doc().landing.is_none(), "the held landing is cleared");
+    h.settle();
+    let s = h.sub(two);
+    assert_eq!(s.state, State::Landed);
+    assert_eq!(s.head, head);
+}
+
+/// satisfies: 152, 24, 5; record 0124: once one of a held landing's
+/// submissions is withdrawn, the landing is dropped, and the rest go back
+/// to the queue and are formed again
+#[test]
+fn a_held_landing_is_dropped_once_one_of_its_submissions_leaves() {
+    use sluice_core::Requester;
+    let h = Harness::bolt();
+    h.w().forge_refuses(BRANCH, Some(DECLINED));
+    h.work("unit/a", "agent-a", &[("a/lib", Some("a2"))]);
+    h.work("unit/b", "agent-b", &[("b/lib", Some("b2"))]);
+    let one = h.submit("unit/a");
+    let two = h.submit("unit/b");
+    for _ in 0..4 {
+        h.step();
+    }
+    let held = h.doc().landing.expect("a landing held");
+    assert_eq!(held.ids, [one, two]);
+    assert_eq!(h.sub(two).state, State::Refused);
+    h.sluice()
+        .withdraw(one, &Requester::Operator)
+        .unwrap()
+        .unwrap();
+    h.w().forge_refuses(BRANCH, None);
+    h.step();
+    assert!(h.doc().landing.is_none(), "the landing is dropped");
+    assert_ne!(h.sub(two).state, State::Refused, "back in the queue");
+    h.settle();
+    assert_eq!(h.sub(one).state, State::Withdrawn);
+    assert_eq!(h.sub(two).state, State::Landed);
+}

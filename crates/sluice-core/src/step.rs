@@ -1534,6 +1534,10 @@ impl Sluice<'_> {
     fn decide(&self, branch: &str) -> Result<Decided> {
         let mut line = self.read_line(branch)?;
         let now = self.now();
+        // Design D2: before any run is read, and before a round that holds
+        // the branch returns; record 0124 (design D10): a landing the forge
+        // refused goes once one of its submissions has left.
+        self.drop_withdrawn(&mut line)?;
         if let Some(landing) = &line.doc.landing {
             if landing.refused.is_none() {
                 bail!("{branch} has a landing left unfinished");
@@ -1557,9 +1561,6 @@ impl Sluice<'_> {
                 Written::Refused => Decided::Contended,
             });
         }
-        // Design D2: before any run is read, and before a round that holds
-        // the branch returns.
-        self.drop_withdrawn(&mut line)?;
         let Some(tip) = self.seams.branch.read(branch)? else {
             bail!("{branch} does not exist");
         };
@@ -1837,6 +1838,28 @@ impl Sluice<'_> {
     /// and stands (rule core.17). Another host's run of it is that host's
     /// to end (81).
     fn drop_withdrawn(&self, line: &mut Line) -> Result<()> {
+        // 152, 24, record 0124 (design D10): a landing the forge refused is
+        // its submitters' to take out: once any of its submissions has left
+        // the queue, withdrawn by its submitter, its planner, the operator
+        // or a submission from its place, the landing is dropped and the
+        // rest go back to the queue, to be formed again.
+        if let Some(landing) = line.doc.landing.clone().filter(|l| l.refused.is_some()) {
+            let left = landing
+                .ids
+                .iter()
+                .any(|id| line.subs.get(id).is_none_or(|s| s.state.is_out()));
+            if left {
+                line.doc.landing = None;
+                for id in &landing.ids {
+                    if let Some(s) = line.subs.get_mut(id).filter(|s| s.state == State::Refused) {
+                        s.state = State::Queued;
+                        s.tested = None;
+                        s.result = None;
+                        s.covered_by = None;
+                    }
+                }
+            }
+        }
         let subs = &line.subs;
         let obsolete: BTreeSet<String> = line
             .doc
