@@ -1230,8 +1230,10 @@ fn live_pull_request_calls() {
 /// runner of its system and its claim; a job is read from the run of the
 /// workflow that bears its claim in its title, queued, running since its
 /// run job's start, or ended, recorded where its sign job succeeded, or
-/// none (record 0122; design D12); a wake is a dispatch to advance the
-/// branch.
+/// none (record 0122; design D12). GitHub refuses a dispatch carrying an
+/// input the workflow does not declare, so the fake refuses one carrying
+/// any input `sluice.yml` does not; a wake dispatches nothing, the
+/// workflow running no round (design D11).
 #[test]
 fn the_pools_calls() {
     use sluice::profiles::checks::Launcher;
@@ -1257,6 +1259,22 @@ fn the_pools_calls() {
             };
         }
         if path == "/repos/o/r/actions/workflows/sluice.yml/dispatches" && r.method == "POST" {
+            const DECLARED: [&str; 5] = ["claim", "branch", "combination", "system", "runner"];
+            let body: serde_json::Value = serde_json::from_str(&r.body).unwrap_or_default();
+            let unexpected: Vec<&String> = body["inputs"]
+                .as_object()
+                .map(|o| {
+                    o.keys()
+                        .filter(|k| !DECLARED.contains(&k.as_str()))
+                        .collect()
+                })
+                .unwrap_or_default();
+            if !unexpected.is_empty() {
+                return json(
+                    422,
+                    json!({ "message": format!("Unexpected inputs provided: {unexpected:?}") }),
+                );
+            }
             return (204, vec![], String::new());
         }
         if path.starts_with("/repos/o/r/actions/workflows/sluice.yml/runs") {
@@ -1343,7 +1361,9 @@ fn the_pools_calls() {
         .unwrap();
     let body: serde_json::Value = serde_json::from_str(&sent.body).unwrap();
     assert_eq!(body["ref"], "main");
-    assert_eq!(body["inputs"]["mode"], "run");
+    assert_eq!(body["inputs"]["mode"], serde_json::Value::Null);
+    assert_eq!(body["inputs"]["branch"], "main");
+    assert_eq!(body["inputs"]["system"], "macos-arm64");
     assert_eq!(body["inputs"]["runner"], "macos-15");
     assert_eq!(body["inputs"]["claim"], "pool/forge/7");
     assert_eq!(body["inputs"]["combination"], "c0ffee");
@@ -1360,15 +1380,9 @@ fn the_pools_calls() {
     assert_eq!(job("pool/forge/10"), Job::Ended { recorded: true });
     assert_eq!(job("pool/forge/11"), Job::Ended { recorded: false });
     assert_eq!(job("pool/forge/8"), Job::None);
+    let sent = fake.requests().len();
     pool.wake(&kind, "main", Some("origin")).unwrap();
-    let wake = fake
-        .requests()
-        .into_iter()
-        .rfind(|r| r.path.ends_with("/dispatches"))
-        .unwrap();
-    let body: serde_json::Value = serde_json::from_str(&wake.body).unwrap();
-    assert_eq!(body["inputs"]["mode"], "round");
-    assert_eq!(body["inputs"]["branch"], "main");
+    assert_eq!(fake.requests().len(), sent, "a wake calls nothing");
 }
 
 // 134; rule core.29: every call to GitHub's API under the retry policy.

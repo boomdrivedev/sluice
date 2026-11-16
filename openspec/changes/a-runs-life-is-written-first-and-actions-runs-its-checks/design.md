@@ -289,7 +289,12 @@ flume's and crew's readers take as failed.
 `sluice-pr.yml`; `workflows.rs` renders them with the release that
 writes them. `sluice.yml` runs on `workflow_dispatch` (inputs `claim`,
 `branch`, `combination`, `system`, `runner`; title `sluice <claim>`)
-and on `workflow_run` of `sluice-pr.yml`:
+and on `workflow_run` of `sluice-pr.yml`. A pool's dispatch sends those
+five inputs and no other, since GitHub refuses a dispatch carrying an
+input its workflow does not declare. The workflow runs no round, so a
+submission's wake of a GitHub pool dispatches nothing: the round job and
+its wake are `a-github-action-runs-a-queue-whole`'s, and until then the
+wake is lost, which only delays the submission (59). The jobs:
 
 - **run**, on `${{ inputs.runner }}`, `permissions: contents: read`, no
   environment: installs sluice's release and the toolchain the policy
