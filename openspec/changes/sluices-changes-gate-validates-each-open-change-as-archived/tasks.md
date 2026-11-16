@@ -17,7 +17,7 @@ number and rules by id.
 
 ## 3. The decision is written down
 
-- [ ] 3.1 Add record 0128 (`docs/adr/0128-each-open-change-is-validated-as-it-would-archive-alone-against-the-trees-specs.md`) with the paths not taken, and rule core.61 with its details. True when `sluice exec bolt/sluices-checks-read-no-markdown` passes.
+- [x] 3.1 Add record 0128 (`docs/adr/0128-each-open-change-is-validated-as-it-would-archive-alone-against-the-trees-specs.md`) with the paths not taken, and rule core.61 with its details. True when `sluice exec bolt/sluices-checks-read-no-markdown` passes.
 
 ## 4. The specs archive clean
 
