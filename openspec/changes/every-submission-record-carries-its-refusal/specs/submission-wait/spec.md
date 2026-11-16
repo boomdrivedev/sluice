@@ -7,12 +7,10 @@
 Under `--json`, `sluice wait` and a waiting `sluice submit` SHALL print
 one document on stdout however they end, decided, out of time or
 stopped with Ctrl-C: the submission's record, as `sluice status <n>
---json` prints it, its `notice` and, for one whose landing the forge
-refused, its `refused` among it. Its `state` SHALL be one of `queued`,
-`waiting`, `testing`, `passed`, `landing`, `landed`, `failed`,
-`conflict`, `withdrawn` and `refused` (152; record 0124), and under
-`sluice/submission@1` none of these SHALL be renamed or removed and none
-added.
+--json` prints it. Its `state` SHALL be one of `queued`, `waiting`,
+`testing`, `passed`, `landing`, `landed`, `failed`, `conflict`,
+`withdrawn` and `refused` (152), and under `sluice/submission@1` none of
+these SHALL be renamed or removed and none added.
 
 #### Scenario: Stopped with Ctrl-C
 

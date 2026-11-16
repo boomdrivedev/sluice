@@ -24,30 +24,14 @@ amended 2026-11-16).
   (`a_landing_the_forge_refused_is_told_with_its_words` in
   `crates/sluice/tests/cli.rs`)
 
-## MODIFIED Requirements
+### Requirement: The inbox hands a held landing's refusal over
 
-### Requirement: A held landing is told to its submitter
-
-A submission whose landing the forge refused SHALL be told to its
-submitter as an outcome is told, under `<id>:refused`, with the forge's
-words, owed until its reader confirms it (50, 51; rule core.52). While
-the submission is refused, `sluice inbox` in its worktree SHALL hand the
-refusal over as it hands over an outcome, its words read from the held
-landing once the round has pushed its notice, and every document of the
-submission SHALL give its `delivery` under that key (135; rule core.31).
-Its status SHALL say `held: the forge refused its landing:` with the
-forge's words.
-
-#### Scenario: The submitter's notice
-
-- **WHEN** #2021's landing is refused by the forge
-- **THEN** a delivery under `2021:refused` is owed to #2021's work,
-  carrying the forge's words, and `sluice status 2021` says `held: the
-  forge refused its landing:` with them
-  (`a_held_landing_is_owed_to_its_submitter` in
-  `crates/sluice-conformance/tests/landing.rs`;
-  `a_landing_the_forge_refused_is_told_with_its_words` in
-  `crates/sluice/tests/cli.rs`)
+While a submission is refused, `sluice inbox` in its worktree SHALL hand
+over its refusal owed under `<id>:refused` as it hands over an outcome,
+its words read from the held landing once the round has pushed its
+notice, and every document of the submission SHALL give its `delivery`
+under that key (50, 51, 135, 152; rules core.31, core.52; record 0124
+as amended 2026-11-16).
 
 #### Scenario: Collected by its worktree's inbox
 
@@ -56,4 +40,6 @@ forge's words.
 - **THEN** the inbox hands over #1's refusal under `1:refused` with the
   forge's words, and `sluice status 1 --json` gives its `delivery` under
   that key (`a_held_landing_is_collected_by_its_worktrees_inbox` in
-  `crates/sluice-conformance/tests/landing.rs`)
+  `crates/sluice-conformance/tests/landing.rs`;
+  `a_landing_the_forge_refused_is_told_with_its_words` in
+  `crates/sluice/tests/cli.rs`)

@@ -8,11 +8,9 @@ Each element of `outcomes` SHALL hold `id`, `branch`, `state`
 (`landed`, `failed`, `conflict` or `refused`), `notice`, `delivery` and
 `from`; a landed one `landed_as`; a failed one `result` (`failed`, or
 `timed out`) and `failed`, each with its `task` and, where kept, its
-`log`; a conflicting one `conflict` with its `paths` and its `with`; one
-whose landing the forge refused `refused` with the forge's `words` and
-its `at` (152; record 0124). From this change on, a later sluice SHALL
-keep these names and meanings, and MAY add fields; `delivered` and
-`delivered_to` are gone.
+`log`; a conflicting one `conflict` with its `paths` and its `with`; a
+refused one `refused` (152). A later sluice SHALL keep these names and
+meanings, and MAY add fields; `delivered` and `delivered_to` are gone.
 
 #### Scenario: The JSON document lists the records
 
