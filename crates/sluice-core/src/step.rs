@@ -711,6 +711,7 @@ impl Sluice<'_> {
                 }
                 Ok(())
             }
+            Moved::Refused(words) => bail!("the forge refused {branch}'s landing: {words}"),
             Moved::Elsewhere(found) => {
                 span.record("sluice.outcome", "refused");
                 info!(
@@ -4195,6 +4196,10 @@ impl Sluice<'_> {
                 Ok(Moved::Elsewhere(at)) => Levelled::Behind {
                     at,
                     why: "it moved while sluice levelled it".into(),
+                },
+                Ok(Moved::Refused(words)) => Levelled::Behind {
+                    at: copy,
+                    why: words,
                 },
                 Err(e) => Levelled::Behind {
                     at: copy,

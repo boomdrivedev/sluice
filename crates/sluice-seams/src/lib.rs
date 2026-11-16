@@ -1417,6 +1417,10 @@ pub enum Moved {
     Moved,
     /// 45: refused, the branch was elsewhere.
     Elsewhere(Option<Rev>),
+    /// 152, rule core.5, record 0124 (design D10): the forge refused the
+    /// move with the branch where it was expected, in the forge's words,
+    /// whole: a refusal of the move itself, never pushed again by itself.
+    Refused(String),
 }
 
 /// What this host holds of a branch apart from the branch itself (124).

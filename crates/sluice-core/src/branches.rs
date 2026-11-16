@@ -169,6 +169,8 @@ impl Sluice<'_> {
                 Ok(at)
             }
             Moved::Elsewhere(found) => Err(MakeRefusal::Present(found)),
+            // 152: the forge refused the branch's making.
+            Moved::Refused(words) => bail!("the forge refused making {branch}: {words}"),
         })
     }
 
@@ -207,6 +209,8 @@ impl Sluice<'_> {
                 Ok(tip)
             }
             Moved::Elsewhere(found) => Err(RemoveRefusal::Elsewhere(found)),
+            // 152: the forge refused the branch's removal.
+            Moved::Refused(words) => bail!("the forge refused removing {branch}: {words}"),
         })
     }
 

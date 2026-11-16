@@ -362,6 +362,7 @@ impl LocalRefs {
         match self.transact(name, change)? {
             Moved::Moved => Ok(()),
             Moved::Elsewhere(_) => bail!("{name} could not be written"),
+            Moved::Refused(words) => bail!("{name} could not be written: {words}"),
         }
     }
 
@@ -379,6 +380,7 @@ impl LocalRefs {
         match self.transact(name, change)? {
             Moved::Moved => Ok(()),
             Moved::Elsewhere(_) => bail!("{name} could not be removed"),
+            Moved::Refused(words) => bail!("{name} could not be removed: {words}"),
         }
     }
 

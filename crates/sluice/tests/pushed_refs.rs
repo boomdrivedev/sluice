@@ -362,9 +362,76 @@ fn a_refused_push_names_the_remotes_reason() {
     let err = p.push_branch(&head, "unit/u").unwrap_err().to_string();
     assert!(err.contains("pre-receive hook declined"), "{err}");
     let to = landing(&p, &base, &head);
-    let err = p.move_to("main", &base, &to).unwrap_err().to_string();
-    assert!(err.contains("pre-receive hook declined"), "{err}");
+    // 152, record 0124 (design D10): the branch where the landing expected
+    // it, the forge refused the landing, in its words.
+    match p.move_to("main", &base, &to).unwrap() {
+        Moved::Refused(words) => assert!(words.contains("pre-receive hook declined"), "{words}"),
+        other => panic!("{other:?}"),
+    }
     assert_eq!(repo.rev("main"), base.as_str());
+}
+
+/// A `pre-receive` hook at the bare remote `bare` running `script`.
+fn pre_receive(bare: &std::path::Path, script: &str) {
+    use std::os::unix::fs::PermissionsExt;
+    let hook = bare.join("hooks/pre-receive");
+    std::fs::create_dir_all(hook.parent().unwrap()).unwrap();
+    std::fs::write(&hook, format!("#!/bin/sh\n{script}")).unwrap();
+    std::fs::set_permissions(&hook, std::fs::Permissions::from_mode(0o755)).unwrap();
+}
+
+/// 152, rule core.5, record 0124 (design D10): a push the forge declines,
+/// a ruleset's or push protection's, with the branch where the landing
+/// expected it, reads as refused by the forge, with the forge's words
+/// whole, and moves nothing.
+#[test]
+fn a_push_the_forge_declines_reads_as_refused_by_the_forge() {
+    let repo = Repo::new("forge-declines");
+    let bare = repo.bare_origin();
+    pre_receive(
+        bare.path(),
+        "echo 'push declined due to repository rule violations' >&2\nexit 1\n",
+    );
+    let head = rev(repo.branch("unit/u", "main", &[("a", Some("1"))]));
+    let p = open(&repo);
+    let base = p.read("main").unwrap().unwrap();
+    let to = landing(&p, &base, &head);
+    match p.move_to("main", &base, &to).unwrap() {
+        Moved::Refused(words) => {
+            assert!(
+                words.contains("push declined due to repository rule violations"),
+                "{words}"
+            );
+            assert!(words.contains("pre-receive hook declined"), "{words}");
+        }
+        other => panic!("{other:?}"),
+    }
+    assert_eq!(p.read("main").unwrap(), Some(base));
+}
+
+/// 45, 152, rule core.5, record 0124 (design D10): a push the forge
+/// declines while the branch was moved meanwhile reads as elsewhere, with
+/// what the branch holds, as any refusal at the ref does.
+#[test]
+fn a_refused_push_with_the_branch_moved_reads_as_elsewhere() {
+    let repo = Repo::new("declined-moved");
+    let bare = repo.bare_origin();
+    let side = rev(repo.branch("side", "main", &[("s", Some("1"))]));
+    repo.git(&["push", "-q", "origin", "side"]);
+    // The hook moves main, as a landing another host made meanwhile would,
+    // and declines the push.
+    pre_receive(
+        bare.path(),
+        "unset GIT_QUARANTINE_PATH\ngit update-ref refs/heads/main refs/heads/side\nexit 1\n",
+    );
+    let head = rev(repo.branch("unit/u", "main", &[("a", Some("1"))]));
+    let p = open(&repo);
+    let base = p.read("main").unwrap().unwrap();
+    let to = landing(&p, &base, &head);
+    assert_eq!(
+        p.move_to("main", &base, &to).unwrap(),
+        Moved::Elsewhere(Some(side))
+    );
 }
 
 /// 124: the host's copy is its own `refs/heads/<branch>`, read with no

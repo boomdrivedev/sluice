@@ -194,6 +194,11 @@ struct Inner {
     /// This host's refusal of each branch's intake (design D27).
     intake_refusals: BTreeMap<(String, String), Vec<u8>>,
     crash: Option<Crash>,
+    /// 152, record 0124 (design D10): each branch whose every move the forge
+    /// refuses, with its words, until cleared.
+    forge_refuses: BTreeMap<String, String>,
+    /// Each move the forge refused, by branch, in order.
+    refusals_of_moves: Vec<String>,
     // the check
     tasks: Vec<TaskDef>,
     fail_rules: Vec<(String, Predicate)>,
@@ -742,6 +747,21 @@ impl World {
     /// How many levellings set a copy.
     pub fn levels(&self) -> usize {
         self.0.borrow().levels
+    }
+
+    /// 152, record 0124 (design D10): from now the forge refuses each move
+    /// of `branch` with `words`, or, with `None`, takes them again.
+    pub fn forge_refuses(&self, branch: &str, words: Option<&str>) {
+        let mut inner = self.0.borrow_mut();
+        match words {
+            Some(w) => inner.forge_refuses.insert(branch.into(), w.into()),
+            None => inner.forge_refuses.remove(branch),
+        };
+    }
+
+    /// Each move the forge refused, by branch, in order.
+    pub fn refused_moves(&self) -> Vec<String> {
+        self.0.borrow().refusals_of_moves.clone()
     }
 
     pub fn crash(&self, crash: Crash) {
@@ -2438,6 +2458,12 @@ impl Branch for FakeBranch {
         let found = inner.refs.get(branch).cloned();
         if found.as_ref() != Some(expected) {
             return Ok(Moved::Elsewhere(found));
+        }
+        // 152, record 0124 (design D10): the forge refuses the move, the
+        // branch where it was expected.
+        if let Some(words) = inner.forge_refuses.get(branch).cloned() {
+            inner.refusals_of_moves.push(branch.to_string());
+            return Ok(Moved::Refused(words));
         }
         inner.refs.insert(branch.into(), to.clone());
         inner.moves.push(MoveRecord {
