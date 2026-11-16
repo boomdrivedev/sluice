@@ -1410,12 +1410,12 @@ fn status_lists_the_queue() {
             format!("2 no longer in the queue: sluice status {BRANCH} --all"),
             "OWED".to_string(),
             "  unit/batch-review · never confirmed".to_string(),
-            "    2:failed #2  owed until 2026-10-18T09:00:09Z · handed over by notice at \
-             2026-10-11T09:00:15Z"
+            "    2:failed #2  owed until 2026-10-18T09:00:11Z · handed over by notice at \
+             2026-10-11T09:00:18Z"
                 .to_string(),
             "  unit/touches · never confirmed".to_string(),
-            "    1:landed #1  owed until 2026-10-18T09:00:10Z · handed over by notice at \
-             2026-10-11T09:00:16Z"
+            "    1:landed #1  owed until 2026-10-18T09:00:14Z · handed over by notice at \
+             2026-10-11T09:00:19Z"
                 .to_string(),
             "confirm one with: sluice confirm <key>, in its worktree, or sluice confirm <key> \
              --as operator"
@@ -7137,8 +7137,8 @@ fn status_and_overview_show_a_hold_while_it_lasts() {
             // D13 (51; record 0102): #1's landing, which nobody confirmed.
             "OWED".to_string(),
             "  unit/a · never confirmed".to_string(),
-            "    1:landed #1  owed until 2026-10-18T09:00:10Z · handed over by notice at \
-             2026-10-11T09:00:14Z, wait at 2026-10-11T09:00:17Z"
+            "    1:landed #1  owed until 2026-10-18T09:00:13Z · handed over by notice at \
+             2026-10-11T09:00:16Z, wait at 2026-10-11T09:00:19Z"
                 .to_string(),
             "confirm one with: sluice confirm <key>, in its worktree, or sluice confirm <key> \
              --as operator"
