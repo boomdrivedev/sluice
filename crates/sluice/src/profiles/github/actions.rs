@@ -3,19 +3,27 @@
 //! pool names, by `workflow_dispatch`, on the runner its system names; a
 //! wake starts a job that advances a branch. A job is named by its claim
 //! in the run's title, `sluice <claim>`, which the workflow sets, so
-//! whether it still runs is read from the workflow's queued and running
-//! runs.
+//! where it stands is read from the workflow's runs and their jobs
+//! (record 0122; design D12).
 
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
 
 use anyhow::{anyhow, bail, Result};
 use serde_json::{json, Value};
-use sluice_seams::{Launch, Setting};
+use sluice_seams::{Job, Launch, Setting};
 
 use super::app::{App, Bearer, Call, Repo};
 use crate::profiles::checks::Launcher;
 use crate::profiles::pushed_refs::remote_url;
+
+/// Record 0119, 0122 (design D11): the name of a pool run's job that runs
+/// the checks, holding no identity.
+pub const RUN_JOB: &str = "run";
+
+/// Record 0119, 0122 (design D11): the name of a pool run's job that signs
+/// and records the run's end.
+pub const SIGN_JOB: &str = "sign";
 
 pub struct Actions {
     app: Rc<App>,
@@ -98,29 +106,55 @@ impl Launcher for Actions {
         )
     }
 
-    fn job_alive(
-        &self,
-        kind: &(String, Setting),
-        claim: &str,
-        remote: Option<&str>,
-    ) -> Result<bool> {
+    /// 77, 88, record 0122 (design D12): the workflow's runs listed,
+    /// completed ones among them, in one call conditional on what the host
+    /// keeps (rule core.32), the newest bearing `sluice <claim>` in its
+    /// title read: queued until its `run` job starts, running since that
+    /// job's own start, and, completed, recorded where its `sign` job
+    /// succeeded.
+    fn job(&self, kind: &(String, Setting), claim: &str, remote: Option<&str>) -> Result<Job> {
         let repo = self.repo(remote)?;
         let workflow = Actions::workflow(kind)?;
         let title = format!("sluice {claim}");
-        for status in ["queued", "in_progress", "waiting", "pending", "requested"] {
-            let path = format!(
-                "/repos/{}/{}/actions/workflows/{workflow}/runs?status={status}&per_page=100",
-                repo.owner, repo.name
-            );
-            let v = self.app.get(&path, Bearer::Repo(&repo))?;
-            let found = v["workflow_runs"]
-                .as_array()
-                .is_some_and(|runs| runs.iter().any(|r| r["display_title"] == title.as_str()));
-            if found {
-                return Ok(true);
-            }
+        let path = format!(
+            "/repos/{}/{}/actions/workflows/{workflow}/runs?per_page=100",
+            repo.owner, repo.name
+        );
+        let v = self.app.get(&path, Bearer::Repo(&repo))?;
+        let Some(run) = v["workflow_runs"].as_array().and_then(|runs| {
+            runs.iter()
+                .filter(|r| r["display_title"] == title.as_str())
+                .max_by_key(|r| r["id"].as_u64().unwrap_or(0))
+        }) else {
+            return Ok(Job::None);
+        };
+        let status = run["status"].as_str().unwrap_or_default();
+        if matches!(status, "queued" | "waiting" | "pending" | "requested") {
+            return Ok(Job::Queued);
         }
-        Ok(false)
+        let id = run["id"]
+            .as_u64()
+            .ok_or_else(|| anyhow!("a run of {workflow} with no id"))?;
+        let path = format!(
+            "/repos/{}/{}/actions/runs/{id}/jobs?per_page=100",
+            repo.owner, repo.name
+        );
+        let jobs = self.app.get(&path, Bearer::Repo(&repo))?;
+        let job = |name: &str| {
+            jobs["jobs"]
+                .as_array()
+                .and_then(|j| j.iter().find(|x| x["name"] == name).cloned())
+        };
+        if status == "completed" {
+            let recorded = job(SIGN_JOB).is_some_and(|j| j["conclusion"] == "success");
+            return Ok(Job::Ended { recorded });
+        }
+        Ok(
+            match job(RUN_JOB).and_then(|j| j["started_at"].as_str().map(String::from)) {
+                Some(since) => Job::Running { since },
+                None => Job::Queued,
+            },
+        )
     }
 
     fn wake(&self, kind: &(String, Setting), branch: &str, remote: Option<&str>) -> Result<()> {

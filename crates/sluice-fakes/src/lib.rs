@@ -330,6 +330,9 @@ struct Inner {
     launch_fails: Option<bool>,
     /// The pool jobs that ended, by claim (77, 88).
     jobs_ended: BTreeSet<String>,
+    /// Record 0122 (design D12): each pool job's state as a test moved it,
+    /// by its claim.
+    jobs: BTreeMap<String, sluice_seams::Job>,
     /// Every branch a pool was woken for, in order (111).
     wakes: Vec<String>,
     /// The signer the host's results are recorded as signed by (78).
@@ -1355,6 +1358,11 @@ impl World {
     }
 
     /// The pool's job under `claim` has ended: lost, cancelled, or done.
+    /// Record 0122 (design D12): the pool's job of `claim` stands as `job`.
+    pub fn move_job(&self, claim: &str, job: sluice_seams::Job) {
+        self.0.borrow_mut().jobs.insert(claim.into(), job);
+    }
+
     pub fn end_job(&self, claim: &str) {
         self.0.borrow_mut().jobs_ended.insert(claim.into());
     }
@@ -2817,13 +2825,26 @@ impl Tests for FakeTests {
         }
     }
 
-    fn job_alive(
+    /// Record 0122 (design D12): the job's state as a test moved it; one
+    /// launched and not moved is queued, one ended with no record, and a
+    /// claim never launched has none.
+    fn job(
         &self,
         _kind: &(String, sluice_seams::Setting),
         claim: &str,
         _remote: Option<&str>,
-    ) -> Result<bool> {
-        Ok(!self.0 .0.borrow().jobs_ended.contains(claim))
+    ) -> Result<sluice_seams::Job> {
+        let inner = self.0 .0.borrow();
+        if let Some(job) = inner.jobs.get(claim) {
+            return Ok(job.clone());
+        }
+        if inner.jobs_ended.contains(claim) {
+            return Ok(sluice_seams::Job::Ended { recorded: false });
+        }
+        Ok(match inner.launches.iter().any(|l| l.claim == claim) {
+            true => sluice_seams::Job::Queued,
+            false => sluice_seams::Job::None,
+        })
     }
 
     fn wake(

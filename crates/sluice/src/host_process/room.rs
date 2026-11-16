@@ -748,13 +748,13 @@ impl Tests for Roomed<'_> {
         self.inner.launch(launch)
     }
 
-    fn job_alive(
+    fn job(
         &self,
         kind: &(String, Setting),
         claim: &str,
         remote: Option<&str>,
-    ) -> Result<bool> {
-        self.inner.job_alive(kind, claim, remote)
+    ) -> Result<sluice_seams::Job> {
+        self.inner.job(kind, claim, remote)
     }
 
     fn wake(&self, kind: &(String, Setting), branch: &str, remote: Option<&str>) -> Result<()> {

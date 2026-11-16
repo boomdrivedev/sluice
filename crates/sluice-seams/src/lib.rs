@@ -950,6 +950,20 @@ pub enum Progress {
     Lost,
 }
 
+/// 88, record 0122 (design D12): where a pool's job of a claim stands.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Job {
+    /// No run of the pool bears the claim.
+    None,
+    /// Its run waits for a runner, or its run job has not started.
+    Queued,
+    /// Its run job runs, since its own start.
+    Running { since: String },
+    /// Its run is over: `recorded` where its sign job recorded the run's
+    /// end, and otherwise not, a lapsed claim.
+    Ended { recorded: bool },
+}
+
 /// Record 0122 (design D3): a run found started in a checkout, by the
 /// supervisor's own files: its handle, and its own start.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -1093,16 +1107,14 @@ pub trait Tests {
         anyhow::bail!("no pool is bound for {}", launch.pool)
     }
 
-    /// 77, 88: whether the job under `claim` that pool `kind` was given
-    /// still runs or waits to; one its pool finished, cancelled or lost
-    /// without a report is a lapsed claim.
-    fn job_alive(
-        &self,
-        _kind: &(String, Setting),
-        _claim: &str,
-        _remote: Option<&str>,
-    ) -> Result<bool> {
-        Ok(false)
+    /// 77, 88, record 0122 (design D12): where the job under `claim` that
+    /// pool `kind` was given stands, read from the pool: none of its title,
+    /// queued, its run job running since its own start, or ended, with
+    /// whether its run was recorded. One that ended with no record is a
+    /// lapsed claim, and so is none past the sign-of-life bound since the
+    /// claim.
+    fn job(&self, _kind: &(String, Setting), _claim: &str, _remote: Option<&str>) -> Result<Job> {
+        Ok(Job::None)
     }
 
     /// 111: ask a pool to advance `branch`, when work is written that no

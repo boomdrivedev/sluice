@@ -216,12 +216,12 @@ struct Meta {
 /// A pool the binding hands this profile, to start runs on (88; ADR 0034).
 pub trait Launcher {
     fn launch(&self, launch: &sluice_seams::Launch) -> Result<()>;
-    fn job_alive(
+    fn job(
         &self,
         kind: &(String, Setting),
         claim: &str,
         remote: Option<&str>,
-    ) -> Result<bool>;
+    ) -> Result<sluice_seams::Job>;
     fn wake(&self, kind: &(String, Setting), branch: &str, remote: Option<&str>) -> Result<()>;
 }
 
@@ -2246,17 +2246,17 @@ impl Tests for Checks {
         }
     }
 
-    fn job_alive(
+    fn job(
         &self,
         kind: &(String, Setting),
         claim: &str,
         remote: Option<&str>,
-    ) -> Result<bool> {
+    ) -> Result<sluice_seams::Job> {
         match &self.pool {
-            Some(p) => p.job_alive(kind, claim, remote),
-            // A host that cannot ask the pool reads its jobs as running:
-            // a claim lapses only by what is known of it (77).
-            None => Ok(true),
+            Some(p) => p.job(kind, claim, remote),
+            // A host that cannot ask the pool reads its jobs as waiting: a
+            // claim lapses only by what is known of it (77).
+            None => Ok(sluice_seams::Job::Queued),
         }
     }
 

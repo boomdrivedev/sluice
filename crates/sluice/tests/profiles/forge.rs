@@ -1227,9 +1227,11 @@ fn live_pull_request_calls() {
 
 /// 88, 107, 111: GitHub Actions as a pool, against the fake API: a run is
 /// one dispatch of the pool's workflow on the signer's branch, with the
-/// runner of its system and its claim; a job is alive while a queued or
-/// running run of the workflow bears its claim in its title; a wake is a
-/// dispatch to advance the branch.
+/// runner of its system and its claim; a job is read from the run of the
+/// workflow that bears its claim in its title, queued, running since its
+/// run job's start, or ended, recorded where its sign job succeeded, or
+/// none (record 0122; design D12); a wake is a dispatch to advance the
+/// branch.
 #[test]
 fn the_pools_calls() {
     use sluice::profiles::checks::Launcher;
@@ -1257,14 +1259,43 @@ fn the_pools_calls() {
         if path == "/repos/o/r/actions/workflows/sluice.yml/dispatches" && r.method == "POST" {
             return (204, vec![], String::new());
         }
-        if path.starts_with("/repos/o/r/actions/workflows/sluice.yml/runs?status=in_progress") {
+        if path.starts_with("/repos/o/r/actions/workflows/sluice.yml/runs") {
             return json(
                 200,
-                json!({ "workflow_runs": [{ "display_title": "sluice pool/forge/7" }] }),
+                json!({ "workflow_runs": [
+                    { "id": 1, "display_title": "sluice pool/forge/7", "status": "queued" },
+                    { "id": 2, "display_title": "sluice pool/forge/9", "status": "in_progress" },
+                    { "id": 3, "display_title": "sluice pool/forge/10", "status": "completed" },
+                    { "id": 4, "display_title": "sluice pool/forge/11", "status": "completed" },
+                ] }),
             );
         }
-        if path.starts_with("/repos/o/r/actions/workflows/sluice.yml/runs") {
-            return json(200, json!({ "workflow_runs": [] }));
+        if path.starts_with("/repos/o/r/actions/runs/2/jobs") {
+            return json(
+                200,
+                json!({ "jobs": [
+                    { "name": "run", "status": "in_progress", "started_at": "2026-11-16T09:00:00Z" },
+                    { "name": "sign", "status": "queued" },
+                ] }),
+            );
+        }
+        if path.starts_with("/repos/o/r/actions/runs/3/jobs") {
+            return json(
+                200,
+                json!({ "jobs": [
+                    { "name": "run", "status": "completed", "conclusion": "success", "started_at": "2026-11-16T09:00:00Z" },
+                    { "name": "sign", "status": "completed", "conclusion": "success" },
+                ] }),
+            );
+        }
+        if path.starts_with("/repos/o/r/actions/runs/4/jobs") {
+            return json(
+                200,
+                json!({ "jobs": [
+                    { "name": "run", "status": "completed", "conclusion": "cancelled" },
+                    { "name": "sign", "status": "completed", "conclusion": "skipped" },
+                ] }),
+            );
         }
         json(404, json!({ "message": "Not Found" }))
     });
@@ -1316,12 +1347,19 @@ fn the_pools_calls() {
     assert_eq!(body["inputs"]["runner"], "macos-15");
     assert_eq!(body["inputs"]["claim"], "pool/forge/7");
     assert_eq!(body["inputs"]["combination"], "c0ffee");
-    assert!(pool
-        .job_alive(&kind, "pool/forge/7", Some("origin"))
-        .unwrap());
-    assert!(!pool
-        .job_alive(&kind, "pool/forge/8", Some("origin"))
-        .unwrap());
+    // Record 0122 (design D12): where each claim's job stands.
+    use sluice_seams::Job;
+    let job = |claim: &str| pool.job(&kind, claim, Some("origin")).unwrap();
+    assert_eq!(job("pool/forge/7"), Job::Queued);
+    assert_eq!(
+        job("pool/forge/9"),
+        Job::Running {
+            since: "2026-11-16T09:00:00Z".into()
+        }
+    );
+    assert_eq!(job("pool/forge/10"), Job::Ended { recorded: true });
+    assert_eq!(job("pool/forge/11"), Job::Ended { recorded: false });
+    assert_eq!(job("pool/forge/8"), Job::None);
     pool.wake(&kind, "main", Some("origin")).unwrap();
     let wake = fake
         .requests()

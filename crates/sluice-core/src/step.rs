@@ -24,9 +24,10 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use anyhow::{anyhow, bail, Result};
 use sluice_seams::{
-    read_refused, AtBound, Contested, CoveringVerdict, Delivery, Formed, HostCopy, LandingCommit,
-    Limits, Moved, NotRun, Notification, Outcome, Part, Progress, ReadRefused, Reading, Refusals,
-    Rev, RunHandle, RunKind, RunReport, RunRequest, Source, Submitter, TaskLog, Written,
+    read_refused, AtBound, Contested, CoveringVerdict, Delivery, Formed, HostCopy, Job,
+    LandingCommit, Limits, Moved, NotRun, Notification, Outcome, Part, Progress, ReadRefused,
+    Reading, Refusals, Rev, RunHandle, RunKind, RunReport, RunRequest, Source, Submitter, TaskLog,
+    Written,
 };
 use tracing::{info, info_span, warn};
 
@@ -2053,7 +2054,15 @@ impl Sluice<'_> {
                         .holder()
                         .expect("another's run names its host")
                         .to_string();
-                    if r.state.held() && self.lapsed(&host, now, &pools, rules.remote.as_deref())? {
+                    if r.state.held()
+                        && self.lapsed(
+                            &host,
+                            now,
+                            &pools,
+                            rules.remote.as_deref(),
+                            r.claim.as_ref().map(|c| c.at.as_str()),
+                        )?
+                    {
                         line.log(
                             now,
                             Event::Lapsed {
@@ -3897,7 +3906,7 @@ impl Sluice<'_> {
         for (host, (_, beat)) in self.seams.state.beats()? {
             if host == self.peer.name
                 || host.starts_with("pool/")
-                || self.lapsed(&host, now, &[], None)?
+                || self.lapsed(&host, now, &[], None, None)?
             {
                 continue;
             }
@@ -4067,7 +4076,7 @@ impl Sluice<'_> {
                             .is_some_and(|l| l.iter().any(|x| x.as_str() == Some(s.as_str())))
                 }
             };
-            if takes && !self.lapsed(&host, now, &[], None)? {
+            if takes && !self.lapsed(&host, now, &[], None, None)? {
                 return Ok(true);
             }
         }
@@ -4083,14 +4092,24 @@ impl Sluice<'_> {
         now: &str,
         pools: &[crate::policy::Pool],
         remote: Option<&str>,
+        claimed: Option<&str>,
     ) -> Result<bool> {
         if let Some(rest) = host.strip_prefix("pool/") {
             let name = rest.split('/').next().unwrap_or_default();
-            return match pools.iter().find(|p| p.name == name) {
-                Some(p) => Ok(!self.seams.tests.job_alive(&p.kind, host, remote)?),
+            let Some(p) = pools.iter().find(|p| p.name == name) else {
                 // A pool the policy no longer names runs nothing for it.
-                None => Ok(true),
+                return Ok(true);
             };
+            // Record 0122 (design D12): a job that ended with no record, or
+            // none of the claim's title past the sign-of-life bound since
+            // the claim, is a lapsed claim.
+            return Ok(match self.seams.tests.job(&p.kind, host, remote)? {
+                Job::Ended { recorded } => !recorded,
+                Job::None => claimed
+                    .and_then(|at| seconds_between(at, now))
+                    .is_none_or(|s| s >= self.peer.alive.as_secs_f64()),
+                Job::Queued | Job::Running { .. } => false,
+            });
         }
         let marker = self
             .seams
