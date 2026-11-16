@@ -1153,6 +1153,23 @@ pub trait Tests {
         Ok(())
     }
 
+    /// Record 0119 (design D11; 78, 109): which keys of `report`, a pool's
+    /// run job's, the tree of `revision` bears out by what the run job
+    /// kept in `dir` ([`Tests::keep_proof`]), read as [`Tests::proven`]
+    /// reads a run's own, the runner taken from `tests`, the policy's
+    /// `[tests]` at the branch's revision, never from the run job: nothing
+    /// of the combination runs. A profile that proves nothing so handed
+    /// over proves none.
+    fn proven_from(
+        &self,
+        _dir: &Path,
+        _revision: &Rev,
+        _tests: &Settings,
+        _report: &RunReport,
+    ) -> Result<Proof> {
+        Ok(Proof::default())
+    }
+
     /// ADR 0035: the session runs running on this host, as `running`
     /// counts them, each with what its `sluice exec` kept of it: for a
     /// person to read, never a run or a result (rule core.18).

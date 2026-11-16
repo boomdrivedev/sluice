@@ -825,8 +825,9 @@ fn verify(signer: &str, key: &SignerKey, bytes: &[u8]) -> Result<Vec<ResultLine>
             })?;
             let bundle = std::str::from_utf8(bytes).context("not a Sigstore bundle")?;
             let statement = crate::profiles::github::keyless::verify(bundle, identity)?;
-            let s: Statement =
-                serde_json::from_value(statement).context("the bundle's statement is no run's")?;
+            let s: Statement = serde_json::from_value(statement)
+                .context("the bundle's statement is no run's")
+                .and_then(Statement::checked)?;
             let who = s
                 .predicate
                 .claim

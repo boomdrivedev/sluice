@@ -1281,6 +1281,33 @@ pub enum JobCommand {
         #[arg(long)]
         out: PathBuf,
     },
+    /// Keep of a run job's report only the keys the combination's tree
+    /// bears out, running nothing of it, and write the subjects and the
+    /// predicate `actions/attest` signs to --out; where none is borne out,
+    /// or the run job kept no report, it writes no subjects.
+    #[command(
+        after_help = "Example:\n  $ sluice job sign --claim pool/forge/3 --branch main --from run --out sign"
+    )]
+    Sign {
+        /// The claim the pool's job ran under.
+        #[arg(long, conflicts_with = "head")]
+        claim: Option<String>,
+        /// A pull request's head, signed with no claim.
+        #[arg(long, required_unless_present = "claim")]
+        head: Option<String>,
+        /// The branch the run's combination, or the head, lands on.
+        #[arg(long)]
+        branch: String,
+        /// With --head, the system the head's run job ran as.
+        #[arg(long, requires = "head")]
+        system: Option<String>,
+        /// The run job's directory, as `sluice job run --out` kept it.
+        #[arg(long)]
+        from: PathBuf,
+        /// The directory the subjects and the predicate are written to.
+        #[arg(long)]
+        out: PathBuf,
+    },
 }
 
 /// What a waiting command does between rounds.

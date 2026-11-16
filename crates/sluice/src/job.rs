@@ -3,7 +3,9 @@
 //! checks`): `run`, in the run job, starts the run its claim holds, or a
 //! pull request's head, and hands what it reported and what proves its
 //! keys to the sign job in a directory, recording nothing, writing no
-//! state and holding no key.
+//! state and holding no key; `sign`, in the sign job, keeps of that report
+//! only the keys the combination's tree bears out, running nothing of it,
+//! and writes the subjects and the predicate `actions/attest` signs.
 
 use std::cell::RefCell;
 use std::collections::BTreeMap;
@@ -28,6 +30,12 @@ pub const PROOF: &str = "proof";
 
 /// The file of a run job's directory saying why it holds no report.
 pub const WHY: &str = "why";
+
+/// The files of a sign job's directory `actions/attest` reads: the
+/// subjects, as `sha256sum` writes them, the predicate, and its type.
+pub const SUBJECTS: &str = "subjects";
+pub const PREDICATE: &str = "predicate.json";
+pub const PREDICATE_TYPE: &str = "predicate-type";
 
 /// One `sluice job` command.
 pub fn run(
@@ -100,7 +108,210 @@ pub fn run(
                 }
             }
         }
+        JobCommand::Sign {
+            claim,
+            head,
+            branch,
+            system,
+            from,
+            out: dir,
+        } => {
+            let unwritten = Unwritten::over(seams.state);
+            let s = Sluice::new(
+                Seams {
+                    state: &unwritten,
+                    ..seams
+                },
+                clock,
+            )
+            .as_peer(host.peer());
+            let target = match (&claim, &head) {
+                (Some(claim), None) => claimed(&s, &branch, claim)?,
+                (None, Some(head)) => Signed {
+                    base: base_of(&s, &branch)?,
+                    revision: Rev::new(head),
+                    system: system.clone(),
+                    claim: None,
+                },
+                _ => bail!("sluice job sign: give --claim or --head, not both"),
+            };
+            sign(&s, &branch, &target, &from, &dir, clock, out)
+        }
     }
+}
+
+/// What a sign job signs for: the combination's revision, or a head's,
+/// the branch's revision whose policy it reads, the run's system and its
+/// claim.
+struct Signed {
+    base: Rev,
+    revision: Rev,
+    system: Option<String>,
+    claim: Option<String>,
+}
+
+/// The revision `branch`'s records stand on, whose gate a run is held to
+/// (rule core.15).
+fn base_of(s: &Sluice<'_>, branch: &str) -> Result<Rev> {
+    let snap = s.seams().state.read(branch)?;
+    let doc = sluice_core::line::Line::load(branch, snap)?.doc;
+    doc.base
+        .ok_or_else(|| anyhow::anyhow!("{branch}'s records hold no revision yet"))
+}
+
+/// The run `claim` holds on `branch`, read from its records, the
+/// combination fetched by its own ref (82): never what the run job says
+/// of it.
+fn claimed(s: &Sluice<'_>, branch: &str, claim: &str) -> Result<Signed> {
+    let snap = s.seams().state.read(branch)?;
+    let doc = sluice_core::line::Line::load(branch, snap)?.doc;
+    let base = doc
+        .base
+        .clone()
+        .ok_or_else(|| anyhow::anyhow!("{branch}'s records hold no revision yet"))?;
+    let (c, r) = doc
+        .candidates
+        .iter()
+        .find_map(|c| {
+            c.runs
+                .iter()
+                .find(|r| r.holder() == Some(claim) && r.state.held())
+                .map(|r| (c, r))
+        })
+        .ok_or_else(|| anyhow::anyhow!("no run of {branch} is held under {claim}"))?;
+    s.seams().state.fetch_candidate(branch, &c.id)?;
+    Ok(Signed {
+        base,
+        revision: c.revision.clone(),
+        system: r.system.clone(),
+        claim: Some(claim.to_string()),
+    })
+}
+
+/// The run job's directory under `from`: `from` itself where it holds the
+/// report or says why it holds none, else its one directory that does, as
+/// a download of one artifact by pattern leaves it.
+fn handed_dir(from: &Path) -> std::path::PathBuf {
+    let holds = |d: &Path| d.join(REPORT).exists() || d.join(WHY).exists();
+    if holds(from) {
+        return from.to_path_buf();
+    }
+    let inner: Vec<_> = std::fs::read_dir(from)
+        .into_iter()
+        .flatten()
+        .flatten()
+        .map(|e| e.path())
+        .filter(|p| p.is_dir() && holds(p))
+        .collect();
+    match &inner[..] {
+        [one] => one.clone(),
+        _ => from.to_path_buf(),
+    }
+}
+
+/// Record 0119 (design D11; 78, 79, 109): the keys of the run job's report
+/// the tree of `target.revision` bears out, by the proof the job kept,
+/// with nothing of the combination run, written as the subjects and the
+/// run's predicate for `actions/attest`; a report that is missing, or
+/// whose every key is refused, writes no subjects, and the record that
+/// follows ends the run with no outcome or with what was signed.
+fn sign(
+    s: &Sluice<'_>,
+    branch: &str,
+    target: &Signed,
+    from: &Path,
+    dir: &Path,
+    clock: &dyn Clock,
+    out: &mut dyn Write,
+) -> Result<i32> {
+    use crate::signing::statement::{Claims, Held, Run, RunResult, Statement, RUN_PREDICATE};
+    let from = handed_dir(from);
+    std::fs::create_dir_all(dir)
+        .with_context(|| format!("making the job's directory {}", dir.display()))?;
+    let _ = std::fs::remove_file(dir.join(SUBJECTS));
+    let report: RunReport = match std::fs::read(from.join(REPORT)) {
+        Ok(bytes) => serde_json::from_slice(&bytes).context("the run job's report")?,
+        Err(_) => {
+            let why = std::fs::read_to_string(from.join(WHY))
+                .unwrap_or_else(|_| "the run job handed over nothing".into());
+            writeln!(out, "sluice job sign: nothing to sign: {why}")?;
+            return Ok(0);
+        }
+    };
+    let policy = s
+        .policy_at(&target.base)?
+        .ok_or_else(|| anyhow::anyhow!("{branch}'s revision {} has no policy", target.base))?;
+    let proof =
+        s.seams()
+            .tests
+            .proven_from(&from.join(PROOF), &target.revision, &policy.tests, &report)?;
+    let proven = |t: &&sluice_seams::TaskResult| proof.proven.contains(&t.task);
+    // 149: a task a check depends on is signed only where it failed it.
+    let failed_by = |t: &&sluice_seams::TaskResult| t.outcome == sluice_seams::Outcome::Fail;
+    let results: Vec<RunResult> = report
+        .tasks
+        .iter()
+        .filter(proven)
+        .chain(report.dependencies.iter().filter(proven).filter(failed_by))
+        .map(|t| RunResult {
+            check: t.task.clone(),
+            key: t.hash.clone(),
+            outcome: t.outcome,
+            replayed: matches!(t.source, sluice_seams::Source::Replayed { .. }),
+            took_ms: t.took_ms,
+            attempts: t.attempts,
+        })
+        .collect();
+    for r in &proof.refused {
+        writeln!(out, "not signed: {} ({}): {}", r.task, r.key, r.why)?;
+    }
+    for u in &proof.unkept {
+        writeln!(out, "not signed: {}: {}", u.task, u.reason)?;
+    }
+    if results.is_empty() {
+        writeln!(out, "sluice job sign: no key the tree bears out")?;
+        return Ok(0);
+    }
+    let e = &report.executor;
+    let held = Held {
+        memory: e.memory,
+        network: e.network,
+        docker: e.docker,
+        grant: e.grant.clone(),
+    };
+    let statement = Statement::of(Run {
+        results,
+        claims: Claims {
+            executor: e.kind.clone(),
+            confined: e.confined,
+            system: target.system.clone().unwrap_or_default(),
+        },
+        branch: branch.to_string(),
+        combination: target.revision.clone(),
+        claim: target.claim.clone(),
+        at: clock
+            .now()
+            .to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
+        held: (held != Held::default()).then_some(held),
+    });
+    let subjects: String = statement
+        .subject
+        .iter()
+        .map(|s| format!("{}  {}\n", s.digest["sha256"], s.name))
+        .collect();
+    std::fs::write(
+        dir.join(PREDICATE),
+        serde_json::to_vec(&statement.predicate)?,
+    )?;
+    std::fs::write(dir.join(PREDICATE_TYPE), RUN_PREDICATE)?;
+    std::fs::write(dir.join(SUBJECTS), subjects)?;
+    writeln!(
+        out,
+        "signs {} keys the tree of {} bears out",
+        statement.subject.len(),
+        target.revision
+    )?;
+    Ok(0)
 }
 
 /// Record 0119 (design D11): the run's report, and what proves its keys,

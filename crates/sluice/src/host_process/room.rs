@@ -776,6 +776,16 @@ impl Tests for Roomed<'_> {
         self.inner.keep_proof(run, report, dir)
     }
 
+    fn proven_from(
+        &self,
+        dir: &Path,
+        revision: &sluice_seams::Rev,
+        tests: &sluice_seams::Settings,
+        report: &RunReport,
+    ) -> Result<Proof> {
+        self.inner.proven_from(dir, revision, tests, report)
+    }
+
     fn session_runs(&self) -> Result<Vec<HostRun>> {
         self.inner.session_runs()
     }

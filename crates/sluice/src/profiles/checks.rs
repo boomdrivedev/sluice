@@ -431,10 +431,6 @@ impl RoomHandle {
     }
 }
 
-/// Record 0119 (design D11): the file of a run job's proof naming the
-/// runner its run named.
-const PROOF_RUNNER: &str = "runner";
-
 /// A part a start takes, as the room it was held of carries it: the room
 /// itself, or the host process's over the connection `sluice exec` or
 /// `sluice preview` held it on (design D12).
@@ -2392,18 +2388,17 @@ impl Tests for Checks {
         Ok(proof)
     }
 
-    /// Record 0119 (design D11; 109): the runner the run named, in
-    /// `runner`, and, for a moon run, each manifest its keys' walk reads,
-    /// the key's own and each dependency's, from the stores [`proven`]
-    /// reads, under `blobs/` as moon's store keeps them, so the sign job
-    /// holds each key to the same proof by its content with nothing run.
+    /// Record 0119 (design D11; 109): for a moon run, each manifest its
+    /// keys' walk reads, the key's own and each dependency's, from the
+    /// stores [`proven`] reads, under `blobs/` as moon's store keeps them,
+    /// so the sign job holds each key to the same proof by its content with
+    /// nothing run.
     ///
     /// [`proven`]: Tests::proven
     fn keep_proof(&self, run: &RunHandle, report: &RunReport, dir: &Path) -> Result<()> {
         let meta: Meta = serde_json::from_value(self.runs.request(&run.0)?.meta)
             .with_context(|| format!("reading run {}", run.0))?;
         std::fs::create_dir_all(dir)?;
-        std::fs::write(dir.join(PROOF_RUNNER), &meta.runner)?;
         if meta.runner != "moon" {
             return Ok(());
         }
@@ -2431,6 +2426,76 @@ impl Tests for Checks {
             std::fs::write(at.join(&key[2..]), bytes)?;
         }
         Ok(())
+    }
+
+    /// Record 0119 (design D11; 78, 109; rule core.9): each key of a run
+    /// job's `report` checked against the tree of `revision`, which this
+    /// repository holds, by the manifests the job kept in `dir`, as
+    /// [`proven`] checks a run's own: a command runner's keys are sluice's
+    /// own; a moon key whose manifest the job kept none of is unkept where
+    /// it is a ran pass, and any other the tree does not bear out is
+    /// refused with why. The runner is the policy's, never the job's.
+    ///
+    /// [`proven`]: Tests::proven
+    fn proven_from(
+        &self,
+        dir: &Path,
+        revision: &sluice_seams::Rev,
+        tests: &sluice_seams::Settings,
+        report: &RunReport,
+    ) -> Result<Proof> {
+        let tasks = report.tasks.iter().chain(&report.dependencies);
+        if text(tests, "runner")? != Some("moon") {
+            return Ok(Proof {
+                proven: tasks.map(|t| t.task.clone()).collect(),
+                ..Proof::default()
+            });
+        }
+        let blob = |k: &str| super::moon::blob_in(dir, k);
+        let tree = |p: &str| super::moon::file_at(&self.common, revision.as_str(), p);
+        let checks = report.tasks.iter().map(|t| (t, true));
+        let dependencies = report.dependencies.iter().map(|t| (t, false));
+        let mut proof = Proof::default();
+        for (t, check) in checks.chain(dependencies) {
+            let e = match super::moon::check_key(&t.hash, &t.task, &blob, &tree) {
+                Ok(()) => {
+                    proof.proven.push(t.task.clone());
+                    continue;
+                }
+                Err(e) => e,
+            };
+            let ran_pass =
+                check && matches!(t.source, Source::Ran { .. }) && t.outcome == Outcome::Pass;
+            if let Some(missing) = e.downcast_ref::<moon::NoManifest>() {
+                if ran_pass {
+                    let whose = if missing.task == t.task {
+                        "it".to_string()
+                    } else {
+                        format!("{}, which it depends on", missing.task)
+                    };
+                    proof.unkept.push(NotRun {
+                        task: t.task.clone(),
+                        reason: format!(
+                            "it passed, but nothing the run job handed over proves it ran: \
+                             moon's manifest of {whose} is not among what it kept"
+                        ),
+                        key: Some(missing.key.clone()),
+                    });
+                }
+                continue;
+            }
+            proof.refused.push(sluice_seams::Refused {
+                task: t.task.clone(),
+                key: t.hash.clone(),
+                why: format!("{e:#}"),
+            });
+            tracing::warn!(
+                sluice.task = %t.task,
+                sluice.hash = %t.hash,
+                "a key the combination's tree does not bear out is not signed: {e:#}"
+            );
+        }
+        Ok(proof)
     }
 
     fn session_runs(&self) -> Result<Vec<HostRun>> {

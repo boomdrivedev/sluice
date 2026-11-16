@@ -97,9 +97,14 @@ jobs:
           if [ -n "$CLAIM" ]; then
             set -- --claim "$CLAIM" --branch "$BRANCH"
           else
+            git fetch --no-tags --depth=1 origin "$HEAD"
             set -- --head "$HEAD" --branch "$BASE"
           fi
           sluice job sign "$@" --from "$RUNNER_TEMP/sluice-run" --out "$RUNNER_TEMP/sluice-sign"
+          if [ -s "$RUNNER_TEMP/sluice-sign/subjects" ]; then
+            echo "subjects=true" >> "$GITHUB_OUTPUT"
+            echo "predicate-type=$(cat "$RUNNER_TEMP/sluice-sign/predicate-type")" >> "$GITHUB_OUTPUT"
+          fi
         env:
           CLAIM: ${{ inputs.claim }}
           BRANCH: ${{ inputs.branch }}
@@ -110,7 +115,7 @@ jobs:
         if: steps.sign.outputs.subjects == 'true'
         with:
           subject-checksums: ${{ runner.temp }}/sluice-sign/subjects
-          predicate-type: https://agentplot.github.io/sluice/run/v1
+          predicate-type: ${{ steps.sign.outputs.predicate-type }}
           predicate-path: ${{ runner.temp }}/sluice-sign/predicate.json
           show-summary: false
       - name: Record the run's end

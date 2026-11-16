@@ -2968,6 +2968,43 @@ impl Tests for FakeTests {
         Ok(())
     }
 
+    /// Record 0119 (design D11): a key is borne out where its run job kept
+    /// its line in `keys` and the world forged nothing of its task; a ran
+    /// pass with no line is unkept.
+    fn proven_from(
+        &self,
+        dir: &std::path::Path,
+        _revision: &Rev,
+        _tests: &sluice_seams::Settings,
+        report: &RunReport,
+    ) -> Result<Proof> {
+        let inner = self.0 .0.borrow();
+        let keys = std::fs::read_to_string(dir.join("keys")).unwrap_or_default();
+        let kept = |t: &TaskResult| keys.lines().any(|l| l == format!("{} {}", t.task, t.hash));
+        let mut proof = Proof::default();
+        for t in report.tasks.iter().chain(&report.dependencies) {
+            if inner.forged.contains(&t.task) {
+                proof.refused.push(sluice_seams::Refused {
+                    task: t.task.clone(),
+                    key: t.hash.clone(),
+                    why: format!(
+                        "{}: its record names an input the tree does not hold",
+                        t.task
+                    ),
+                });
+            } else if kept(t) {
+                proof.proven.push(t.task.clone());
+            } else if matches!(t.source, Source::Ran { .. }) && t.outcome == Outcome::Pass {
+                proof.unkept.push(NotRun {
+                    task: t.task.clone(),
+                    reason: "it passed, but nothing the run job handed over proves it ran".into(),
+                    key: Some(t.hash.clone()),
+                });
+            }
+        }
+        Ok(proof)
+    }
+
     fn logs(&self, run: &RunHandle, tasks: &[String]) -> Result<Vec<TaskLog>> {
         Ok(tasks
             .iter()

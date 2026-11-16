@@ -9779,15 +9779,31 @@ const POOLED: &str = "[tests]\nrunner = \"fake\"\n\n[checkout]\n\n\
     \n[systems]\nlinux-x64 = { os = \"linux\", arch = \"x86_64\" }\n\
     macos-arm64 = { os = \"macos\", arch = \"aarch64\" }\n";
 
-/// Record 0119 (design D11): a world whose `main` has one submission whose
-/// run the lead, host `a` with no room of its own, claimed for the pool and
-/// dispatched; the world's host is then `runner`, the pool's job's. The
-/// claim is answered.
-fn pooled(f: &Fakes) -> String {
-    f.world
-        .init("main", &[(POLICY_PATH, POOLED), ("a/lib", "a1")]);
-    f.world.task("a:test", "a/");
-    let head = f.world.work(&f.world.tip("main"), &[("a/lib", Some("a2"))]);
+/// Record 0119 (design D11): a world whose `main` holds `projects`, each
+/// `<p>/lib` with its check `<p>:test`, and one submission changing each,
+/// whose run the lead, host `a` with no room of its own, claimed for the
+/// pool and dispatched; the world's host is then `runner`, the pool's
+/// job's. The claim is answered.
+fn pooled(f: &Fakes, projects: &[&str]) -> String {
+    let libs: Vec<(String, String)> = projects
+        .iter()
+        .map(|p| (format!("{p}/lib"), format!("{p}1")))
+        .collect();
+    let mut files = vec![(POLICY_PATH, POOLED)];
+    files.extend(libs.iter().map(|(p, c)| (p.as_str(), c.as_str())));
+    f.world.init("main", &files);
+    for p in projects {
+        f.world.task(&format!("{p}:test"), &format!("{p}/"));
+    }
+    let changes: Vec<(String, String)> = projects
+        .iter()
+        .map(|p| (format!("{p}/lib"), format!("{p}2")))
+        .collect();
+    let changes: Vec<(&str, Option<&str>)> = changes
+        .iter()
+        .map(|(p, c)| (p.as_str(), Some(c.as_str())))
+        .collect();
+    let head = f.world.work(&f.world.tip("main"), &changes);
     f.world.session("unit/a", "agent-a", &head);
     f.world.be_host("a");
     f.world.signs_as("box");
@@ -9833,7 +9849,7 @@ fn pooled_runs(f: &Fakes) -> Vec<sluice_core::records::SystemRun> {
 #[test]
 fn job_run_writes_its_report_and_records_nothing() {
     let f = Fakes::new();
-    let claim = pooled(&f);
+    let claim = pooled(&f, &["a"]);
     // The lead writes the run running from its run job's start, before
     // the job reads its records (record 0122, design D12).
     f.world.be_host("a");
@@ -9901,4 +9917,118 @@ fn job_run_writes_its_report_and_records_nothing() {
         "{why}"
     );
     assert!(!none.join("report.json").exists());
+}
+
+/// `sluice job run` under `claim` on `main`, its directory under `out`.
+fn job_run(f: &Fakes, claim: &str, out: &std::path::Path) -> std::path::PathBuf {
+    let dir = out.join("sluice-run");
+    let (code, said) = sluice(
+        f,
+        &[
+            "job",
+            "run",
+            "--claim",
+            claim,
+            "--branch",
+            "main",
+            "--out",
+            dir.to_str().unwrap(),
+        ],
+    );
+    assert_eq!(code, 0, "{said}");
+    dir
+}
+
+/// satisfies: record 0119 (design D11); 78, 109; the actions-pool spec's
+/// "The sign job signs only what the combination's tree bears out"
+#[test]
+fn job_sign_signs_only_what_the_tree_bears_out() {
+    let f = Fakes::new();
+    let claim = pooled(&f, &["a", "b"]);
+    let out = support::Scratch::new("job-sign");
+    let ran = job_run(&f, &claim, out.path());
+    let report: sluice_seams::RunReport =
+        serde_json::from_slice(&std::fs::read(ran.join("report.json")).unwrap()).unwrap();
+    let key_of = |task: &str| {
+        report
+            .tasks
+            .iter()
+            .find(|t| t.task == task)
+            .unwrap_or_else(|| panic!("{task} in the report"))
+            .hash
+            .clone()
+    };
+    let (a, _) = (key_of("a:test"), key_of("b:test"));
+    // b:test's key names an input the combination's tree does not hold.
+    f.world.forges("b:test");
+    let starts = f.world.run_starts().len();
+    let version = f.world.version("main");
+    let results = f.world.results_log();
+    let sign = out.path().join("sluice-sign");
+    let (code, said) = sluice(
+        &f,
+        &[
+            "job",
+            "sign",
+            "--claim",
+            &claim,
+            "--branch",
+            "main",
+            "--from",
+            out.path().to_str().unwrap(),
+            "--out",
+            sign.to_str().unwrap(),
+        ],
+    );
+    assert_eq!(code, 0, "{said}");
+    assert!(said.contains("not signed: b:test"), "{said}");
+    assert!(said.contains("signs 1 keys"), "{said}");
+    let subjects = std::fs::read_to_string(sign.join("subjects")).unwrap();
+    assert_eq!(subjects, format!("{a}  a:test@macos-arm64\n"));
+    let run: sluice::signing::statement::Run =
+        serde_json::from_slice(&std::fs::read(sign.join("predicate.json")).unwrap()).unwrap();
+    assert_eq!(run.results.len(), 1);
+    assert_eq!(run.results[0].check, "a:test");
+    assert_eq!(run.claim.as_deref(), Some(claim.as_str()));
+    assert_eq!(run.claims.system, "macos-arm64");
+    assert_eq!(run.combination, pooled_combination(&f));
+    assert_eq!(
+        std::fs::read_to_string(sign.join("predicate-type")).unwrap(),
+        sluice::signing::statement::RUN_PREDICATE
+    );
+    assert_eq!(f.world.run_starts().len(), starts, "nothing of it ran");
+    assert_eq!(f.world.version("main"), version, "no state written");
+    assert_eq!(f.world.results_log(), results, "nothing recorded");
+
+    // Every key refused: no subjects, so nothing is signed.
+    f.world.forges("a:test");
+    let (code, said) = sluice(
+        &f,
+        &[
+            "job",
+            "sign",
+            "--claim",
+            &claim,
+            "--branch",
+            "main",
+            "--from",
+            ran.to_str().unwrap(),
+            "--out",
+            sign.to_str().unwrap(),
+        ],
+    );
+    assert_eq!(code, 0, "{said}");
+    assert!(said.contains("no key the tree bears out"), "{said}");
+    assert!(!sign.join("subjects").exists());
+}
+
+/// The revision of `main`'s first combination.
+fn pooled_combination(f: &Fakes) -> Rev {
+    let snap = f.sluice().seams().state.read("main").unwrap();
+    sluice_core::line::Line::load("main", snap)
+        .unwrap()
+        .doc
+        .candidates[0]
+        .revision
+        .clone()
 }
