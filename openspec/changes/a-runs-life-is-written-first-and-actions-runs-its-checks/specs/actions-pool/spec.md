@@ -24,11 +24,12 @@ non-zero, and write it only with `--force` (88, C.8).
 ### Requirement: sluice init actions names the pool and its signer
 
 `sluice init actions` SHALL add `[signers.forge]`, naming `sluice.yml` on
-the branch it runs from, and `[pools.forge]`, with a runner for each
-system the policy names, to `.config/sluice.toml` where the policy has
-neither, and SHALL print what the operator must still do on GitHub: the
-app's permission to run workflows, and the `sluice` environment holding
-the app's key, admitting only the signer's branch.
+the remote's default branch, else `main`, and `[pools.forge]`, with a
+runner for each system the policy names that GitHub hosts, to
+`.config/sluice.toml` where the policy has neither, and SHALL print what
+the operator must still do on GitHub: the app's permission to run
+workflows, and the `sluice` environment holding the app's key, admitting
+only the signer's branch.
 
 #### Scenario: A repository with no pool
 
@@ -38,6 +39,23 @@ the app's key, admitting only the signer's branch.
   `github = { workflow = ".github/workflows/sluice.yml", ref =
   "refs/heads/main" }` and `[pools.forge]` with a runner for each system,
   and prints the permission and the environment to set
+  (`init_actions_writes_both_workflows_and_the_pool` in
+  `crates/sluice/tests/cli.rs`)
+
+#### Scenario: A system GitHub hosts no runner for
+
+- **WHEN** the policy's `[systems]` also names `riscv`, `linux` on
+  `riscv64`
+- **THEN** `[pools.forge]` names no runner for it, and `sluice init
+  actions` says GitHub hosts none for it
+  (`init_actions_writes_both_workflows_and_the_pool` in
+  `crates/sluice/tests/cli.rs`)
+
+#### Scenario: A policy naming no systems
+
+- **WHEN** the policy names no `[systems]`
+- **THEN** `sluice init actions` appends `[systems]` naming `linux-x64`
+  with the pool, a runner for it, and says so
   (`init_actions_writes_both_workflows_and_the_pool` in
   `crates/sluice/tests/cli.rs`)
 

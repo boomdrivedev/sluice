@@ -35,13 +35,19 @@ enum Pool {
     Appended {
         text: String,
         runners: BTreeMap<String, String>,
+        /// Whether a `[systems]` table is appended, the policy naming none.
+        systems: bool,
+        /// Each system `[systems]` names that GitHub hosts no runner for,
+        /// as `<name> (<os> <arch>)`.
+        unhosted: Vec<String>,
     },
 }
 
 /// The pool `policy` names on GitHub, or the tables to append for the
 /// `forge` signer and pool: the signer's workflow at `git_ref`, the pool's
-/// runners for each system `[systems]` names that GitHub hosts, and, where
-/// it names none, a `linux-x64` system appended with them (85).
+/// runners for each system `[systems]` names that GitHub hosts, each it
+/// hosts none for named, and, where it names none, a `linux-x64` system
+/// appended with them (85).
 fn pool_of(policy: &str, git_ref: &str) -> Result<Pool> {
     let table: toml::Table = policy
         .parse()
@@ -76,11 +82,15 @@ fn pool_of(policy: &str, git_ref: &str) -> Result<Pool> {
         bail!("{POLICY_PATH} names [pools.forge], which is no pool on GitHub");
     }
     let mut runners = BTreeMap::new();
+    let mut unhosted = Vec::new();
     let systems = table.get("systems").and_then(|s| s.as_table());
     for (name, s) in systems.into_iter().flatten() {
         let field = |k: &str| s.get(k).and_then(|v| v.as_str()).unwrap_or_default();
-        if let Some(runner) = hosted_runner(field("os"), field("arch")) {
-            runners.insert(name.clone(), runner.to_string());
+        match hosted_runner(field("os"), field("arch")) {
+            Some(runner) => {
+                runners.insert(name.clone(), runner.to_string());
+            }
+            None => unhosted.push(format!("{name} ({} {})", field("os"), field("arch"))),
         }
     }
     if systems.is_none() {
@@ -100,11 +110,17 @@ fn pool_of(policy: &str, git_ref: &str) -> Result<Pool> {
          runners = {{ {} }}\n",
         listed.join(", ")
     ));
-    Ok(Pool::Appended { text, runners })
+    Ok(Pool::Appended {
+        text,
+        runners,
+        systems: systems.is_none(),
+        unhosted,
+    })
 }
 
 /// The ref the signer's workflow runs from: the remote's default branch as
-/// the working copy holds it, else `main`'s.
+/// the working copy holds it, else `main`'s, never the branch the working
+/// copy has checked out, which may be a feature branch's (design D14).
 fn signer_ref(dir: &Path) -> String {
     let out = std::process::Command::new("git")
         .current_dir(dir)
@@ -186,7 +202,12 @@ pub fn actions(dir: &Path, force: bool, out: &mut dyn Write) -> Result<i32> {
     }
     match pool {
         Pool::Named(_) => writeln!(out, "{POLICY_PATH}: names its pool on GitHub already")?,
-        Pool::Appended { text, .. } => {
+        Pool::Appended {
+            text,
+            systems,
+            unhosted,
+            ..
+        } => {
             let mut file = std::fs::OpenOptions::new()
                 .append(true)
                 .open(&policy_path)
@@ -195,11 +216,22 @@ pub fn actions(dir: &Path, force: bool, out: &mut dyn Write) -> Result<i32> {
                 file.write_all(b"\n")?;
             }
             file.write_all(text.as_bytes())?;
+            let appended = match systems {
+                true => "[systems], naming linux-x64, [signers.forge] and [pools.forge]",
+                false => "[signers.forge] and [pools.forge]",
+            };
             writeln!(
                 out,
-                "{POLICY_PATH}: [signers.forge] and [pools.forge] appended; a branch's \
-                 `systems` names the systems its runs need, and `trust` names forge"
+                "{POLICY_PATH}: {appended} appended; a branch's `systems` names the systems \
+                 its runs need, and `trust` names forge"
             )?;
+            for system in unhosted {
+                writeln!(
+                    out,
+                    "{POLICY_PATH}: GitHub hosts no runner for {system}; name one for it in \
+                     [pools.forge] runners to run it on the pool"
+                )?;
+            }
         }
     }
     let branch = git_ref.strip_prefix("refs/heads/").unwrap_or(&git_ref);

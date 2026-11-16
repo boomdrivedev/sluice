@@ -1062,9 +1062,11 @@ Sets up a pool on GitHub Actions in the working copy it runs in, or
 `--worktree <path>`. It writes `.github/workflows/sluice.yml`, a pool's
 run in two jobs, and `sluice-pr.yml`, which runs a pull request's head
 on each of the pool's systems. Where the policy names no pool on
-GitHub, it appends `[signers.forge]` and `[pools.forge]`, with a runner
-for each system `[systems]` names that GitHub hosts, leaving the file's
-own lines as they were. A workflow that differs from what it writes is
+GitHub, it appends `[signers.forge]`, whose workflow runs from the
+remote's default branch, and `[pools.forge]`, with a runner for each
+system `[systems]` names that GitHub hosts, leaving the file's own lines
+as they were. It names each system GitHub hosts no runner for, and a
+policy with no `[systems]` gains `linux-x64`. A workflow that differs from what it writes is
 left as it is, naming the first line that differs, and it exits `1`;
 `--force` writes it. Then it says what to set on GitHub: the app's
 permission to run workflows, and the `sluice` environment.

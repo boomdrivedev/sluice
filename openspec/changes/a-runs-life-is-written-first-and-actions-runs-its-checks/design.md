@@ -364,7 +364,12 @@ host would need.
 `sluice init actions` writes both workflows, appends `[signers.forge]`
 and `[pools.forge]` as text where the policy, read with `toml`, has
 neither, the file's own lines untouched, leaves a differing file
-without `--force`, and prints the permission and the environment. `sluice
+without `--force`, and prints the permission and the environment. The
+signer's ref is the remote's default branch as the working copy holds
+it, else `main`: a session runs `init` in a worktree on a feature
+branch, which no signer's workflow runs from. The pool's runners are
+those GitHub hosts for the systems `[systems]` names, each it hosts none
+for named in the output; a policy naming no systems gains `linux-x64`. `sluice
 forge check` adds, for a policy with a GitHub pool, the workflow on the
 signer's branch as `init` would write it, the app's `actions: write`, the
 `sluice` environment's deployment branch policy naming only the signer's

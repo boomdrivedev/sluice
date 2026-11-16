@@ -10359,6 +10359,8 @@ fn init_actions_writes_both_workflows_and_the_pool() {
     assert!(said.contains("Actions, read and write"), "{said}");
     assert!(said.contains("environment named `sluice`"), "{said}");
 
+    assert!(said.contains("[systems], naming linux-x64,"), "{said}");
+
     // Again: nothing changes.
     let (code, said) = init_actions(&f, dir.path(), false);
     assert_eq!(code, 0, "{said}");
@@ -10368,6 +10370,41 @@ fn init_actions_writes_both_workflows_and_the_pool() {
         std::fs::read_to_string(dir.path().join(POLICY_PATH)).unwrap(),
         policy
     );
+
+    // A policy naming linux-x64 and macos-arm64, and a system GitHub hosts
+    // no runner for: a runner for each it hosts, the other named, and the
+    // signer's workflow on main, where it runs from.
+    let systems = format!(
+        "{INIT_POLICY}\n[systems]\nlinux-x64 = {{ os = \"linux\", arch = \"x86_64\" }}\n\
+         macos-arm64 = {{ os = \"macos\", arch = \"aarch64\" }}\n\
+         riscv = {{ os = \"linux\", arch = \"riscv64\" }}\n"
+    );
+    let dir = copy_with(&systems);
+    let (code, said) = init_actions(&f, dir.path(), false);
+    assert_eq!(code, 0, "{said}");
+    let policy = std::fs::read_to_string(dir.path().join(POLICY_PATH)).unwrap();
+    assert!(policy.starts_with(&systems), "{policy}");
+    assert_eq!(policy.matches("[systems]").count(), 1, "{policy}");
+    assert!(
+        policy.contains(
+            "[signers.forge]\ngithub = { workflow = \".github/workflows/sluice.yml\", ref = \
+             \"refs/heads/main\" }\n"
+        ),
+        "{policy}"
+    );
+    let p = sluice_core::policy::Policy::parse(&policy).expect("the policy parses");
+    assert_eq!(
+        p.pools[0].runners,
+        std::collections::BTreeMap::from([
+            ("linux-x64".to_string(), "ubuntu-24.04".to_string()),
+            ("macos-arm64".to_string(), "macos-15".to_string()),
+        ])
+    );
+    assert!(
+        said.contains("GitHub hosts no runner for riscv (linux riscv64)"),
+        "{said}"
+    );
+    assert!(!said.contains("[systems], naming"), "{said}");
 }
 
 /// satisfies: record 0119 (design D14); the actions-pool spec's "A
