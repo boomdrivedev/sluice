@@ -13,7 +13,7 @@ number and rules by id.
 
 ## 2. root:changes validates each open change as archived
 
-- [ ] 2.1 Add `check-changes.sh`, copied from Boomdrive's, and run it in `root:changes`, with the script among the task's inputs. True when `sluice exec bolt/sluices-checks-read-no-markdown -- moon run root:changes` passes. The two refusals have no test of their own, as Boomdrive's have none: a test would hold specs as fixtures, and the gate runs the task over the tree's own changes.
+- [x] 2.1 Add `check-changes.sh`, copied from Boomdrive's, and run it in `root:changes`, with the script among the task's inputs. True when `sluice exec bolt/sluices-checks-read-no-markdown -- moon run root:changes` passes. The two refusals have no test of their own, as Boomdrive's have none: a test would hold specs as fixtures, and the gate runs the task over the tree's own changes.
 
 ## 3. The decision is written down
 
