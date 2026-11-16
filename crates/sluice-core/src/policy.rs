@@ -1053,6 +1053,23 @@ batch = true
 hold = "5m"
 "##;
 
+    /// 137, record 0093 as amended 2026-11-08 (design D10 of
+    /// `a-queues-home-is-written-in-its-records`): no key of a branch's
+    /// policy chooses how its queue runs or which host leads it: a branch's
+    /// `runs` and `lead` are each refused naming the key, as any key sluice
+    /// does not know is.
+    #[test]
+    fn no_policy_key_chooses_how_a_queue_runs() {
+        for (key, value) in [("runs", "\"daemon\""), ("lead", "\"box\"")] {
+            let text = format!("[branches.main]\nrequired = [\"#gate\"]\n{key} = {value}\n");
+            let refused = match Policy::parse(&text) {
+                Ok(p) => format!("{:#}", p.rules_for("main").unwrap_err()),
+                Err(e) => format!("{e:#}"),
+            };
+            assert!(refused.contains(key), "{key}: {refused}");
+        }
+    }
+
     #[test]
     fn reads_the_walkthrough_shape() {
         let p = Policy::parse(POLICY).unwrap();

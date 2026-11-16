@@ -8,7 +8,10 @@
 //!   event per line, appended and never rewritten (16);
 //! - `deliveries.jsonl`: each decided outcome a reader is owed, as weir's
 //!   delivery records, one to a line in C.8's JSON, in the order added
-//!   (51; record 0102).
+//!   (51; record 0102);
+//! - `home.json`: where the branch's queue lives, whether this home is
+//!   open, moving or closed, and where a move took it (record 0122; C.6;
+//!   design D1 of `a-queues-home-is-written-in-its-records`).
 //!
 //! and beside every branch, one `results.jsonl` for the repository: every
 //! check's outcome under its key, for any branch's gate to read (69).
@@ -30,6 +33,7 @@ pub const BRANCH_SCHEMA: &str = "sluice/branch@1";
 pub const LOG_SCHEMA: &str = "sluice/log@1";
 pub const RESULT_SCHEMA: &str = "sluice/result@1";
 pub const SET_ASIDE_SCHEMA: &str = "sluice/set-aside@1";
+pub const HOME_SCHEMA: &str = "sluice/home@1";
 
 fn log_schema() -> String {
     LOG_SCHEMA.into()
@@ -41,6 +45,9 @@ fn result_schema() -> String {
 
 pub const BRANCH_FILE: &str = "branch.json";
 pub const LOG_FILE: &str = "log.jsonl";
+/// Record 0122 (design D1): the home document, beside `branch.json` in
+/// each home of the branch.
+pub const HOME_FILE: &str = "home.json";
 /// 51: the branch's deliveries, weir's records in C.8's JSON (record 0102;
 /// design D3).
 pub const DELIVERIES_FILE: &str = "deliveries.jsonl";
@@ -282,10 +289,15 @@ pub struct Submission {
     /// commit that landed it there.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub landed_elsewhere: bool,
-    /// Its id in this host's own records, before the branch's records
-    /// moved to the remote and it was submitted again there (design D10).
+    /// Record 0122 (design D5): its number in the home it was carried
+    /// from, where a move carried it under another one; written only by a
+    /// carry.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub was: Option<u64>,
+    /// Record 0122 (design D5): the home it was carried from, `here` or a
+    /// remote's name, where its number changed, beside `was`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub carried_from: Option<String>,
     /// Passed and waiting to land with a deeper candidate (117).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub held: Option<Held>,
@@ -864,6 +876,12 @@ pub struct BranchDoc {
     /// reads it (rule core.14).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub proof_missing: Vec<ProofMissing>,
+    /// 72, record 0122 (design D9): the lead's own time of its last write
+    /// of the branch, by its own clock; set by every write the lead makes,
+    /// and written alone every half lease while a run of the branch is
+    /// live, so no other instance's lease passes under it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub kept: Option<String>,
 }
 
 /// 114, record 0105 (design D6): a cause of passes `host`'s runs kept no
@@ -942,6 +960,127 @@ impl BranchDoc {
             copies: BTreeMap::new(),
             refused_writes: Vec::new(),
             proof_missing: Vec::new(),
+            kept: None,
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// The home (record 0122)
+// ---------------------------------------------------------------------------
+
+/// Record 0122 (design D1): the name of the host's own files as a home.
+pub const HERE: &str = "here";
+
+/// Record 0122, C.6 (design D1): `home.json`, one in each home of a
+/// branch: where its queue lives, `here` for the host's own files or a
+/// remote's name, the revision whose policy chose it, and whether it is
+/// open, moving or closed. It is written with the records it belongs to,
+/// in one write (63).
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct HomeDoc {
+    pub schema: String,
+    /// The home: [`HERE`] or a remote's name.
+    pub at: String,
+    /// The branch's revision whose policy chose it; `None` where the
+    /// branch had none.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub chosen_at: Option<Rev>,
+    pub state: HomeState,
+    /// While `moving`: where to, the revision whose policy named it, and
+    /// since when (design D3).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub moving: Option<Moving>,
+    /// The move that opened it: the home it came from, the host whose own
+    /// files that was, and each number carried, as it was and as it is
+    /// here (design D3, D5).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub came_from: Option<CameFrom>,
+    /// Once `closed`: the home that took it, and each submission carried
+    /// there by its number here (design D3, D4, D7).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub closed: Option<Closed>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum HomeState {
+    Open,
+    Moving,
+    Closed,
+}
+
+/// Design D3: a move written and not yet carried.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Moving {
+    pub to: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub chosen_at: Option<Rev>,
+    pub since: String,
+}
+
+/// Design D3, D5: where an open home came from.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CameFrom {
+    pub home: String,
+    /// The host whose own files it came from, or, for a branch coming home
+    /// from a remote, the host that carried it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub host: Option<String>,
+    /// Each number carried, as it was there and as it is here.
+    #[serde(default)]
+    pub carried: BTreeMap<u64, u64>,
+}
+
+/// Design D3, D4: where a closed home went, and each submission carried.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Closed {
+    pub to: String,
+    /// By its number here, each submission carried: its number in the home
+    /// that took it and, where that is a host's own files, the host.
+    #[serde(default)]
+    pub carried: BTreeMap<u64, CarriedTo>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CarriedTo {
+    pub number: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub host: Option<String>,
+}
+
+impl HomeDoc {
+    /// A home opened at `at` by the policy at `chosen_at` (design D2).
+    pub fn open(at: &str, chosen_at: Option<Rev>) -> HomeDoc {
+        HomeDoc {
+            schema: HOME_SCHEMA.into(),
+            at: at.into(),
+            chosen_at,
+            state: HomeState::Open,
+            moving: None,
+            came_from: None,
+            closed: None,
+        }
+    }
+
+    /// Whether the queue lives here: open or moving (design D2).
+    pub fn is_live(&self) -> bool {
+        self.state != HomeState::Closed
+    }
+
+    /// Where a move written here goes, while it is written.
+    pub fn moving_to(&self) -> Option<&str> {
+        match self.state {
+            HomeState::Moving => self.moving.as_ref().map(|m| m.to.as_str()),
+            _ => None,
+        }
+    }
+
+    /// Where a closed home went.
+    pub fn closed_to(&self) -> Option<&str> {
+        match self.state {
+            HomeState::Closed => self.closed.as_ref().map(|c| c.to.as_str()),
+            _ => None,
         }
     }
 }
@@ -1036,6 +1175,26 @@ pub enum Event {
         outcome: Outcome,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         from_run_at: Option<String>,
+    },
+    /// Record 0122 (design D3): a move of the queue to `to` written in
+    /// this home, chosen by the policy at revision `at`.
+    Moving {
+        to: String,
+        #[serde(rename = "chosen_at", default, skip_serializing_if = "Option::is_none")]
+        at: Option<Rev>,
+    },
+    /// Record 0122 (design D3): a written move ended, the policy at `at`
+    /// naming this home again.
+    Stayed {
+        #[serde(rename = "chosen_at", default, skip_serializing_if = "Option::is_none")]
+        at: Option<Rev>,
+    },
+    /// Record 0122 (design D3, D5): the queue's live submissions carried to
+    /// `to`, each by the number it had and the number it has there.
+    Carried {
+        to: String,
+        #[serde(with = "numbers")]
+        numbers: BTreeMap<u64, u64>,
     },
     /// 72, 73: an instance took the branch, from the lead it names or
     /// from none.
@@ -1329,6 +1488,29 @@ pub enum Event {
     },
 }
 
+/// A log line's map of numbers, keyed by each number as JSON's text: a
+/// line's event is read through serde's buffer, which reads no number from
+/// a key by itself.
+mod numbers {
+    use std::collections::BTreeMap;
+
+    use serde::{Deserialize, Deserializer, Serialize, Serializer};
+
+    pub fn serialize<S: Serializer>(map: &BTreeMap<u64, u64>, s: S) -> Result<S::Ok, S::Error> {
+        map.iter()
+            .map(|(k, v)| (k.to_string(), *v))
+            .collect::<BTreeMap<String, u64>>()
+            .serialize(s)
+    }
+
+    pub fn deserialize<'de, D: Deserializer<'de>>(d: D) -> Result<BTreeMap<u64, u64>, D::Error> {
+        BTreeMap::<String, u64>::deserialize(d)?
+            .into_iter()
+            .map(|(k, v)| Ok((k.parse().map_err(serde::de::Error::custom)?, v)))
+            .collect()
+    }
+}
+
 // ---------------------------------------------------------------------------
 // The repository's results log (69)
 // ---------------------------------------------------------------------------
@@ -1541,6 +1723,164 @@ mod tests {
                 covered_by: None,
             })
         );
+    }
+
+    /// Record 0122 (design D1, D5, D9): `home.json` reads as written,
+    /// open, moving and closed, and writes back the same; a submission's
+    /// `carried_from` and the branch's `kept` round-trip, and the log's
+    /// `moving`, `stayed` and `carried` lines are the spec's.
+    #[test]
+    fn a_home_document_reads_as_written() {
+        let written = r#"{
+  "schema": "sluice/home@1",
+  "at": "origin",
+  "chosen_at": "4f6fe55f",
+  "state": "moving",
+  "moving": {
+    "to": "here",
+    "chosen_at": "9a1c",
+    "since": "2026-11-14T10:00:00Z"
+  },
+  "came_from": {
+    "home": "here",
+    "host": "build-1",
+    "carried": {
+      "52": 52,
+      "53": 61
+    }
+  }
+}
+"#;
+        let home: HomeDoc = serde_json::from_str(written).unwrap();
+        assert_eq!(home.at, "origin");
+        assert_eq!(home.chosen_at, Some(Rev::new("4f6fe55f")));
+        assert_eq!(home.state, HomeState::Moving);
+        assert_eq!(home.moving_to(), Some(HERE));
+        assert!(home.is_live());
+        let came = home.came_from.as_ref().unwrap();
+        assert_eq!(came.host.as_deref(), Some("build-1"));
+        assert_eq!(came.carried[&53], 61);
+        assert_eq!(String::from_utf8(to_document(&home)).unwrap(), written);
+
+        let mut closed = HomeDoc::open("origin", Some(Rev::new("4f6fe55f")));
+        closed.state = HomeState::Closed;
+        closed.closed = Some(Closed {
+            to: HERE.into(),
+            carried: BTreeMap::from([
+                (
+                    7,
+                    CarriedTo {
+                        number: 7,
+                        host: Some("build-1".into()),
+                    },
+                ),
+                (
+                    8,
+                    CarriedTo {
+                        number: 8,
+                        host: Some("build-2".into()),
+                    },
+                ),
+            ]),
+        });
+        let v = serde_json::to_value(&closed).unwrap();
+        assert_eq!(
+            v["closed"],
+            serde_json::json!({
+                "to": "here",
+                "carried": {
+                    "7": {"number": 7, "host": "build-1"},
+                    "8": {"number": 8, "host": "build-2"},
+                },
+            })
+        );
+        assert_eq!(v["state"], "closed");
+        let back: HomeDoc = serde_json::from_value(v).unwrap();
+        assert_eq!(back, closed);
+        assert_eq!(back.closed_to(), Some(HERE));
+        assert!(!back.is_live());
+
+        let mut s = submission(None);
+        s.was = Some(52);
+        s.carried_from = Some(HERE.into());
+        let v = serde_json::to_value(&s).unwrap();
+        assert_eq!(
+            (v["was"].clone(), v["carried_from"].clone()),
+            (52.into(), "here".into())
+        );
+        assert!(!String::from_utf8(to_document(&submission(None)))
+            .unwrap()
+            .contains("carried_from"));
+
+        let mut doc = BranchDoc::new("bolt/x");
+        assert!(!String::from_utf8(to_document(&doc))
+            .unwrap()
+            .contains("kept"));
+        doc.kept = Some("2026-11-14T10:02:30Z".into());
+        let v = serde_json::to_value(&doc).unwrap();
+        assert_eq!(v["kept"], "2026-11-14T10:02:30Z");
+        assert_eq!(serde_json::from_value::<BranchDoc>(v).unwrap(), doc);
+
+        let lines = [
+            Event::Moving {
+                to: "origin".into(),
+                at: Some(Rev::new("9a1c")),
+            },
+            Event::Stayed {
+                at: Some(Rev::new("9a1d")),
+            },
+            Event::Carried {
+                to: "origin".into(),
+                numbers: BTreeMap::from([(52, 52), (53, 61)]),
+            },
+        ];
+        let text: Vec<String> = lines
+            .iter()
+            .map(|event| {
+                String::from_utf8(to_line(&LogLine {
+                    schema: LOG_SCHEMA.into(),
+                    at: "2026-11-14T10:00:00Z".into(),
+                    event: event.clone(),
+                }))
+                .unwrap()
+            })
+            .collect();
+        assert_eq!(
+            text,
+            [
+                "{\"schema\":\"sluice/log@1\",\"at\":\"2026-11-14T10:00:00Z\",\"event\":\"moving\",\"to\":\"origin\",\"chosen_at\":\"9a1c\"}\n",
+                "{\"schema\":\"sluice/log@1\",\"at\":\"2026-11-14T10:00:00Z\",\"event\":\"stayed\",\"chosen_at\":\"9a1d\"}\n",
+                "{\"schema\":\"sluice/log@1\",\"at\":\"2026-11-14T10:00:00Z\",\"event\":\"carried\",\"to\":\"origin\",\"numbers\":{\"52\":52,\"53\":61}}\n",
+            ]
+        );
+        let back: Vec<LogLine> = parse_lines(text.concat().as_bytes()).unwrap();
+        assert_eq!(back.into_iter().map(|l| l.event).collect::<Vec<_>>(), lines);
+    }
+
+    /// Record 0122 (design D1, D2): records with no `home.json` have no
+    /// home, and a write of them writes none; a home set on them is written
+    /// with the rest.
+    #[test]
+    fn a_branch_with_no_home_document_has_no_home() {
+        let mut files = BTreeMap::new();
+        files.insert(
+            BRANCH_FILE.to_string(),
+            to_document(&BranchDoc::new("bolt/x")),
+        );
+        let snapshot = sluice_seams::Snapshot { version: 3, files };
+        let mut line = crate::line::Line::load("bolt/x", snapshot).unwrap();
+        assert_eq!(line.home, None);
+        assert!(line.changes().is_empty());
+        line.home = Some(HomeDoc::open(HERE, Some(Rev::new("c43609b"))));
+        let changes = line.changes();
+        let written: HomeDoc = serde_json::from_slice(&changes.put[HOME_FILE]).unwrap();
+        assert_eq!(written.at, HERE);
+        assert_eq!(written.state, HomeState::Open);
+        let mut files = BTreeMap::new();
+        files.insert(HOME_FILE.to_string(), changes.put[HOME_FILE].clone());
+        let read = crate::line::Line::load("bolt/x", sluice_seams::Snapshot { version: 4, files })
+            .unwrap();
+        assert_eq!(read.home, Some(written));
     }
 
     #[test]

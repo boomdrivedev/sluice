@@ -438,6 +438,9 @@ pub struct Status {
     /// writes were to sluice's copy of it, for the words after them
     /// (design D5). Read only while any stand, and `false` while none do.
     pub on_remote: bool,
+    /// Record 0122 (design D11): where its queue lives, and its move while
+    /// one is written; `None` for records with no home yet.
+    pub home: Option<crate::overview::HomeView>,
 }
 
 /// 133: what this host's rounds of a branch could not read of its remote,
@@ -658,9 +661,21 @@ impl Sluice<'_> {
         for _ in &sessions {
             ids.push(self.seams.state.allocate_id(&req.branch)?);
         }
+        let ids = std::cell::RefCell::new(ids);
         let now = self.now();
         let _lock = self.seams.state.wait_lock(&req.branch)?;
         let accepted = self.update(&req.branch, |l| {
+            // Record 0122 (design D3, D5): the write goes where the branch's
+            // records are now, a move having closed the home it read; a
+            // number that home's count gave and the records it is written in
+            // hold already is given again by theirs (record 0114).
+            if ids.borrow().iter().any(|&id| l.has(id)) {
+                let again = (0..ids.borrow().len())
+                    .map(|_| self.seams.state.allocate_id(&req.branch))
+                    .collect::<Result<Vec<_>>>()?;
+                *ids.borrow_mut() = again;
+            }
+            let ids = ids.borrow();
             let mut accepted = Vec::new();
             // 125, 140: the act's heads, named by its first, where it has
             // several.
@@ -1228,18 +1243,17 @@ impl Sluice<'_> {
         self.held_on(&branch, id)
     }
 
-    /// Submission `id` as `branch`'s records hold it, live or finished.
+    /// Submission `id` as `branch`'s records hold it, live or finished, in
+    /// its open home or a closed one this host reached it through (record
+    /// 0122; design D6, D7).
     fn held_on(&self, branch: &str, id: u64) -> Result<Option<Submission>> {
-        let mut line = self.read_line(branch)?;
-        if let Some(s) = line.subs.remove(&id) {
-            return Ok(Some(s));
-        }
-        self.finished_sub(branch, id)
+        self.reach(branch, id)
     }
 
     /// 49, 26: submission `id` as `sluice wait <n>` and `sluice status
     /// <n>` look it up: as last written, or the submission it became when
-    /// its branch's records moved to its remote (design D10). Every branch
+    /// a move carried it under another number (record 0122; design D5,
+    /// D6). Every branch
     /// is read. A branch that cannot be read is passed by where one branch
     /// read holds the number; named, with the words it was refused with,
     /// where none does (rule core.11); and named beside the branches that
@@ -1323,9 +1337,9 @@ impl Sluice<'_> {
         Ok(moved.then(|| commit.commit.clone()))
     }
 
-    /// Design D10: the submission that `old`, a submission of this host's
-    /// own records, became when the branch's records moved to its remote,
-    /// from the branches that read (26): none where it became one on more
+    /// Record 0122 (design D5): the submission that `old` became when a
+    /// move carried it under another number, from the branches that read
+    /// (26): none where it became one on more
     /// than one branch, since it then names none of them alone (record
     /// 0114).
     pub fn moved_to(&self, old: u64) -> Result<Option<Submission>> {
@@ -1362,15 +1376,18 @@ impl Sluice<'_> {
         Ok(moved)
     }
 
-    /// The submission of `branch` that `old` became, if any.
+    /// The submission of `branch` that `old` became, if any: one a carry
+    /// took under another number, its record naming `old` in `was` and the
+    /// home it came from in `carried_from` (record 0122; design D5).
     fn moved_on(&self, branch: &str, old: u64) -> Result<Option<Submission>> {
         let line = self.read_line(branch)?;
-        if let Some(s) = line.subs.values().find(|s| s.was == Some(old)) {
+        let carried = |s: &Submission| s.was == Some(old) && s.carried_from.is_some();
+        if let Some(s) = line.subs.values().find(|s| carried(s)) {
             return Ok(Some(s.clone()));
         }
         for id in line.finished.keys() {
             if let Some(s) = self.finished_sub(branch, *id)? {
-                if s.was == Some(old) {
+                if carried(&s) {
                     return Ok(Some(s));
                 }
             }
@@ -1577,7 +1594,9 @@ impl Sluice<'_> {
         let on_remote =
             !refused_writes.is_empty() && self.seams.branch.copy(branch)? != HostCopy::Itself;
         let chain = line.order(at.as_ref(), true).chain;
+        let home = crate::overview::HomeView::of(&line);
         Ok(Status {
+            home,
             branch: branch.into(),
             at,
             gone,
@@ -1745,6 +1764,7 @@ fn admit(
             landed_as: None,
             landed_elsewhere: false,
             was: None,
+            carried_from: None,
             held: None,
             subject,
             beside: None,

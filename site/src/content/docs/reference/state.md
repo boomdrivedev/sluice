@@ -17,6 +17,8 @@ readable with plain tools whether or not sluice is running.
   feature/concurrent-units/
     version            57: bumped on every write, so two rounds never both write
     branch.json        the queue's own state, one document
+    home.json          where the queue lives: open here, moving, or closed
+                       with where it went
     submissions/14.json
                        a submission still in the queue, or blamed or conflicting
     .finished/12.json  a submission landed or withdrawn, moved here unchanged
@@ -283,7 +285,7 @@ rest to go on:
 
 ```
 refs/sluice/state/<branch>       one commit: the branch's files above, branch.json,
-                                 submissions/, .finished/, log.jsonl,
+                                 home.json, submissions/, .finished/, log.jsonl,
                                  deliveries.jsonl and version, replaced on every write
 refs/sluice/runs/<signer>        each signer's signed results, only ever added to:
                                  <combination>/<system>/<n>.json, one run's results
@@ -348,6 +350,59 @@ its [`[signing]`](/sluice/reference/configuration/#signing) names. sluice counts
 only once the signature checks against a signer the branch's policy
 names.
 
+## Where a branch's queue lives
+
+A branch's queue has one home: this host's own files, or its remote's
+refs. `home.json`, beside `branch.json` in each, says which, and every
+sluice process reads the branch where it says, whatever a later policy
+names:
+
+```json
+{
+  "schema": "sluice/home@1",
+  "at": "origin",
+  "chosen_at": "4f6fe55f9e",
+  "state": "open"
+}
+```
+
+`at` is `here` for this host's own files, or the remote's name.
+`chosen_at` is the revision whose policy chose it. A branch with no home
+anywhere gets one with its first write: on its remote where its policy
+names `[signers]` and a `remote` for it, in this host's own files
+otherwise. A host with no state of a branch finds its home on the
+remote, as the host process last fetched it.
+
+When a landing brings a policy naming another home, the next round
+writes the move: `state` becomes `moving`, with `moving` saying where
+to, the revision whose policy named it and since when. From then on no
+combination is formed or started; those under test go on and land. Once
+none is under test, the round carries every live submission to the new
+home, with its number and its state, and the outcomes still owed. The
+new home's `home.json` names where it came from in `came_from`, with
+each number as it was and as it is. The old one is `closed`, its
+`closed` naming the home that took the queue and each submission it
+carried; its finished submissions, its index and its log stay where
+they are. A move stopped between its writes is finished by the next
+round, carrying nothing twice. A landing that names the open home again
+before anything is carried ends the move.
+
+A carried submission keeps its number where the new home's branch holds
+none of that number, and the new home's count goes past it. One whose
+number the new home's branch already holds takes the next number there,
+and its record names the number it had in `was` and the home it came
+from in `carried_from`. `sluice status <n>` and `sluice wait <n>` on the
+host that held it follow it under the number it has now.
+
+When a branch on its remote stops naming `[signers]`, its queue comes
+home to each host's own files. The host that keeps it closes the remote
+home, `closed.to` being `here`, and carries what it submitted; every
+other host carries what it submitted the first time it runs a round of
+the branch, and the remote home's `closed.carried` names each submission
+with the host that took it. A submission whose host has not run sluice
+since stays readable in the closed home, and `sluice status <n>` says it
+waits for that host to take it home.
+
 ## A branch's own record
 
 `branch.json` holds the queue's own state: the revision its
@@ -404,6 +459,12 @@ written as `<revision>`. `from` and `to` are the last refused write's,
 show those refused in the last day; read them there, since this form
 is sluice's own. The field is left out when it is empty.
 
+`kept`, on a branch whose state is on its remote, is when the host that
+keeps it last wrote its state, by that host's own clock. Every write it
+makes sets it, and while a run of the branch is claimed or under test it
+writes `kept` alone every half lease, so no other host takes the branch
+while it is alive. It is left out where no host keeps the branch.
+
 `proof_missing` holds, on a branch whose state is on its remote, each
 reason a host's runs kept no proof of a test that passed, while it
 stands, one for each host and reason: `[{"host": "build-1", "why": "it
@@ -459,6 +520,11 @@ since it never ran:
   { "task": "root:integration", "failed_by": ["api:integration"] }
 ]
 ```
+
+A submission a move carried under another number has `was`, the number
+it had, and `carried_from`, the home it came from, `here` or a remote's
+name ([where a branch's queue lives](#where-a-branchs-queue-lives)).
+Both are left out otherwise.
 
 A test with neither `hash` nor `failed_by` was left without a result:
 skipped for another reason, never reached or cut off by the time limit.
@@ -611,6 +677,17 @@ run:
 `landing` is written before the branch moves and `landed` after, so a
 round that crashes between the two is finished correctly by the next
 one.
+
+A move of the queue between its homes is logged as it is written:
+`moving` in the home it leaves, naming where to and the revision whose
+policy chose it; `stayed` there when a later policy names that home
+again; and `carried` in the home that took the queue, each submission's
+number as it was and as it is now:
+
+```json
+{"schema":"sluice/log@1","event":"moving","to":"origin","chosen_at":"4f6fe55f9e"}
+{"schema":"sluice/log@1","event":"carried","to":"origin","numbers":{"52":52,"53":61}}
+```
 
 `handed` is logged each time a submission's outcome is handed over,
 with its key, `by` the way, `notice` (typed into the session's pane),

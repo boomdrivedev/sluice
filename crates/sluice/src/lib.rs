@@ -1940,18 +1940,32 @@ pub fn run(
                     if let Some(d) = s.delivery_of(&sub)? {
                         doc["delivery"] = d.to_json();
                     }
+                    // Record 0122 (design D4): left for its host in a closed
+                    // remote home.
+                    if let Some((home, host)) = s.left_for_host(&sub.branch, sub.id)? {
+                        doc["left_for"] = serde_json::json!({ "home": home, "host": host });
+                    }
                     with_checks(&s, &sub, &mut doc);
                     writeln!(out, "{}", serde_json::to_string_pretty(&doc)?)?;
                     Ok(0)
                 }
                 Lookup::Found(sub) => {
+                    // Record 0122 (design D5, D6): carried under another
+                    // number, named as it is now.
                     if sub.id != id {
+                        let from = sub
+                            .carried_from
+                            .as_deref()
+                            .unwrap_or(sluice_core::records::HERE);
                         writeln!(
                             out,
-                            "submission {id} is #{} now: {}'s queue moved to its remote",
-                            sub.id, sub.branch
+                            "submission {id} is #{} now: {}'s queue moved, and carried it from {} under the next number",
+                            sub.id,
+                            sub.branch,
+                            sluice_core::home::describe(from)
                         )?;
                     }
+                    let left = s.left_for_host(&sub.branch, sub.id)?;
                     let branch = sub.branch.clone();
                     let pusher = pushers.pusher(&branch)?;
                     let room = s.room(host.reserved())?;
@@ -1977,6 +1991,15 @@ pub fn run(
                     )?;
                     for w in ways {
                         writeln!(out, "{w}")?;
+                    }
+                    // Record 0122 (design D4): a submission its host has not
+                    // taken home says so.
+                    if let Some((home, host)) = left {
+                        writeln!(
+                            out,
+                            "#{id} is in {home}'s closed home, waiting for {} to take it home",
+                            host.as_deref().unwrap_or("the host that made it")
+                        )?;
                     }
                     Ok(0)
                 }
@@ -3915,6 +3938,14 @@ impl Reading {
     /// Read `sub` again, and its branch's part of the overview, from the
     /// reader's document; with no whole overview to read it says nothing
     /// new.
+    ///
+    /// Record 0122 (design D6): the submission is followed in the home it
+    /// was last read in. Where the document's queue no longer holds it, or
+    /// holds another submission under its number, as when a move closed
+    /// that home and carried it to another, its record is read again by
+    /// number, which follows the closed home's pointer to the submission
+    /// under the number it has now; it is never another's, and what carried
+    /// it is never worked out here.
     fn read(&mut self, s: &Sluice<'_>, sub: &mut Submission) -> Result<()> {
         let (id, branch) = (sub.id, sub.branch.clone());
         // The reader's read that failed is no whole document either: the
@@ -3926,7 +3957,8 @@ impl Reading {
         let held = self
             .view
             .as_ref()
-            .and_then(|v| v.submissions.iter().find(|x| x.id == id));
+            .and_then(|v| v.submissions.iter().find(|x| x.id == id))
+            .filter(|x| sluice_core::home::same_work(x, sub));
         match held {
             // In the queue: the overview's record is its record.
             Some(x) => *sub = x.clone(),
@@ -6075,6 +6107,10 @@ fn write_status(
             status.testing
         )?;
     }
+    // Record 0122 (design D11): where its queue lives, and its move.
+    if let Some(home) = &status.home {
+        writeln!(out, "its queue is {}", home.line())?;
+    }
     match pusher {
         None => {}
         Some(Pusher {
@@ -6297,6 +6333,7 @@ fn status_json(status: &Status, submissions: &[Submission]) -> Result<serde_json
         "held_checkouts": held_checkouts,
         "copy": status.copy,
         "refused_writes": status.refused_writes,
+        "home": status.home,
     });
     if let Some(refused) = &status.refused {
         json["refused"] = serde_json::json!(refused);

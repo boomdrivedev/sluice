@@ -288,6 +288,14 @@ fn peers() -> Harness {
     h
 }
 
+/// Design D8: the instance that keeps the branch, `lead`, signing as
+/// `box`, which the branch accepts, with no room of its own, so other
+/// hosts and pools take the runs.
+fn keeper<'a>(h: &'a Harness) -> Sluice<'a> {
+    let s = on(h, "lead", Some("box"));
+    h.w().no_room();
+    s
+}
 /// Host `name`, signing as `signer`.
 fn on<'a>(h: &'a Harness, name: &str, signer: Option<&str>) -> Sluice<'a> {
     h.w().be_host(name);
@@ -321,19 +329,19 @@ fn a_host_whose_leftover_checkout_will_not_release_claims_all_the_same() {
     h.w().hold_runs(true);
     h.work("unit/a", "agent-a", &[("a/lib", Some("a2"))]);
     let one = h.submit("unit/a");
-    on(&h, "lead", None).step(BRANCH).unwrap();
+    keeper(&h).step(BRANCH).unwrap();
     on(&h, "b", Some("box")).step(BRANCH).unwrap();
     let left = h.w().live_places()[0].clone();
     // b stops; its claim lapses, and c takes the run.
-    on(&h, "lead", None).step(BRANCH).unwrap();
+    keeper(&h).step(BRANCH).unwrap();
     h.w().advance(chrono::Duration::minutes(3));
-    on(&h, "lead", None).step(BRANCH).unwrap();
+    keeper(&h).step(BRANCH).unwrap();
     h.w().hold_runs(false);
     on(&h, "c", Some("box")).step(BRANCH).unwrap();
     assert_eq!(claims(&h), ["b", "c"]);
     for _ in 0..3 {
         on(&h, "c", Some("box")).step(BRANCH).unwrap();
-        on(&h, "lead", None).step(BRANCH).unwrap();
+        keeper(&h).step(BRANCH).unwrap();
     }
     assert_eq!(h.sub(one).state, State::Landed);
 
@@ -342,7 +350,7 @@ fn a_host_whose_leftover_checkout_will_not_release_claims_all_the_same() {
         .place_release_fails(&left, Some(shared::RELEASE_FAILS));
     h.work("unit/b", "agent-b", &[("b/lib", Some("b2"))]);
     let two = h.submit("unit/b");
-    on(&h, "lead", None).step(BRANCH).unwrap();
+    keeper(&h).step(BRANCH).unwrap();
     on(&h, "b", Some("box")).step(BRANCH).unwrap();
     let held = h.sluice().status(BRANCH).unwrap().failed_releases;
     assert_eq!(held.len(), 1, "{held:?}");
@@ -354,7 +362,7 @@ fn a_host_whose_leftover_checkout_will_not_release_claims_all_the_same() {
     assert!(claimed.len() == 2 && claimed.contains(&left), "{claimed:?}");
 
     for _ in 0..6 {
-        on(&h, "lead", None).step(BRANCH).unwrap();
+        keeper(&h).step(BRANCH).unwrap();
         on(&h, "b", Some("box")).step(BRANCH).unwrap();
     }
     assert_eq!(h.sub(two).state, State::Landed);

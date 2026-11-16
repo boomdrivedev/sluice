@@ -31,13 +31,16 @@ use std::process::{Output, Stdio};
 use std::rc::Rc;
 
 use anyhow::{anyhow, bail, Context, Result};
-use sluice_core::records::{parse_lines, to_line, ResultKind, ResultLine, RESULT_SCHEMA};
+use sluice_core::records::{
+    parse_lines, to_line, HomeDoc, ResultKind, ResultLine, HOME_FILE, RESULT_SCHEMA,
+};
 use sluice_seams::{
     read_refused, Changes, Enforced, Guard, ReadRefused, ResultAsk, Rev, Snapshot, State, TaskLog,
     TaskProgress, Written, FINISHED, KEPT_LOGS,
 };
 
 use super::local_files::LocalFiles;
+use super::local_refs::LocalRefs;
 use super::pushed_refs::{command, Pushed, PushedRefs};
 use crate::signing::dsse::Envelope;
 use crate::signing::ssh;
@@ -200,6 +203,46 @@ impl RemoteRefs {
 
     pub fn remote(&self) -> &str {
         self.pushed.remote()
+    }
+
+    /// Record 0122 (design D5; record 0114): raise the remote's count past
+    /// `number`, so it gives no number up to it, by a leased write of
+    /// `refs/sluice/ids`; a count already past it is left as it is.
+    pub fn raise_ids_past(&self, number: u64) -> Result<()> {
+        let name = "refs/sluice/ids";
+        for _ in 0..ADD_TRIES {
+            let tip = self.fetch(name)?;
+            let next: u64 = match &tip {
+                Some(c) => match self.tree(c)?.get("next") {
+                    Some((_, b)) => std::str::from_utf8(b)?.trim().parse()?,
+                    None => 1,
+                },
+                None => 1,
+            };
+            if next > number {
+                return Ok(());
+            }
+            let files = BTreeMap::from([(
+                "next".to_string(),
+                self.blob(format!("{}\n", number + 1).as_bytes())?,
+            )]);
+            let commit = self.commit(&files, None, &format!("next id {}", number + 1))?;
+            if self.push_leased(&commit, name, tip.as_deref())? {
+                return Ok(());
+            }
+        }
+        bail!(
+            "raising the submission ids on {} was refused {ADD_TRIES} times",
+            self.remote()
+        )
+    }
+
+    /// Record 0122 (design D2): `branch`'s home document in its state on
+    /// the remote as this host last fetched it, read with no process and
+    /// without touching what a write is leased on; `None` where the state
+    /// fetched holds none, or none was fetched.
+    pub fn held_home(&self, branch: &str) -> Result<Option<HomeDoc>> {
+        fetched_home(self.pushed.local(), self.remote(), branch)
     }
 
     /// The results each signer in `signers` signed, each verified with the
@@ -644,6 +687,32 @@ pub(crate) fn ask(pushed: &PushedRefs) -> Result<()> {
     let specs = [&state, &hosts, &branches, &heads, &combinations, &runs].map(String::as_str);
     pushed.fetch_specs("refs/sluice/*", &specs, &["--prune"])?;
     Ok(())
+}
+
+/// Record 0122 (design D2): `branch`'s home document in its state on
+/// `remote` as this host last fetched it into `local`, read with no
+/// process and with no profile of the remote opened, so a branch whose
+/// home is this host's own files asks its remote nothing for it (129;
+/// rule core.31); `None` where the state fetched holds none, or none was
+/// fetched.
+pub(crate) fn fetched_home(
+    local: &LocalRefs,
+    remote: &str,
+    branch: &str,
+) -> Result<Option<HomeDoc>> {
+    let name = state_ref(branch)?;
+    let rest = name.strip_prefix("refs/sluice/").unwrap_or(&name);
+    let Some(at) = local.read_ref(&format!("refs/sluice-fetched/{remote}/{rest}"))? else {
+        return Ok(None);
+    };
+    let entries = local.tree_entries(at.as_str())?;
+    let Some((_, oid)) = entries.iter().find(|(p, _)| p == HOME_FILE) else {
+        return Ok(None);
+    };
+    let bytes = local.blob(oid)?;
+    Ok(Some(serde_json::from_slice(&bytes).with_context(|| {
+        format!("reading {branch}'s {HOME_FILE} on {remote}")
+    })?))
 }
 
 /// 129: the branches whose state this host fetched from `pushed`'s remote,
@@ -1164,6 +1233,12 @@ impl State for RemoteRefs {
             return Ok(Written::Refused);
         }
         self.read.borrow_mut().remove(branch);
+        // Record 0122 (design D2): the state this write left is the state
+        // this host holds of the remote, so what it reads with no fetch,
+        // the home among it, is what it wrote.
+        self.pushed
+            .local()
+            .write_ref(&self.fetched(&name), &Rev(commit.clone()))?;
         // 82: a submission moved to the finished records has left sluice,
         // and its head with it.
         let prefix = format!("{FINISHED}/");

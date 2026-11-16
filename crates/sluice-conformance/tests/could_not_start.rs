@@ -168,6 +168,14 @@ fn peers() -> Harness {
     h
 }
 
+/// Design D8: the instance that keeps the branch, `lead`, signing as
+/// `box`, which the branch accepts, with no room of its own, so other
+/// hosts and pools take the runs.
+fn keeper<'a>(h: &'a Harness) -> Sluice<'a> {
+    let s = on(h, "lead", Some("box"));
+    h.w().no_room();
+    s
+}
 /// Instance `name` on its own host, signing as `signer` or as no one.
 fn on<'a>(h: &'a Harness, name: &str, signer: Option<&str>) -> Sluice<'a> {
     h.w().be_host(name);
@@ -205,7 +213,7 @@ fn launched(h: &Harness) -> (String, String, sluice_seams::Rev) {
     h.w().be_host("lead");
     h.work("unit/a", "agent-a", &[("a/lib", Some("a2"))]);
     h.submit("unit/a");
-    on(h, "lead", None).step(BRANCH).unwrap();
+    keeper(h).step(BRANCH).unwrap();
     assert_eq!(h.w().launches().len(), 1);
     let claim = claims(h).pop().expect("the pool's claim");
     assert!(claim.starts_with("pool/forge/"), "{claim}");
@@ -278,7 +286,7 @@ fn a_host_that_holds_the_combination_fetches_nothing_more() {
     h.w().hold_runs(true);
     h.work("unit/a", "agent-a", &[("a/lib", Some("a2"))]);
     h.submit("unit/a");
-    on(&h, "lead", None).step(BRANCH).unwrap();
+    keeper(&h).step(BRANCH).unwrap();
     on(&h, "a", Some("box")).step(BRANCH).unwrap();
     assert_eq!(claims(&h), ["a"]);
     assert_eq!(h.w().requests().len(), 1);
@@ -304,8 +312,8 @@ fn a_run_one_signing_host_could_not_start_is_taken_by_another() {
     h.w().hold_runs(true);
     h.work("unit/a", "agent-a", &[("a/lib", Some("a2"))]);
     h.submit("unit/a");
-    // A lead that signs as no one the gate trusts opens the run.
-    on(&h, "lead", None).step(BRANCH).unwrap();
+    // A lead with no room of its own opens the run (design D8).
+    keeper(&h).step(BRANCH).unwrap();
     h.w().start_fails(Some(TOOLCHAIN));
     on(&h, "a", Some("box")).step(BRANCH).unwrap();
     assert_eq!(claims(&h), ["a"]);

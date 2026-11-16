@@ -14,6 +14,11 @@ use support::soon;
 
 const BRANCH: &str = "bolt/concurrent-units";
 
+/// Record 0122 (design D11): a branch's status names its queue's home
+/// under its first line; every branch of these fakes is kept in this
+/// host's own files, its policy naming no signer.
+const HOME: &str = "its queue is in this host's own files";
+
 const POLICY: &str = "[branches.\"bolt/*\"]\nrequired = [\"#gate\"]\nparallel = 4\ntrust = [\"open\", \"sandbox\", \"container\"]\n";
 
 struct Rounds(Cell<usize>);
@@ -1391,14 +1396,15 @@ fn status_lists_the_queue() {
     // ADR 0042: the combination under test, with how long it has run.
     let lines: Vec<&str> = out.lines().collect();
     assert_eq!(lines[0], header);
+    assert_eq!(lines[1], HOME, "{out}");
     assert!(
-        lines[1].starts_with(&format!("  testing {BRANCH} + #3 unit/forecast · ")),
+        lines[2].starts_with(&format!("  testing {BRANCH} + #3 unit/forecast · ")),
         "{out}"
     );
     // D13 (51; record 0102): after the queue, what is owed, since nobody
     // confirmed #1's landing or #2's blame.
     assert_eq!(
-        lines[2..],
+        lines[3..],
         [
             format!("  #3 unit/forecast  testing   crw-1-unit-3  unit/forecast   {BRANCH} + #3"),
             format!("2 no longer in the queue: sluice status {BRANCH} --all"),
@@ -1422,16 +1428,17 @@ fn status_lists_the_queue() {
     assert_eq!(code, 0);
     let lines: Vec<&str> = out.lines().collect();
     assert_eq!(lines[0], header);
-    assert!(lines[1].starts_with(&format!("  testing {BRANCH} + #3 unit/forecast · ")));
+    assert_eq!(lines[1], HOME, "{out}");
+    assert!(lines[2].starts_with(&format!("  testing {BRANCH} + #3 unit/forecast · ")));
     assert_eq!(
-        lines[2],
+        lines[3],
         "  #1 unit/touches       landed    crw-1-unit-1  unit/touches"
     );
-    assert!(lines[3].starts_with(
+    assert!(lines[4].starts_with(
         "  #2 unit/batch-review  failed    crw-1-unit-2  unit/batch-review   tests:t-batch-cards on "
     ));
     assert_eq!(
-        lines[4],
+        lines[5],
         format!(
             "  #3 unit/forecast      testing   crw-1-unit-3  unit/forecast       {BRANCH} + #3"
         )
@@ -2936,10 +2943,45 @@ fn wait_follows_the_readers_progress() {
     assert_eq!(lines[1], "still waiting: sluice wait 1");
 }
 
+/// `doc`'s first submission of the branch given the work of `f`'s
+/// submission `id`: its head, its submitter and when it was submitted, so
+/// the reader's document holds that one submission as its reader read it,
+/// whatever else it says of it (core.48; record 0122, design D6).
+fn as_the_work_of(f: &Fakes, id: u64, mut doc: serde_json::Value) -> serde_json::Value {
+    let own = json(&sluice(f, &["status", &id.to_string(), "--json"]).1);
+    let held = &mut doc["branches"][0]["submissions"][0];
+    for key in ["head", "from", "submitted"] {
+        held[key] = own[key].clone();
+    }
+    doc
+}
+
 /// 129: out of time, a follower's `--json` is its record as the reader's
-/// document holds it.
+/// document holds it, which here says `testing` where its own records
+/// still say `queued`.
 #[test]
 fn wait_out_of_time_prints_the_readers_record() {
+    let f = setup();
+    f.world.hold_runs(true);
+    work(&f, "unit/a", "agent-a", &[("plugin/a", Some("a"))]);
+    sluice(&f, &["submit", BRANCH, "--worktree", "unit/a", "--no-wait"]);
+    let doc = as_the_work_of(&f, 1, one_testing(3));
+    let _reader = reader_of(REPOSITORY, &doc);
+    let (code, out) = sluice(&f, &["wait", "1", "--timeout", "2s", "--json"]);
+    assert_eq!(code, sluice::WAITING, "{out}");
+    let held = &doc["branches"][0]["submissions"][0];
+    assert_eq!(json(&out), *held);
+    assert_eq!(held["state"], "testing");
+    let (_, out) = sluice(&f, &["status", "1", "--json"]);
+    assert_eq!(json(&out)["state"], "queued");
+}
+
+/// core.48 (129; record 0122, design D6): a reader's document that gives
+/// a follower's number to other work, another head from another
+/// worktree, holds another submission: out of time, the wait's `--json`
+/// is its own record, read from its records, never the other's.
+#[test]
+fn a_wait_out_of_time_takes_no_other_works_record_from_the_reader() {
     let f = setup();
     f.world.hold_runs(true);
     work(&f, "unit/a", "agent-a", &[("plugin/a", Some("a"))]);
@@ -2948,11 +2990,20 @@ fn wait_out_of_time_prints_the_readers_record() {
     let _reader = reader_of(REPOSITORY, &doc);
     let (code, out) = sluice(&f, &["wait", "1", "--timeout", "2s", "--json"]);
     assert_eq!(code, sluice::WAITING, "{out}");
-    let held = &doc["branches"][0]["submissions"][0];
-    assert_eq!(json(&out), *held);
-    assert_eq!(held["state"], "testing");
-    let (_, out) = sluice(&f, &["status", "1", "--json"]);
-    assert_ne!(json(&out)["head"], held["head"]);
+    let other = &doc["branches"][0]["submissions"][0];
+    let own = json(&sluice(&f, &["status", "1", "--json"]).1);
+    assert_ne!(own["head"], other["head"]);
+    let waited = json(&out);
+    assert_eq!(
+        (
+            &waited["head"],
+            &waited["from"]["worktree"],
+            &waited["state"]
+        ),
+        (&own["head"], &own["from"]["worktree"], &own["state"]),
+        "{out}"
+    );
+    assert_eq!(waited["from"]["worktree"], "unit/a");
 }
 
 /// 129: once the reader's document no longer holds a follower's
@@ -3697,7 +3748,7 @@ fn a_follower_wait_out_of_time_on_a_failure() {
     let f = setup();
     f.world.hold_runs(true);
     seven_queued(&f);
-    let doc = seven_testing();
+    let doc = as_the_work_of(&f, 7, seven_testing());
     let _reader = reader_of(REPOSITORY, &doc);
     let step = Then(Cell::new(0), |n| {
         if n == 1 {
@@ -7079,6 +7130,7 @@ fn status_and_overview_show_a_hold_while_it_lasts() {
                 "{BRANCH} at {} · 1 in the queue · testing 0 at once (up to 4)",
                 &landing[..7]
             ),
+            HOME.to_string(),
             held.clone(),
             "  #2 unit/b  queued    agent-b  unit/b".to_string(),
             format!("1 no longer in the queue: sluice status {BRANCH} --all"),
@@ -7915,12 +7967,13 @@ fn status_shows_this_hosts_copy_behind_while_it_lasts() {
     assert_eq!(code, 0);
     let lines: Vec<&str> = out.lines().collect();
     assert_eq!(
-        lines[..2],
+        lines[..3],
         [
             format!(
                 "{BRANCH} at {} · 0 in the queue · testing 0 at once (up to 4)",
                 &landing.0[..7]
             ),
+            HOME.to_string(),
             format!(
                 "this host's {BRANCH} is at {}, behind the landing {}: {lock}",
                 &made.0[..7],
@@ -7944,7 +7997,7 @@ fn status_shows_this_hosts_copy_behind_while_it_lasts() {
     sluice(&f, &["step", BRANCH]);
     assert_eq!(f.world.copy_of(BRANCH), Some(landing));
     let (_, out) = sluice(&f, &["status", BRANCH]);
-    assert!(!out.contains("this host's"), "{out}");
+    assert!(!out.contains(&format!("this host's {BRANCH}")), "{out}");
     let v = json(&sluice(&f, &["status", BRANCH, "--json"]).1);
     assert!(v["copy"].is_null(), "{v}");
 }
@@ -8030,8 +8083,9 @@ fn status_shows_the_writes_its_protection_refused() {
     assert_eq!(code, 0, "{out}");
     let lines: Vec<&str> = out.lines().collect();
     assert_eq!(
-        lines[1..5],
+        lines[1..6],
         [
+            HOME.to_string(),
             format!(
                 "sluice refused writes to {BRANCH} in the last day, by commands that are not sluice's:"
             ),
@@ -8086,7 +8140,7 @@ fn status_tells_a_local_branchs_refused_writes_what_to_do() {
     let (_, out) = sluice(&f, &["status", BRANCH]);
     let lines: Vec<&str> = out.lines().collect();
     assert_eq!(
-        lines[2..5],
+        lines[3..6],
         [
             format!("  {commit}"),
             "    on build-1: 1 time, first 2026-11-02T16:01:20Z, last 2026-11-02T16:01:20Z, \

@@ -168,19 +168,21 @@ impl Bound {
             discovery,
             peer,
         ));
-        // C.6: a branch's records are on its remote when its policy names
-        // signers, and this host's own files otherwise.
+        // 51: the host a session's submit is recorded on, as its peers
+        // name it.
+        let host = instance.peers.name.clone().unwrap_or_else(checks::hostname);
+        // C.6, record 0122: a branch's records are in the home its records
+        // name, and, where none does, on its remote when its policy names
+        // signers and this host's own files otherwise.
         let state = records::Records::new(
             &common,
             branches::Branches::open_as(dir, identity.clone(), retry.clone())?,
             instance.signing.clone(),
-        );
+        )
+        .as_host(&host);
         let state = if guarding { state.guarding() } else { state };
         let jobs = instance.jobs();
         let caches = instance.caches.clone();
-        // 51: the host a session's submit is recorded on, as its peers
-        // name it.
-        let host = instance.peers.name.clone().unwrap_or_else(checks::hostname);
         Ok(Bound {
             // A session's place's release command is the check seam's to
             // build, and the end of a preview's containers the check seam's

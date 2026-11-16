@@ -165,6 +165,14 @@ fn peers() -> Harness {
     h
 }
 
+/// Design D8: the instance that keeps the branch, `lead`, signing as
+/// `box`, which the branch accepts, with no room of its own, so other
+/// hosts and pools take the runs.
+fn keeper<'a>(h: &'a Harness) -> Sluice<'a> {
+    let s = on(h, "lead", Some("box"));
+    h.w().no_room();
+    s
+}
 /// Instance `name` on its own host, signing as `signer` or as no one.
 fn on<'a>(h: &'a Harness, name: &str, signer: Option<&str>) -> Sluice<'a> {
     h.w().be_host(name);
@@ -197,8 +205,8 @@ fn a_host_whose_engine_answers_takes_the_run_another_turned_down() {
     h.w().hold_runs(true);
     h.work("unit/a", "agent-a", &[("a/lib", Some("a2"))]);
     h.submit("unit/a");
-    // A lead that signs as no one the gate trusts opens the run.
-    on(&h, "lead", None).step(BRANCH).unwrap();
+    // A lead with no room of its own opens the run (design D8).
+    keeper(&h).step(BRANCH).unwrap();
     h.w().be_host("a");
     h.w().engine_unmet(Some(NO_ENGINE));
     for _ in 0..3 {
@@ -361,7 +369,7 @@ fn a_host_whose_executor_holds_the_limits_takes_the_run_another_turned_down() {
     h.w().hold_runs(true);
     h.work("unit/a", "agent-a", &[("a/lib", Some("a2"))]);
     h.submit("unit/a");
-    on(&h, "lead", None).step(BRANCH).unwrap();
+    keeper(&h).step(BRANCH).unwrap();
     h.w().be_host("a");
     h.w().memory_unmet(Some(SANDBOX_MEMORY));
     for _ in 0..3 {
@@ -573,7 +581,7 @@ fn a_run_claimed_in_one_round_reads_the_host_again_at_its_start() {
     h.w().hold_runs(true);
     h.work("unit/a", "agent-a", &[("a/lib", Some("a2"))]);
     h.submit("unit/a");
-    on(&h, "lead", None).step(BRANCH).unwrap();
+    keeper(&h).step(BRANCH).unwrap();
     // Host a claims the run and makes its checkout, and its round ends
     // before the tests start.
     h.w().unanswer_starts(1);

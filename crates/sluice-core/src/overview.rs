@@ -132,6 +132,73 @@ pub struct BranchView {
     /// fetched.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub stale: Option<String>,
+    /// Record 0122 (design D11): where the branch's queue lives, and its
+    /// move while one is written; `None` for records with no home yet, and
+    /// in a document from before it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub home: Option<HomeView>,
+}
+
+/// Record 0122 (design D11): a branch's home as the overview and a status
+/// give it: `at`, `here` for this host's own files or a remote's name, and
+/// while a move is written, where to, since when, and how many combinations
+/// under test it waits for.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct HomeView {
+    pub at: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub moving: Option<MovingView>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MovingView {
+    pub to: String,
+    pub since: String,
+    /// How many combinations under test the move waits for.
+    pub waiting: usize,
+}
+
+impl HomeView {
+    /// Record 0122 (design D11): `line`'s home, `None` where its records
+    /// hold none.
+    pub fn of(line: &Line) -> Option<HomeView> {
+        let home = line.home.as_ref()?;
+        let moving = home
+            .moving
+            .as_ref()
+            .filter(|_| home.moving_to().is_some())
+            .map(|m| MovingView {
+                to: m.to.clone(),
+                since: m.since.clone(),
+                waiting: line
+                    .doc
+                    .candidates
+                    .iter()
+                    .filter(|c| c.state.under_test())
+                    .count(),
+            });
+        Some(HomeView {
+            at: home.at.clone(),
+            moving,
+        })
+    }
+
+    /// Design D11: the line a status says it in: `on origin`, `in this
+    /// host's own files`, or `moving to origin since <time>, waiting for
+    /// <n> combinations under test`.
+    pub fn line(&self) -> String {
+        match &self.moving {
+            Some(m) => format!(
+                "moving to {} since {}, waiting for {} combination{} under test",
+                crate::home::describe(&m.to),
+                m.since,
+                m.waiting,
+                if m.waiting == 1 { "" } else { "s" }
+            ),
+            None if self.at == crate::records::HERE => "in this host's own files".into(),
+            None => format!("on {}", self.at),
+        }
+    }
 }
 
 impl BranchView {
@@ -159,6 +226,7 @@ impl BranchView {
             refused_writes: Vec::new(),
             unread: Some(format!("{why:#}")),
             stale: None,
+            home: None,
         }
     }
 }
@@ -330,6 +398,7 @@ pub fn branch_view(read: BranchRead) -> Result<BranchView> {
         refused_writes: line.doc.refused_writes.clone(),
         unread: None,
         stale: None,
+        home: HomeView::of(&line),
     })
 }
 
@@ -886,6 +955,7 @@ mod tests {
             refused_writes: Vec::new(),
             unread: None,
             stale: None,
+            home: None,
         }
     }
 

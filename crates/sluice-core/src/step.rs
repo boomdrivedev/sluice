@@ -35,8 +35,8 @@ use crate::overview::Room;
 use crate::policy::{Rules, POLICY_PATH};
 use crate::records::{
     Beside, BesideWhy, BranchHold, Candidate, CandidateState, ConflictRecord, CopyBehind,
-    DecidedRecord, Event, FailedTask, Held, LandingCommitRecord, LandingIntent, LostRun,
-    OutboxItem, Recorded, ResultKind, ResultLine, RunState, State, SystemRun, Tested,
+    DecidedRecord, Event, FailedTask, Held, HomeState, LandingCommitRecord, LandingIntent, LostRun,
+    Moving, OutboxItem, Recorded, ResultKind, ResultLine, RunState, State, SystemRun, Tested, HERE,
 };
 use crate::refused::Refusal;
 use crate::release::{ReleaseOutcome, Releasing};
@@ -258,6 +258,24 @@ impl Sluice<'_> {
         round: &tracing::Span,
         releases: &mut Vec<ReleaseOutcome>,
     ) -> Result<Step> {
+        // Record 0122, C.6 (design D4): before the branch is read, what this
+        // host owes a move is carried, wherever its home is not moving: the
+        // submissions it made left in a remote home closed toward the hosts'
+        // own files come into its own the first time a round of its own
+        // reads that home. A moving home is carried only by the round that
+        // keeps it, once nothing is under test ([`Sluice::decide`]). As
+        // there, a round that carries does nothing more: the next reads the
+        // branch where its queue is now.
+        let held = self.seams.state.read_held(branch)?;
+        let moving = match held.files.get(crate::records::HOME_FILE) {
+            Some(bytes) => serde_json::from_slice::<crate::records::HomeDoc>(bytes)
+                .is_ok_and(|h| h.state == HomeState::Moving),
+            None => false,
+        };
+        if !moving && self.seams.state.carry(branch)?.to.is_some() {
+            round.record("sluice.step", "carried");
+            return Ok(Step::Stepped);
+        }
         if !self.keeps(branch)? {
             // 75: another instance keeps the branch; this one takes, runs
             // and reports runs of its own.
@@ -300,9 +318,19 @@ impl Sluice<'_> {
     /// does, or when the instance that does has written nothing for the
     /// lease by this host's own observation and there is work to do.
     /// Taking is a write (62), after which the former lead's next write is
-    /// refused. A branch in this host's own files has no lead. Intake asks
-    /// it too, to take a branch's pull requests in only where this
-    /// instance keeps the branch (137).
+    /// refused. Intake asks it too, to take a branch's pull requests in
+    /// only where this instance keeps the branch (137).
+    ///
+    /// Record 0122, 137, record 0093 as amended 2026-11-08 (design D8): the
+    /// home decides first. A queue open in this host's own files is this
+    /// host's, with no lead. A remote home is taken or kept only by an
+    /// instance the rules at the branch's revision accept: it signs as a
+    /// signer they trust, and the records say they list the key it signs
+    /// with; where they name no signer, as for a branch coming home, any
+    /// instance may lead it, through the lease, so one carries its queue
+    /// home. An instance they do not accept never writes itself as lead,
+    /// and a lead they no longer accept keeps nothing from its next round,
+    /// so an accepted one takes the branch once the lease passes (73).
     pub fn keeps(&self, branch: &str) -> Result<bool> {
         let line = self.read_line(branch)?;
         // 133: the round's first read of the records, answered from what was
@@ -313,8 +341,21 @@ impl Sluice<'_> {
         let Some(tip) = self.seams.branch.read(branch)? else {
             return Ok(true);
         };
-        if !self.rules_at(branch, &tip)?.is_some_and(|r| r.signed) {
+        // 56, S64, 124 (record 0069): the rules at the branch's revision are
+        // read before anything is decided, wherever its home is, so a policy
+        // refused there refuses the round before it levels this host's copy,
+        // lands or runs anything.
+        let rules = self.rules_at(branch, &tip)?;
+        if line.home.as_ref().is_some_and(|h| h.at == HERE) {
             return Ok(true);
+        }
+        let signed = rules.as_ref().is_some_and(|r| r.signed);
+        // Records with no home yet go where the rules at the head send them.
+        if line.home.is_none() && !signed {
+            return Ok(true);
+        }
+        if signed && !self.accepted(branch, &tip, rules.as_ref())? {
+            return Ok(false);
         }
         let me = self.peer.name.clone();
         let from = match &line.doc.lead {
@@ -340,8 +381,51 @@ impl Sluice<'_> {
         let mut taken = line;
         taken.doc.lead = Some(me.clone());
         let now = self.now();
+        taken.doc.kept = Some(now.clone());
         taken.log(&now, Event::Took { by: me, from });
         Ok(matches!(self.write(&taken)?, Written::Written(_)))
+    }
+
+    /// 72, 58, record 0122 (design D9): in a round this instance keeps as
+    /// the lead of a remote home, while a run of the branch is claimed or
+    /// under test, or open on a combination under test, `kept` is written
+    /// once half a lease has passed by this instance's own clock since its
+    /// last, so the branch's state never stands a lease while the lead is
+    /// alive; a round that writes anything else writes it anyway
+    /// ([`Sluice::write`]), and with no such run nothing is written for it.
+    fn keep_lead(&self, line: &mut Line, now: &str) {
+        if line.doc.lead.as_deref() != Some(self.peer.name.as_str()) {
+            return;
+        }
+        if !line.doc.candidates.iter().any(|c| c.state.under_test()) {
+            return;
+        }
+        let half = self.peer.lease.as_secs_f64() / 2.0;
+        let due = line
+            .doc
+            .kept
+            .as_deref()
+            .and_then(|k| seconds_between(k, now))
+            .is_none_or(|s| s >= half);
+        if due {
+            line.doc.kept = Some(now.to_string());
+        }
+    }
+
+    /// 137, record 0093 as amended 2026-11-08 (design D8): whether the
+    /// rules at `tip`, a branch whose records are on its remote, accept this
+    /// instance: it signs as a signer they trust, and the records say they
+    /// list the key it signs with ([`Sluice::key_listed`]).
+    fn accepted(&self, branch: &str, tip: &Rev, rules: Option<&Rules>) -> Result<bool> {
+        let Some(rules) = rules else {
+            return Ok(false);
+        };
+        let trusted = self
+            .peer
+            .signer
+            .as_ref()
+            .is_some_and(|s| rules.claims.contains_key(s));
+        Ok(trusted && self.key_listed(branch, tip, rules)?)
     }
 
     // -----------------------------------------------------------------------
@@ -1315,6 +1399,9 @@ impl Sluice<'_> {
             line.doc.covered_by = None;
         }
         let rules = self.gate(branch, &tip)?;
+        // Record 0122 (design D3): the home the rules at the head name,
+        // weighed against the one the queue is open in.
+        let moving = self.weigh_home(&mut line, &crate::home::named(&rules), &tip, &now);
         let home = self.home_system(&tip)?;
         let listed = self.key_listed(branch, &tip, &rules)?;
         let unmet = Unmet::of(self.policy_at(&tip)?.map(|p| p.limits).unwrap_or_default());
@@ -1326,8 +1413,20 @@ impl Sluice<'_> {
             line.doc.window = rules.parallel;
         }
         line.doc.window = line.doc.window.clamp(1, rules.parallel);
+        // Record 0122, 59 (design D3): a moving home with no combination
+        // under test or judged, and no landing unsettled, is carried under
+        // this round's lock: the round's decisions written first, then every
+        // live submission carried to the home the move names, logged
+        // `carried` there, and the old home closed with its pointer. The
+        // round ends there; the next forms in the new home.
+        if moving && !line.doc.candidates.iter().any(|c| c.state.pins()) {
+            if let Written::Refused = self.write(&line)? {
+                return Ok(Decided::Contended);
+            }
+            self.seams.state.carry(branch)?;
+            return Ok(Decided::Written(unmet, Parts::new()));
+        }
 
-        let adopted = self.adopt_left_behind(&mut line, &now)?;
         // 82: heads submitted from other hosts, fetched to be formed here;
         // and the heads of submissions out of the queue removed.
         self.seams.state.fetch_heads(branch)?;
@@ -1362,11 +1461,14 @@ impl Sluice<'_> {
         // 140: work no required check reads lands beside the chain, before
         // anything is formed; a round that lands so does nothing else, and
         // the next forms on the revision it made.
-        let beside = info_span!("sluice.beside")
-            .in_scope(|| self.choose_beside(&mut line, &rules, &tip, &now))?;
+        // Record 0122 (design D3): nothing lands beside a queue whose move
+        // is written, which waits for no landing but its chain's.
+        let beside = !moving
+            && info_span!("sluice.beside")
+                .in_scope(|| self.choose_beside(&mut line, &rules, &tip, &now))?;
         if !beside {
             let chain = loop {
-                let (chain, removed) = self.arrange(&mut line, &rules, &now)?;
+                let (chain, removed) = self.arrange(&mut line, &rules, moving, &now)?;
                 if !removed {
                     break chain;
                 }
@@ -1392,14 +1494,12 @@ impl Sluice<'_> {
                 )?;
                 self.note_declined(&mut line, &rules, home.as_deref(), listed, &unmet, &now);
             }
-            derive_states(&mut line, &chain);
+            derive_states(&mut line, &chain, moving);
         }
         self.keep_tasks(&line)?;
+        self.keep_lead(&mut line, &now);
         let queued = line.subs.values().filter(|s| !s.state.is_out()).count() as u64;
         let written = matches!(self.write(&line)?, Written::Written(_));
-        if written && !adopted.is_empty() {
-            self.seams.state.forget_left_behind(branch, &adopted)?;
-        }
         if written {
             info!(gauge.sluice.queue.depth = queued, sluice.branch = branch);
             info!(
@@ -1412,6 +1512,46 @@ impl Sluice<'_> {
         } else {
             Decided::Contended
         })
+    }
+
+    /// Record 0122, 58 (design D3): in a round that keeps the queue's open
+    /// home, the home the rules at the head `tip` name, `named`, against it.
+    /// Where they differ, the move is written in the home, logged `moving`;
+    /// a head naming the open home again ends a move written, logged
+    /// `stayed`; one naming a third home writes the move there instead.
+    /// Whether the queue's move stands written after it. Records with no
+    /// home yet have the one their first write writes, and move nothing.
+    fn weigh_home(&self, line: &mut Line, named: &str, tip: &Rev, now: &str) -> bool {
+        let Some(home) = line.home.as_mut() else {
+            return false;
+        };
+        let event = match home.state {
+            HomeState::Closed => return false,
+            HomeState::Open if home.at == named => return false,
+            HomeState::Moving if home.at == named => {
+                home.state = HomeState::Open;
+                home.moving = None;
+                Event::Stayed {
+                    at: Some(tip.clone()),
+                }
+            }
+            HomeState::Moving if home.moving_to() == Some(named) => return true,
+            HomeState::Open | HomeState::Moving => {
+                home.state = HomeState::Moving;
+                home.moving = Some(Moving {
+                    to: named.to_string(),
+                    chosen_at: Some(tip.clone()),
+                    since: now.to_string(),
+                });
+                Event::Moving {
+                    to: named.to_string(),
+                    at: Some(tip.clone()),
+                }
+            }
+        };
+        let moving = matches!(event, Event::Moving { .. });
+        line.log(now, event);
+        moving
     }
 
     /// 122: every submission in the queue, not landing and in no candidate
@@ -1510,44 +1650,6 @@ impl Sluice<'_> {
         }
         line.doc.release.extend(release);
         Ok(())
-    }
-
-    /// Design D10: what this host had queued on the branch in its own
-    /// records, left behind when another host's queue reached the remote
-    /// first, submitted again under new ids, each naming its old one.
-    /// Returns the old ids, for the records seam to forget once written.
-    fn adopt_left_behind(&self, line: &mut Line, now: &str) -> Result<Vec<u64>> {
-        let left = self.seams.state.left_behind(&line.branch)?;
-        let mut adopted = Vec::new();
-        for bytes in left {
-            let old: crate::records::Submission = serde_json::from_slice(&bytes)?;
-            adopted.push(old.id);
-            if line.subs.values().any(|s| s.was == Some(old.id)) {
-                continue;
-            }
-            let id = self.seams.state.allocate_id(&line.branch)?;
-            let head = old.head.clone();
-            line.subs.insert(
-                id,
-                crate::records::Submission {
-                    id,
-                    submitted: now.to_string(),
-                    after: Vec::new(),
-                    attempt: 1,
-                    state: State::Queued,
-                    tested: None,
-                    result: None,
-                    failed: Vec::new(),
-                    conflict: None,
-                    withdrawn: None,
-                    landed_as: None,
-                    was: Some(old.id),
-                    ..old
-                },
-            );
-            line.log(now, Event::Submitted { id, head });
-        }
-        Ok(adopted)
     }
 
     /// ADR 0028: keep the tasks of each run still under test, as its
@@ -2203,7 +2305,17 @@ impl Sluice<'_> {
     /// it, drop candidates it does not hold, and attribute failures.
     /// Returns the chain's candidates, and whether a submission was
     /// removed, in which case the chain is arranged again (8, 12, 21).
-    fn arrange(&self, line: &mut Line, rules: &Rules, now: &str) -> Result<(Vec<String>, bool)> {
+    ///
+    /// Record 0122 (design D3): while the queue's move is written, nothing is
+    /// formed: the chain holds only the combinations under test or judged
+    /// on the base, and those formed and not under test are dropped.
+    fn arrange(
+        &self,
+        line: &mut Line,
+        rules: &Rules,
+        moving: bool,
+        now: &str,
+    ) -> Result<(Vec<String>, bool)> {
         let base = line.doc.base.clone().expect("decide reads the base first");
         let ord = line.order(Some(&base), false);
         let mut removed = false;
@@ -2227,6 +2339,9 @@ impl Sluice<'_> {
                 Some(c) if self.carried(c)?.is_none() => None,
                 found => found,
             };
+            if moving && !reused.is_some_and(|c| c.state.pins()) {
+                break;
+            }
             if let Some(c) = reused {
                 prev = c.revision.clone();
                 ids.push(c.id.clone());
@@ -2989,15 +3104,23 @@ impl Sluice<'_> {
                 .iter()
                 .position(|r| self.claimable(r, home, rules, listed, unmet));
             // A candidate this host would run starts only with room held
-            // for it.
+            // for it. Design D8 (75): on a branch whose records are on its
+            // remote, a lead with no room opens it all the same, its runs
+            // open to every host the branch accepts.
             let part = match mine {
+                Some(_) if full && rules.signed => None,
                 Some(_) if full => break,
                 Some(_) => match self.seams.tests.hold(RunKind::Queue)? {
                     Some(part) => Some(part),
+                    None if rules.signed => {
+                        full = true;
+                        None
+                    }
                     None => break,
                 },
                 None => None,
             };
+            let mine = mine.filter(|_| part.is_some() || !rules.signed);
             let place = match mine {
                 Some(i) => {
                     let place = self.next_place(line);
@@ -4146,7 +4269,10 @@ fn held(
 }
 
 /// Each queued submission's state, read from the chain (26, 49).
-fn derive_states(line: &mut Line, chain: &[String]) {
+/// Record 0122 (design D3): while the queue's move is written, a
+/// submission no combination holds is queued, never waiting: the chain
+/// stops at what is under test, not at what it waits on (7).
+fn derive_states(line: &mut Line, chain: &[String], moving: bool) {
     let base = line.doc.base.clone();
     let mut under_test: BTreeSet<u64> = BTreeSet::new();
     let mut own: BTreeMap<u64, CandidateState> = BTreeMap::new();
@@ -4170,7 +4296,10 @@ fn derive_states(line: &mut Line, chain: &[String]) {
         // Its own candidate passed: passed, though a deeper one holding it
         // is under test, as when a hold keeps it (117).
         s.state = if !in_chain.contains(&s.id) {
-            State::Waiting
+            match moving {
+                true => State::Queued,
+                false => State::Waiting,
+            }
         } else if own.get(&s.id) == Some(&CandidateState::Passed) {
             State::Passed
         } else if under_test.contains(&s.id) {

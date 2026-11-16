@@ -1326,6 +1326,20 @@ dir = "/caches/moon"
         assert_eq!(ordinal(22), "22nd");
     }
 
+    /// 137, record 0093 as amended 2026-11-08 (design D10 of
+    /// `a-queues-home-is-written-in-its-records`): no key of the host's
+    /// settings chooses how a queue runs or which host leads it: `[peers]
+    /// lead` and a `[queue]` table are each refused naming the key, as any
+    /// key sluice does not know is.
+    #[test]
+    fn no_host_setting_chooses_how_a_queue_runs() {
+        let err = |text: &str| format!("{:#}", with(text, 4).unwrap_err());
+        let lead = err("[peers]\nname = \"box-1\"\nlead = true\n");
+        assert!(lead.contains("lead"), "{lead}");
+        let queue = err("[queue]\nruns = \"daemon\"\n");
+        assert!(queue.contains("queue"), "{queue}");
+    }
+
     /// 35: an entry sluice cannot honour is refused, naming the entry by
     /// its place and the key or the variable.
     #[test]
