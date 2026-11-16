@@ -2212,7 +2212,7 @@ pub fn run(
                     refuse_several(id, "sluice status", &several, json, 2, out)
                 }
                 Lookup::Found(sub) if json => {
-                    let mut doc = with_waiting(&s, &sub, decided_document(&sub, None)?);
+                    let mut doc = with_waiting(&s, &sub, decided_document(&s, &sub, None)?);
                     // 51, D13: a decided submission's delivery.
                     if let Some(d) = s.delivery_of(&sub)? {
                         doc["delivery"] = d.to_json();
@@ -2323,7 +2323,7 @@ pub fn run(
                 // its queue.
                 let owed = s.owed_on_branch(&target)?;
                 if json {
-                    let mut doc = status_json(&status, &shown)?;
+                    let mut doc = status_json(&s, &status, &shown)?;
                     // 84, record 0074: what each combination waits for.
                     doc["waiting"] = progress::waiting_json(&s.branch_view_of(&target)?);
                     doc["owed"] = owed_json(&owed);
@@ -3679,14 +3679,41 @@ fn await_submission(
 /// 51, D8: a submission's document, its record as it is, with, for one
 /// landed, failed or conflicting, its `notice`: the words the round pushes
 /// into its session and `sluice inbox` gives it, from `decided` where the
-/// round's outbox item names its outcome, else from the record's own. A
-/// withdrawn, queued or testing one has none. The one document `sluice
-/// inbox --json`, `sluice status <branch> [--all] --json` and `sluice
-/// status <n> --json` give a submission: a contract a caller reads, which
-/// only gains fields.
-fn decided_document(sub: &Submission, decided: Option<&Decided>) -> Result<serde_json::Value> {
+/// round's outbox item names its outcome, else from the record's own. One
+/// whose landing the forge refused has `refused`, the forge's `words` and
+/// when (`at`), read from the branch's held landing, and the notice of
+/// that refusal, which decides no outcome (152, record 0124). A withdrawn,
+/// queued or testing one has none. The one document `sluice inbox
+/// --json`, `sluice status <branch> [--all] --json`, `sluice status <n>
+/// --json`, `sluice wait --json` and a waiting submit give a submission: a
+/// contract a caller reads, which only gains fields.
+fn decided_document(
+    s: &Sluice<'_>,
+    sub: &Submission,
+    decided: Option<&Decided>,
+) -> Result<serde_json::Value> {
+    let refusal = match sub.state {
+        State::Refused => landing_refusal(s, &sub.branch, sub.id)?,
+        _ => None,
+    };
+    document(sub, decided, refusal.as_ref())
+}
+
+/// [`decided_document`], `refusal` the forge's refusal of the landing that
+/// holds `sub`, as its branch's records keep it.
+fn document(
+    sub: &Submission,
+    decided: Option<&Decided>,
+    refusal: Option<&sluice_core::records::LandingRefused>,
+) -> Result<serde_json::Value> {
     let mut doc = serde_json::to_value(sub)?;
-    let own = sub.decided();
+    let refused = refusal.map(|r| Decided::Refused {
+        words: r.words.clone(),
+    });
+    if let Some(r) = refusal {
+        doc["refused"] = serde_json::json!({ "words": r.words, "at": r.at });
+    }
+    let own = sub.decided().or(refused);
     if let Some(d) = decided.or(own.as_ref()) {
         doc["notice"] = sluice_core::notice(sub.id, &sub.branch, d).into();
     }
@@ -4398,13 +4425,13 @@ fn report(
         _ => None,
     };
     if json {
-        let mut doc = with_carried(with_copy(serde_json::to_value(sub)?, copy)?, by);
+        // The submission's record as `sluice status <n> --json` gives it,
+        // its notice and its refusal among it (51, 152).
+        let doc = document(sub, None, refusal.as_ref())?;
+        let mut doc = with_carried(with_copy(doc, copy)?, by);
         // 51, D13: a decided submission's delivery, where it has one.
         if let Some(delivery) = delivery {
             doc["delivery"] = delivery;
-        }
-        if let Some(r) = &refusal {
-            doc["refused"] = serde_json::json!({ "words": r.words, "at": r.at });
         }
         writeln!(out, "{}", serde_json::to_string_pretty(&doc)?)?;
         return Ok(exit_for(sub));
@@ -4897,7 +4924,7 @@ fn inbox(
             .outcomes
             .iter()
             .map(|o| {
-                let mut doc = decided_document(&o.submission, Some(&o.decided))?;
+                let mut doc = decided_document(s, &o.submission, Some(&o.decided))?;
                 doc["delivery"] = o.left("inbox", &owed.at, confirms).to_json();
                 Ok(doc)
             })
@@ -6297,10 +6324,8 @@ fn landing_refusal(
     let snap = sluice_seams::State::read(s_state(s), branch)?;
     let log = sluice_core::line::Line::read_log(&snap)?;
     let line = sluice_core::line::Line::load(branch, snap)?;
-    if let Some(landing) = line.doc.landing.as_ref().filter(|l| l.ids.contains(&id)) {
-        if let Some(r) = &landing.refused {
-            return Ok(Some(r.clone()));
-        }
+    if let Some(r) = line.refusal_of(id) {
+        return Ok(Some(r.clone()));
     }
     Ok(log.iter().rev().find_map(|l| match &l.event {
         Event::ForgeRefused { ids, words } if ids.contains(&id) => {
@@ -6708,10 +6733,14 @@ fn write_failed_releases(
     Ok(())
 }
 
-fn status_json(status: &Status, submissions: &[Submission]) -> Result<serde_json::Value> {
+fn status_json(
+    s: &Sluice<'_>,
+    status: &Status,
+    submissions: &[Submission],
+) -> Result<serde_json::Value> {
     let submissions = submissions
         .iter()
-        .map(|sub| decided_document(sub, None))
+        .map(|sub| decided_document(s, sub, None))
         .collect::<Result<Vec<_>>>()?;
     let held_checkouts: Vec<serde_json::Value> = status
         .failed_releases

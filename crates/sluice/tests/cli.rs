@@ -170,7 +170,10 @@ fn submit_waits_and_lands() {
 /// whose landing the forge refuses while it waits exits 6 with the forge's
 /// words; a wait's document is the submission's record with the refusal;
 /// `sluice status <n>` gives the refused submission's row with the words,
-/// and a submission queued behind it waits behind the held landing
+/// and a submission queued behind it waits behind the held landing; and
+/// the refused-landing spec's "Every document of a held submission": the
+/// wait's, `sluice status <n> --json`'s, `sluice status <branch> --all
+/// --json`'s and the inbox's give `refused` and the refusal's `notice`
 #[test]
 fn a_landing_the_forge_refused_is_told_with_its_words() {
     let f = setup();
@@ -192,10 +195,8 @@ fn a_landing_the_forge_refused_is_told_with_its_words() {
     let (code, out) = sluice(&f, &["wait", "1", "--json"]);
     assert_eq!(code, sluice::REFUSED, "{out}");
     let doc: serde_json::Value = serde_json::from_str(&out).unwrap();
-    assert_eq!(doc["state"], "refused", "{doc}");
     assert_eq!(doc["id"], 1, "{doc}");
-    assert_eq!(doc["refused"]["words"], words, "{doc}");
-    assert!(doc["refused"]["at"].is_string(), "{doc}");
+    held_record(&doc, words);
 
     work(
         &f,
@@ -228,6 +229,53 @@ fn a_landing_the_forge_refused_is_told_with_its_words() {
         row.ends_with("waits behind the landing the forge refused of #1 unit/touches"),
         "{row}"
     );
+
+    // Every document of #1's record carries the refusal and its notice,
+    // and its delivery under `1:refused`; #2, queued, has neither.
+    let (code, out) = sluice(&f, &["status", "1", "--json"]);
+    assert_eq!(code, 0, "{out}");
+    let one: serde_json::Value = serde_json::from_str(&out).unwrap();
+    held_record(&one, words);
+    assert_eq!(one["delivery"]["key"], "1:refused", "{one}");
+    let (code, out) = sluice(&f, &["status", "2", "--json"]);
+    assert_eq!(code, 0, "{out}");
+    let two: serde_json::Value = serde_json::from_str(&out).unwrap();
+    assert!(two.get("refused").is_none(), "{two}");
+    assert!(two.get("notice").is_none(), "{two}");
+    let (code, out) = sluice(&f, &["status", BRANCH, "--all", "--json"]);
+    assert_eq!(code, 0, "{out}");
+    let all: serde_json::Value = serde_json::from_str(&out).unwrap();
+    let one = all["submissions"]
+        .as_array()
+        .and_then(|subs| subs.iter().find(|s| s["id"] == 1))
+        .unwrap_or_else(|| panic!("#1 among the submissions: {all}"));
+    held_record(one, words);
+    let (code, out) = sluice(&f, &["inbox", "--worktree", "unit/touches", "--json"]);
+    assert_eq!(code, 0, "{out}");
+    let inbox: serde_json::Value = serde_json::from_str(&out).unwrap();
+    let outcomes = inbox["outcomes"].as_array().unwrap();
+    assert_eq!(outcomes.len(), 1, "{inbox}");
+    assert_eq!(outcomes[0]["id"], 1, "{inbox}");
+    held_record(&outcomes[0], words);
+    assert_eq!(outcomes[0]["delivery"]["key"], "1:refused", "{inbox}");
+}
+
+/// 152, record 0124: `doc`, a refused submission's document, as every
+/// document of its record gives it: `state` `refused`, `refused` with the
+/// forge's `words` and when, and the notice of the refusal, naming it and
+/// the words.
+fn held_record(doc: &serde_json::Value, words: &str) {
+    assert_eq!(doc["state"], "refused", "{doc}");
+    assert_eq!(doc["refused"]["words"], words, "{doc}");
+    assert!(doc["refused"]["at"].is_string(), "{doc}");
+    let notice = doc["notice"]
+        .as_str()
+        .unwrap_or_else(|| panic!("a notice: {doc}"));
+    assert!(
+        notice.starts_with(&format!("[sluice] #{}'s landing", doc["id"])),
+        "{notice}"
+    );
+    assert!(notice.contains(words), "{notice}");
 }
 
 #[test]

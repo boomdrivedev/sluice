@@ -426,11 +426,17 @@ impl Submission {
     }
 
     /// 51: the notification its outcome is delivered under, `<id>:<outcome>`,
-    /// as the round's outbox names it, so a repeat is known as one; `None`
-    /// where [`Submission::decided`] is.
+    /// as the round's outbox names it, so a repeat is known as one; for one
+    /// whose landing the forge refused, `<id>:refused`, under which the
+    /// refusal is owed though it decides no outcome (152, record 0124);
+    /// `None` otherwise where [`Submission::decided`] is.
     pub fn notification(&self) -> Option<String> {
-        self.decided()
-            .map(|decided| format!("{}:{}", self.id, decided.word()))
+        match self.state {
+            State::Refused => Some(format!("{}:refused", self.id)),
+            _ => self
+                .decided()
+                .map(|decided| format!("{}:{}", self.id, decided.word())),
+        }
     }
 }
 

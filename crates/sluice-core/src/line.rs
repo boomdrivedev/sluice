@@ -334,6 +334,17 @@ impl Line {
             .ok_or_else(|| anyhow!("no submission {id} to {}", self.branch))
     }
 
+    /// 152, record 0124 (design D10): the forge's refusal of the branch's
+    /// held landing, where that landing carries submission `id`.
+    pub fn refusal_of(&self, id: u64) -> Option<&crate::records::LandingRefused> {
+        self.doc
+            .landing
+            .as_ref()
+            .filter(|l| l.ids.contains(&id))?
+            .refused
+            .as_ref()
+    }
+
     /// 152, 24, record 0124 (design D10; rule core.48): a landing the forge
     /// refused is its submitters' to take out: once any of its submissions
     /// has left the queue, withdrawn by its submitter, its planner, the
