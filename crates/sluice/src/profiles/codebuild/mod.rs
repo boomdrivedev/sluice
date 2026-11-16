@@ -17,6 +17,7 @@ pub mod aws;
 #[cfg(test)]
 pub mod fake;
 pub mod sdk;
+pub mod template;
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};

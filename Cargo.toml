@@ -152,6 +152,8 @@ aws-runtime = "1.10"
 aws-types = "1.7"
 aws-smithy-types = "1.9"
 http = "1"
+# The CodeBuild pool's template read back as YAML by its tests.
+yaml-rust2 = "0.11"
 aws-smithy-http-client = { version = "1.5", features = ["rustls-ring"] }
 tokio = { version = "1", default-features = false, features = [
   "rt",
