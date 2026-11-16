@@ -264,6 +264,15 @@ fn record(
         )?;
         return Ok(FAILED);
     };
+    // 78 (the actions-pool spec's "A key the tree does not bear out"): each
+    // check of the run job's report that the sign job left out, judged
+    // again here as it judged it, by the combination's tree alone, so that
+    // check is left without a result rather than lost.
+    let ran = from.map(handed_dir).filter(|d| d.join(REPORT).exists());
+    let left = match &ran {
+        Some(dir) => kept(s, branch, &claimed(s, branch, claim)?, dir)?.left,
+        None => Vec::new(),
+    };
     let (signed, why) = match bundle {
         Some(path) => {
             let bytes = std::fs::read(path)
@@ -300,6 +309,7 @@ fn record(
                 .collect();
             (signed, "the sign job signed no outcome for it".to_string())
         }
+        None if ran.is_some() => (Vec::new(), NOTHING_SIGNED.to_string()),
         None => {
             let why = from
                 .map(handed_dir)
@@ -308,7 +318,7 @@ fn record(
             (Vec::new(), why)
         }
     };
-    if !s.end_claimed(branch, claim, &signed, &why)? {
+    if !s.end_claimed(branch, claim, &signed, &left, &why)? {
         writeln!(
             out,
             "sluice job record: {claim}'s claim lapsed before its run's end was written"
@@ -325,7 +335,95 @@ fn record(
         c.revision,
         signed.len()
     )?;
+    for n in &left {
+        writeln!(out, "left without a result: {}: {}", n.task, n.reason)?;
+    }
     Ok(0)
+}
+
+/// Why a run whose report the sign job signed nothing of ended so.
+const NOTHING_SIGNED: &str = "the sign job signed no key the combination's tree bears out";
+
+/// Why a check of the run job's report that nothing it handed over proves
+/// was left out, where the check profile gave no why of its own.
+const UNPROVEN_KEY: &str = "nothing the run job handed over proves its key";
+
+/// Record 0119 (design D11; 78, 109): what a sign job keeps of a run job's
+/// report, read from `from`, the run job's directory: `results`, each key
+/// the tree of `target.revision` bears out by the proof the job kept, and
+/// `left`, each check of the report it keeps no result of, with why.
+struct Kept {
+    report: RunReport,
+    results: Vec<crate::signing::statement::RunResult>,
+    refused: Vec<sluice_seams::Refused>,
+    unkept: Vec<sluice_seams::NotRun>,
+    left: Vec<sluice_seams::NotRun>,
+}
+
+/// [`Kept`] of the report in `from`, judged by the policy at
+/// `target.base`, running nothing of the combination.
+fn kept(s: &Sluice<'_>, branch: &str, target: &Signed, from: &Path) -> Result<Kept> {
+    use crate::signing::statement::RunResult;
+    let report: RunReport = serde_json::from_slice(
+        &std::fs::read(from.join(REPORT)).context("reading the run job's report")?,
+    )
+    .context("the run job's report")?;
+    let policy = s
+        .policy_at(&target.base)?
+        .ok_or_else(|| anyhow::anyhow!("{branch}'s revision {} has no policy", target.base))?;
+    let proof =
+        s.seams()
+            .tests
+            .proven_from(&from.join(PROOF), &target.revision, &policy.tests, &report)?;
+    let proven = |t: &&sluice_seams::TaskResult| proof.proven.contains(&t.task);
+    // 149: a task a check depends on is signed only where it failed it.
+    let failed_by = |t: &&sluice_seams::TaskResult| t.outcome == sluice_seams::Outcome::Fail;
+    let results: Vec<RunResult> = report
+        .tasks
+        .iter()
+        .filter(proven)
+        .chain(report.dependencies.iter().filter(proven).filter(failed_by))
+        .map(|t| RunResult {
+            check: t.task.clone(),
+            key: t.hash.clone(),
+            outcome: t.outcome,
+            replayed: matches!(t.source, sluice_seams::Source::Replayed { .. }),
+            took_ms: t.took_ms,
+            attempts: t.attempts,
+        })
+        .collect();
+    let left = report
+        .tasks
+        .iter()
+        .filter(|t| !proof.proven.contains(&t.task))
+        .map(|t| {
+            let why = proof
+                .refused
+                .iter()
+                .find(|r| r.task == t.task)
+                .map(|r| r.why.clone())
+                .or_else(|| {
+                    proof
+                        .unkept
+                        .iter()
+                        .find(|u| u.task == t.task)
+                        .map(|u| u.reason.clone())
+                })
+                .unwrap_or_else(|| UNPROVEN_KEY.into());
+            sluice_seams::NotRun {
+                task: t.task.clone(),
+                reason: why,
+                key: Some(t.hash.clone()),
+            }
+        })
+        .collect();
+    Ok(Kept {
+        report,
+        results,
+        refused: proof.refused,
+        unkept: proof.unkept,
+        left,
+    })
 }
 
 /// What a sign job signs for: the combination's revision, or a head's,
@@ -412,48 +510,28 @@ fn sign(
     clock: &dyn Clock,
     out: &mut dyn Write,
 ) -> Result<i32> {
-    use crate::signing::statement::{Claims, Held, Run, RunResult, Statement, RUN_PREDICATE};
+    use crate::signing::statement::{Claims, Held, Run, Statement, RUN_PREDICATE};
     let from = handed_dir(from);
     std::fs::create_dir_all(dir)
         .with_context(|| format!("making the job's directory {}", dir.display()))?;
     let _ = std::fs::remove_file(dir.join(SUBJECTS));
-    let report: RunReport = match std::fs::read(from.join(REPORT)) {
-        Ok(bytes) => serde_json::from_slice(&bytes).context("the run job's report")?,
-        Err(_) => {
-            let why = std::fs::read_to_string(from.join(WHY))
-                .unwrap_or_else(|_| "the run job handed over nothing".into());
-            writeln!(out, "sluice job sign: nothing to sign: {why}")?;
-            return Ok(0);
-        }
-    };
-    let policy = s
-        .policy_at(&target.base)?
-        .ok_or_else(|| anyhow::anyhow!("{branch}'s revision {} has no policy", target.base))?;
-    let proof =
-        s.seams()
-            .tests
-            .proven_from(&from.join(PROOF), &target.revision, &policy.tests, &report)?;
-    let proven = |t: &&sluice_seams::TaskResult| proof.proven.contains(&t.task);
-    // 149: a task a check depends on is signed only where it failed it.
-    let failed_by = |t: &&sluice_seams::TaskResult| t.outcome == sluice_seams::Outcome::Fail;
-    let results: Vec<RunResult> = report
-        .tasks
-        .iter()
-        .filter(proven)
-        .chain(report.dependencies.iter().filter(proven).filter(failed_by))
-        .map(|t| RunResult {
-            check: t.task.clone(),
-            key: t.hash.clone(),
-            outcome: t.outcome,
-            replayed: matches!(t.source, sluice_seams::Source::Replayed { .. }),
-            took_ms: t.took_ms,
-            attempts: t.attempts,
-        })
-        .collect();
-    for r in &proof.refused {
+    if !from.join(REPORT).exists() {
+        let why = std::fs::read_to_string(from.join(WHY))
+            .unwrap_or_else(|_| "the run job handed over nothing".into());
+        writeln!(out, "sluice job sign: nothing to sign: {why}")?;
+        return Ok(0);
+    }
+    let Kept {
+        report,
+        results,
+        refused,
+        unkept,
+        ..
+    } = kept(s, branch, target, &from)?;
+    for r in &refused {
         writeln!(out, "not signed: {} ({}): {}", r.task, r.key, r.why)?;
     }
-    for u in &proof.unkept {
+    for u in &unkept {
         writeln!(out, "not signed: {}: {}", u.task, u.reason)?;
     }
     if results.is_empty() {

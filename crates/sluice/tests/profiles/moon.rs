@@ -1170,6 +1170,64 @@ fn proven_drops_a_key_the_tree_does_not_bear_out() {
     );
 }
 
+/// Record 0119 (design D11; 78, 109): what a pool's run job keeps of its
+/// run proves its keys to the sign job, which runs nothing: `keep_proof`
+/// keeps each manifest the keys' walk reads, and `proven_from` holds each
+/// key to the combination's tree by those alone, refusing one whose kept
+/// manifest was changed, and leaving unkept a pass whose manifest the job
+/// did not keep.
+#[test]
+fn a_run_jobs_kept_proof_proves_its_keys_and_no_forged_one() {
+    let repo = workspace("moon-kept-proof");
+    let c = checks(&repo);
+    let req = request(&repo, "p1", &["#check-fast"], None);
+    let (run, report) = finish_run(&c, &req);
+    let kept = repo.dir().join(".git/sluice/.tmp/kept");
+    c.keep_proof(&run, &report, &kept).unwrap();
+    let mut proven = c
+        .proven_from(&kept, &req.revision, &moon(), &report)
+        .unwrap()
+        .proven;
+    proven.sort();
+    assert_eq!(proven, ["alpha:test", "beta:test"]);
+
+    let alpha = report
+        .tasks
+        .iter()
+        .find(|t| t.task == "alpha:test")
+        .unwrap();
+    let blob = kept
+        .join("blobs")
+        .join(&alpha.hash[..2])
+        .join(&alpha.hash[2..]);
+    let manifest = std::fs::read_to_string(&blob).unwrap();
+    std::fs::write(
+        &blob,
+        manifest.replace("alpha/value.txt", "alpha/other.txt"),
+    )
+    .unwrap();
+    let proof = c
+        .proven_from(&kept, &req.revision, &moon(), &report)
+        .unwrap();
+    assert_eq!(proof.proven, ["beta:test"]);
+    assert_eq!(proof.refused.len(), 1, "{proof:?}");
+    assert_eq!(proof.refused[0].task, "alpha:test");
+    assert!(
+        proof.refused[0].why.starts_with("alpha:test: "),
+        "{proof:?}"
+    );
+
+    std::fs::remove_file(&blob).unwrap();
+    let proof = c
+        .proven_from(&kept, &req.revision, &moon(), &report)
+        .unwrap();
+    assert!(!proof.proven.iter().any(|t| t == "alpha:test"), "{proof:?}");
+    assert!(
+        proof.unkept.iter().any(|u| u.task == "alpha:test"),
+        "{proof:?}"
+    );
+}
+
 /// Record 0105, design D2 to D4 of the change
 /// `a-pass-nothing-proves-blames-no-one` (114): a pass whose manifest is
 /// gone from the store the profile reads is neither proven nor dropped

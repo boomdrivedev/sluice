@@ -10177,6 +10177,66 @@ fn job_record_under_a_lapsed_claim_is_refused() {
     assert!(f.world.signed_adds().is_empty());
 }
 
+/// satisfies: record 0119 (design D7, D11); 78, 109; the actions-pool
+/// spec's "A key the tree does not bear out": on a branch whose gate is a
+/// tag, a check of the run job's report that `sluice job sign` left out is
+/// left without a result when the run ends, and its follow-up holds it,
+/// never read as passed under the tag
+#[test]
+fn job_record_leaves_a_key_the_tree_does_not_bear_out_without_a_result() {
+    use sluice_core::records::{CandidateState, CheckOutcome, RunState};
+    let f = Fakes::new();
+    let claim = pooled(&f, &["a", "b"]);
+    let out = support::Scratch::new("job-record-left-out");
+    let ran = job_run(&f, &claim, out.path());
+    // b:test's key names an input the combination's tree does not hold.
+    f.world.forges("b:test");
+    let bundle = out.path().join("bundle.json");
+    std::fs::write(&bundle, job_sign(&f, &claim, &ran, out.path())).unwrap();
+    let (code, said) = sluice(
+        &f,
+        &[
+            "job",
+            "record",
+            "--claim",
+            &claim,
+            "--branch",
+            "main",
+            "--bundle",
+            bundle.to_str().unwrap(),
+            "--from",
+            ran.to_str().unwrap(),
+        ],
+    );
+    assert_eq!(code, 0, "{said}");
+    assert!(said.contains("left without a result: b:test"), "{said}");
+    let run = pooled_runs(&f)[0].clone();
+    assert_eq!(run.state, RunState::Closed);
+    let ended = run.ended.expect("ended");
+    assert_eq!(ended.outcomes.get("a:test"), Some(&CheckOutcome::Passed));
+    assert_eq!(
+        ended.outcomes.get("b:test"),
+        Some(&CheckOutcome::None {
+            why: "b:test: its record names an input the tree does not hold".into()
+        }),
+        "{ended:?}"
+    );
+
+    // The lead reads the run undecided: its follow-up holds b:test alone,
+    // and the combination is not passed.
+    f.world.be_host("a");
+    pool_lead(&f).step("main").unwrap();
+    let runs = pooled_runs(&f);
+    let follow = runs
+        .iter()
+        .find(|r| r.follows == Some(0))
+        .expect("a follow-up of the run");
+    assert_eq!(follow.checks, ["b:test".to_string()]);
+    let snap = f.sluice().seams().state.read("main").unwrap();
+    let doc = sluice_core::line::Line::load("main", snap).unwrap().doc;
+    assert_ne!(doc.candidates[0].state, CandidateState::Passed);
+}
+
 /// A working copy holding `policy` as its policy, for `sluice init`.
 fn copy_with(policy: &str) -> support::Scratch {
     let dir = support::Scratch::new("init-actions");

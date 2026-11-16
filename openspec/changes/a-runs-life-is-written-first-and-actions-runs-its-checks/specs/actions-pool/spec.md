@@ -137,9 +137,13 @@ to `refs/sluice/runs/<signer>` and write the run's end under its claim
 - **WHEN** a run job's report names a pass of `cli:build` under a key
   the combination's tree does not bear out
 - **THEN** `sluice job sign` leaves that key out of the statement, and
-  the check reads as left without a result
-  (`job_sign_signs_only_what_the_tree_bears_out` in
-  `crates/sluice/tests/cli.rs`)
+  the check reads as left without a result, a follow-up run holding it,
+  whatever tag the branch's gate names
+  (`job_sign_signs_only_what_the_tree_bears_out` and
+  `job_record_leaves_a_key_the_tree_does_not_bear_out_without_a_result`
+  in `crates/sluice/tests/cli.rs`;
+  `a_run_jobs_kept_proof_proves_its_keys_and_no_forged_one` in
+  `crates/sluice/tests/profiles/moon.rs`)
 
 ### Requirement: sluice job run records nothing
 

@@ -1097,11 +1097,13 @@ them yourself.
   <dir>`, in the sign job, keeps of that report only the keys the
   combination's tree bears out, running nothing of it, and writes what
   `actions/attest` signs.
-- `sluice job record --claim <claim> --branch <branch> --bundle <file>`
-  adds the signed bundle to the signer's runs and writes the run ended
-  and closed. Where the claim no longer holds the run, it writes nothing
-  and exits `1`. With no bundle, the run ends with no outcome. `--head
-  <revision>` adds a pull request's head run's bundle, writing no state.
+- `sluice job record --claim <claim> --branch <branch> --bundle <file>
+  --from <dir>` adds the signed bundle to the signer's runs and writes
+  the run ended and closed. A test of the run job's report in `<dir>`
+  that the sign job left out has no result, and runs again. Where the
+  claim no longer holds the run, it writes nothing and exits `1`. With
+  no bundle, the run ends with no outcome. `--head <revision>` adds a
+  pull request's head run's bundle, writing no state.
 
 ## `sluice set-aside`
 

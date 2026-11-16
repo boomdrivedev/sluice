@@ -1356,7 +1356,9 @@ pub enum JobCommand {
         /// The bundle `actions/attest` made of the run's statement.
         #[arg(long)]
         bundle: Option<PathBuf>,
-        /// The run job's directory, which says why it holds no report.
+        /// The run job's directory: each check of its report the sign job
+        /// left out ends with no result, and where it holds no report it
+        /// says why.
         #[arg(long)]
         from: Option<PathBuf>,
     },

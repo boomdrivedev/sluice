@@ -1186,16 +1186,21 @@ impl Sluice<'_> {
     /// `branch`, ended as its pool's sign job ends it: each check the run
     /// was given read from what the job signed, `signed`, a pass it ran
     /// passed, a fail failed and a replay unproven, since a replay counts
-    /// only through a pass signed for its key (108; rule core.9), and a
-    /// check it signed nothing of with no outcome, for `why`. The run is
-    /// written ended and closed in one write, its checkout the job's
-    /// runner's, which went with it. `false`, with nothing written, where
-    /// the claim no longer holds the run (77).
+    /// only through a pass signed for its key (108; rule core.9); each
+    /// check of the run job's report the sign job left out, `left`, with
+    /// no outcome for its own why, so a key the combination's tree does not
+    /// bear out is left without a result and its follow-up holds it, as a
+    /// host's run reads a key it cannot count (78; design D7); and a check
+    /// it signed nothing of with no outcome, for `why`. The run is written
+    /// ended and closed in one write, its checkout the job's runner's,
+    /// which went with it. `false`, with nothing written, where the claim
+    /// no longer holds the run (77).
     pub fn end_claimed(
         &self,
         branch: &str,
         claim: &str,
         signed: &[SignedResult],
+        left: &[NotRun],
         why: &str,
     ) -> Result<bool> {
         let _lock = self.seams.state.wait_lock(branch)?;
@@ -1228,8 +1233,16 @@ impl Sluice<'_> {
                     (s.check.clone(), outcome)
                 })
                 .collect();
+            for n in left {
+                outcomes
+                    .entry(n.task.clone())
+                    .or_insert_with(|| CheckOutcome::None {
+                        why: n.reason.clone(),
+                    });
+            }
             // A tag given is read by the checks it names, as a run's own
-            // report is read (outcomes_of); a check given that the job
+            // report is read (outcomes_of), each check it names that the
+            // job left out undecided beside it; a check given that the job
             // signed nothing of has no outcome.
             for check in &given {
                 outcomes.entry(check.clone()).or_insert_with(|| {
