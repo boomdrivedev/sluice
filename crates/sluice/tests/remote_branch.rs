@@ -561,6 +561,87 @@ fn a_wait_on_a_landing_the_forge_refused_exits_6() {
     assert_eq!(s.states(), ["refused"]);
 }
 
+/// A pre-receive hook at `s`'s remote that refuses every push saying
+/// `words`, each push counted in the file it returns.
+fn refusing(s: &Setup, words: &str) -> std::path::PathBuf {
+    use std::os::unix::fs::PermissionsExt;
+    let hook = s.origin.path().join("hooks/pre-receive");
+    let pushes = s.origin.path().join("pushes");
+    std::fs::create_dir_all(hook.parent().unwrap()).unwrap();
+    std::fs::write(
+        &hook,
+        format!(
+            "#!/bin/sh\necho push >> \"{}\"\necho \"{words}\" >&2\nexit 1\n",
+            pushes.display()
+        ),
+    )
+    .unwrap();
+    std::fs::set_permissions(&hook, std::fs::Permissions::from_mode(0o755)).unwrap();
+    pushes
+}
+
+/// Step `main` until its one submission is refused.
+fn step_until_refused(s: &Setup) {
+    let deadline = Instant::now() + Duration::from_secs(60);
+    while s.states() != ["refused"] {
+        let out = s.sluice(&["step", "main"]);
+        assert!(out.status.success(), "{}", text(&out));
+        assert!(Instant::now() < deadline, "{}", s.status());
+        std::thread::sleep(Duration::from_millis(200));
+    }
+}
+
+/// 152, 24, rule core.5; record 0124: `sluice push main` pushes a held
+/// landing again once the forge takes it, and its submission lands as the
+/// same landing, with no new run.
+#[test]
+fn push_lands_a_held_landing_once_the_forge_takes_it() {
+    let s = Setup::new("push-taken", "origin");
+    refusing(&s, "main takes no push but the queue's identity");
+    let before = s.remote_main();
+    s.submit("a");
+    step_until_refused(&s);
+    std::fs::remove_file(s.origin.path().join("hooks/pre-receive")).unwrap();
+    let out = s.sluice(&["push", "main"]);
+    assert!(out.status.success(), "{}", text(&out));
+    assert!(text(&out).contains("landed on main"), "{}", text(&out));
+    assert_eq!(s.states(), ["landed"]);
+    assert_eq!(s.runs(), 1, "no new run");
+    let landed = s.remote_main();
+    assert_eq!(s.repo.rev(&format!("{landed}^1")), before);
+    let out = s.sluice(&["push", "main"]);
+    assert!(out.status.success(), "{}", text(&out));
+    assert!(
+        text(&out).contains("holds no landing the forge refused"),
+        "{}",
+        text(&out)
+    );
+    assert_eq!(s.remote_main(), landed, "nothing pushed");
+}
+
+/// 152, rule core.5; record 0124: `sluice push main` refused again leaves
+/// the landing held with the forge's new words, and exits non-zero with
+/// them.
+#[test]
+fn push_refused_again_leaves_the_landing_held() {
+    let s = Setup::new("push-refused", "origin");
+    let pushes = refusing(&s, "main takes no push but the queue's identity");
+    let before = s.remote_main();
+    s.submit("a");
+    step_until_refused(&s);
+    let again = "push declined due to repository rule violations";
+    refusing(&s, again);
+    let out = s.sluice(&["push", "main"]);
+    assert_eq!(out.status.code(), Some(6), "{}", text(&out));
+    assert!(text(&out).contains(again), "{}", text(&out));
+    assert_eq!(s.states(), ["refused"]);
+    assert_eq!(s.remote_main(), before);
+    let pushed = std::fs::read_to_string(&pushes).unwrap_or_default();
+    assert_eq!(pushed.lines().count(), 2, "pushed once more");
+    let status = s.sluice(&["status", "main"]);
+    assert!(text(&status).contains(again), "{}", text(&status));
+}
+
 /// 124, 6, rule core.6: after a landing, this host's copy of `main`
 /// stands where it was before it, and git's lock keeps any round from
 /// levelling it (S64). A session cut from the copy submits; its candidate

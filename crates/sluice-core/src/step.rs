@@ -117,6 +117,21 @@ impl Unmet {
     }
 }
 
+/// 152, record 0124 (design D10): what the operator's push of a branch's
+/// held landing came to.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum PushedHeld {
+    /// The branch holds no landing the forge refused: nothing is pushed.
+    Nothing,
+    /// The forge took it: its submissions landed as the same landing.
+    Landed { ids: Vec<u64>, to: Rev },
+    /// The forge refused it again: held with its new words.
+    Refused { ids: Vec<u64>, words: String },
+    /// The branch had moved: the landing is dropped and its submissions
+    /// form again, as any landing that finds the branch elsewhere (24).
+    Elsewhere { ids: Vec<u64>, found: Option<Rev> },
+}
+
 /// Design D4: what starting a claimed run came to.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Started {
@@ -803,6 +818,54 @@ impl Sluice<'_> {
                 })
             }
         }
+    }
+
+    /// 152, rule core.5, record 0124 (design D10): the operator's word that
+    /// `branch`'s landing the forge refused be pushed again: under the
+    /// branch's lock its refusal is cleared, its submissions landing again,
+    /// and the landing is run once, as a round runs it: taken, they land as
+    /// the same landing; refused again, it is held with the forge's new
+    /// words. A branch with no landing held pushes nothing.
+    pub fn push_held(&self, branch: &str) -> Result<PushedHeld> {
+        let _lock = self.seams.state.wait_lock(branch)?;
+        let line = self.read_line(branch)?;
+        let Some(intent) = line.doc.landing.clone().filter(|l| l.refused.is_some()) else {
+            return Ok(PushedHeld::Nothing);
+        };
+        self.update(branch, |l| {
+            if let Some(landing) = l.doc.landing.as_mut() {
+                landing.refused = None;
+            }
+            for id in &intent.ids {
+                let s = l.sub_mut(*id);
+                if s.state == State::Refused {
+                    s.state = State::Landing;
+                }
+            }
+            Ok(())
+        })?;
+        self.perform_landing(branch)?;
+        let line = self.read_line(branch)?;
+        let ids = intent.ids.clone();
+        Ok(match &line.doc.landing {
+            Some(l) => match &l.refused {
+                Some(r) => PushedHeld::Refused {
+                    ids,
+                    words: r.words.clone(),
+                },
+                None => bail!("{branch}'s landing is still unsettled after its push"),
+            },
+            None if ids
+                .iter()
+                .all(|id| line.subs.get(id).is_none_or(|s| s.state == State::Landed)) =>
+            {
+                PushedHeld::Landed { ids, to: intent.to }
+            }
+            None => PushedHeld::Elsewhere {
+                ids,
+                found: self.seams.branch.read(branch)?,
+            },
+        })
     }
 
     /// 50, 51: push each outcome's notice to its submission's session

@@ -376,6 +376,19 @@ pub enum Command {
         #[arg(long)]
         json: bool,
     },
+    /// Push again a branch's landing the forge refused, on the operator's
+    /// word, once the forge's rule allows it: its submissions land as the
+    /// same landing, or it is held again with the forge's new words.
+    #[command(
+        after_help = "Example:\n  $ sluice push main\n\nExit codes:\n  0    landed, or no landing was held and nothing was pushed\n  3    sluice itself failed\n  6    the forge refused it again: held, its words on stdout"
+    )]
+    Push {
+        /// The branch whose held landing to push.
+        branch: String,
+        /// One JSON document on stdout; the rest on stderr.
+        #[arg(long)]
+        json: bool,
+    },
     /// One round of a branch's work, then exit.
     #[command(after_help = "Example:\n  $ sluice step main")]
     Step {
@@ -1368,6 +1381,7 @@ impl Cli {
                 | Command::Preview { json, .. }
                 | Command::Previews { json }
                 | Command::Step { json, .. }
+                | Command::Push { json, .. }
                 | Command::Amend { json, .. }
                 | Command::Withdraw { json, .. }
                 | Command::SetAside { json, .. }
@@ -2335,6 +2349,11 @@ pub fn run(
         }
         .run(&s, out),
         Command::Previews { json } => preview::list(&s, host, json, out),
+        Command::Push { branch, json } => {
+            let code = push_held(&s, &branch, json, out);
+            serve();
+            code
+        }
         Command::Release {
             name: Some(name),
             accept_failure,
@@ -6408,6 +6427,58 @@ const CHECKOUT: &str = "sluice/try/";
 /// that name on this host, its release run once more under its branch's
 /// lock, or with `accept` freed with nothing run. Exits 1, saying what
 /// failed, when its release fails again.
+/// 152, record 0124 (design D10): `sluice push <branch>`: the branch's
+/// held landing pushed again on the operator's word, and what came of it.
+fn push_held(s: &Sluice<'_>, branch: &str, json: bool, out: &mut dyn Write) -> Result<i32> {
+    use sluice_core::step::PushedHeld;
+    let ids = |ids: &[u64]| {
+        ids.iter()
+            .map(|i| format!("#{i}"))
+            .collect::<Vec<_>>()
+            .join(", ")
+    };
+    let pushed = s.push_held(branch)?;
+    let (text, code, doc) = match &pushed {
+        PushedHeld::Nothing => (
+            format!("{branch} holds no landing the forge refused: nothing is pushed"),
+            LANDED,
+            serde_json::json!({ "branch": branch, "pushed": false }),
+        ),
+        PushedHeld::Landed { ids: landed, to } => (
+            format!("{} landed on {branch} as {}", ids(landed), to.short()),
+            LANDED,
+            serde_json::json!({ "branch": branch, "pushed": true, "landed": landed, "to": to }),
+        ),
+        PushedHeld::Refused { ids: held, words } => (
+            format!(
+                "held: the forge refused the landing of {} on {branch} again: {words}",
+                ids(held)
+            ),
+            REFUSED,
+            serde_json::json!({ "branch": branch, "pushed": true, "refused": held, "words": words }),
+        ),
+        PushedHeld::Elsewhere { ids: back, found } => (
+            format!(
+                "{branch} moved{}: the landing of {} is dropped, and they are formed again",
+                found
+                    .as_ref()
+                    .map(|f| format!(" to {}", f.short()))
+                    .unwrap_or_default(),
+                ids(back)
+            ),
+            LANDED,
+            serde_json::json!({ "branch": branch, "pushed": true, "queued": back }),
+        ),
+    };
+    if json {
+        writeln!(std::io::stderr(), "{text}")?;
+        writeln!(out, "{}", serde_json::to_string_pretty(&doc)?)?;
+    } else {
+        writeln!(out, "{text}")?;
+    }
+    Ok(code)
+}
+
 fn release_checkout(
     s: &Sluice<'_>,
     name: &str,
