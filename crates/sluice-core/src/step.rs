@@ -2225,7 +2225,20 @@ impl Sluice<'_> {
         // Design D9: a check, or a task a check was failed by, whose key
         // the tree did not bear out was signed by no one, so it is no pass
         // (15, 149): the verdict reads it failed under that key.
-        let mut v = verdict::read(&report, &results, rules, system, home, proven.as_deref());
+        let checks = &if r.checks.is_empty() {
+            rules.required.clone()
+        } else {
+            r.checks.clone()
+        };
+        let mut v = verdict::read(
+            &report,
+            &results,
+            rules,
+            system,
+            home,
+            proven.as_deref(),
+            checks,
+        );
         // C.6, 20 (design D5 of the change
         // `a-signed-run-without-a-sandbox-proves-its-passes`): a check
         // failed under a key the check profile refused says why, in the
@@ -2281,11 +2294,6 @@ impl Sluice<'_> {
             );
             return Ok(());
         }
-        let checks = &if r.checks.is_empty() {
-            rules.required.clone()
-        } else {
-            r.checks.clone()
-        };
         // 70, 55: a revision with no verdict runs every required check; a
         // report holding none of them is no pass.
         if c.every_check && !checks.is_empty() && report.tasks.is_empty() {
@@ -2293,7 +2301,13 @@ impl Sluice<'_> {
         }
         // 149, 114: a check every task it was failed by reads passed was
         // judged by nothing, and is read as one the run did not judge.
-        let not_run: Vec<NotRun> = report.not_run.iter().chain(&v.unjudged).cloned().collect();
+        let not_run: Vec<NotRun> = report
+            .not_run
+            .iter()
+            .chain(&v.unjudged)
+            .chain(&v.none)
+            .cloned()
+            .collect();
         if !not_run.is_empty() {
             let judged = !v.failed.is_empty() || v.timed_out;
             let host = &self.peer.name;
@@ -4749,9 +4763,12 @@ mod tests {
             .candidates
             .iter()
             .all(|c| !c.submissions.contains(&three)));
-        // Listed before #1's run, read after it, listed its own.
+        // Listed before #1's run is read; #1's run ended, its checkout
+        // released after its end is written (record 0122; design D3).
         let first_place = first.runs[0].place.clone().expect("a run of #1 here");
-        assert_eq!(line.doc.release, [place.clone(), first_place]);
+        assert_eq!(line.doc.release, std::slice::from_ref(&place));
+        let read = holding(&line, &[one]).expect("#1's combination");
+        assert_eq!(read.runs[0].state, RunState::Ended);
         assert!(result_read(&s, &first.revision), "#1's run was read");
         assert!(!result_read(&s, &last.revision), "#3's run was read");
         assert_eq!(f.world.live_runs(), 2, "#2's and #3's");
@@ -4762,6 +4779,7 @@ mod tests {
         drop(lock);
         assert!(releases.is_empty(), "{releases:?}");
         assert!(f.world.released_places().contains(&place));
+        assert!(f.world.released_places().contains(&first_place));
         assert_eq!(f.world.live_runs(), 1, "#3's run is ended");
         let line = s.read_line("main").unwrap();
         assert!(line.doc.release.is_empty());

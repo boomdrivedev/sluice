@@ -25,7 +25,14 @@ pub struct Verdict {
     /// under its key: never run, judged by nothing, and read as a check
     /// that could not run, with why.
     pub unjudged: Vec<NotRun>,
+    /// 60, 114, record 0122 (design D8): the checks the run's report holds
+    /// no outcome for, each with why: never failed, nobody blamed.
+    pub none: Vec<NotRun>,
 }
+
+/// Record 0122 (design D8): why a check the run's report holds nothing for
+/// has no outcome.
+pub const NO_OUTCOME: &str = "the run's report holds no outcome for it";
 
 /// The gate read over one finished run. `results` is the repository's
 /// results log, which already holds this run's results: a verdict is
@@ -82,6 +89,14 @@ pub struct Verdict {
 /// Only results on the run's `system` are read, a pass on one system
 /// never standing for another (85, 69); a line that names no system is
 /// read as on `unnamed`, the host's own.
+///
+/// 60, 114, record 0122 (design D8): a check the report leaves missing,
+/// and a check the run was given, of `given`, that the report names
+/// nowhere, has no outcome, [`NO_OUTCOME`], never a failed task; a
+/// required check the runner keeps out of its CI mode, by its own word in
+/// `kept_out`, is left without a result and is no pass, as before (15;
+/// ADR 0050). A tag of `given` names no check until the runner expands
+/// it, so the report is asked of no tag.
 pub fn read(
     report: &RunReport,
     results: &[ResultLine],
@@ -89,6 +104,7 @@ pub fn read(
     system: Option<&str>,
     unnamed: Option<&str>,
     proven: Option<&[String]>,
+    given: &[String],
 ) -> Verdict {
     let flaky = rules.flaky;
     let trusted = |e: &Enforced| rules.trusts_run(&e.kind, e.confined);
@@ -277,15 +293,45 @@ pub fn read(
             failed.push(failed_task(&skipped.task, "", None));
         }
     }
-    // 15: a required check the run left without a result is no pass.
+    // 15, ADR 0050: a required check the runner keeps out of its CI mode
+    // is left without a result, and no pass.
+    let mut none = Vec::new();
     for task in &report.missing {
-        failed.push(failed_task(task, "", None));
+        if report.kept_out.contains(task) {
+            failed.push(failed_task(task, "", None));
+        } else {
+            none.push(NotRun {
+                task: task.clone(),
+                reason: NO_OUTCOME.into(),
+                key: None,
+            });
+        }
+    }
+    // Record 0122 (design D8): a check given the run that its report names
+    // nowhere has no outcome either.
+    let named = |c: &str| {
+        report.tasks.iter().any(|t| t.task == c)
+            || report.dependencies.iter().any(|t| t.task == c)
+            || report.missing.iter().any(|m| m == c)
+            || report.not_run.iter().any(|n| n.task == c)
+            || report.failed_by.iter().any(|f| f.task == c)
+            || report.kept_out.iter().any(|k| k == c)
+    };
+    for check in given.iter().filter(|c| !c.starts_with('#')) {
+        if !named(check) && !none.iter().any(|n| n.task == *check) {
+            none.push(NotRun {
+                task: check.clone(),
+                reason: NO_OUTCOME.into(),
+                key: None,
+            });
+        }
     }
     Verdict {
         passed: failed.is_empty()
             && unproven.is_empty()
             && missing.is_empty()
             && unjudged.is_empty()
+            && none.is_empty()
             && !report.timed_out,
         timed_out: report.timed_out,
         failed,
@@ -294,6 +340,7 @@ pub fn read(
         unproven,
         missing,
         unjudged,
+        none,
     }
 }
 
@@ -322,7 +369,55 @@ mod tests {
 
     /// A run read on no named system.
     fn read(report: &RunReport, results: &[ResultLine], rules: &Rules) -> Verdict {
-        super::read(report, results, rules, None, None, None)
+        super::read(report, results, rules, None, None, None, &[])
+    }
+
+    /// 60, 114, record 0122 (design D8): a check in the report's missing,
+    /// and a check the run was given that the report names nowhere, has no
+    /// outcome, saying the report holds none for it, and is never a failed
+    /// task; a required check the runner keeps out of its CI mode is left
+    /// without a result, as before; a tag given is asked of no report.
+    #[test]
+    fn a_check_the_report_holds_nothing_for_has_no_outcome() {
+        let pass = report(Source::Ran { host: "h".into() }, enforced("open", false));
+        let run = RunReport {
+            missing: vec!["b:test".into(), "k:test".into()],
+            kept_out: vec!["k:test".into()],
+            ..pass
+        };
+        let given: Vec<String> = ["a:test", "b:test", "c:test", "k:test", "#gate"]
+            .iter()
+            .map(|c| c.to_string())
+            .collect();
+        let v = super::read(&run, &[], &rules(&["open"]), None, None, None, &given);
+        assert!(!v.passed);
+        let none: Vec<(&str, &str)> = v
+            .none
+            .iter()
+            .map(|n| (n.task.as_str(), n.reason.as_str()))
+            .collect();
+        assert_eq!(
+            none,
+            [
+                ("b:test", "the run's report holds no outcome for it"),
+                ("c:test", "the run's report holds no outcome for it"),
+            ]
+        );
+        let failed: Vec<&str> = v.failed.iter().map(|f| f.task.as_str()).collect();
+        assert_eq!(failed, ["k:test"], "kept out of CI, as before");
+        assert!(v.unproven.is_empty() && v.missing.is_empty() && v.unjudged.is_empty());
+
+        let whole = report(Source::Ran { host: "h".into() }, enforced("open", false));
+        let v = super::read(
+            &whole,
+            &[],
+            &rules(&["open"]),
+            None,
+            None,
+            None,
+            &given[..1],
+        );
+        assert!(v.passed && v.none.is_empty(), "{v:?}");
     }
 
     /// The tasks a verdict reads unproven (108).
@@ -515,7 +610,15 @@ mod tests {
         };
 
         // A branch in a host's own files.
-        let v = super::read(&run, &results, &rules(&["open"]), Some("linux"), None, None);
+        let v = super::read(
+            &run,
+            &results,
+            &rules(&["open"]),
+            Some("linux"),
+            None,
+            None,
+            &[],
+        );
         assert!(!v.passed);
         assert_eq!(
             whys(&v),
@@ -548,7 +651,7 @@ mod tests {
         };
         let mut results = results;
         results[2] = line("d:test", enforced("open", false), "linux", Outcome::Pass);
-        let v = super::read(&run, &results, &signed, Some("linux"), None, None);
+        let v = super::read(&run, &results, &signed, Some("linux"), None, None, &[]);
         assert_eq!(
             whys(&v),
             expect(&[
@@ -915,6 +1018,7 @@ mod tests {
             Some("macos-arm64"),
             None,
             None,
+            &[],
         );
         assert_eq!(unproven(&v), ["a:test"]);
         let v = super::read(
@@ -924,6 +1028,7 @@ mod tests {
             Some("linux-x64"),
             None,
             None,
+            &[],
         );
         assert!(v.passed);
         // An old line is the host's own system.
@@ -934,6 +1039,7 @@ mod tests {
             Some("linux-x64"),
             Some("linux-x64"),
             None,
+            &[],
         );
         assert!(v.passed);
         let v = super::read(
@@ -943,6 +1049,7 @@ mod tests {
             Some("macos-arm64"),
             Some("linux-x64"),
             None,
+            &[],
         );
         assert!(!v.passed);
         // A failure names its system.
@@ -954,7 +1061,7 @@ mod tests {
             }],
             ..fail
         };
-        let v = super::read(&fail, &[], &r, Some("linux-arm64"), None, None);
+        let v = super::read(&fail, &[], &r, Some("linux-arm64"), None, None, &[]);
         assert_eq!(v.failed[0].system.as_deref(), Some("linux-arm64"));
     }
 
@@ -1118,7 +1225,7 @@ mod tests {
         assert_eq!(v.missing, ["api:integration"]);
         assert!(v.failed.is_empty() && v.unjudged.is_empty());
 
-        let v = super::read(&run, &[], &r, None, None, Some(&[]));
+        let v = super::read(&run, &[], &r, None, None, Some(&[]), &[]);
         assert!(v.missing.is_empty());
         assert_eq!(
             (v.failed[0].task.as_str(), v.failed[0].hash.as_str()),
