@@ -750,6 +750,16 @@ impl Sluice<'_> {
                         if s.state == State::Landing {
                             s.state = State::Refused;
                         }
+                        // 50, 51, rule core.52: its work is owed word of the
+                        // hold, which decides no outcome.
+                        let item = OutboxItem {
+                            id: format!("{id}:refused"),
+                            submission: *id,
+                            outcome: DecidedRecord::Refused {
+                                words: words.clone(),
+                            },
+                        };
+                        l.push_outcome(item, &now, self.peer.expire_after)?;
                     }
                     l.log(
                         &now,

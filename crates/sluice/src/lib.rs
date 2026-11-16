@@ -2466,6 +2466,24 @@ pub fn run(
     }
 }
 
+/// 152, record 0124 (design D10): a branch whose landing the forge
+/// refused, held with the forge's words, and the ways out.
+pub(crate) fn refused_landing_line(
+    branch: &str,
+    ids: &[u64],
+    refused: &sluice_core::records::LandingRefused,
+) -> String {
+    let ids: Vec<String> = ids.iter().map(|i| format!("#{i}")).collect();
+    format!(
+        "held: the forge refused the landing of {} on {branch} at {}: {}; withdraw one of \
+         them or submit again from its place, or run sluice push {branch} once the forge \
+         takes it",
+        ids.join(", "),
+        refused.at,
+        refused.words
+    )
+}
+
 /// 121: a branch held because the revision it is read at lacks its last
 /// landing, with both revisions and the two ways out.
 pub(crate) fn held_line(branch: &str, hold: &BranchHold) -> String {
@@ -4282,6 +4300,18 @@ fn report(
                 writeln!(out, "sluice status {}", e.id)?;
             }
         }
+        // 152, record 0124 (design D10): held, with the forge's words.
+        State::Refused => {
+            let words = log
+                .iter()
+                .rev()
+                .find_map(|l| match &l.event {
+                    Event::ForgeRefused { ids, words } if ids.contains(&id) => Some(words.clone()),
+                    _ => None,
+                })
+                .unwrap_or_default();
+            writeln!(out, "held: the forge refused its landing: {words}")?;
+        }
         _ => writeln!(out, "{}", sub.state.word())?,
     }
     Ok(exit_for(sub))
@@ -6042,6 +6072,8 @@ fn detail_of_state(
             })
             .unwrap_or_default(),
         State::Waiting => format!("after {}", hashes(&s.after, names, said)),
+        // 152, record 0124 (design D10).
+        State::Refused => "held: the forge refused its landing".to_string(),
         // 120, 137: withdrawn at a hand-over of intake, which holds no
         // request: the host it went to.
         State::Withdrawn => s
@@ -6137,6 +6169,14 @@ fn write_status(
     }
     if let Some(hold) = &status.held {
         writeln!(out, "{}", held_line(&status.branch, hold))?;
+    }
+    // 152, record 0124 (design D10): the landing the forge refused, held.
+    if let Some((ids, refused)) = &status.landing_refused {
+        writeln!(
+            out,
+            "{}",
+            refused_landing_line(&status.branch, ids, refused)
+        )?;
     }
     write_failed_releases(&status.failed_releases, out)?;
     if let Some(copy) = &status.copy {

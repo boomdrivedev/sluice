@@ -309,3 +309,57 @@ fn a_held_landing_is_dropped_once_one_of_its_submissions_leaves() {
     assert_eq!(h.sub(one).state, State::Withdrawn);
     assert_eq!(h.sub(two).state, State::Landed);
 }
+
+/// satisfies: 152, 50, 51; rule core.52; record 0124: a submission whose
+/// landing the forge refused is owed to its work under `<id>:refused`,
+/// with the forge's words, deciding no outcome
+#[test]
+fn a_held_landing_is_owed_to_its_submitter() {
+    use sluice_seams::Decided;
+    let h = Harness::bolt();
+    h.w().forge_refuses(BRANCH, Some(DECLINED));
+    h.work("unit/a", "agent-a", &[("a/lib", Some("a2"))]);
+    let one = h.submit("unit/a");
+    for _ in 0..4 {
+        h.step();
+    }
+    let key = format!("{one}:refused");
+    let s = h.sluice();
+    let line =
+        sluice_core::line::Line::load(BRANCH, s.seams().state.read(BRANCH).unwrap()).unwrap();
+    let owed: Vec<&weir_delivery::Delivery> = line
+        .deliveries()
+        .iter()
+        .filter_map(|r| match r {
+            weir_delivery::Record::Delivery(d) if d.key().as_str() == key => Some(d),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(owed.len(), 1, "recorded once, under {key}");
+    assert!(
+        owed[0].message().as_str().contains(DECLINED),
+        "{}",
+        owed[0].message().as_str()
+    );
+    assert_eq!(
+        owed[0]
+            .readers()
+            .iter()
+            .map(|r| r.as_str())
+            .collect::<Vec<_>>(),
+        ["unit/a"],
+        "owed to its work"
+    );
+    let told = h.delivered_to("agent-a");
+    assert_eq!(told.len(), 1);
+    assert_eq!(told[0].id, key);
+    assert_eq!(
+        told[0].decided,
+        Decided::Refused {
+            words: DECLINED.to_string()
+        }
+    );
+    let sub = h.sub(one);
+    assert_eq!(sub.state, State::Refused);
+    assert_eq!(sub.decided(), None, "no outcome decided");
+}

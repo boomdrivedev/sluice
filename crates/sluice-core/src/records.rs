@@ -901,6 +901,8 @@ pub enum DecidedRecord {
         paths: Vec<String>,
         with: Vec<Contested>,
     },
+    /// 152, record 0124 (design D10): the forge refused its landing.
+    Refused { words: String },
 }
 
 impl DecidedRecord {
@@ -929,6 +931,7 @@ impl DecidedRecord {
                 logs,
             },
             DecidedRecord::Conflict { paths, with } => Decided::Conflict { paths, with },
+            DecidedRecord::Refused { words } => Decided::Refused { words },
         }
     }
 
@@ -937,6 +940,7 @@ impl DecidedRecord {
             DecidedRecord::Landed { .. } => "landed",
             DecidedRecord::Failed { .. } => "failed",
             DecidedRecord::Conflict { .. } => "conflict",
+            DecidedRecord::Refused { .. } => "refused",
         }
     }
 }

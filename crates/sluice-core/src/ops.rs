@@ -441,6 +441,9 @@ pub struct Status {
     /// Record 0122 (design D11): where its queue lives, and its move while
     /// one is written; `None` for records with no home yet.
     pub home: Option<crate::overview::HomeView>,
+    /// 152, record 0124 (design D10): the branch's landing the forge
+    /// refused, held: its submissions and the forge's refusal.
+    pub landing_refused: Option<(Vec<u64>, crate::records::LandingRefused)>,
 }
 
 /// 133: what this host's rounds of a branch could not read of its remote,
@@ -1621,6 +1624,11 @@ impl Sluice<'_> {
             window: line.doc.window,
             parallel,
             held: line.doc.held.clone(),
+            landing_refused: line
+                .doc
+                .landing
+                .as_ref()
+                .and_then(|l| Some((l.ids.clone(), l.refused.clone()?))),
             copy: line.doc.copies.get(&self.peer.name).cloned(),
             finished: line.finished.len(),
             named: line

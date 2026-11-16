@@ -1601,6 +1601,10 @@ pub enum Decided {
         paths: Vec<String>,
         with: Vec<Contested>,
     },
+    /// 152, record 0124 (design D10): the forge refused its landing, with
+    /// the branch where the landing expected it, in the forge's words: no
+    /// outcome, a hold its submitter is owed word of.
+    Refused { words: String },
 }
 
 impl Decided {
@@ -1609,6 +1613,7 @@ impl Decided {
             Decided::Landed { .. } => "landed",
             Decided::Failed { .. } => "failed",
             Decided::Conflict { .. } => "conflict",
+            Decided::Refused { .. } => "refused",
         }
     }
 }
