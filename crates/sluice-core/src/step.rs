@@ -131,6 +131,9 @@ pub enum PushedHeld {
     /// The branch had moved: the landing is dropped and its submissions
     /// form again, as any landing that finds the branch elsewhere (24).
     Elsewhere { ids: Vec<u64>, found: Option<Rev> },
+    /// Submissions `left` of it had left the queue: nothing is pushed, the
+    /// landing is dropped and `back` form again (24; rule core.48).
+    Dropped { left: Vec<u64>, back: Vec<u64> },
 }
 
 /// Design D4: what starting a claimed run came to.
@@ -843,13 +846,25 @@ impl Sluice<'_> {
     /// branch's lock its refusal is cleared, its submissions landing again,
     /// and the landing is run once, as a round runs it: taken, they land as
     /// the same landing; refused again, it is held with the forge's new
-    /// words. A branch with no landing held pushes nothing.
+    /// words. A branch with no landing held pushes nothing, and a held
+    /// landing one of whose submissions has left the queue is dropped,
+    /// pushing nothing, the rest back in the queue (24; rule core.48).
     pub fn push_held(&self, branch: &str) -> Result<PushedHeld> {
         let _lock = self.seams.state.wait_lock(branch)?;
         let line = self.read_line(branch)?;
         let Some(intent) = line.doc.landing.clone().filter(|l| l.refused.is_some()) else {
             return Ok(PushedHeld::Nothing);
         };
+        let left = self.update(branch, |l| Ok(l.drop_left_landing()))?;
+        if let Some(left) = left {
+            let back = intent
+                .ids
+                .iter()
+                .copied()
+                .filter(|id| !left.contains(id))
+                .collect();
+            return Ok(PushedHeld::Dropped { left, back });
+        }
         self.update(branch, |l| {
             if let Some(landing) = l.doc.landing.as_mut() {
                 landing.refused = None;
@@ -2072,28 +2087,9 @@ impl Sluice<'_> {
     /// and stands (rule core.17). Another host's run of it is that host's
     /// to end (81).
     fn drop_withdrawn(&self, line: &mut Line) -> Result<()> {
-        // 152, 24, record 0124 (design D10): a landing the forge refused is
-        // its submitters' to take out: once any of its submissions has left
-        // the queue, withdrawn by its submitter, its planner, the operator
-        // or a submission from its place, the landing is dropped and the
-        // rest go back to the queue, to be formed again.
-        if let Some(landing) = line.doc.landing.clone().filter(|l| l.refused.is_some()) {
-            let left = landing
-                .ids
-                .iter()
-                .any(|id| line.subs.get(id).is_none_or(|s| s.state.is_out()));
-            if left {
-                line.doc.landing = None;
-                for id in &landing.ids {
-                    if let Some(s) = line.subs.get_mut(id).filter(|s| s.state == State::Refused) {
-                        s.state = State::Queued;
-                        s.tested = None;
-                        s.result = None;
-                        s.covered_by = None;
-                    }
-                }
-            }
-        }
+        // 152, 24, record 0124 (design D10): a landing the forge refused
+        // goes once one of its submissions has left the queue.
+        line.drop_left_landing();
         let subs = &line.subs;
         let obsolete: BTreeSet<String> = line
             .doc

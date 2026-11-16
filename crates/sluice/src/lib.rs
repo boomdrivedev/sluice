@@ -6601,6 +6601,18 @@ fn push_held(s: &Sluice<'_>, branch: &str, json: bool, out: &mut dyn Write) -> R
             LANDED,
             serde_json::json!({ "branch": branch, "pushed": true, "queued": back }),
         ),
+        PushedHeld::Dropped { left, back } => (
+            format!(
+                "{} left the queue: the landing held on {branch} is dropped and nothing is pushed{}",
+                ids(left),
+                match back.is_empty() {
+                    true => String::new(),
+                    false => format!(", and {} are formed again", ids(back)),
+                }
+            ),
+            LANDED,
+            serde_json::json!({ "branch": branch, "pushed": false, "dropped": left, "queued": back }),
+        ),
     };
     if json {
         writeln!(std::io::stderr(), "{text}")?;

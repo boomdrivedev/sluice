@@ -688,6 +688,10 @@ impl Sluice<'_> {
                 let subject = req.subjects.get(k).cloned();
                 accepted.push(admit(l, req, id, act, session, head, subject, &now));
             }
+            // 152, 24, 67 (record 0124, design D10; rule core.48): a held
+            // landing whose submission a later one from its place withdrew
+            // goes with it, so nothing pushes it.
+            l.drop_left_landing();
             Ok(accepted)
         })?;
         let accepted = accepted
@@ -1220,6 +1224,9 @@ impl Sluice<'_> {
                     handed_over_to: None,
                 },
             );
+            // 152, 24 (record 0124, design D10; rule core.48): a held
+            // landing it was of goes with it, so nothing pushes it.
+            l.drop_left_landing();
             Ok(Ok(Withdrew::Now))
         })
     }

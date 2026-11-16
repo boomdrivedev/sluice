@@ -310,6 +310,88 @@ fn a_held_landing_is_dropped_once_one_of_its_submissions_leaves() {
     assert_eq!(h.sub(two).state, State::Landed);
 }
 
+/// satisfies: 152, 24, 5; rule core.48; record 0124; the refused-landing
+/// spec's "One of two leaves": a withdrawal drops the held landing in its
+/// own write, so the operator's push before the next round pushes nothing
+/// withdrawn and writes no withdrawn submission landed
+#[test]
+fn a_push_after_a_withdrawal_lands_nothing_withdrawn() {
+    use sluice_core::step::PushedHeld;
+    use sluice_core::Requester;
+    let h = Harness::bolt();
+    h.w().forge_refuses(BRANCH, Some(DECLINED));
+    h.work("unit/a", "agent-a", &[("a/lib", Some("a2"))]);
+    h.work("unit/b", "agent-b", &[("b/lib", Some("b2"))]);
+    let one = h.submit("unit/a");
+    let two = h.submit("unit/b");
+    for _ in 0..4 {
+        h.step();
+    }
+    assert_eq!(h.doc().landing.expect("a landing held").ids, [one, two]);
+    let before = h.tip();
+    h.sluice()
+        .withdraw(one, &Requester::Operator)
+        .unwrap()
+        .unwrap();
+    assert!(h.doc().landing.is_none(), "dropped with the withdrawal");
+    assert_eq!(h.sub(two).state, State::Queued, "back in the queue");
+
+    h.w().forge_refuses(BRANCH, None);
+    assert_eq!(h.sluice().push_held(BRANCH).unwrap(), PushedHeld::Nothing);
+    assert_eq!(h.tip(), before, "nothing pushed");
+    assert_eq!(h.sub(one).state, State::Withdrawn);
+    h.settle();
+    assert_eq!(h.sub(one).state, State::Withdrawn);
+    assert_eq!(h.sub(two).state, State::Landed);
+}
+
+/// satisfies: 152, 24; rule core.48; record 0124: a held landing one of
+/// whose submissions has left, as records a withdrawal wrote before it
+/// dropped the landing leave it, is dropped by the operator's push, which
+/// pushes nothing and rewrites no withdrawn submission as landed
+#[test]
+fn a_push_drops_a_held_landing_one_of_whose_submissions_left() {
+    use sluice_core::line::Line;
+    use sluice_core::step::PushedHeld;
+    use sluice_seams::Written;
+    let h = Harness::bolt();
+    h.w().forge_refuses(BRANCH, Some(DECLINED));
+    h.work("unit/a", "agent-a", &[("a/lib", Some("a2"))]);
+    h.work("unit/b", "agent-b", &[("b/lib", Some("b2"))]);
+    let one = h.submit("unit/a");
+    let two = h.submit("unit/b");
+    for _ in 0..4 {
+        h.step();
+    }
+    assert!(h.doc().landing.is_some(), "a landing held");
+    {
+        let s = h.sluice();
+        let state = s.seams().state;
+        let lock = state.lock(BRANCH).unwrap().expect("the lock");
+        let mut line = Line::load(BRANCH, state.read(BRANCH).unwrap()).unwrap();
+        line.sub_mut(one).state = State::Withdrawn;
+        let written = state.write(BRANCH, line.version, line.changes()).unwrap();
+        assert!(matches!(written, Written::Written(_)));
+        drop(lock);
+    }
+    let before = h.tip();
+    h.w().forge_refuses(BRANCH, None);
+    assert_eq!(
+        h.sluice().push_held(BRANCH).unwrap(),
+        PushedHeld::Dropped {
+            left: vec![one],
+            back: vec![two]
+        }
+    );
+    assert_eq!(h.tip(), before, "nothing pushed");
+    assert!(h.doc().landing.is_none());
+    assert_eq!(h.sub(one).state, State::Withdrawn);
+    assert_eq!(h.sub(two).state, State::Queued);
+    h.settle();
+    assert_eq!(h.sub(one).state, State::Withdrawn);
+    assert_eq!(h.sub(two).state, State::Landed);
+}
+
 /// satisfies: 152, 50, 51; rule core.52; record 0124: a submission whose
 /// landing the forge refused is owed to its work under `<id>:refused`,
 /// with the forge's words, deciding no outcome

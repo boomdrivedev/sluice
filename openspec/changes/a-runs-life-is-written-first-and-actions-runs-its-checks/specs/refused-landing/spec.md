@@ -66,9 +66,9 @@ A submission of a landing refused by the forge SHALL no longer be
 landing. Its submitter, its planner or the operator SHALL be able to
 withdraw it, and a submission from its place SHALL withdraw it as it
 withdraws any earlier submission of that place (5, 67). Once any of the
-landing's submissions leaves, the landing SHALL be dropped, and those
-that remain SHALL go back to the queue and be formed again on the branch
-(24).
+landing's submissions leaves, the landing SHALL be dropped in the write
+that takes it out, and those that remain SHALL go back to the queue and
+be formed again on the branch (24; rule core.48).
 
 #### Scenario: The fixed head from the same place
 
@@ -85,6 +85,15 @@ that remain SHALL go back to the queue and be formed again on the branch
 - **THEN** the landing is dropped and #6 is queued again and formed on
   the branch (`a_held_landing_is_dropped_once_one_of_its_submissions_leaves`
   in `crates/sluice-conformance/tests/landing.rs`)
+
+#### Scenario: A push after a withdrawal
+
+- **WHEN** a held landing carries #5 and #6, #5 is withdrawn, and the
+  operator runs `sluice push` before the next round
+- **THEN** nothing is pushed, #5 stays withdrawn, and #6 is formed on the
+  branch and lands (`a_push_after_a_withdrawal_lands_nothing_withdrawn`
+  and `a_push_drops_a_held_landing_one_of_whose_submissions_left` in
+  `crates/sluice-conformance/tests/landing.rs`)
 
 ### Requirement: A held landing is told to its submitter
 
@@ -109,7 +118,9 @@ words.
 on the operator's word, as the same landing: where the forge takes it,
 its submissions land (122); where the forge refuses it again, it stays
 held with the new words. On a branch with no held landing it SHALL say
-so and push nothing (152; record 0124).
+so and push nothing, and a held landing one of whose submissions has
+left the queue it SHALL drop, pushing nothing (24, 152; record 0124;
+rule core.48).
 
 #### Scenario: The rule changed
 

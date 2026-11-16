@@ -1052,7 +1052,9 @@ $ sluice push main
 ```
 
 Refused again, it is held again with the forge's new words, and the
-command exits `6` with them.
+command exits `6` with them. Where one of its submissions has left the
+queue, nothing is pushed: the landing is dropped and the rest are
+formed again.
 
 ## `sluice init actions`
 
