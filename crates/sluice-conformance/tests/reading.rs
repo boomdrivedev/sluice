@@ -406,3 +406,100 @@ fn the_overview_names_each_branchs_home_and_its_move() {
     let origin = home_of(&h);
     assert_eq!(origin.line(), "on origin");
 }
+
+/// A branch whose records are on its remote, trusting the signer `box`,
+/// led by `a`, which signs as `box`; and `a` itself, with no room, so the
+/// run it opens waits open (design D8 of `peers`).
+fn led_with_no_room(h: &Harness) -> sluice_core::Sluice<'_> {
+    h.w().be_host("a");
+    let s = h.sluice().as_peer(sluice_core::Peer {
+        name: "a".into(),
+        lease: std::time::Duration::from_secs(300),
+        alive: std::time::Duration::from_secs(120),
+        signer: Some("box".into()),
+        systems: None,
+        expire_after: sluice_core::EXPIRE_AFTER,
+    });
+    h.w().no_room();
+    s
+}
+
+/// The bolt's policy with its records on `origin`, trusting `box`.
+fn signed() -> Harness {
+    let p = sluice_conformance::policy(false, "fail", 4).replace(
+        "trust = [\"open\", \"sandbox\", \"container\"]\n",
+        "trust = [\"box\"]\nremote = \"origin\"\n",
+    ) + "\n[signers.box]\nssh = \"box ssh-ed25519 AAAA\"\n";
+    let h = Harness::new(&p);
+    h.w().signs_as("box");
+    h
+}
+
+/// satisfies: record 0122; 26; the run-life spec's "A status reads each
+/// run's state", a run waiting for room
+#[test]
+fn a_run_waiting_for_room_says_since_when() {
+    let h = signed();
+    h.work("unit/a", "agent-a", &[("a/lib", Some("a2"))]);
+    h.submit("unit/a");
+    led_with_no_room(&h).step(BRANCH).unwrap();
+    h.w().advance(chrono::Duration::minutes(12));
+    led_with_no_room(&h).step(BRANCH).unwrap();
+    let view = h.sluice().branch_view_of(BRANCH).unwrap();
+    let c = &view.candidates[0];
+    let run = &c.runs[0];
+    assert_eq!(run.state, sluice_core::records::RunState::Open);
+    let opened = h.doc().candidates[0].runs[0]
+        .opened
+        .clone()
+        .expect("when it opened");
+    assert_eq!(run.since.as_deref(), Some(opened.as_str()));
+    let now = chrono::DateTime::parse_from_rfc3339(&opened)
+        .unwrap()
+        .to_utc()
+        + chrono::Duration::minutes(12);
+    let said = sluice_core::overview::run_time(c, now).expect("a line of its runs");
+    assert_eq!(said, format!("waiting for room since {opened}"));
+    assert!(!said.contains(" of "), "no time against its limit: {said}");
+}
+
+/// satisfies: record 0122; 26, 66; the run-life spec's "A status reads
+/// each run's state", a running run
+#[test]
+fn a_running_runs_time_is_its_own() {
+    let h = signed();
+    h.w().hold_runs(true);
+    h.work("unit/a", "agent-a", &[("a/lib", Some("a2"))]);
+    h.submit("unit/a");
+    led_with_no_room(&h).step(BRANCH).unwrap();
+    // It waits 30 minutes for room, then runs.
+    h.w().advance(chrono::Duration::minutes(30));
+    led_with_no_room(&h).step(BRANCH).unwrap();
+    h.w().has_room();
+    h.sluice()
+        .as_peer(sluice_core::Peer {
+            name: "a".into(),
+            lease: std::time::Duration::from_secs(300),
+            alive: std::time::Duration::from_secs(120),
+            signer: Some("box".into()),
+            systems: None,
+            expire_after: sluice_core::EXPIRE_AFTER,
+        })
+        .step(BRANCH)
+        .unwrap();
+    let running = h.doc().candidates[0].runs[0]
+        .running
+        .clone()
+        .expect("its own start");
+    let view = h.sluice().branch_view_of(BRANCH).unwrap();
+    let c = &view.candidates[0];
+    assert_eq!(c.runs[0].since.as_deref(), Some(running.as_str()));
+    let now = chrono::DateTime::parse_from_rfc3339(&running)
+        .unwrap()
+        .to_utc()
+        + chrono::Duration::minutes(4);
+    assert_eq!(
+        sluice_core::overview::run_time(c, now).as_deref(),
+        Some("4m00s of 20m")
+    );
+}

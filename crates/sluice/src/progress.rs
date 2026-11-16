@@ -31,13 +31,51 @@ pub fn lines(
 ) -> Result<Vec<String>> {
     let view = s.branch_view_of(branch)?;
     let shown: Vec<&CandidateView> = match only {
-        None => under_test(&view).collect(),
-        Some(id) => own(&view, id).into_iter().collect(),
+        None => under_test(&view).chain(not_passed(&view)).collect(),
+        Some(id) => own(&view, id)
+            .or_else(|| not_passed(&view).find(|c| c.submissions.contains(&id)))
+            .into_iter()
+            .collect(),
     };
     Ok(shown
         .into_iter()
-        .map(|c| testing_line(branch, c, now, names))
+        .map(|c| match c.state {
+            CandidateState::NotPassed => not_passed_line(branch, c, names),
+            _ => testing_line(branch, c, now, names),
+        })
         .collect())
+}
+
+/// 66, 87, record 0122 (design D6): the combinations of a branch read not
+/// passed for a run no live executor took, shown until they form again.
+fn not_passed(view: &BranchView) -> impl Iterator<Item = &CandidateView> {
+    view.candidates
+        .iter()
+        .filter(|c| c.state == CandidateState::NotPassed)
+}
+
+/// 66, 87, record 0122 (design D6): `not passed main + #3 · no run took its
+/// checks: macos-arm64: no host that may take it was live`, each such run
+/// by its system, where it names one, with why; its submissions are queued
+/// and form again, and nobody is blamed.
+pub fn not_passed_line(branch: &str, c: &CandidateView, names: Option<&Names>) -> String {
+    let named = combination(branch, &c.submissions, names, &mut BTreeSet::new());
+    let whys: Vec<String> = c
+        .runs
+        .iter()
+        .filter(|r| r.untaken)
+        .map(|r| {
+            let why = r.why.as_deref().unwrap_or_default();
+            match &r.system {
+                Some(system) => format!("{system}: {why}"),
+                None => why.to_string(),
+            }
+        })
+        .collect();
+    format!(
+        "not passed {named} · no run took its checks: {}",
+        whys.join("; ")
+    )
 }
 
 /// The combinations of a branch under test.
@@ -218,7 +256,11 @@ pub fn line(c: &CandidateView, now: DateTime<Utc>) -> String {
             parts.push(format!("running {}", named.join(", ")));
         }
     }
-    if let Some(s) = since(c.started.as_deref(), now) {
+    // Record 0122 (design D6): the time of its runs' own, where its runs
+    // say it; from its testing line in a document from before them.
+    if let Some(t) = sluice_core::overview::run_time(c, now) {
+        parts.push(t);
+    } else if let Some(s) = since(c.started.as_deref().filter(|_| c.runs.is_empty()), now) {
         parts.push(match c.limit {
             Some(l) => format!("{} of {}", duration(s), limit(l)),
             None => duration(s),
@@ -235,22 +277,12 @@ fn since(at: Option<&str>, now: DateTime<Utc>) -> Option<i64> {
 
 /// `45s`, `2m10s`, `1h03m`, as the board says a time.
 pub fn duration(seconds: i64) -> String {
-    let s = seconds.max(0);
-    match s {
-        0..60 => format!("{s}s"),
-        60..3600 => format!("{}m{:02}s", s / 60, s % 60),
-        _ => format!("{}h{:02}m", s / 3600, (s % 3600) / 60),
-    }
+    sluice_core::overview::duration(seconds)
 }
 
 /// `15m` for a limit of whole minutes under an hour, else a [`duration`].
 fn limit(seconds: u64) -> String {
-    let s = seconds as i64;
-    if s % 60 == 0 && s < 3600 {
-        format!("{}m", s / 60)
-    } else {
-        duration(s)
-    }
+    sluice_core::overview::limit(seconds)
 }
 
 #[cfg(test)]
@@ -289,6 +321,7 @@ mod tests {
             tasks,
             waiting: BTreeMap::new(),
             lost: Vec::new(),
+            runs: Vec::new(),
         }
     }
 
@@ -437,6 +470,76 @@ mod tests {
         let before = moved(&c);
         c.lost.pop();
         assert_ne!(moved(&c), before, "a wait prints the line again");
+    }
+
+    /// Record 0122 (design D6; 26): a combination with no run running reads
+    /// by its runs: an open run waiting since it opened, for room or for a
+    /// host of its system, a claimed run starting on its host, and a running
+    /// run's time from its own start, never from its testing line; a
+    /// combination read not passed says why, and blames no one.
+    #[test]
+    fn a_waiting_run_reads_waiting_since_it_opened() {
+        use sluice_core::overview::RunView;
+        use sluice_core::records::RunState;
+        let run = |state, system: Option<&str>, since: &str, host: Option<&str>| RunView {
+            system: system.map(String::from),
+            state,
+            since: Some(since.into()),
+            host: host.map(String::from),
+            why: None,
+            untaken: false,
+        };
+        let mut c = candidate(None, Some(1800));
+        c.runs = vec![run(RunState::Open, None, "2026-10-21T12:10:00Z", None)];
+        assert_eq!(
+            line(&c, now()),
+            "waiting for room since 2026-10-21T12:10:00Z"
+        );
+        c.runs = vec![run(
+            RunState::Open,
+            Some("macos-arm64"),
+            "2026-10-21T12:10:00Z",
+            None,
+        )];
+        assert_eq!(
+            line(&c, now()),
+            "waiting for a host of macos-arm64 since 2026-10-21T12:10:00Z"
+        );
+        c.runs.push(run(
+            RunState::Claimed,
+            None,
+            "2026-10-21T12:29:00Z",
+            Some("box"),
+        ));
+        assert_eq!(line(&c, now()), "starting on box");
+        c.runs.push(run(
+            RunState::Running,
+            None,
+            "2026-10-21T12:26:00Z",
+            Some("box"),
+        ));
+        assert_eq!(
+            line(&c, now()),
+            "4m00s of 30m",
+            "not 26m10s, its testing line's"
+        );
+
+        c.state = CandidateState::NotPassed;
+        c.runs = vec![RunView {
+            why: Some("no host that may take it was live".into()),
+            untaken: true,
+            ..run(
+                RunState::Closed,
+                Some("macos-arm64"),
+                "2026-10-21T12:29:00Z",
+                None,
+            )
+        }];
+        assert_eq!(
+            not_passed_line("main", &c, None),
+            "not passed main + #12 · no run took its checks: macos-arm64: no host that may take \
+             it was live"
+        );
     }
 
     #[test]
