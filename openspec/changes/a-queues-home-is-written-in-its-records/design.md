@@ -120,8 +120,13 @@ write of the records would not move with them (63).
    policy chose it.
 
 A home reached through a closed home's pointer that is itself closed
-toward `here` routes to local files (D4). Two homes both `open` or
-`moving` refuse the branch alone, naming both (26). The route is read at
+toward `here` routes to local files (D4). Where this host's own home is
+`open` while a live remote home's `came_from` names this host's own
+files and this host, the one queue is in two homes, and the branch alone
+is refused, naming both (26). A host's own `open` home beside a remote
+home another host's queue or a policy opened is a queue not yet moved:
+it routes to local files, and the round that keeps it moves it (D3,
+D5). The route is read at
 every lock, read and write within a pass and again at the next pass
 (`next_pass`), never kept for a binding's life, so the host process and
 a one-shot command read one answer.
@@ -129,7 +134,8 @@ a one-shot command read one answer.
 *Not taken:* routing by the head's policy for every process (record
 0116's half), which is one answer per read but still each process's
 own, and makes a move a side effect of whichever read first sees a new
-policy.
+policy; refusing any two open homes, which would refuse every host whose
+own queue had not yet moved, so none ever could.
 
 ### D3. A move is three writes, decided by the round that keeps the home
 

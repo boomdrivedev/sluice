@@ -26,9 +26,13 @@ Every process SHALL read a branch's home from the branch's records: this
 host's own `home.json` of it, then the state's on each remote that may
 hold it as last fetched (129), and SHALL route the branch by its policy
 only where neither holds a home. A process that keeps running SHALL read
-the home again at each of its passes, never keeping it for its life. Two
-homes of one branch that are both open or moving SHALL refuse that
-branch alone, naming both (26).
+the home again at each of its passes, never keeping it for its life.
+Where this host's own home of a branch is open while a live remote home
+of it came from this host's own files, the one queue is in two homes,
+and that branch alone SHALL be refused, naming both (26). A host's own
+open home beside a remote home that another host's queue or a policy
+opened is a queue not yet moved: the branch SHALL be read in this
+host's own files, and its round SHALL move it.
 
 #### Scenario: A policy that names another home does not move the reading
 
@@ -42,7 +46,7 @@ branch alone, naming both (26).
 
 #### Scenario: Two open homes
 
-- **WHEN** this host's own files and origin's state of `bolt/x` both hold a `home.json` that is open
+- **WHEN** this host's own files of `bolt/x` hold a `home.json` that is open, and origin's state of `bolt/x` holds an open `home.json` that came from this host's own files
 - **THEN** a round, a submit and a status of `bolt/x` are refused naming both homes, and every other branch is read as before
 
 ### Requirement: A move is written in the current home and opens no combination until the runs under test end
