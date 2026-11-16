@@ -31,12 +31,6 @@ tasks:
     inputs: ['/.claude-plugin/**/*', '/plugins/*/.claude-plugin/plugin.json', '/plugins/check-marketplace.sh', '/plugins/claude.sh', '/devenv.nix', '/devenv.lock']
     tags: [check-fast]
     options: {runFromWorkspaceRoot: true}
-  # No two decision records share a number (check-adrs.sh).
-  adrs:
-    command: 'sh check-adrs.sh'
-    inputs: ['/docs/adr/*.md', '/check-adrs.sh']
-    tags: [check-fast]
-    options: {runFromWorkspaceRoot: true}
   # Every file that carries sluice's version gives the workspace's, 0.0.0
   # on main; the marketplace names none; every plugin manifest is among the
   # files set-version.sh writes; and the writer, run on a scratch copy,
@@ -67,20 +61,15 @@ tasks:
     tags: [check-fast]
     options: {runFromWorkspaceRoot: true}
   # Every open change under openspec/changes passes the same strict
-  # validation, so a requirement archive would refuse fails the unit's own
-  # checks and not first at its merge. A MODIFIED block is read against the
-  # specs it replaces, so they are inputs too; the archived changes are not.
+  # validation, and archives cleanly: openspec archive applies its deltas,
+  # alone, to a scratch copy of the specs, and each spec it writes passes
+  # openspec validate --strict (check-changes.sh; record 0128, core.61). So
+  # a change archive would refuse, or archive into a spec root:specs fails,
+  # fails the unit's own checks and not first at its merge. The specs are
+  # read and rebuilt, so they are inputs too; the archived changes are not.
   changes:
-    command: 'openspec validate --changes --strict --no-interactive'
-    env: {OPENSPEC_TELEMETRY: '0', OPENSPEC_NO_UPDATE_CHECK: '1'}
-    inputs: ['/openspec/changes/**/*', '!/openspec/changes/archive/**/*', '/openspec/specs/**/*', '/openspec/config.yaml', '/devenv.nix', '/devenv.lock']
-    tags: [check-fast]
-    options: {runFromWorkspaceRoot: true}
-  # OpenSpec's Claude Code skills and commands under .claude are what the
-  # openspec devenv.nix pins writes (record 0101; core.24).
-  openspec-claude:
-    command: 'sh check-openspec-claude.sh'
-    inputs: ['/.claude/skills/**/*', '/.claude/commands/**/*', '/check-openspec-claude.sh', '/devenv.nix', '/devenv.lock']
+    command: 'sh check-changes.sh'
+    inputs: ['/openspec/changes/**/*', '!/openspec/changes/archive/**/*', '/openspec/specs/**/*', '/openspec/config.yaml', '/check-changes.sh', '/devenv.nix', '/devenv.lock']
     tags: [check-fast]
     options: {runFromWorkspaceRoot: true}
   # The scene the plugins' screenshots are taken of, built --fast with the

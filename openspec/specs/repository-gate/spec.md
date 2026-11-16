@@ -150,8 +150,9 @@ the board in a session leaves the worktree clean.
 Each directory under `plugins/`, and `site/`, SHALL be a moon project
 listed in `.moon/workspace.yml` with its language declared, and each of
 its checks SHALL be a check-fast task of that project, not of the root or
-another part's. The site's one check SHALL be its prose check,
-`site:prose`: it has no tests, and its build is the Pages workflow's.
+another part's. The site SHALL hold no check: its pages are Markdown,
+which no task reads (principle 16; core.21), it has no tests, and its
+build is the Pages workflow's.
 
 #### Scenario: Listing the projects
 
@@ -213,3 +214,64 @@ name, with a comment saying why.
   `nix/tests/files/every.toml`
 - **THEN** it does not read that file, and the exclude in `treefmt.nix`
   has a comment above it giving its reason
+
+### Requirement: No task reads a Markdown file
+
+No task of the repository's SHALL read a Markdown file, a record, a
+spec, a skill, a command, a README or a site page, to format, lint, test
+or check it (principle 16 as amended 2026-11-15, boomdrivedev/blueprints
+3a5c19d; core.21; record 0127). A tool's own validation of the files it
+works on stays: OpenSpec's `openspec validate` of the specs and the open
+changes, and Claude Code's `plugin validate` of each plugin.
+
+#### Scenario: Listing the tasks
+
+- **WHEN** `moon query tasks` runs in the repository
+- **THEN** it lists no `root:adrs`, `root:openspec-claude`,
+  `site:prose` or `site:rules`, and lists `root:specs`, `root:changes`,
+  `root:toolchain` and `root:format`
+
+### Requirement: The site's rules page is made at build
+
+The site's build SHALL make its rules page from
+`docs/architecture/core.md`, as it makes its decision pages from
+`docs/adr`, and the tree SHALL NOT track the page (record 0127).
+
+#### Scenario: Building the site
+
+- **WHEN** the site's build runs, or its dev server starts
+- **THEN** `site/scripts/rules.mjs` writes
+  `site/src/content/docs/architecture/rules.md` from
+  `docs/architecture/core.md` before Astro reads the pages, and
+  `git ls-files site/src/content/docs/architecture/rules.md` prints
+  nothing
+
+### Requirement: Each open change is validated as it would archive
+
+`root:changes` SHALL fail where an open change under `openspec/changes`
+fails `openspec validate --strict`, where `openspec archive` refuses it,
+applied alone to a copy of the tree's specs, or where a spec that
+archive writes fails `openspec validate --strict`. It SHALL name the
+change with OpenSpec's words, SHALL write nothing in the tree, and SHALL
+fail nothing for a task left unchecked (principle 16 as amended
+2026-11-15; record 0128; rule core.61).
+
+#### Scenario: A change that adds a requirement its spec holds
+
+- **WHEN** an open change adds a requirement under a name its spec
+  already holds, with other text, and `moon run root:changes` runs
+- **THEN** the task fails naming the change, with archive's words that
+  the requirement already exists, and the tree's specs are as they were
+
+#### Scenario: A change that archives into a spec root:specs would fail
+
+- **WHEN** an open change adds a capability whose delta has no
+  `## Purpose`, and `moon run root:changes` runs
+- **THEN** the task fails naming the change and the spec, with
+  OpenSpec's words that its Purpose is a placeholder
+
+#### Scenario: A change whose tasks are open
+
+- **WHEN** every open change archives into valid specs, one with tasks left
+  unchecked, and `moon run root:changes` runs
+- **THEN** the task passes

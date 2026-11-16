@@ -1,24 +1,16 @@
 $schema: 'https://moonrepo.dev/schemas/project.json'
 
-# The documentation site. Its prose, and its rules page against
-# docs/architecture/core.md, are checked in the fast tier; its build is
-# the Pages workflow's and is not part of any gate.
+# The documentation site. It holds no check: its pages are Markdown, which
+# no task reads (principle 16; core.21; record 0127), and it has no tests.
+# Its build, which makes the decision and rules pages from docs/adr and
+# docs/architecture/core.md, is the Pages workflow's and is not part of
+# any gate.
 language: 'typescript'
 layer: 'application'
 
 tasks:
-  prose:
-    command: "vale --glob='!{**/decisions/**,**/architecture/rules.md}' src/content/docs"
-    inputs: ['src/content/docs/**/*', '/.vale.ini', '/styles/**/*']
-    tags: [check-fast]
-  # The rules page is what scripts/rules.mjs makes from
-  # docs/architecture/core.md, run by the Node.js devenv.nix pins.
-  rules:
-    command: 'node scripts/rules.mjs --check'
-    inputs: ['scripts/rules.mjs', 'src/content/docs/architecture/rules.md', '/docs/architecture/core.md', '/devenv.nix', '/devenv.lock']
-    tags: [check-fast]
   build:
     command: 'bun run build'
-    inputs: ['**/*', '/docs/adr/*.md', '/docs/diagrams/sluice.py', '/plugins/*/screenshots/*.png']
+    inputs: ['**/*', '/docs/adr/*.md', '/docs/architecture/core.md', '/docs/diagrams/sluice.py', '/plugins/*/screenshots/*.png']
     outputs: ['dist']
     options: {cache: false}
