@@ -1491,3 +1491,69 @@ impl State for RemoteRefs {
             .put_progress_under(&self.locks, branch, candidate, tasks)
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::profiles::github::keyless::Identity;
+
+    /// A bundle of the public-good instance, issued to prefix-dev's
+    /// workflow `action.yaml` on its `main`, its statement a conda
+    /// package's: the recorded one the forge tests read.
+    const PUBLIC_GOOD: &str = include_str!("../../tests/profiles/forge/public-good.sigstore.json");
+
+    /// 78, record 0119 (design D13; rule core.22): a `github` signer lists
+    /// a pool's job, which holds no key, so its job may claim, and one whose
+    /// table or remote names no workflow lists nothing; a bundle issued to
+    /// another workflow is left out, naming the identity it carried; one
+    /// issued to the signer's own workflow that holds no run's statement
+    /// counts for nothing; and a signer with no identity verifies nothing.
+    #[test]
+    fn a_github_signers_record_counts_only_from_its_own_workflow() {
+        let ours = SignerKey::Keyless(Some(Identity::workflow(
+            "acme",
+            "widgets",
+            ".github/workflows/sluice.yml",
+            "refs/heads/main",
+        )));
+        let key = ssh_key::PrivateKey::random(&mut rand_core::OsRng, ssh_key::Algorithm::Ed25519)
+            .unwrap();
+        assert!(ours.lists(key.public_key()));
+        assert!(!SignerKey::Keyless(None).lists(key.public_key()));
+
+        let said = format!(
+            "{:#}",
+            verify("forge", &ours, PUBLIC_GOOD.as_bytes()).unwrap_err()
+        );
+        assert!(
+            said.contains(
+                "prefix-dev/sigstore-example/.github/workflows/action.yaml@refs/heads/main"
+            ),
+            "the identity it carried: {said}"
+        );
+
+        let theirs = SignerKey::Keyless(Some(Identity::workflow(
+            "prefix-dev",
+            "sigstore-example",
+            ".github/workflows/action.yaml",
+            "refs/heads/main",
+        )));
+        let said = format!(
+            "{:#}",
+            verify("forge", &theirs, PUBLIC_GOOD.as_bytes()).unwrap_err()
+        );
+        assert!(
+            said.contains("the bundle's statement is no run's"),
+            "{said}"
+        );
+
+        let said = format!(
+            "{:#}",
+            verify("forge", &SignerKey::Keyless(None), PUBLIC_GOOD.as_bytes()).unwrap_err()
+        );
+        assert!(
+            said.contains("[signers.forge] github names no workflow and ref"),
+            "{said}"
+        );
+    }
+}
