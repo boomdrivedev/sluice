@@ -211,6 +211,13 @@ reads the candidate `NotPassed`; `arrange` drops it with no culprit, no
 and its submissions stay queued and form again. Each submission's status
 says the combination was not passed and why.
 
+The lead marks each open run `no_executor` while it finds no live
+executor that may take it, writing only a change, so a status reads,
+from the records alone, an open run waiting for room where one may and
+waiting for a host of its system where none may, whatever system the
+run names; where no run is running, a combination's line gives each
+run's state.
+
 *Not taken:* holding the combination open until a host comes. Record
 0122 ends it at the limit, so a status says it, and a host's return
 needs no special reading.
@@ -269,12 +276,19 @@ again, and a follow-up run holds each check with no counted pass.
   and `decide` forms nothing for the branch. A refused submission is not
   in play, so the host process may end.
 - `withdraw_in` and `admit` take a `Refused` submission as any queued
-  one. `drop_withdrawn` drops a refused landing once any of its
-  submissions has left, and the rest go back to `Queued`.
+  one. The write that takes one of a refused landing's submissions out
+  of the queue, a withdrawal's, a later submission's from its place, or
+  a round's `drop_withdrawn`, drops the landing (`Line::drop_left_landing`),
+  and the rest go back to `Queued`; `sluice push` drops, pushing nothing,
+  a held landing one of whose submissions has left, so no push lands
+  withdrawn work (rule core.48).
 - The refusal is owed under `<id>:refused`, carrying the words, through
   `push_outcome`'s weir delivery. It decides no outcome.
 - A wait on a refused submission ends at once with exit 6, `the forge
-  refused its landing: <words>`; its document is the record.
+  refused its landing: <words>`; its document is the record with
+  `refused`, the forge's words and when. A status row of a refused
+  submission gives the words, and one queued behind the landing says it
+  waits behind it.
 - `sluice push <branch>` clears `refused` under the branch's lock and
   runs the round's landing once; refused again, it is held again with
   the new words, and the command exits non-zero with them.
@@ -307,6 +321,10 @@ wake is lost, which only delays the submission (59). The jobs:
   no report gets a sign job that records the run ended with no outcome.
   A cancelled workflow run signs nothing: its sign job is skipped, and
   the lead ends the run as a job that ended with no record (D12).
+  `sluice job record --from` judges the run job's report again as
+  `sluice job sign` did, by the combination's tree alone, and each check
+  of it left out ends with no outcome for its why, whatever tag the gate
+  names, so its follow-up holds it (D7).
 
 `sluice job` is one subcommand with `run`, `sign` and `record`.
 `sluice job run` starts its run through `Sluice::start_claimed` under
