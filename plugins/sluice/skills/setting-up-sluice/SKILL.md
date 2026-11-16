@@ -319,7 +319,7 @@ ruleset with the button left on.
 | how work reaches the queue | straight from a worktree, or pull requests | [pull-requests](references/profiles/pull-requests.md) |
 | running copies of landed revisions (`[preview]`) | a command per repository | [previews](references/profiles/previews.md) |
 | more than one host, or more than one system (`[signers]`, `[systems]`) | peers on the git remote, standing hosts signing with SSH keys | [peers](references/profiles/peers.md) |
-| runs no standing host takes, a burst or a system none runs (`[pools]`) | a pool on GitHub Actions, set up by `sluice init actions` | [GitHub Actions](https://agentplot.github.io/sluice/guides/github-actions/) |
+| runs no standing host takes, a burst or a system none runs (`[pools]`) | a pool on GitHub Actions, set up by `sluice init actions`; or a CodeBuild fleet in the project's own AWS account, set up by `sluice init codebuild`, which can take every run of a branch whose `trust` names its signer beside the leading hosts' signer with `systems = []` | [running checks on a pool](https://agentplot.github.io/sluice/guides/pools/) |
 
 The rules per branch (`required`, `parallel`, `batch`, `hold`, `flaky`,
 `timeout`, `release_retries`, `trust`) and `[landing] subject` are in the
@@ -552,6 +552,22 @@ ask the user to give the app Actions read and write, and to make the
 `sluice` environment it prints, deployable from that branch alone,
 holding `SLUICE_APP_KEY` and `SLUICE_APP_ID`. Land the files, then
 `sluice forge check <branch>` reads all of it back.
+
+For a queue whose every run goes to a pool, offer a CodeBuild fleet in
+the project's own AWS account, once the app is set up and the policy
+names `[signers]`; its instances bill while they run, each for an hour
+at least. In a working copy of the branch, run `sluice init codebuild`:
+it writes `.config/sluice-codebuild.yml`, a fleet and a run project for
+each Linux system `[systems]` names, and prints the deploy command and
+the secret to fill. Ask the user to deploy the stack and fill the
+secret, and to name, on each host that leads the branch, the profile
+that assumes the stack's lead role as `[aws] profile`. Then
+`sluice init codebuild --stack <name>` appends `[signers.codebuild]`
+and `[pools.codebuild]`. Give the signer the leading hosts sign as
+`systems = []`, so they claim no run, and set each branch's `trust` to
+that signer and `codebuild`, with `batch = false` and `parallel` at the
+fleet's maximum. Land the policy, then `sluice pool check <branch>`
+reads the pool back from AWS.
 
 A pattern with `remote = "origin"` needs no push by hand: `sluice branch
 create <branch> --from main` makes each branch under it there as the app,

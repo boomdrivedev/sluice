@@ -199,6 +199,9 @@ struct Inner {
     refusals: BTreeMap<(String, String), Vec<u8>>,
     /// This host's refusal of each branch's intake (design D27).
     intake_refusals: BTreeMap<(String, String), Vec<u8>>,
+    /// Each host's refusal of a branch's pools' reads (design D5 of the
+    /// change `a-codebuild-fleet-runs-a-queues-checks`).
+    pool_refusals: BTreeMap<(String, String), Vec<u8>>,
     crash: Option<Crash>,
     /// 152, record 0124 (design D10): each branch whose every move the forge
     /// refuses, with its words, until cleared.
@@ -336,6 +339,10 @@ struct Inner {
     launch_fails: Option<bool>,
     /// The pool jobs that ended, by claim (77, 88).
     jobs_ended: BTreeSet<String>,
+    /// Where set, every read of a pool's job fails with these words, as a
+    /// pool refusing it (77, 133; design D5 of the change
+    /// `a-codebuild-fleet-runs-a-queues-checks`).
+    jobs_refused: Option<String>,
     /// Record 0122 (design D12): each pool job's state as a test moved it,
     /// by its claim.
     jobs: BTreeMap<String, sluice_seams::Job>,
@@ -1374,6 +1381,12 @@ impl World {
 
     pub fn end_job(&self, claim: &str) {
         self.0.borrow_mut().jobs_ended.insert(claim.into());
+    }
+
+    /// Every read of a pool's job fails with `words` from now, or, with
+    /// `None`, is answered again (77, 133).
+    pub fn refuse_jobs(&self, words: Option<&str>) {
+        self.0.borrow_mut().jobs_refused = words.map(String::from);
     }
 
     /// Every branch a pool was woken for.
@@ -2855,15 +2868,22 @@ impl Tests for FakeTests {
     fn job(
         &self,
         _kind: &(String, sluice_seams::Setting),
+        _runners: &BTreeMap<String, String>,
         claim: &str,
         _remote: Option<&str>,
     ) -> Result<sluice_seams::Job> {
         let inner = self.0 .0.borrow();
+        if let Some(words) = &inner.jobs_refused {
+            bail!("{words}");
+        }
         if let Some(job) = inner.jobs.get(claim) {
             return Ok(job.clone());
         }
         if inner.jobs_ended.contains(claim) {
-            return Ok(sluice_seams::Job::Ended { recorded: false });
+            return Ok(sluice_seams::Job::Ended {
+                recorded: false,
+                why: None,
+            });
         }
         Ok(match inner.launches.iter().any(|l| l.claim == claim) {
             true => sluice_seams::Job::Queued,
@@ -4075,6 +4095,22 @@ impl State for FakeState {
         match doc {
             Some(doc) => inner.intake_refusals.insert(key, doc.to_vec()),
             None => inner.intake_refusals.remove(&key),
+        };
+        Ok(())
+    }
+
+    fn pool_refusal(&self, branch: &str) -> Result<Option<Vec<u8>>> {
+        let inner = self.0 .0.borrow();
+        let key = (inner.host.clone(), branch.to_string());
+        Ok(inner.pool_refusals.get(&key).cloned())
+    }
+
+    fn keep_pool_refusal(&self, branch: &str, doc: Option<&[u8]>) -> Result<()> {
+        let mut inner = self.0 .0.borrow_mut();
+        let key = (inner.host.clone(), branch.to_string());
+        match doc {
+            Some(doc) => inner.pool_refusals.insert(key, doc.to_vec()),
+            None => inner.pool_refusals.remove(&key),
         };
         Ok(())
     }

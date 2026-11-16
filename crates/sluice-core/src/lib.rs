@@ -365,6 +365,10 @@ impl<'a> Sluice<'a> {
         // 133 (design D27): this host's refusal of the branch's intake, its
         // lines marked so, written beside the round's.
         let intake = self.intake_refusal(&line.branch)?;
+        // 77, 133 (design D5 of the change
+        // `a-codebuild-fleet-runs-a-queues-checks`): its refusal of the
+        // reads of the branch's pools' jobs, its lines marked so.
+        let pool = self.pool_refusal(&line.branch)?;
         let carried: Vec<(String, crate::records::Event)> = refusal
             .as_ref()
             .map(|r| r.unwritten(&self.peer.name))
@@ -373,7 +377,12 @@ impl<'a> Sluice<'a> {
             .chain(
                 intake
                     .as_ref()
-                    .map(|r| r.unwritten_as(&self.peer.name, true))
+                    .map(|r| r.unwritten_as(&self.peer.name, refused::Of::Intake))
+                    .unwrap_or_default(),
+            )
+            .chain(
+                pool.as_ref()
+                    .map(|r| r.unwritten_as(&self.peer.name, refused::Of::Pool))
                     .unwrap_or_default(),
             )
             .collect();
@@ -412,6 +421,14 @@ impl<'a> Sluice<'a> {
                     tracing::warn!(
                         sluice.branch = line.branch,
                         "noting the intake refusal's lines as written failed: {e:#}"
+                    );
+                }
+            }
+            if let Some(r) = pool.filter(|_| !carried.is_empty()) {
+                if let Err(e) = self.keep_pool_refusal(&line.branch, r.written().as_ref()) {
+                    tracing::warn!(
+                        sluice.branch = line.branch,
+                        "noting the pool refusal's lines as written failed: {e:#}"
                     );
                 }
             }
@@ -478,6 +495,97 @@ impl<'a> Sluice<'a> {
         self.seams
             .state
             .keep_intake_refusal(branch, bytes.as_deref())
+    }
+
+    /// 77, 133 (design D5 of the change
+    /// `a-codebuild-fleet-runs-a-queues-checks`): this host's refusal of the
+    /// reads of `branch`'s pools' jobs, as the records seam keeps it.
+    pub fn pool_refusal(&self, branch: &str) -> Result<Option<Refusal>> {
+        self.seams
+            .state
+            .pool_refusal(branch)?
+            .map(|b| Refusal::parse(&b))
+            .transpose()
+    }
+
+    /// Keep `refusal` as this host's refusal of `branch`'s pools' reads, or,
+    /// with `None`, remove it.
+    fn keep_pool_refusal(&self, branch: &str, refusal: Option<&Refusal>) -> Result<()> {
+        let bytes = refusal.map(Refusal::to_bytes);
+        self.seams.state.keep_pool_refusal(branch, bytes.as_deref())
+    }
+
+    /// 77, 133, rule core.28 (design D5 of the change
+    /// `a-codebuild-fleet-runs-a-queues-checks`): a round's read of the job
+    /// of `pool` failed, `said` the service's words: counted in this host's
+    /// refusal of the branch's pools' reads, its cause added and a
+    /// `read-refused` line marked `pool` owed where no read of the refusal
+    /// met it before, which the round writes once it ends
+    /// ([`Sluice::write_pool_lines`]). The round reads the run as it stood
+    /// whatever this does.
+    pub(crate) fn note_pool_refused(&self, branch: &str, pool: &str, said: &str) {
+        let noted = (|| -> Result<()> {
+            let read = ReadRefused {
+                remote: pool.into(),
+                asked: format!("pool {pool}'s jobs"),
+                said: said.trim_end().into(),
+                note: None,
+            };
+            let r = Refusal::refused(self.pool_refusal(branch)?, &read, &self.now());
+            self.keep_pool_refusal(branch, Some(&r))
+        })();
+        if let Err(e) = noted {
+            tracing::warn!(
+                sluice.branch = branch,
+                "keeping the refused read of pool {pool} in the log failed: {e:#}"
+            );
+        }
+    }
+
+    /// 133 (design D5 of the change `a-codebuild-fleet-runs-a-queues-checks`):
+    /// a round read a pool's job of `branch`: this host's refusal of its
+    /// pools' reads, where one stands, ends, its `read-again` line marked
+    /// `pool` owed as the refusal's are.
+    pub(crate) fn note_pool_read(&self, branch: &str) {
+        let noted = (|| -> Result<()> {
+            let Some(mut r) = self.pool_refusal(branch)? else {
+                return Ok(());
+            };
+            if r.ended.is_none() {
+                r.read_again(&self.now());
+                self.keep_pool_refusal(branch, Some(&r))?;
+            }
+            Ok(())
+        })();
+        if let Err(e) = noted {
+            tracing::warn!(
+                sluice.branch = branch,
+                "keeping the end of a refused pool read in the log failed: {e:#}"
+            );
+        }
+    }
+
+    /// 133 (design D5 of the change `a-codebuild-fleet-runs-a-queues-checks`):
+    /// the lines this host's refusal of `branch`'s pools' reads owes the
+    /// log, in a write holding nothing else, once its round's own writes are
+    /// done; a write that fails leaves them for the next.
+    pub(crate) fn write_pool_lines(&self, branch: &str) {
+        let written = (|| -> Result<()> {
+            let owed = self.pool_refusal(branch)?.is_some_and(|r| {
+                !r.unwritten_as(&self.peer.name, refused::Of::Pool)
+                    .is_empty()
+            });
+            if !owed || self.seams.state.stale(branch).is_some() {
+                return Ok(());
+            }
+            self.write_refusal_lines(branch)
+        })();
+        if let Err(e) = written {
+            tracing::warn!(
+                sluice.branch = branch,
+                "writing the pool refusal's lines failed: {e:#}"
+            );
+        }
     }
 
     /// 133, rule core.28 (design D27): an intake pass of `branch` met

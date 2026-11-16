@@ -110,6 +110,65 @@ sigstore-trust-root = { version = "=0.15.1", default-features = false, features 
   "aws-lc-rs",
 ] }
 
+# A key-service signer's records (record 0119; design D7 of the change
+# `a-codebuild-fleet-runs-a-queues-checks`): ECDSA P-256 over a DSSE
+# envelope's encoding, as timber's key-service signer signs (timber record
+# 0017), verified from the public half the policy lists. Pinned exactly,
+# two weeks old at the least.
+p256 = { version = "=0.13.2", default-features = false, features = [
+  "ecdsa",
+  "pkcs8",
+] }
+
+# A CodeBuild pool (record 0119; design D9 of the change
+# `a-codebuild-fleet-runs-a-queues-checks`): CodeBuild, S3, KMS and STS
+# reached through the AWS SDK's own chain at each call, as timber's KMS
+# signer reaches KMS (timber record 0017), at the versions timber pins and
+# the services' of the same release, over rustls on ring, on a
+# current-thread runtime the profile enters for each call alone.
+aws-config = { version = "1.13", default-features = false, features = [
+  "rt-tokio",
+  "behavior-version-latest",
+  "sso",
+  "credentials-process",
+] }
+aws-sdk-codebuild = { version = "1.143", default-features = false, features = [
+  "rt-tokio",
+  "behavior-version-latest",
+] }
+aws-sdk-kms = { version = "1.126", default-features = false, features = [
+  "rt-tokio",
+  "behavior-version-latest",
+] }
+aws-sdk-s3 = { version = "1.155", default-features = false, features = [
+  "rt-tokio",
+  "behavior-version-latest",
+] }
+aws-sdk-sts = { version = "1.122", default-features = false, features = [
+  "rt-tokio",
+  "behavior-version-latest",
+] }
+aws-runtime = "1.10"
+aws-types = "1.7"
+aws-smithy-types = "1.9"
+http = "1"
+# The CodeBuild pool's template read back as YAML by its tests.
+yaml-rust2 = "0.11"
+aws-smithy-http-client = { version = "1.5", features = ["rustls-ring"] }
+tokio = { version = "1", default-features = false, features = [
+  "rt",
+  "net",
+  "time",
+] }
+
+# A CodeBuild run build's hand-over, a zip CodeBuild uploads, read and
+# never written by sluice (design D6 of the change
+# `a-codebuild-fleet-runs-a-queues-checks`). Pinned exactly, two weeks old
+# at the least.
+zip = { version = "=9.2.1", default-features = false, features = [
+  "deflate-flate2-zlib-rs",
+] }
+
 # The tests' container engine over TLS: its certificates, made in each
 # test's scratch directory, and its server, on the ring provider ureq uses.
 rcgen = { version = "0.14", default-features = false, features = [

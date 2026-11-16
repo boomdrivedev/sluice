@@ -751,10 +751,11 @@ impl Tests for Roomed<'_> {
     fn job(
         &self,
         kind: &(String, Setting),
+        runners: &std::collections::BTreeMap<String, String>,
         claim: &str,
         remote: Option<&str>,
     ) -> Result<sluice_seams::Job> {
-        self.inner.job(kind, claim, remote)
+        self.inner.job(kind, runners, claim, remote)
     }
 
     fn wake(&self, kind: &(String, Setting), branch: &str, remote: Option<&str>) -> Result<()> {

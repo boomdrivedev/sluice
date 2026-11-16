@@ -115,7 +115,13 @@ impl Launcher for Actions {
     /// title read: queued until its `run` job starts, running since that
     /// job's own start, and, completed, recorded where its `sign` job
     /// succeeded.
-    fn job(&self, kind: &(String, Setting), claim: &str, remote: Option<&str>) -> Result<Job> {
+    fn job(
+        &self,
+        kind: &(String, Setting),
+        _runners: &std::collections::BTreeMap<String, String>,
+        claim: &str,
+        remote: Option<&str>,
+    ) -> Result<Job> {
         let repo = self.repo(remote)?;
         let workflow = Actions::workflow(kind)?;
         let title = format!("sluice {claim}");
@@ -150,7 +156,10 @@ impl Launcher for Actions {
         };
         if status == "completed" {
             let recorded = job(SIGN_JOB).is_some_and(|j| j["conclusion"] == "success");
-            return Ok(Job::Ended { recorded });
+            return Ok(Job::Ended {
+                recorded,
+                why: None,
+            });
         }
         Ok(
             match job(RUN_JOB).and_then(|j| j["started_at"].as_str().map(String::from)) {

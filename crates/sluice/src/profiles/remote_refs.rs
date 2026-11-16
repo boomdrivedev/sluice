@@ -75,6 +75,16 @@ pub enum SignerKey {
     /// against the roots sluice carries; `None` where the policy's table
     /// or the branch's remote names none, which verifies nothing.
     Keyless(Option<crate::profiles::github::keyless::Identity>),
+    /// 78, record 0119 (design D7 of the change
+    /// `a-codebuild-fleet-runs-a-queues-checks`): a key in a key service,
+    /// by its ARN, verified by the public half the policy lists with no
+    /// service asked; and a digest of the two that tells this key from
+    /// another the same signer is listed with elsewhere.
+    Kms {
+        key: String,
+        public: p256::ecdsa::VerifyingKey,
+        digest: String,
+    },
 }
 
 impl SignerKey {
@@ -94,6 +104,16 @@ impl SignerKey {
         })
     }
 
+    /// A `kms` signer: `key` a key's ARN, `public` its public half as the
+    /// policy lists it, the base64 of its DER SubjectPublicKeyInfo.
+    pub fn kms(key: &str, public: &str) -> Result<SignerKey> {
+        Ok(SignerKey::Kms {
+            key: key.into(),
+            public: crate::signing::kms::public_half(public)?,
+            digest: sha256_hex(format!("{key} {}", public.trim()).as_bytes()),
+        })
+    }
+
     /// Whether `key` is among those listed: a signature it makes verifies
     /// (78, 87).
     pub fn lists(&self, key: &ssh_key::PublicKey) -> bool {
@@ -104,6 +124,11 @@ impl SignerKey {
             // 78, record 0119 (design D13): a pool's job holds no key; its
             // signer is listed by its identity, so a job may claim.
             SignerKey::Keyless(identity) => identity.is_some(),
+            // Record 0119 (design D7; boomdrive-design's ruling of
+            // 2026-11-16): a kms signer's one listed key is its key in the
+            // key service, so no host signs as one: whatever SSH key it
+            // holds, it is not accepted, leads nothing and claims nothing.
+            SignerKey::Kms { .. } => false,
         }
     }
 
@@ -112,6 +137,7 @@ impl SignerKey {
         match self {
             SignerKey::Ssh { digest, .. } => digest,
             SignerKey::Keyless(_) => "keyless",
+            SignerKey::Kms { digest, .. } => digest,
         }
     }
 }
@@ -835,6 +861,23 @@ fn verify(signer: &str, key: &SignerKey, bytes: &[u8]) -> Result<Vec<ResultLine>
                 .unwrap_or_else(|| signer.to_string());
             (s, who)
         }
+        // 78, 79, record 0119 (design D7): an envelope the listed key
+        // signed, under its ARN, verified by the listed half alone; one
+        // under another ARN, or that the half does not verify, is left
+        // out, naming the key.
+        SignerKey::Kms { key, public, .. } => {
+            let envelope: Envelope =
+                serde_json::from_slice(bytes).context("not a DSSE envelope")?;
+            crate::signing::kms::verify(&envelope, key, public)
+                .with_context(|| format!("[signers.{signer}] kms names the key {key}"))?;
+            let s = Statement::from_envelope(&envelope)?;
+            let who = s
+                .predicate
+                .claim
+                .clone()
+                .unwrap_or_else(|| signer.to_string());
+            (s, who)
+        }
     };
     let run = s.predicate;
     let held = run.held.clone().unwrap_or_default();
@@ -1158,6 +1201,18 @@ impl State for RemoteRefs {
 
     fn keep_intake_refusal(&self, branch: &str, doc: Option<&[u8]>) -> Result<()> {
         keep_file(&self.own_file("intake", branch)?, doc)
+    }
+
+    fn pool_refusal(&self, branch: &str) -> Result<Option<Vec<u8>>> {
+        match std::fs::read(self.own_file("pool", branch)?) {
+            Ok(b) => Ok(Some(b)),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
+            Err(e) => Err(e.into()),
+        }
+    }
+
+    fn keep_pool_refusal(&self, branch: &str, doc: Option<&[u8]>) -> Result<()> {
+        keep_file(&self.own_file("pool", branch)?, doc)
     }
 
     fn refusal(&self, branch: &str) -> Result<Option<Vec<u8>>> {

@@ -616,6 +616,17 @@ impl Records {
                 // workflow at its ref in the repository the branch's remote
                 // names.
                 ("github", table) => SignerKey::Keyless(self.keyless(table, remote)),
+                // 78, record 0119 (design D7 of the change
+                // `a-codebuild-fleet-runs-a-queues-checks`): a key in a key
+                // service, by its ARN and the public half listed beside it.
+                ("kms", Setting::Tables(t)) => {
+                    let text = |field: &str| match t.first().and_then(|t| t.get(field)) {
+                        Some(Setting::Text(v)) => Ok(v.as_str()),
+                        _ => Err(anyhow::anyhow!("[signers.{name}] kms names no {field}")),
+                    };
+                    SignerKey::kms(text("key")?, text("public")?)
+                        .with_context(|| format!("[signers.{name}] kms"))?
+                }
                 _ => SignerKey::Keyless(None),
             };
             signers.insert(name.clone(), key);
@@ -983,6 +994,20 @@ impl State for Records {
         match self.route(branch)? {
             None => self.local.keep_intake_refusal(branch, doc),
             Some(r) => r.keep_intake_refusal(branch, doc),
+        }
+    }
+
+    fn pool_refusal(&self, branch: &str) -> Result<Option<Vec<u8>>> {
+        match self.route(branch)? {
+            None => self.local.pool_refusal(branch),
+            Some(r) => r.pool_refusal(branch),
+        }
+    }
+
+    fn keep_pool_refusal(&self, branch: &str, doc: Option<&[u8]>) -> Result<()> {
+        match self.route(branch)? {
+            None => self.local.keep_pool_refusal(branch, doc),
+            Some(r) => r.keep_pool_refusal(branch, doc),
         }
     }
 

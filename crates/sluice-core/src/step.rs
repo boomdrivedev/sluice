@@ -223,6 +223,11 @@ enum Decided {
     Refused,
 }
 
+/// 113: the checkout a pull request's head is run in by a pool's job.
+pub fn head_place(head: &Rev) -> String {
+    format!("sluice/head/{head}")
+}
+
 impl Sluice<'_> {
     /// One round of `branch`'s work.
     pub fn step(&self, branch: &str) -> Result<Step> {
@@ -281,6 +286,10 @@ impl Sluice<'_> {
             return Ok(Step::Busy);
         };
         let stepped = self.step_held(branch, round, releases);
+        // 77, 133 (design D5 of the change
+        // `a-codebuild-fleet-runs-a-queues-checks`): what the round met of
+        // its pools' reads, once its own writes are done.
+        self.write_pool_lines(branch);
         match &stepped {
             Ok(_) => self.note_read_again(branch),
             Err(e) => {
@@ -1304,7 +1313,7 @@ impl Sluice<'_> {
         let Some(part) = self.seams.tests.hold(RunKind::Queue)? else {
             return Ok(Started::AtBound);
         };
-        let name = format!("sluice/head/{head}");
+        let name = head_place(head);
         let place = match self
             .seams
             .checkout
@@ -2182,6 +2191,7 @@ impl Sluice<'_> {
         listed: bool,
         now: &str,
     ) -> Result<()> {
+        let branch = &line.branch.clone();
         let limits = &unmet.limits;
         let pools = match &line.doc.base {
             Some(base) if rules.signed => {
@@ -2214,7 +2224,7 @@ impl Sluice<'_> {
                     // written running, from its run job's own start.
                     if r.state == RunState::Claimed {
                         if let Some(since) =
-                            self.job_started(&host, &pools, rules.remote.as_deref())?
+                            self.job_started(branch, &host, &pools, rules.remote.as_deref())?
                         {
                             let x = line.candidate_mut(&c.id).expect("polled candidate");
                             let xr = &mut x.runs[i];
@@ -2234,7 +2244,14 @@ impl Sluice<'_> {
                     }
                     let claimed = r.claim.as_ref().map(|k| k.at.as_str());
                     let lapse = match r.state.held() {
-                        true => self.lapse(&host, now, &pools, rules.remote.as_deref(), claimed)?,
+                        true => self.lapse(
+                            branch,
+                            &host,
+                            now,
+                            &pools,
+                            rules.remote.as_deref(),
+                            claimed,
+                        )?,
                         false => None,
                     };
                     if let Some(why) = lapse {
@@ -3998,16 +4015,11 @@ impl Sluice<'_> {
         let Some(signer) = &self.peer.signer else {
             return false;
         };
-        let Some((may_confine, systems)) = rules.claims.get(signer) else {
+        let Some((may_confine, _)) = rules.claims.get(signer) else {
             return false;
         };
         let system = run.system.as_deref().or(home);
-        listed
-            && (!rules.confined || *may_confine)
-            && match (system, systems) {
-                (Some(s), Some(list)) => list.iter().any(|x| x == s),
-                _ => true,
-            }
+        listed && (!rules.confined || *may_confine) && rules.may_claim(signer, system)
     }
 
     /// 78, 87: whether `branch`'s policy at `tip`, the revision the round
@@ -4082,6 +4094,7 @@ impl Sluice<'_> {
         chain: &[String],
         now: &str,
     ) -> Result<()> {
+        let branch = &line.branch.clone();
         if !rules.signed {
             return Ok(());
         }
@@ -4098,7 +4111,7 @@ impl Sluice<'_> {
         for (host, (_, beat)) in self.seams.state.beats()? {
             if host == self.peer.name
                 || host.starts_with("pool/")
-                || self.lapsed(&host, now, &[], None, None)?
+                || self.lapsed(branch, &host, now, &[], None, None)?
             {
                 continue;
             }
@@ -4113,11 +4126,14 @@ impl Sluice<'_> {
                 room,
             ));
         }
-        let trusted = |signer: &str| {
+        // 79: a host whose signer may claim no run of the system takes none
+        // (boomdrive-design's ruling of 2026-11-16).
+        let trusted = |signer: &str, system: Option<&str>| {
             rules
                 .claims
                 .get(signer)
                 .is_some_and(|(confined, _)| !rules.confined || *confined)
+                && rules.may_claim(signer, system)
         };
         let mut lead_room = self.free_runs()?;
         let open: Vec<(String, usize)> = chain
@@ -4142,7 +4158,9 @@ impl Sluice<'_> {
             }
             let taker = rooms.iter_mut().find(|(signer, system, room)| {
                 *room > 0
-                    && signer.as_deref().is_some_and(&trusted)
+                    && signer
+                        .as_deref()
+                        .is_some_and(|s| trusted(s, run.system.as_deref()))
                     && (run.system.is_none() || *system == run.system)
             });
             if let Some(t) = taker {
@@ -4152,7 +4170,7 @@ impl Sluice<'_> {
             // A pool with a runner of the run's system, whose signer the
             // gate trusts.
             let pool = policy.pools.iter().find(|p| {
-                trusted(&p.signer)
+                trusted(&p.signer, run.system.as_deref())
                     && match &run.system {
                         Some(s) => p.runners.contains_key(s),
                         None => !p.runners.is_empty(),
@@ -4222,10 +4240,25 @@ impl Sluice<'_> {
             let Some(pool) = policy.pools.iter().find(|p| p.name == name) else {
                 continue;
             };
-            let job = self
-                .seams
-                .tests
-                .job(&pool.kind, &claim, rules.remote.as_deref())?;
+            // 77, 133 (design D5 of the change
+            // `a-codebuild-fleet-runs-a-queues-checks`): a job the pool
+            // could not be asked of is read as it stood: nothing is started
+            // for it this round.
+            let job = match self.seams.tests.job(
+                &pool.kind,
+                &pool.runners,
+                &claim,
+                rules.remote.as_deref(),
+            ) {
+                Ok(job) => {
+                    self.note_pool_read(branch);
+                    job
+                }
+                Err(e) => {
+                    self.note_pool_refused(branch, &pool.name, &format!("{e:#}"));
+                    continue;
+                }
+            };
             let unanswered = match job {
                 Job::None => {
                     let runner = match &run.system {
@@ -4318,6 +4351,7 @@ impl Sluice<'_> {
     /// pool's, or whose job does not run.
     fn job_started(
         &self,
+        branch: &str,
         claim: &str,
         pools: &[crate::policy::Pool],
         remote: Option<&str>,
@@ -4329,10 +4363,24 @@ impl Sluice<'_> {
         let Some(p) = pools.iter().find(|p| p.name == name) else {
             return Ok(None);
         };
-        Ok(match self.seams.tests.job(&p.kind, claim, remote)? {
-            Job::Running { since } => Some(since),
-            _ => None,
-        })
+        // 77, 133 (design D5): a job the pool could not be asked of is read
+        // as it stood, still claimed.
+        Ok(
+            match self.seams.tests.job(&p.kind, &p.runners, claim, remote) {
+                Ok(Job::Running { since }) => {
+                    self.note_pool_read(branch);
+                    Some(since)
+                }
+                Ok(_) => {
+                    self.note_pool_read(branch);
+                    None
+                }
+                Err(e) => {
+                    self.note_pool_refused(branch, &p.name, &format!("{e:#}"));
+                    None
+                }
+            },
+        )
     }
 
     /// 66, 87, 107, record 0122 (design D6): whether a live executor may take
@@ -4356,11 +4404,14 @@ impl Sluice<'_> {
         if self.may_claim(run, home, rules, listed) && self.meets(unmet) {
             return Ok(true);
         }
+        // 79: a signer that may claim no run of the system takes none
+        // (boomdrive-design's ruling of 2026-11-16).
         let trusted = |signer: &str| {
             rules
                 .claims
                 .get(signer)
                 .is_some_and(|(confined, _)| !rules.confined || *confined)
+                && rules.may_claim(signer, run.system.as_deref())
         };
         if !rules.signed {
             return Ok(false);
@@ -4394,7 +4445,7 @@ impl Sluice<'_> {
                             .is_some_and(|l| l.iter().any(|x| x.as_str() == Some(s.as_str())))
                 }
             };
-            if takes && !self.lapsed(&host, now, &[], None, None)? {
+            if takes && !self.lapsed("", &host, now, &[], None, None)? {
                 return Ok(true);
             }
         }
@@ -4406,13 +4457,16 @@ impl Sluice<'_> {
     /// (88).
     fn lapsed(
         &self,
+        branch: &str,
         host: &str,
         now: &str,
         pools: &[crate::policy::Pool],
         remote: Option<&str>,
         claimed: Option<&str>,
     ) -> Result<bool> {
-        Ok(self.lapse(host, now, pools, remote, claimed)?.is_some())
+        Ok(self
+            .lapse(branch, host, now, pools, remote, claimed)?
+            .is_some())
     }
 
     /// [`Sluice::lapsed`], with why `host`'s claim lapsed where it did: a
@@ -4422,6 +4476,7 @@ impl Sluice<'_> {
     /// claim lapsed.
     fn lapse(
         &self,
+        branch: &str,
         host: &str,
         now: &str,
         pools: &[crate::policy::Pool],
@@ -4438,11 +4493,30 @@ impl Sluice<'_> {
             // Record 0122 (design D12): a job that ended with no record, or
             // none of the claim's title past the sign-of-life bound since
             // the claim, is a lapsed claim.
-            return Ok(match self.seams.tests.job(&p.kind, host, remote)? {
-                Job::Ended { recorded: false } => {
-                    Some(format!("{host}'s job ended with no record of its run"))
+            // 77, 133 (design D5 of the change
+            // `a-codebuild-fleet-runs-a-queues-checks`): a job the pool
+            // could not be asked of is read as it stood, and lapses nothing.
+            let job = match self.seams.tests.job(&p.kind, &p.runners, host, remote) {
+                Ok(job) => {
+                    self.note_pool_read(branch);
+                    job
                 }
-                Job::Ended { recorded: true } => None,
+                Err(e) => {
+                    self.note_pool_refused(branch, &p.name, &format!("{e:#}"));
+                    return Ok(None);
+                }
+            };
+            return Ok(match job {
+                // Design D5 of the change
+                // `a-codebuild-fleet-runs-a-queues-checks`: the pool's own
+                // words where it gives why, in place of these.
+                Job::Ended {
+                    recorded: false,
+                    why,
+                } => Some(
+                    why.unwrap_or_else(|| format!("{host}'s job ended with no record of its run")),
+                ),
+                Job::Ended { recorded: true, .. } => None,
                 Job::None => claimed
                     .and_then(|at| seconds_between(at, now))
                     .is_none_or(|s| s >= self.peer.alive.as_secs_f64())

@@ -162,10 +162,13 @@ fn main() {
         }
     };
     // Record 0119 (design D11): a sign job's record writes the records as
-    // the app its environment names.
+    // the app its environment names; a CodeBuild pool's sign build reads
+    // them, and fetches the combination, as it too (design D2 of the change
+    // `a-codebuild-fleet-runs-a-queues-checks`).
     let instance = match &cli.command {
         Some(Command::Job {
-            command: sluice::JobCommand::Record { .. },
+            command:
+                sluice::JobCommand::Record { .. } | sluice::JobCommand::Sign { build: Some(_), .. },
         }) => sluice::job::with_app_from_env(instance).unwrap_or_else(|e| {
             eprintln!("sluice: {e:#}");
             std::process::exit(3);
@@ -234,7 +237,16 @@ fn main() {
             std::process::exit(3);
         }
     };
-    if let Err(e) = sluice::stop_on_interrupt() {
+    let job_run = matches!(
+        cli.command,
+        Some(sluice::Command::Job {
+            command: sluice::JobCommand::Run { .. }
+        })
+    );
+    if let Err(e) = sluice::stop_on_interrupt().and_then(|()| match job_run {
+        true => sluice::stop_on_terminate(),
+        false => Ok(()),
+    }) {
         eprintln!("sluice: {e:#}");
         tell_json(json, &e);
         finish(telemetry);

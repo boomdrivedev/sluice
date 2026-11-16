@@ -1005,6 +1005,7 @@ fn a_profile_beside_the_host_process_holds_through_its_socket() {
                 caches: Vec::new(),
                 expire_after: sluice_core::EXPIRE_AFTER,
                 telemetry: None,
+                aws: Default::default(),
             },
         )
         .with_room(RoomHandle::Socket(Some(client.clone())))

@@ -58,6 +58,7 @@ fn refused(host: &str, asked: &str, said: &str) -> Event {
         asked: asked.into(),
         said: said.into(),
         intake: false,
+        pool: false,
     }
 }
 
@@ -230,6 +231,7 @@ fn the_end_is_logged_with_how_long_and_how_many_rounds() {
             stood: stood.num_seconds() as u64,
             rounds: 12,
             intake: false,
+            pool: false,
         }
     );
     assert_eq!(kept(&h), None, "nothing is kept once the end is written");

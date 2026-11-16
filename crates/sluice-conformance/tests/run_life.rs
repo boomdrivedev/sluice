@@ -1059,8 +1059,13 @@ fn a_pools_job_ended_with_no_record_is_a_lapsed_claim() {
     let one = h.submit("unit/a");
     lead(&h).step(BRANCH).unwrap();
     let claim = pool_run(&h).claim.unwrap().by;
-    h.w()
-        .move_job(&claim, sluice_seams::Job::Ended { recorded: false });
+    h.w().move_job(
+        &claim,
+        sluice_seams::Job::Ended {
+            recorded: false,
+            why: None,
+        },
+    );
     lead(&h).step(BRANCH).unwrap();
     let runs = candidates(&h)[0].runs.clone();
     assert_eq!(runs[0].state, RunState::Closed);
@@ -1084,4 +1089,195 @@ fn a_pools_job_ended_with_no_record_is_a_lapsed_claim() {
     let launches = h.w().launches();
     assert_eq!(launches.len(), 2);
     assert_eq!(launches[1].claim, again.by);
+}
+
+/// satisfies: record 0122; 77, 88; the codebuild-pool spec's "The lead's
+/// lapse gives the pool's why": a pool's job that ended with no record
+/// and says why ends its run with no outcome under the pool's words,
+/// nobody blamed, and a follow-up run holds its checks
+#[test]
+fn a_pools_job_ended_with_its_why_lapses_with_it() {
+    let h = with_pool();
+    h.work("unit/a", "agent-a", &[("a/lib", Some("a2"))]);
+    let one = h.submit("unit/a");
+    lead(&h).step(BRANCH).unwrap();
+    let claim = pool_run(&h).claim.unwrap().by;
+    let why = format!("{claim}'s run build sluice-run:1 was stopped, which starts no sign build");
+    h.w().move_job(
+        &claim,
+        sluice_seams::Job::Ended {
+            recorded: false,
+            why: Some(why.clone()),
+        },
+    );
+    lead(&h).step(BRANCH).unwrap();
+    let runs = candidates(&h)[0].runs.clone();
+    assert_eq!(runs[0].state, RunState::Closed);
+    let ended = runs[0].ended.as_ref().expect("ended");
+    assert_eq!(ended.why.as_deref(), Some(why.as_str()));
+    assert!(ended
+        .outcomes
+        .values()
+        .all(|o| *o == CheckOutcome::None { why: why.clone() }));
+    assert!(h.results().is_empty(), "nothing of it recorded");
+    assert!(
+        !h.events().iter().any(|e| matches!(e, Event::Blamed { .. })),
+        "nobody blamed"
+    );
+    assert!(h.sub(one).failed.is_empty());
+    assert_eq!(runs[1].follows, Some(0), "a follow-up holds its checks");
+    assert!(runs[1].claim.is_some());
+}
+
+/// satisfies: 77, 133; rule core.28; the codebuild-pool spec's "The pool
+/// refuses every read for a while": a lead's reads of a running pool run's
+/// job fail for three rounds with one cause, then answer; the branch's log
+/// holds one line of the cause and one of its end, and the run is still
+/// running under its claim
+#[test]
+fn a_pools_read_refused_is_logged_once_and_lapses_nothing() {
+    let h = with_pool();
+    h.work("unit/a", "agent-a", &[("a/lib", Some("a2"))]);
+    h.submit("unit/a");
+    lead(&h).step(BRANCH).unwrap();
+    let claim = pool_run(&h).claim.unwrap().by;
+    let since = "2026-10-11T09:03:00Z";
+    h.w().move_job(
+        &claim,
+        sluice_seams::Job::Running {
+            since: since.into(),
+        },
+    );
+    lead(&h).step(BRANCH).unwrap();
+    assert_eq!(pool_run(&h).state, RunState::Running);
+
+    let said = "BatchGetBuilds: AccessDeniedException: User: \
+                arn:aws:sts::111122223333:assumed-role/sluice-lead/host is not authorized to \
+                perform: codebuild:BatchGetBuilds";
+    h.w().refuse_jobs(Some(said));
+    for _ in 0..3 {
+        lead(&h).step(BRANCH).unwrap();
+        let run = pool_run(&h);
+        assert_eq!(run.state, RunState::Running, "read as it stood");
+        assert_eq!(run.claim.as_ref().unwrap().by, claim);
+    }
+    h.w().refuse_jobs(None);
+    lead(&h).step(BRANCH).unwrap();
+
+    let refused: Vec<Event> = h
+        .events()
+        .into_iter()
+        .filter(|e| matches!(e, Event::ReadRefused { pool: true, .. }))
+        .collect();
+    assert_eq!(
+        refused,
+        [Event::ReadRefused {
+            host: "a".into(),
+            remote: "forge".into(),
+            asked: "pool forge's jobs".into(),
+            said: said.into(),
+            intake: false,
+            pool: true,
+        }]
+    );
+    let again: Vec<Event> = h
+        .events()
+        .into_iter()
+        .filter(|e| matches!(e, Event::ReadAgain { pool: true, .. }))
+        .collect();
+    assert_eq!(again.len(), 1, "{again:?}");
+    let Event::ReadAgain { rounds, remote, .. } = &again[0] else {
+        unreachable!()
+    };
+    assert_eq!(remote, "forge");
+    assert!(*rounds >= 3, "{rounds}");
+    assert!(
+        !h.events().iter().any(|e| matches!(
+            e,
+            Event::Lapsed { .. } | Event::ReadRefused { pool: false, .. }
+        )),
+        "nothing lapsed, and no read of the remote refused"
+    );
+    let run = pool_run(&h);
+    assert_eq!(run.state, RunState::Running);
+    assert_eq!(run.claim.unwrap().by, claim);
+}
+
+/// A branch whose records are on its remote, its gate trusting `lead`, the
+/// signer its leading host signs as, which may claim no system, and
+/// `codebuild`, the `kms` signer of the CodeBuild pool `codebuild` that
+/// runs `linux-x64`, testing two combinations side by side.
+fn on_a_fleet() -> Harness {
+    let p = policy(false, "fail", 2).replace(
+        "trust = [\"open\", \"sandbox\", \"container\"]\n",
+        "trust = [\"lead\", \"codebuild\"]\nremote = \"origin\"\nsystems = [\"linux-x64\"]\n",
+    ) + "\n[signers.lead]\nssh = \"lead ssh-ed25519 AAAA\"\nsystems = []\n\
+         \n[signers.codebuild]\nkms = { key = \"arn:aws:kms:us-east-1:111122223333:key/1234abcd-12ab-34cd-56ef-1234567890ab\", public = \"MFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAEg44RRacS1htcK8s6X92E7lTYn8f6s5LC4GIxCQv+9fg1UWxDvETlpCR7yLWZ337t0Q/nT0nGEvEP5rLDBHhtTg==\" }\n\
+         systems = [\"linux-x64\"]\n\
+         \n[pools.codebuild]\ncodebuild = { region = \"us-east-1\", sign = \"sluice-sign\" }\nsigner = \"codebuild\"\n\
+         runners = { linux-x64 = \"sluice-run-linux-x64\" }\n\
+         \n[systems]\nlinux-x64 = { os = \"linux\", arch = \"x86_64\" }\n";
+    let h = Harness::new(&p);
+    h.w().signs_as("lead");
+    h.w().platform("linux", "x86_64");
+    h
+}
+
+/// Host `name`, signing as `lead`.
+fn leading<'a>(h: &'a Harness, name: &str) -> Sluice<'a> {
+    h.w().be_host(name);
+    h.sluice().as_peer(Peer {
+        name: name.into(),
+        lease: Duration::from_secs(300),
+        alive: Duration::from_secs(120),
+        signer: Some("lead".into()),
+        systems: None,
+        expire_after: sluice_core::EXPIRE_AFTER,
+    })
+}
+
+/// satisfies: 71, 79, 87, 107; record 0119; the codebuild-pool spec's "A
+/// lead with room beside a pool": a gate trusting a pool's signer and the
+/// lead's, which may claim no system, has every run of its combinations
+/// claimed by the pool; the lead, of the run's system and with room, leads
+/// the branch and claims none, holding no part of its bound for them
+/// (boomdrive-design's ruling of 2026-11-16)
+#[test]
+fn a_gate_trusting_only_a_pools_signer_runs_every_run_on_its_pool() {
+    let h = on_a_fleet();
+    // The lead, and a second host of the same signer, live with room.
+    leading(&h, "a").step(BRANCH).unwrap();
+    leading(&h, "b").step(BRANCH).unwrap();
+    let beats = h.sluice().seams().state.beats().unwrap();
+    assert!(beats.contains_key("b"), "b is live: {:?}", beats.keys());
+    h.work("unit/a", "agent-a", &[("a/lib", Some("a2"))]);
+    h.submit("unit/a");
+    h.work("unit/b", "agent-b", &[("b/lib", Some("b2"))]);
+    h.submit("unit/b");
+    for host in ["a", "b", "a", "b"] {
+        leading(&h, host).step(BRANCH).unwrap();
+    }
+    assert_eq!(h.doc().lead.as_deref(), Some("a"), "the host leads");
+    let c = candidates(&h);
+    assert_eq!(c.len(), 2, "two combinations open: {c:?}");
+    let mut claims = Vec::new();
+    for combination in &c {
+        assert_eq!(combination.runs.len(), 1, "{combination:?}");
+        let run = &combination.runs[0];
+        assert_eq!(run.system.as_deref(), Some("linux-x64"));
+        let claim = run.claim.as_ref().expect("claimed").by.clone();
+        assert!(claim.starts_with("pool/codebuild/"), "{claim}");
+        claims.push(claim);
+    }
+    let launches = h.w().launches();
+    assert_eq!(launches.len(), 2);
+    for (l, claim) in launches.iter().zip(&claims) {
+        assert_eq!(l.kind.0, "codebuild");
+        assert_eq!(l.runner, "sluice-run-linux-x64");
+        assert_eq!(&l.claim, claim);
+    }
+    assert!(h.w().started().is_empty(), "neither host started one");
+    // A host that leads nothing holds a part only to look for a run it may
+    // claim, and gives it back at once (rule core.49): none stays held.
+    assert_eq!(h.w().parts_held(), 0, "no part of a bound held for them");
 }

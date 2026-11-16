@@ -235,6 +235,16 @@ let
   nixVersion = "2.34.8";
   statixVersion = "0.5.8-unstable-2026-07-17";
 
+  # The linter of the CloudFormation template `sluice init codebuild`
+  # writes, which treefmt.nix runs over its source as actionlint runs over
+  # the workflows' (record 0119; core.21): nixpkgs' build, pinned by
+  # devenv.lock and asserted to be this version, so every host that runs
+  # the gate lints it alike (core.24).
+  cfnLintVersion = "1.43.3";
+  cfnLint =
+    assert pkgs.python3Packages.cfn-lint.version == cfnLintVersion;
+    pkgs.python3Packages.cfn-lint;
+
   # OpenSpec, which root:specs validates openspec/specs with: the release
   # the specs are written with, built as nixpkgs builds its older one. Bump
   # the version, then each hash from the mismatch the build reports, then
@@ -452,6 +462,10 @@ in
     # wrapper evaluated elsewhere checks the other tree.
     projectRootFile = "devenv.nix";
     programs.rustfmt.package = rustfmt;
+    # Given no standard input by treefmt, cfn-lint fails reading it.
+    settings.formatter.cfn-lint.command = "${pkgs.writeShellScript "cfn-lint" ''
+      exec ${cfnLint}/bin/cfn-lint "$@" </dev/null
+    ''}";
   };
 
   # `devenv shell -- cargo-tests`: every crate's cargo tests, through

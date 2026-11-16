@@ -259,6 +259,7 @@ fn the_check_seam_counts_the_hosts_running_checks() {
             caches: Vec::new(),
             expire_after: sluice_core::EXPIRE_AFTER,
             telemetry: None,
+            aws: Default::default(),
         },
     )
     .with_sessions(dir.path().join("sessions"))

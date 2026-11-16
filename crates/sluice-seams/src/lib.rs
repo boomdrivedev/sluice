@@ -963,8 +963,11 @@ pub enum Job {
     /// Its run job runs, since its own start.
     Running { since: String },
     /// Its run is over: `recorded` where its sign job recorded the run's
-    /// end, and otherwise not, a lapsed claim.
-    Ended { recorded: bool },
+    /// end, and otherwise not, a lapsed claim, with why where the pool
+    /// says, which the lapse writes in place of its own words (77, 88;
+    /// record 0122; design D5 of the change
+    /// `a-codebuild-fleet-runs-a-queues-checks`).
+    Ended { recorded: bool, why: Option<String> },
 }
 
 /// Record 0122 (design D3): a run found started in a checkout, by the
@@ -1111,12 +1114,18 @@ pub trait Tests {
     }
 
     /// 77, 88, record 0122 (design D12): where the job under `claim` that
-    /// pool `kind` was given stands, read from the pool: none of its title,
-    /// queued, its run job running since its own start, or ended, with
-    /// whether its run was recorded. One that ended with no record is a
-    /// lapsed claim, and so is none past the sign-of-life bound since the
-    /// claim.
-    fn job(&self, _kind: &(String, Setting), _claim: &str, _remote: Option<&str>) -> Result<Job> {
+    /// pool `kind`, running each system on `runners`, was given stands,
+    /// read from the pool: none of its title, queued, its run job running
+    /// since its own start, or ended, with whether its run was recorded.
+    /// One that ended with no record is a lapsed claim, and so is none past
+    /// the sign-of-life bound since the claim.
+    fn job(
+        &self,
+        _kind: &(String, Setting),
+        _runners: &BTreeMap<String, String>,
+        _claim: &str,
+        _remote: Option<&str>,
+    ) -> Result<Job> {
         Ok(Job::None)
     }
 
@@ -2004,6 +2013,21 @@ pub trait State {
     /// Keep `doc` as this host's document of a refusal of `branch`'s
     /// intake, or, with `None`, remove it.
     fn keep_intake_refusal(&self, _branch: &str, _doc: Option<&[u8]>) -> Result<()> {
+        Ok(())
+    }
+
+    /// 77, 133, rule core.28 (design D5 of the change
+    /// `a-codebuild-fleet-runs-a-queues-checks`): this host's document of a
+    /// standing refusal of the reads of `branch`'s pools' jobs, beside its
+    /// refusal of the remote and in the same form; kept on this host alone,
+    /// so it decides nothing.
+    fn pool_refusal(&self, _branch: &str) -> Result<Option<Vec<u8>>> {
+        Ok(None)
+    }
+
+    /// Keep `doc` as this host's document of a refusal of `branch`'s pools'
+    /// reads, or, with `None`, remove it.
+    fn keep_pool_refusal(&self, _branch: &str, _doc: Option<&[u8]>) -> Result<()> {
         Ok(())
     }
 

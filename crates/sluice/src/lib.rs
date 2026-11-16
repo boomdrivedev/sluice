@@ -18,6 +18,7 @@ pub mod init;
 pub mod instance;
 pub mod job;
 pub mod overview;
+pub mod pool;
 pub mod preview;
 pub mod profiles;
 pub mod progress;
@@ -638,6 +639,12 @@ pub enum Command {
         #[command(subcommand)]
         command: InitCommand,
     },
+    /// The pools a branch's runs go to, read back from where they run.
+    #[command(after_help = "Example:\n  $ sluice pool check main")]
+    Pool {
+        #[command(subcommand)]
+        command: PoolCommand,
+    },
     /// Run by the workflow `sluice init actions` writes: a pool's job's
     /// run, its signature and its record (record 0119).
     #[command(
@@ -1250,6 +1257,28 @@ pub enum BranchCommand {
 }
 
 #[derive(Subcommand, Debug)]
+pub enum PoolCommand {
+    /// Read each CodeBuild pool the policy at the branch's revision names
+    /// back from AWS: who the host reaches it as, each run project on a
+    /// reserved-capacity fleet of its system with the buildspec this
+    /// release writes and a timeout longer than the branch's, the sign
+    /// project's buildspec, and the key against the policy's half. Exits 1
+    /// naming each that fails; says where the branch does not test side by
+    /// side at the fleets' size.
+    #[command(
+        after_help = "Examples:\n  $ sluice pool check main\n  $ sluice pool check main --profile ops"
+    )]
+    Check {
+        /// The branch whose policy names the pools.
+        branch: String,
+        /// The AWS profile to read the pools as; else the host's
+        /// [aws] profile, else the AWS chain's.
+        #[arg(long)]
+        profile: Option<String>,
+    },
+}
+
+#[derive(Subcommand, Debug)]
 pub enum ForgeCommand {
     /// Whether the host's [forge] identity is set up so only sluice may
     /// move the branch on its remote; exits 1 naming what is not.
@@ -1278,14 +1307,46 @@ pub enum InitCommand {
         #[arg(long)]
         force: bool,
     },
+    /// Write the CloudFormation template of a pool on a CodeBuild fleet,
+    /// its fleets, projects, key, bucket, rule and roles, and say how to
+    /// deploy it; a template that differs is left, exit 1, unless --force.
+    /// With --stack, read the deployed stack's key and append its signer
+    /// and pool to the policy where it names neither.
+    #[command(
+        after_help = "Examples:\n  $ sluice init codebuild\n  $ sluice init codebuild --systems linux-x64 linux-arm64\n  $ sluice init codebuild --stack sluice --region us-east-1"
+    )]
+    Codebuild {
+        /// The working copy to set up.
+        #[arg(long, default_value = ".")]
+        worktree: PathBuf,
+        /// The systems to run, by the policy's names; else each its
+        /// [systems] names that CodeBuild runs on Linux.
+        #[arg(long, num_args = 1..)]
+        systems: Vec<String>,
+        /// Write a template that differs from what sluice writes.
+        #[arg(long, conflicts_with = "stack")]
+        force: bool,
+        /// The stack the template was deployed as: its key read and the
+        /// pool named in the policy.
+        #[arg(long)]
+        stack: Option<String>,
+        /// With --stack, the stack's region; else the AWS chain's.
+        #[arg(long, requires = "stack")]
+        region: Option<String>,
+        /// With --stack, the AWS profile to read the stack's key as; else
+        /// the AWS chain's.
+        #[arg(long, requires = "stack")]
+        profile: Option<String>,
+    },
 }
 
 #[derive(Subcommand, Debug)]
 pub enum JobCommand {
     /// Start the run a claim holds, or a pull request's head, and keep its
     /// report and what proves its keys in --out; records nothing, writes
-    /// no state and holds no key. Exits 0 once the report is kept, and 3
-    /// with why where the run reported nothing.
+    /// no state and holds no key. Releases the checkout it made before it
+    /// exits, whatever its run came to and when it is stopped. Exits 0 once
+    /// the report is kept, and 3 with why where the run reported nothing.
     #[command(
         after_help = "Examples:\n  $ sluice job run --claim pool/forge/3 --branch main --out run\n  $ sluice job run --head 4f2c9e1 --branch main --system linux-x64 --out run"
     )]
@@ -1309,26 +1370,34 @@ pub enum JobCommand {
     /// Keep of a run job's report only the keys the combination's tree
     /// bears out, running nothing of it, and write the subjects and the
     /// predicate `actions/attest` signs to --out; where none is borne out,
-    /// or the run job kept no report, it writes no subjects.
+    /// or the run job kept no report, it writes no subjects. With --build,
+    /// a CodeBuild pool's run build is read from CodeBuild, its hand-over
+    /// kept in --out's `run` only as CodeBuild recorded it, and what the
+    /// tree bears out signed with the pool's key in KMS into --out's
+    /// `record.json`.
     #[command(
-        after_help = "Example:\n  $ sluice job sign --claim pool/forge/3 --branch main --from run --out sign"
+        after_help = "Examples:\n  $ sluice job sign --claim pool/forge/3 --branch main --from run --out sign\n  $ sluice job sign --build \"$SLUICE_RUN_BUILD\" --out sign"
     )]
     Sign {
         /// The claim the pool's job ran under.
-        #[arg(long, conflicts_with = "head")]
+        #[arg(long, conflicts_with_all = ["head", "build"])]
         claim: Option<String>,
         /// A pull request's head, signed with no claim.
-        #[arg(long, required_unless_present = "claim")]
+        #[arg(long, required_unless_present_any = ["claim", "build"], conflicts_with = "build")]
         head: Option<String>,
-        /// The branch the run's combination, or the head, lands on.
+        /// A CodeBuild pool's run build, by its ARN: its claim and branch
+        /// are read from it.
         #[arg(long)]
-        branch: String,
+        build: Option<String>,
+        /// The branch the run's combination, or the head, lands on.
+        #[arg(long, required_unless_present = "build", conflicts_with = "build")]
+        branch: Option<String>,
         /// With --head, the system the head's run job ran as.
         #[arg(long, requires = "head")]
         system: Option<String>,
         /// The run job's directory, as `sluice job run --out` kept it.
-        #[arg(long)]
-        from: PathBuf,
+        #[arg(long, required_unless_present = "build", conflicts_with = "build")]
+        from: Option<PathBuf>,
         /// The directory the subjects and the predicate are written to.
         #[arg(long)]
         out: PathBuf,
@@ -1339,20 +1408,32 @@ pub enum JobCommand {
     /// where the claim no longer holds the run. With --head, a pull
     /// request's head run's bundle is added, under no claim, writing no
     /// state.
+    /// With --build, a CodeBuild pool's run build's claim and branch are
+    /// read from CodeBuild again, and --from is the sign build's directory,
+    /// whose `record.json`, where it holds one, is added.
     #[command(
-        after_help = "Examples:\n  $ sluice job record --claim pool/forge/3 --branch main --bundle attestation.json\n  $ sluice job record --head 4f2c9e1 --branch main --bundle attestation.json"
+        after_help = "Examples:\n  $ sluice job record --claim pool/forge/3 --branch main --bundle attestation.json\n  $ sluice job record --head 4f2c9e1 --branch main --bundle attestation.json\n  $ sluice job record --build \"$SLUICE_RUN_BUILD\" --from sign"
     )]
     Record {
         /// The claim the pool's job ran under.
-        #[arg(long, conflicts_with = "head")]
+        #[arg(long, conflicts_with_all = ["head", "build"])]
         claim: Option<String>,
         /// A pull request's head, whose signed results are added with no
         /// claim.
-        #[arg(long, required_unless_present = "claim", requires = "bundle")]
+        #[arg(
+            long,
+            required_unless_present_any = ["claim", "build"],
+            requires = "bundle",
+            conflicts_with = "build"
+        )]
         head: Option<String>,
+        /// A CodeBuild pool's run build, by its ARN: its claim and branch
+        /// are read from it, and --from is the sign build's directory.
+        #[arg(long, requires = "from", conflicts_with = "bundle")]
+        build: Option<String>,
         /// The branch the run's combination lands on.
-        #[arg(long)]
-        branch: String,
+        #[arg(long, required_unless_present = "build", conflicts_with = "build")]
+        branch: Option<String>,
         /// The bundle `actions/attest` made of the run's statement.
         #[arg(long)]
         bundle: Option<PathBuf>,
@@ -1388,6 +1469,22 @@ pub fn stop_on_interrupt() -> Result<()> {
     );
     // SAFETY: the handler only stores to an atomic.
     unsafe { sigaction(Signal::SIGINT, &action) }?;
+    Ok(())
+}
+
+/// Record 0016 (design D8 of the change
+/// `a-codebuild-fleet-runs-a-queues-checks`): a pool stopping a job's run
+/// ends it as Ctrl-C does, so `sluice job run` ends its run and releases
+/// its checkout before it exits.
+pub fn stop_on_terminate() -> Result<()> {
+    use nix::sys::signal::{sigaction, SaFlags, SigAction, SigHandler, SigSet, Signal};
+    let action = SigAction::new(
+        SigHandler::Handler(interrupted),
+        SaFlags::empty(),
+        SigSet::empty(),
+    );
+    // SAFETY: the handler only stores to an atomic.
+    unsafe { sigaction(Signal::SIGTERM, &action) }?;
     Ok(())
 }
 
@@ -1985,6 +2082,34 @@ pub fn run(
         Command::Init {
             command: InitCommand::Actions { worktree, force },
         } => init::actions(&worktree, force, out),
+        Command::Init {
+            command:
+                InitCommand::Codebuild {
+                    worktree,
+                    systems,
+                    force,
+                    stack: None,
+                    ..
+                },
+        } => init::codebuild(&worktree, &systems, force, out),
+        Command::Init {
+            command:
+                InitCommand::Codebuild {
+                    worktree,
+                    systems,
+                    stack: Some(stack),
+                    region,
+                    profile,
+                    ..
+                },
+        } => init::codebuild_stack(
+            &worktree,
+            &systems,
+            &stack,
+            region.as_deref(),
+            profile.as_deref(),
+            out,
+        ),
         Command::Step { branch, json } => {
             // Rule core.14 (design D10): the host process's round of the
             // branch, between its passes, printed as a step prints it.
@@ -2602,6 +2727,15 @@ pub fn run(
                 serve();
             }
             Ok(code)
+        }
+        Command::Pool {
+            command: PoolCommand::Check { branch, profile },
+        } => {
+            let aws = match profile {
+                Some(p) => instance::Aws { profile: Some(p) },
+                None => instance::Instance::read()?.aws,
+            };
+            pool::check(&s, &branch, &aws, out)
         }
         Command::Forge {
             command: ForgeCommand::Check { branch, json },

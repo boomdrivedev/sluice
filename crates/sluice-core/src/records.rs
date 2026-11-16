@@ -1535,6 +1535,11 @@ pub enum Event {
         /// requests on the forge, rather than of its remote's refs.
         #[serde(default, skip_serializing_if = "std::ops::Not::not")]
         intake: bool,
+        /// 77, 133 (design D5 of the change
+        /// `a-codebuild-fleet-runs-a-queues-checks`): a read of a pool's
+        /// jobs, `remote` the pool, rather than of the branch's remote.
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        pool: bool,
     },
     /// 133: the first round on `host` that read the remote again: when the
     /// refusal began, how many seconds it stood and how many rounds it
@@ -1549,6 +1554,10 @@ pub enum Event {
         /// 133 (design D27): the end of a refusal of the branch's intake.
         #[serde(default, skip_serializing_if = "std::ops::Not::not")]
         intake: bool,
+        /// The end of a refusal of a pool's reads (design D5 of the change
+        /// `a-codebuild-fleet-runs-a-queues-checks`).
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        pool: bool,
     },
     /// 114, record 0105 (design D6 of the change
     /// `a-pass-nothing-proves-blames-no-one`; rule core.28's way): a run
@@ -2243,6 +2252,7 @@ mod tests {
                            fatal: repository 'https://github.com/acme/app.git/' not found"
                         .into(),
                     intake: false,
+                    pool: false,
                 },
             },
             LogLine {
@@ -2255,6 +2265,7 @@ mod tests {
                     stood: 1800,
                     rounds: 12,
                     intake: false,
+                    pool: false,
                 },
             },
         ];

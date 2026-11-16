@@ -1369,7 +1369,8 @@ fn the_pools_calls() {
     assert_eq!(body["inputs"]["combination"], "c0ffee");
     // Record 0122 (design D12): where each claim's job stands.
     use sluice_seams::Job;
-    let job = |claim: &str| pool.job(&kind, claim, Some("origin")).unwrap();
+    let runners = std::collections::BTreeMap::new();
+    let job = |claim: &str| pool.job(&kind, &runners, claim, Some("origin")).unwrap();
     assert_eq!(job("pool/forge/7"), Job::Queued);
     assert_eq!(
         job("pool/forge/9"),
@@ -1377,8 +1378,20 @@ fn the_pools_calls() {
             since: "2026-11-16T09:00:00Z".into()
         }
     );
-    assert_eq!(job("pool/forge/10"), Job::Ended { recorded: true });
-    assert_eq!(job("pool/forge/11"), Job::Ended { recorded: false });
+    assert_eq!(
+        job("pool/forge/10"),
+        Job::Ended {
+            recorded: true,
+            why: None
+        }
+    );
+    assert_eq!(
+        job("pool/forge/11"),
+        Job::Ended {
+            recorded: false,
+            why: None
+        }
+    );
     assert_eq!(job("pool/forge/8"), Job::None);
     let sent = fake.requests().len();
     pool.wake(&kind, "main", Some("origin")).unwrap();

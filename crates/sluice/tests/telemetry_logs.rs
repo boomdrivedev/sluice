@@ -503,6 +503,7 @@ fn a_run_s_environment() -> (String, String) {
             caches: Vec::new(),
             expire_after: sluice_core::EXPIRE_AFTER,
             telemetry: None,
+            aws: Default::default(),
         },
     )
     .with_running(repo.dir().join(".git/host-running"));

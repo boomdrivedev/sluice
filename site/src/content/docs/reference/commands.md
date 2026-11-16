@@ -30,7 +30,9 @@ sidebar:
 | `sluice forge check [<branch>]` | Whether sluice's own identity on GitHub is set up so only sluice may move the branch there, and, for a pool on GitHub Actions, whether it is set up as `sluice init actions` sets it up. `--json` for scripts. |
 | `sluice push <branch>` | Push again a landing the forge refused, on your word, once the forge's rule allows it: it lands as the same landing, or is held again with the forge's new words ([below](#sluice-push)). `--json` for scripts. |
 | `sluice init actions` | Set up a pool on GitHub Actions in this working copy: write its two workflows and append its signer and pool to the policy where it names none ([below](#sluice-init-actions)). `--force` writes a workflow that differs. |
-| `sluice job run`, `sign`, `record` | A pool's job, as the workflow `sluice init actions` writes runs it; you don't run them yourself ([below](#sluice-job)). |
+| `sluice init codebuild` | Write the CloudFormation template of a pool on a CodeBuild fleet and say how to deploy it; `--stack <name>` reads the deployed stack's key and appends its signer and pool to the policy ([below](#sluice-init-codebuild)). |
+| `sluice job run`, `sign`, `record` | A pool's job, as the workflow `sluice init actions` writes or the builds of `sluice init codebuild`'s stack run it; you don't run them yourself ([below](#sluice-job)). |
+| `sluice pool check <branch>` | Read each CodeBuild pool the branch's policy names back from AWS: its projects, fleets, buildspecs, timeout and key, and whether the branch tests side by side at the fleet's size ([below](#sluice-pool-check)). |
 
 ## Forecasting a conflict
 
@@ -1083,20 +1085,88 @@ Then, on GitHub:
   - land these files on main, where the workflow runs from
 ```
 
-[Running a queue's checks on GitHub Actions](/sluice/guides/github-actions/)
+[Running checks on a pool](/sluice/guides/pools/#github-actions) walks
+through it.
+
+## `sluice init codebuild`
+
+Writes the CloudFormation template of a pool on a CodeBuild fleet,
+`.config/sluice-codebuild.yml`, in the working copy it runs in, or
+`--worktree <path>`. It holds a reserved-capacity fleet and a run
+project for each system `--systems` names. Without it, the template
+holds one for each system the policy's `[systems]` names that CodeBuild
+runs on Linux, and says which it leaves out. It also holds the sign
+project and the bucket a run build hands over in. Then the signing key
+in AWS KMS, the secret for the app's key, the rule that starts the sign
+build, and the roles. Its builds clone the
+repository `origin` names on GitHub, and install the release that wrote
+it. A template that differs from what it writes is left as it is,
+naming the first line that differs, and it exits `1`; `--force` writes
+it. Then it says how to deploy it, the secret to fill, the host
+setting to name and the next step.
+
+```console
+$ sluice init codebuild
+.config/sluice-codebuild.yml: written, a fleet and a run project for linux-x64
+
+Then, in AWS:
+  - deploy it, as `sluice` or a name of your own:
+    aws cloudformation deploy --template-file .config/sluice-codebuild.yml --stack-name sluice --capabilities CAPABILITY_IAM --parameter-overrides LeadPrincipal=<the ARN the hosts that lead the branch reach AWS as> AppId=<sluice's app id> MaxCapacity=<the branch's parallel>
+  - fill the secret sluice-app-key with the app's private key:
+    aws secretsmanager put-secret-value --secret-id sluice-app-key --secret-string file://<the app's key>
+  - name the profile that assumes the stack's lead role as [aws] profile on each host that leads the branch
+  - then `sluice init codebuild --stack sluice`, which names the pool in .config/sluice.toml
+```
+
+`sluice init codebuild --stack <name>` reads the deployed stack's key,
+`alias/<name>-sign`, with your own AWS credentials, `--profile <p>` and
+`--region <r>` where you name them, and refuses a key that isn't
+`ECC_NIST_P256` for signing. Where the policy names neither, it appends
+`[signers.codebuild]`, naming the key's ARN and its public half. It
+appends `[pools.codebuild]` too, naming the region, the sign project
+and each system's run project. The file's own lines stay as they were.
+
+[Running checks on a pool](/sluice/guides/pools/#a-codebuild-fleet)
 walks through it.
+
+## `sluice pool check`
+
+Reads each CodeBuild pool the policy at the branch's revision names back
+from AWS, as the host's [`[aws] profile`](/sluice/reference/configuration/#aws)
+reaches it, or `--profile <p>`. It fails where the branch's `trust`
+names no signer a host signs as, since no host can then lead it. It
+says who it reaches AWS as. Each run
+project must run on a reserved-capacity fleet of its system, with the
+buildspec this release writes and a timeout longer than the branch's.
+The sign project's buildspec must be the one this release writes. The
+key must be `ECC_NIST_P256` for signing, with the public half the policy
+lists. It says each thing it read and exits `1` when any fails, naming
+which. Where the branch tests with `batch = true` or a `parallel` other
+than the fleet's maximum, it says so, failing nothing. A pool on GitHub
+Actions is `sluice forge check`'s.
+
+```console
+$ sluice pool check main
+ok      [pools.codebuild] is reached in us-east-1 as arn:aws:sts::111122223333:assumed-role/sluice-lead/host-a
+ok      sluice-run-linux-x64 runs linux-x64 on the reserved-capacity fleet sluice-linux-x64, LINUX_EC2
+...
+note    a branch on a fleet tests side by side: batch = false, with parallel = 10, the fleets' maximum, where it tests with batch = true and parallel = 3
+```
 
 ## `sluice job`
 
-The workflow `sluice init actions` writes runs these; you don't run
-them yourself.
+The workflow `sluice init actions` writes, and the builds of the stack
+`sluice init codebuild` writes, run these; you don't run them yourself.
 
 - `sluice job run --claim <claim> --branch <branch> --out <dir>`, in
   the run job, starts the run its claim holds and keeps its report and
   what proves its keys in `<dir>`, recording nothing, writing no state
   and holding no key. `--head <revision> --system <system>` runs a pull
-  request's head with no claim. It exits `0` once the report is kept,
-  and `3` with why where the run reported nothing.
+  request's head with no claim. It releases the checkout it made before
+  it exits, whatever its run came to and when it is stopped, and says a
+  release that failed in its output and in `<dir>`'s `why`. It exits `0`
+  once the report is kept, and `3` with why where the run reported
+  nothing.
 - `sluice job sign --claim <claim> --branch <branch> --from <dir> --out
   <dir>`, in the sign job, keeps of that report only the keys the
   combination's tree bears out, running nothing of it, and writes what
@@ -1108,6 +1178,17 @@ them yourself.
   claim no longer holds the run, it writes nothing and exits `1`. With
   no bundle, the run ends with no outcome. `--head <revision>` adds a
   pull request's head run's bundle, writing no state.
+- `sluice job sign --build <arn> --out <dir>`, in a CodeBuild pool's
+  sign build, reads the run build from CodeBuild, its claim and branch
+  among it. It keeps its hand-over in `<dir>/run` only where its SHA-256
+  is the one CodeBuild recorded, and signs the keys the combination's
+  tree bears out with the pool's key into `<dir>/record.json`. A build
+  of no project the pool names, one not ended, or one naming no claim,
+  is refused.
+- `sluice job record --build <arn> --from <dir>` reads the claim and
+  the branch from the run build again, adds `<dir>/record.json`, where
+  the sign build wrote one, to the signer's runs, and writes the run
+  ended and closed under its claim, as `--claim` does.
 
 ## `sluice set-aside`
 

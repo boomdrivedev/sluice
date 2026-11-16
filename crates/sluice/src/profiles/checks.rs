@@ -219,6 +219,7 @@ pub trait Launcher {
     fn job(
         &self,
         kind: &(String, Setting),
+        runners: &BTreeMap<String, String>,
         claim: &str,
         remote: Option<&str>,
     ) -> Result<sluice_seams::Job>;
@@ -232,8 +233,10 @@ pub struct Checks {
     common: PathBuf,
     runs: Runs,
     instance: Instance,
-    /// The pool this host can start runs on, where the binding gave one.
-    pool: Option<Box<dyn Launcher>>,
+    /// The pools this host can start runs on, by their kind, as the binding
+    /// gave them (88; rule core.2; design D5 of the change
+    /// `a-codebuild-fleet-runs-a-queues-checks`).
+    pools: BTreeMap<String, Box<dyn Launcher>>,
     /// The host's session runs, when not the host's own directory.
     sessions: Option<Sessions>,
     /// The host's running checks, when not the host's own directory.
@@ -261,16 +264,16 @@ impl Checks {
             sessions: None,
             running: None,
             room: std::cell::OnceCell::new(),
-            pool: None,
+            pools: BTreeMap::new(),
             engines: None,
             system_link: None,
             log: None,
         }
     }
 
-    /// The same profile, starting runs on `pool` (88).
-    pub fn with_pool(mut self, pool: Box<dyn Launcher>) -> Self {
-        self.pool = Some(pool);
+    /// The same profile, starting runs of pools of `kind` on `pool` (88).
+    pub fn with_pool(mut self, kind: &str, pool: Box<dyn Launcher>) -> Self {
+        self.pools.insert(kind.into(), pool);
         self
     }
 
@@ -2235,11 +2238,18 @@ impl Tests for Checks {
         Ok(self.instance.bound)
     }
 
+    /// 88 (design D5): to the launcher of the pool's kind; a kind no
+    /// launcher is bound for starts nothing, naming the kind.
     fn launch(&self, launch: &sluice_seams::Launch) -> Result<()> {
-        match &self.pool {
+        match self.pools.get(&launch.kind.0) {
             Some(p) => p.launch(launch),
+            None if launch.kind.0 == "github" => anyhow::bail!(
+                "this host has no pool of kind github for {}: name the app it reaches GitHub as \
+                 under [forge]",
+                launch.pool
+            ),
             None => anyhow::bail!(
-                "this host has no pool of kind {} for {}: name the app it reaches GitHub as under [forge]",
+                "this host has no pool of kind {} for {}",
                 launch.kind.0,
                 launch.pool
             ),
@@ -2249,11 +2259,12 @@ impl Tests for Checks {
     fn job(
         &self,
         kind: &(String, Setting),
+        runners: &BTreeMap<String, String>,
         claim: &str,
         remote: Option<&str>,
     ) -> Result<sluice_seams::Job> {
-        match &self.pool {
-            Some(p) => p.job(kind, claim, remote),
+        match self.pools.get(&kind.0) {
+            Some(p) => p.job(kind, runners, claim, remote),
             // A host that cannot ask the pool reads its jobs as waiting: a
             // claim lapses only by what is known of it (77).
             None => Ok(sluice_seams::Job::Queued),
@@ -2261,7 +2272,7 @@ impl Tests for Checks {
     }
 
     fn wake(&self, kind: &(String, Setting), branch: &str, remote: Option<&str>) -> Result<()> {
-        match &self.pool {
+        match self.pools.get(&kind.0) {
             Some(p) => p.wake(kind, branch, remote),
             None => Ok(()),
         }
@@ -2726,6 +2737,111 @@ fn took_ms(started: &str, ended: &str) -> Option<u64> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A launcher that says which it is in `calls` at each call.
+    struct Named(&'static str, std::rc::Rc<std::cell::RefCell<Vec<String>>>);
+
+    impl Launcher for Named {
+        fn launch(&self, launch: &sluice_seams::Launch) -> Result<()> {
+            self.1
+                .borrow_mut()
+                .push(format!("{} launch {}", self.0, launch.claim));
+            Ok(())
+        }
+
+        fn job(
+            &self,
+            _kind: &(String, Setting),
+            runners: &BTreeMap<String, String>,
+            claim: &str,
+            _remote: Option<&str>,
+        ) -> Result<sluice_seams::Job> {
+            let on: Vec<&String> = runners.values().collect();
+            self.1
+                .borrow_mut()
+                .push(format!("{} job {claim} {on:?}", self.0));
+            Ok(sluice_seams::Job::None)
+        }
+
+        fn wake(
+            &self,
+            _kind: &(String, Setting),
+            branch: &str,
+            _remote: Option<&str>,
+        ) -> Result<()> {
+            self.1
+                .borrow_mut()
+                .push(format!("{} wake {branch}", self.0));
+            Ok(())
+        }
+    }
+
+    /// 88, rule core.2 (design D5 of the change
+    /// `a-codebuild-fleet-runs-a-queues-checks`): a pool's launch, job and
+    /// wake go to the launcher bound for its kind, a job with the pool's
+    /// runners; a kind no launcher is bound for reads its jobs as waiting
+    /// and refuses a launch naming the kind.
+    #[test]
+    fn a_pool_is_reached_by_its_kind() {
+        use sluice_seams::Tests as _;
+        let calls = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
+        let checks = Checks::new(
+            Path::new("/nonexistent/repo.git"),
+            PathBuf::from("sluice"),
+            Instance::from_file(None, 4).unwrap(),
+        )
+        .with_pool("github", Box::new(Named("actions", calls.clone())))
+        .with_pool("codebuild", Box::new(Named("fleet", calls.clone())));
+        let kind = |k: &str| (k.to_string(), Setting::Text(String::new()));
+        let runners =
+            BTreeMap::from([("linux-x64".to_string(), "sluice-run-linux-x64".to_string())]);
+        let launch = |k: &str, claim: &str| sluice_seams::Launch {
+            pool: k.into(),
+            kind: kind(k),
+            signer: kind("kms"),
+            runner: "sluice-run-linux-x64".into(),
+            remote: Some("origin".into()),
+            branch: "main".into(),
+            candidate: "c3".into(),
+            combination: sluice_seams::Rev::new("c0ffee"),
+            system: Some("linux-x64".into()),
+            claim: claim.into(),
+        };
+        checks
+            .launch(&launch("codebuild", "pool/codebuild/4"))
+            .unwrap();
+        checks.launch(&launch("github", "pool/forge/5")).unwrap();
+        checks
+            .job(&kind("codebuild"), &runners, "pool/codebuild/4", None)
+            .unwrap();
+        checks
+            .job(&kind("github"), &runners, "pool/forge/5", None)
+            .unwrap();
+        checks.wake(&kind("codebuild"), "main", None).unwrap();
+        assert_eq!(
+            *calls.borrow(),
+            [
+                "fleet launch pool/codebuild/4",
+                "actions launch pool/forge/5",
+                "fleet job pool/codebuild/4 [\"sluice-run-linux-x64\"]",
+                "actions job pool/forge/5 [\"sluice-run-linux-x64\"]",
+                "fleet wake main",
+            ]
+        );
+        assert_eq!(
+            checks
+                .job(&kind("gitlab"), &runners, "pool/gl/1", None)
+                .unwrap(),
+            sluice_seams::Job::Queued
+        );
+        let e = format!(
+            "{:#}",
+            checks.launch(&launch("gitlab", "pool/gl/1")).unwrap_err()
+        );
+        assert!(e.contains("no pool of kind gitlab"), "{e}");
+        checks.wake(&kind("gitlab"), "main", None).unwrap();
+        assert_eq!(calls.borrow().len(), 5);
+    }
 
     /// 84, record 0097 (design D2, D4), the host-requirements spec's "A
     /// run an older sluice started": a run's request an older sluice wrote

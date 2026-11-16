@@ -149,10 +149,13 @@ what each costs.
 ## When no box has room
 
 A run waits until a host of its system that the branch trusts has room,
-and claims go earliest combination first. A pool on GitHub Actions takes
-a run no host takes, a burst or a system no box runs, in a workflow run
-of its own: [Running checks on GitHub
-Actions](/sluice/guides/github-actions/).
+and claims go earliest combination first. A pool takes a run no host
+takes, a burst or a system no box runs, in a job of its own, and holds
+no part of any host's bound. sluice has two. GitHub Actions starts one
+workflow run for each run. A CodeBuild fleet of your own starts one
+build on a warm instance for each run. It takes every run of a branch
+whose gate trusts its signer beside a leading hosts' signer that may
+claim no system: [Running checks on a pool](/sluice/guides/pools/).
 
 ## Watching it
 

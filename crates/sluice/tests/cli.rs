@@ -65,6 +65,26 @@ fn sluice(f: &Fakes, args: &[&str]) -> (i32, String) {
     (code, String::from_utf8(out).unwrap())
 }
 
+/// The error `sluice <args>` stops with, in its words.
+fn sluice_err(f: &Fakes, args: &[&str]) -> String {
+    let cli = Cli::try_parse_from(std::iter::once("sluice").chain(args.iter().copied())).unwrap();
+    let mut out = Vec::new();
+    let e = settled(|| {
+        run(
+            cli,
+            f.seams(),
+            &support::FakeHost::new(f.world.clone(), 0),
+            &(),
+            &(),
+            &f.clock,
+            &Rounds(Cell::new(0)),
+            &mut out,
+        )
+    })
+    .expect_err("an error");
+    format!("{e:#}")
+}
+
 /// `command`, a sluice run in this process, and then a moment for each
 /// lock of the host's reader and driver it found free to be free again.
 /// A lock a command lets go may still be held by a process another
@@ -9851,11 +9871,16 @@ const POOLED: &str = "[tests]\nrunner = \"fake\"\n\n[checkout]\n\n\
 /// pool and dispatched; the world's host is then `runner`, the pool's
 /// job's. The claim is answered.
 fn pooled(f: &Fakes, projects: &[&str]) -> String {
+    pooled_as(f, POOLED, projects)
+}
+
+/// [`pooled`], under `policy`.
+fn pooled_as(f: &Fakes, policy: &str, projects: &[&str]) -> String {
     let libs: Vec<(String, String)> = projects
         .iter()
         .map(|p| (format!("{p}/lib"), format!("{p}1")))
         .collect();
-    let mut files = vec![(POLICY_PATH, POOLED)];
+    let mut files = vec![(POLICY_PATH, policy)];
     files.extend(libs.iter().map(|(p, c)| (p.as_str(), c.as_str())));
     f.world.init("main", &files);
     for p in projects {
@@ -9983,6 +10008,446 @@ fn job_run_writes_its_report_and_records_nothing() {
         "{why}"
     );
     assert!(!none.join("report.json").exists());
+}
+
+/// satisfies: record 0016, 123; rule core.10; the place-release spec's "A
+/// run that passed": `sluice job run` releases the checkout it made before
+/// it exits, by the release the policy names, the checkout gone with its
+/// ports and scratch; a release that fails is said in its output and its
+/// hand-over, deciding nothing of the run's outcome
+#[test]
+fn job_run_releases_its_checkout_before_it_exits() {
+    let f = Fakes::new();
+    let claim = pooled(&f, &["a"]);
+    let out = support::Scratch::new("job-run-release");
+    let dir = out.path().join("sluice-run");
+    let args = [
+        "job",
+        "run",
+        "--claim",
+        &claim,
+        "--branch",
+        "main",
+        "--out",
+        dir.to_str().unwrap(),
+    ];
+    let (code, said) = sluice(&f, &args);
+    assert_eq!(code, 0, "{said}");
+    let place = f
+        .world
+        .made_places()
+        .last()
+        .cloned()
+        .expect("a checkout made");
+    assert!(
+        said.contains(&format!("released its checkout {place}")),
+        "{said}"
+    );
+    assert_eq!(
+        f.world.release_attempts(),
+        std::slice::from_ref(&place),
+        "its release ran"
+    );
+    assert!(f.world.released_places().contains(&place));
+    assert!(
+        !f.world.live_places().contains(&place),
+        "gone, ports and all"
+    );
+    assert_eq!(f.world.live_runs(), 0);
+    assert!(dir.join("report.json").exists());
+    assert!(!dir.join("why").exists());
+
+    // A release that fails: said, beside the report, and the run's outcome
+    // stands.
+    let f = Fakes::new();
+    let claim = pooled(&f, &["a"]);
+    f.world.release_fails(Some("the stack would not stop"));
+    let dir = out.path().join("failed-release");
+    let args = [
+        "job",
+        "run",
+        "--claim",
+        &claim,
+        "--branch",
+        "main",
+        "--out",
+        dir.to_str().unwrap(),
+    ];
+    let (code, said) = sluice(&f, &args);
+    assert_eq!(code, 0, "{said}");
+    assert!(said.contains("1 passed, 0 failed"), "{said}");
+    assert!(
+        said.contains("was not released") && said.contains("the stack would not stop"),
+        "{said}"
+    );
+    assert!(dir.join("report.json").exists(), "the report stands");
+    let why = std::fs::read_to_string(dir.join("why")).unwrap();
+    assert!(
+        why.contains("was not released") && why.contains("the stack would not stop"),
+        "{why}"
+    );
+}
+
+/// satisfies: record 0016, 123; rule core.10; the place-release spec's "A
+/// job stopped while its run goes": it ends the run's process group, runs
+/// the release, says it kept no report, and exits
+#[test]
+fn job_run_stopped_releases_its_checkout() {
+    struct Stop;
+    impl Pause for Stop {
+        fn pause(&self) -> bool {
+            false
+        }
+    }
+    let f = Fakes::new();
+    let claim = pooled(&f, &["a"]);
+    f.world.hold_runs(true);
+    let out = support::Scratch::new("job-run-stopped");
+    let dir = out.path().join("sluice-run");
+    let (code, said) = sluice_with(
+        &f,
+        &Stop,
+        &[
+            "job",
+            "run",
+            "--claim",
+            &claim,
+            "--branch",
+            "main",
+            "--out",
+            dir.to_str().unwrap(),
+        ],
+    );
+    assert_eq!(code, sluice::STOPPED, "{said}");
+    let place = f
+        .world
+        .made_places()
+        .last()
+        .cloned()
+        .expect("a checkout made");
+    assert!(said.contains("no report: the job was stopped"), "{said}");
+    assert!(
+        said.contains(&format!("released its checkout {place}")),
+        "{said}"
+    );
+    assert_eq!(f.world.live_runs(), 0, "its run ended");
+    assert_eq!(
+        f.world.release_attempts(),
+        std::slice::from_ref(&place),
+        "its release ran"
+    );
+    assert!(!f.world.live_places().contains(&place));
+    assert!(!dir.join("report.json").exists());
+    let why = std::fs::read_to_string(dir.join("why")).unwrap();
+    assert!(
+        why.contains("the job was stopped before its run ended"),
+        "{why}"
+    );
+}
+
+/// Whether this is the child `test` runs alone in, where it may set the
+/// process's environment, as pointing the AWS SDK at a fake; outside it,
+/// that child is run, and must pass.
+fn alone(test: &str) -> bool {
+    if std::env::var("SLUICE_TEST_ALONE").as_deref() == Ok(test) {
+        return true;
+    }
+    let out = support::isolated(&mut std::process::Command::new(
+        std::env::current_exe().unwrap(),
+    ))
+    .args(["--exact", test, "--nocapture"])
+    .env("SLUICE_TEST_ALONE", test)
+    .output()
+    .unwrap();
+    let said = String::from_utf8_lossy(&out.stdout);
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        out.status.success() && said.contains(&format!("test {test} ... ok")),
+        "{test}, alone:\n{said}{err}"
+    );
+    false
+}
+
+/// Record 0119 (design D1): `main` on `origin`, its runs for `linux-x64`,
+/// which this world's hosts are not, taken by the CodeBuild pool
+/// `codebuild`, whose `kms` signer lists `public`.
+fn on_codebuild(public: &str) -> String {
+    format!(
+        "[tests]\nrunner = \"fake\"\n\n[checkout]\n\n\
+         [branches.main]\nrequired = [\"#gate\"]\nparallel = 4\ntimeout = \"20m\"\n\
+         trust = [\"box\", \"codebuild\"]\nremote = \"origin\"\nsystems = [\"linux-x64\"]\n\
+         \n[signers.box]\nssh = \"box ssh-ed25519 AAAA\"\n\
+         \n[signers.codebuild]\nkms = {{ key = \"{key}\", public = \"{public}\" }}\nsystems = [\"linux-x64\"]\n\
+         \n[pools.codebuild]\ncodebuild = {{ region = \"us-east-1\", sign = \"sluice-sign\" }}\nsigner = \"codebuild\"\n\
+         runners = {{ linux-x64 = \"sluice-run-linux-x64\" }}\n\
+         \n[systems]\nlinux-x64 = {{ os = \"linux\", arch = \"x86_64\" }}\n\
+         macos-arm64 = {{ os = \"macos\", arch = \"aarch64\" }}\n",
+        key = support::aws::KEY
+    )
+}
+
+/// The run build of `claim`'s run on `main` the CodeBuild fake holds, its
+/// hand-over the zip of `ran` as CodeBuild recorded it; its ARN.
+fn run_build(aws: &support::aws::FakeAws, claim: &str, ran: &std::path::Path) -> String {
+    let zip = support::aws::zip_of(ran);
+    aws.put_object(
+        "sluice-hand-over",
+        "sluice-run-linux-x64/1/sluice-run.zip",
+        &zip,
+    );
+    aws.put_build(
+        "sluice-run-linux-x64",
+        "SUCCEEDED",
+        &[
+            ("SLUICE_CLAIM", claim),
+            ("SLUICE_BRANCH", "main"),
+            ("SLUICE_SYSTEM", "linux-x64"),
+        ],
+        Some((
+            "arn:aws:s3:::sluice-hand-over/sluice-run-linux-x64/1/sluice-run.zip",
+            &support::aws::sha256(&zip),
+        )),
+    )
+}
+
+/// satisfies: record 0119 (design D6); 78, 109; rule core.62; the
+/// codebuild-pool spec's "A hand-over another build wrote": the sign build
+/// keeps a run build's hand-over only where its SHA-256 is the one
+/// CodeBuild recorded, signs what the tree bears out with the pool's key,
+/// and otherwise signs nothing and the run ends with no outcome saying so,
+/// nobody blamed; a build no pool's run project made, one not ended, and
+/// one naming no claim are refused
+#[test]
+fn job_sign_keeps_a_hand_over_only_as_codebuild_recorded_it() {
+    use sluice_core::records::{CheckOutcome, RunState};
+    if !alone("job_sign_keeps_a_hand_over_only_as_codebuild_recorded_it") {
+        return;
+    }
+    let aws = support::aws::FakeAws::start();
+    let key = aws.with_key("alias/sluice-sign");
+    aws.point_here();
+    let f = Fakes::new();
+    let claim = pooled_as(&f, &on_codebuild(&support::aws::public(&key)), &["a"]);
+    let out = support::Scratch::new("job-sign-build");
+    let ran = job_run(&f, &claim, out.path());
+    let arn = run_build(&aws, &claim, &ran);
+
+    // As CodeBuild recorded it: what the tree bears out is signed.
+    let sign = out.path().join("sign");
+    let (code, said) = sluice(
+        &f,
+        &[
+            "job",
+            "sign",
+            "--build",
+            &arn,
+            "--out",
+            sign.to_str().unwrap(),
+        ],
+    );
+    assert_eq!(code, 0, "{said}");
+    assert!(said.contains("signed 1 keys"), "{said}");
+    assert!(sign.join("run/report.json").exists());
+    let envelope: sluice::signing::dsse::Envelope =
+        serde_json::from_slice(&std::fs::read(sign.join("record.json")).unwrap()).unwrap();
+    assert_eq!(envelope.signatures[0].keyid, support::aws::KEY);
+    let half = sluice::signing::kms::public_half(&support::aws::public(&key)).unwrap();
+    sluice::signing::kms::verify(&envelope, support::aws::KEY, &half).unwrap();
+    let statement = sluice::signing::statement::Statement::from_envelope(&envelope).unwrap();
+    assert_eq!(statement.predicate.claim.as_deref(), Some(claim.as_str()));
+    assert_eq!(statement.predicate.claims.system, "linux-x64");
+    assert_eq!(statement.predicate.results[0].check, "a:test");
+    let ops = aws.operations();
+    assert!(ops.contains(&"BatchGetBuilds".to_string()), "{ops:?}");
+    assert!(ops.contains(&"Sign".to_string()), "{ops:?}");
+
+    // Another build's object in its place: nothing signed.
+    let forged = out.path().join("forged");
+    std::fs::create_dir_all(&forged).unwrap();
+    std::fs::write(forged.join("report.json"), b"{}").unwrap();
+    aws.put_object(
+        "sluice-hand-over",
+        "sluice-run-linux-x64/1/sluice-run.zip",
+        &support::aws::zip_of(&forged),
+    );
+    let differs = out.path().join("differs");
+    let (code, said) = sluice(
+        &f,
+        &[
+            "job",
+            "sign",
+            "--build",
+            &arn,
+            "--out",
+            differs.to_str().unwrap(),
+        ],
+    );
+    assert_eq!(code, 0, "{said}");
+    assert!(said.contains("is not what CodeBuild recorded"), "{said}");
+    assert!(!differs.join("record.json").exists());
+    assert!(!differs.join("run/report.json").exists());
+    // Builds a sign build refuses.
+    let stray = aws.put_build(
+        "someone-elses-project",
+        "SUCCEEDED",
+        &[("SLUICE_CLAIM", &claim), ("SLUICE_BRANCH", "main")],
+        None,
+    );
+    let running = aws.put_build(
+        "sluice-run-linux-x64",
+        "IN_PROGRESS",
+        &[("SLUICE_CLAIM", &claim), ("SLUICE_BRANCH", "main")],
+        None,
+    );
+    let unclaimed = aws.put_build("sluice-run-linux-x64", "SUCCEEDED", &[], None);
+    for (build, said) in [
+        (&stray, "names for no system"),
+        (&running, "has not ended"),
+        (&unclaimed, "names no SLUICE_CLAIM"),
+    ] {
+        let dir = out.path().join("refused");
+        let e = sluice_err(
+            &f,
+            &[
+                "job",
+                "sign",
+                "--build",
+                build,
+                "--out",
+                dir.to_str().unwrap(),
+            ],
+        );
+        assert!(e.contains(said), "{build}: {e}");
+        assert!(!dir.join("record.json").exists());
+    }
+
+    let (code, said) = sluice(
+        &f,
+        &[
+            "job",
+            "record",
+            "--build",
+            &arn,
+            "--from",
+            differs.to_str().unwrap(),
+        ],
+    );
+    assert_eq!(code, 0, "{said}");
+    let runs = pooled_runs(&f);
+    assert_eq!(runs[0].state, RunState::Closed);
+    let ended = runs[0].ended.as_ref().expect("ended");
+    let why = ended.why.clone().unwrap_or_default();
+    assert!(why.contains("is not what CodeBuild recorded"), "{why}");
+    assert!(ended
+        .outcomes
+        .values()
+        .all(|o| matches!(o, CheckOutcome::None { .. })));
+    assert!(f.world.results_log().is_empty(), "nothing recorded");
+}
+
+/// satisfies: record 0119 (design D6); 77, 109; the codebuild-pool spec's
+/// "A run build's passes": the sign build's record of both passes, signed
+/// by the pool's key, is added among `codebuild`'s runs, and the run reads
+/// ended and closed under its claim in one write; recorded again under a
+/// claim that no longer holds the run, nothing is written
+#[test]
+fn job_record_build_ends_the_run_with_what_the_key_signed() {
+    use sluice_core::records::{CheckOutcome, RunState};
+    if !alone("job_record_build_ends_the_run_with_what_the_key_signed") {
+        return;
+    }
+    let aws = support::aws::FakeAws::start();
+    let key = aws.with_key("alias/sluice-sign");
+    aws.point_here();
+    let f = Fakes::new();
+    let claim = pooled_as(&f, &on_codebuild(&support::aws::public(&key)), &["a", "b"]);
+    let out = support::Scratch::new("job-record-build");
+    let ran = job_run(&f, &claim, out.path());
+    let arn = run_build(&aws, &claim, &ran);
+    let sign = out.path().join("sign");
+    let (code, said) = sluice(
+        &f,
+        &[
+            "job",
+            "sign",
+            "--build",
+            &arn,
+            "--out",
+            sign.to_str().unwrap(),
+        ],
+    );
+    assert_eq!(code, 0, "{said}");
+    assert!(said.contains("signed 2 keys"), "{said}");
+    let record = std::fs::read(sign.join("record.json")).unwrap();
+
+    let version = f.world.version("main");
+    let results = f.world.results_log();
+    let (code, said) = sluice(
+        &f,
+        &[
+            "job",
+            "record",
+            "--build",
+            &arn,
+            "--from",
+            sign.to_str().unwrap(),
+        ],
+    );
+    assert_eq!(code, 0, "{said}");
+    assert!(said.contains(&format!("ended {claim}'s run")), "{said}");
+    assert!(said.contains("2 of 2 signed results passed"), "{said}");
+    assert_eq!(f.world.version("main"), version + 1, "one write");
+    let adds = f.world.signed_adds();
+    assert_eq!(adds.len(), 1, "one envelope among the signer's runs");
+    assert_eq!(adds[0].0, "codebuild", "refs/sluice/runs/codebuild");
+    let combination = pooled_combination(&f);
+    assert!(
+        adds[0].1.starts_with(&format!("{combination}/linux-x64/")),
+        "{}",
+        adds[0].1
+    );
+    assert_eq!(adds[0].2, record);
+    let envelope: sluice::signing::dsse::Envelope = serde_json::from_slice(&adds[0].2).unwrap();
+    let half = sluice::signing::kms::public_half(&support::aws::public(&key)).unwrap();
+    sluice::signing::kms::verify(&envelope, support::aws::KEY, &half).unwrap();
+    let statement = sluice::signing::statement::Statement::from_envelope(&envelope).unwrap();
+    let mut checks: Vec<&str> = statement
+        .predicate
+        .results
+        .iter()
+        .map(|r| r.check.as_str())
+        .collect();
+    checks.sort();
+    assert_eq!(checks, ["a:test", "b:test"]);
+    let run = pooled_runs(&f)[0].clone();
+    assert_eq!(run.state, RunState::Closed);
+    let ended = run.ended.expect("ended");
+    for check in ["a:test", "b:test"] {
+        assert_eq!(
+            ended.outcomes.get(check),
+            Some(&CheckOutcome::Passed),
+            "{ended:?}"
+        );
+    }
+    assert_eq!(f.world.results_log(), results, "nothing of this host's");
+
+    // Its claim no longer holds the run: refused, with nothing written.
+    let version = f.world.version("main");
+    let (code, said) = sluice(
+        &f,
+        &[
+            "job",
+            "record",
+            "--build",
+            &arn,
+            "--from",
+            sign.to_str().unwrap(),
+        ],
+    );
+    assert_eq!(code, FAILED, "{said}");
+    assert!(said.contains("no longer holds a run"), "{said}");
+    assert_eq!(f.world.version("main"), version, "nothing written");
+    assert_eq!(f.world.signed_adds().len(), 1);
 }
 
 /// `sluice job run` under `claim` on `main`, its directory under `out`.
@@ -10192,8 +10657,13 @@ fn job_record_under_a_lapsed_claim_is_refused() {
     let bundle = out.path().join("bundle.json");
     std::fs::write(&bundle, job_sign(&f, &claim, &ran, out.path())).unwrap();
     f.world.be_host("a");
-    f.world
-        .move_job(&claim, sluice_seams::Job::Ended { recorded: false });
+    f.world.move_job(
+        &claim,
+        sluice_seams::Job::Ended {
+            recorded: false,
+            why: None,
+        },
+    );
     pool_lead(&f).step("main").unwrap();
     f.world.be_host("runner");
     let lapsed = pooled_runs(&f)[0].clone();
@@ -10439,6 +10909,410 @@ fn init_actions_leaves_a_differing_workflow_unless_forced() {
         std::fs::read_to_string(at.join("sluice.yml")).unwrap(),
         workflows::sluice(sluice::VERSION, &runners)
     );
+}
+
+/// A working copy holding `policy`, its origin `acme/widgets` on GitHub,
+/// for `sluice init codebuild`.
+fn codebuild_copy(policy: &str) -> support::Scratch {
+    let dir = copy_with(policy);
+    for args in [
+        vec!["init", "-q"],
+        vec![
+            "remote",
+            "add",
+            "origin",
+            "https://github.com/acme/widgets.git",
+        ],
+    ] {
+        let out = support::git_command()
+            .current_dir(dir.path())
+            .args(&args)
+            .output()
+            .unwrap();
+        assert!(out.status.success(), "{out:?}");
+    }
+    dir
+}
+
+/// `sluice init codebuild` in `dir`, with `more` after it.
+fn init_codebuild(f: &Fakes, dir: &std::path::Path, more: &[&str]) -> (i32, String) {
+    let mut args = vec!["init", "codebuild", "--worktree", dir.to_str().unwrap()];
+    args.extend(more);
+    sluice(f, &args)
+}
+
+/// satisfies: record 0119 (design D10); C.8; the codebuild-pool spec's "A
+/// repository with no pool": the template for the systems given, one
+/// fleet and one run project each, naming the release that writes it and
+/// the repository its builds clone; how to deploy it, the secret to fill
+/// and `sluice init codebuild --stack` said; with no systems given, each
+/// `[systems]` names that CodeBuild runs on Linux, the others said
+#[test]
+fn init_codebuild_writes_the_stack() {
+    use sluice::profiles::codebuild::template::{self, System};
+    let f = setup();
+    let dir = codebuild_copy(INIT_POLICY);
+    let (code, said) = init_codebuild(&f, dir.path(), &["--systems", "linux-x64"]);
+    assert_eq!(code, 0, "{said}");
+    let written = std::fs::read_to_string(dir.path().join(".config/sluice-codebuild.yml")).unwrap();
+    let x64 = System::linux("linux-x64", "linux", "x86_64").unwrap();
+    assert_eq!(
+        written,
+        template::render(sluice::VERSION, "acme/widgets", std::slice::from_ref(&x64))
+    );
+    assert_eq!(written.matches("Type: AWS::CodeBuild::Fleet").count(), 1);
+    assert!(written.contains("RunLinuxX64:") && !written.contains("RunLinuxArm64:"));
+    assert!(
+        said.contains("written, a fleet and a run project for linux-x64"),
+        "{said}"
+    );
+    assert!(
+        said.contains("aws cloudformation deploy --template-file .config/sluice-codebuild.yml"),
+        "{said}"
+    );
+    assert!(
+        said.contains("aws secretsmanager put-secret-value --secret-id sluice-app-key"),
+        "{said}"
+    );
+    assert!(
+        said.contains("sluice init codebuild --stack sluice"),
+        "{said}"
+    );
+    assert_eq!(
+        std::fs::read_to_string(dir.path().join(POLICY_PATH)).unwrap(),
+        INIT_POLICY,
+        "the policy is the stack's to name"
+    );
+    let (code, said) = init_codebuild(&f, dir.path(), &["--systems", "linux-x64"]);
+    assert_eq!(code, 0, "{said}");
+    assert!(
+        said.contains("sluice-codebuild.yml: as sluice writes it"),
+        "{said}"
+    );
+
+    // The policy's systems: each CodeBuild runs on Linux, and the others
+    // named.
+    let systems = format!(
+        "{INIT_POLICY}\n[systems]\nlinux-x64 = {{ os = \"linux\", arch = \"x86_64\" }}\n\
+         linux-arm64 = {{ os = \"linux\", arch = \"aarch64\" }}\n\
+         macos-arm64 = {{ os = \"macos\", arch = \"aarch64\" }}\n"
+    );
+    let dir = codebuild_copy(&systems);
+    let (code, said) = init_codebuild(&f, dir.path(), &[]);
+    assert_eq!(code, 0, "{said}");
+    let written = std::fs::read_to_string(dir.path().join(".config/sluice-codebuild.yml")).unwrap();
+    assert!(written.contains("RunLinuxX64:") && written.contains("RunLinuxArm64:"));
+    assert!(
+        said.contains("a fleet and a run project for linux-arm64, linux-x64"),
+        "{said}"
+    );
+    assert!(
+        said.contains(
+            "CodeBuild runs no Linux fleet for macos-arm64 (macos aarch64); it is left out"
+        ),
+        "{said}"
+    );
+    let e = sluice_err(
+        &f,
+        &[
+            "init",
+            "codebuild",
+            "--worktree",
+            dir.path().to_str().unwrap(),
+            "--systems",
+            "macos-arm64",
+        ],
+    );
+    assert!(
+        e.contains("CodeBuild runs no Linux fleet for macos-arm64"),
+        "{e}"
+    );
+}
+
+/// satisfies: record 0119 (design D10); the codebuild-pool spec's "A
+/// template already there": one that differs is left, said how, exit 1,
+/// and written with `--force`
+#[test]
+fn init_codebuild_leaves_a_differing_template_unless_forced() {
+    use sluice::profiles::codebuild::template::{self, System};
+    let f = setup();
+    let dir = codebuild_copy(INIT_POLICY);
+    let x64 = System::linux("linux-x64", "linux", "x86_64").unwrap();
+    let wants = template::render(sluice::VERSION, "acme/widgets", std::slice::from_ref(&x64));
+    let edited = wants.replace("    Default: 4\n", "    Default: 12\n");
+    assert_ne!(edited, wants);
+    std::fs::write(dir.path().join(".config/sluice-codebuild.yml"), &edited).unwrap();
+    let (code, said) = init_codebuild(&f, dir.path(), &[]);
+    assert_eq!(code, FAILED, "{said}");
+    assert!(
+        said.contains("sluice-codebuild.yml: left as it is; line ")
+            && said.contains(
+                "holds \"Default: 12\", where sluice writes \"Default: 4\"; --force writes it"
+            ),
+        "{said}"
+    );
+    assert_eq!(
+        std::fs::read_to_string(dir.path().join(".config/sluice-codebuild.yml")).unwrap(),
+        edited
+    );
+    let (code, said) = init_codebuild(&f, dir.path(), &["--force"]);
+    assert_eq!(code, 0, "{said}");
+    assert_eq!(
+        std::fs::read_to_string(dir.path().join(".config/sluice-codebuild.yml")).unwrap(),
+        wants
+    );
+}
+
+/// satisfies: record 0119 (design D10); the codebuild-pool spec's "A
+/// deployed stack": the stack's key read by its alias, and the signer, its
+/// ARN and public half, and the pool, its region, sign project and run
+/// project, appended to the policy, its own lines untouched; again, nothing
+/// changes; a key of another spec refused, with nothing written
+#[test]
+fn init_codebuild_from_a_stack_appends_the_pool() {
+    if !alone("init_codebuild_from_a_stack_appends_the_pool") {
+        return;
+    }
+    let aws = support::aws::FakeAws::start();
+    let key = aws.with_key("alias/sluice-sign");
+    aws.point_here();
+    let f = setup();
+    let dir = codebuild_copy(INIT_POLICY);
+    let (code, said) = init_codebuild(
+        &f,
+        dir.path(),
+        &["--stack", "sluice", "--region", "us-east-1"],
+    );
+    assert_eq!(code, 0, "{said}");
+    assert!(said.contains(support::aws::KEY), "{said}");
+    assert!(said.contains("sluice pool check"), "{said}");
+    assert_eq!(aws.operations(), ["GetPublicKey"]);
+    let asked: serde_json::Value = serde_json::from_str(&aws.requests()[0].body).unwrap();
+    assert_eq!(asked["KeyId"], "alias/sluice-sign");
+    let policy = std::fs::read_to_string(dir.path().join(POLICY_PATH)).unwrap();
+    assert!(
+        policy.starts_with(INIT_POLICY),
+        "its own lines untouched: {policy}"
+    );
+    let p = sluice_core::policy::Policy::parse(&policy).expect("the policy parses");
+    let signer = &p.signers["codebuild"];
+    assert_eq!(signer.identity.0, "kms");
+    let sluice_seams::Setting::Tables(t) = &signer.identity.1 else {
+        panic!("{:?}", signer.identity)
+    };
+    assert_eq!(
+        t[0]["key"],
+        sluice_seams::Setting::Text(support::aws::KEY.into())
+    );
+    assert_eq!(
+        t[0]["public"],
+        sluice_seams::Setting::Text(support::aws::public(&key))
+    );
+    assert_eq!(p.pools.len(), 1);
+    let pool = &p.pools[0];
+    assert_eq!(
+        (pool.name.as_str(), pool.signer.as_str()),
+        ("codebuild", "codebuild")
+    );
+    assert_eq!(pool.kind.0, "codebuild");
+    let sluice_seams::Setting::Tables(t) = &pool.kind.1 else {
+        panic!("{:?}", pool.kind)
+    };
+    assert_eq!(
+        t[0]["region"],
+        sluice_seams::Setting::Text("us-east-1".into())
+    );
+    assert_eq!(
+        t[0]["sign"],
+        sluice_seams::Setting::Text("sluice-sign".into())
+    );
+    assert_eq!(
+        pool.runners,
+        std::collections::BTreeMap::from([(
+            "linux-x64".to_string(),
+            "sluice-run-linux-x64".to_string()
+        )])
+    );
+
+    let (code, said) = init_codebuild(
+        &f,
+        dir.path(),
+        &["--stack", "sluice", "--region", "us-east-1"],
+    );
+    assert_eq!(code, 0, "{said}");
+    assert!(
+        said.contains("names [signers.codebuild] and [pools.codebuild] already"),
+        "{said}"
+    );
+    assert_eq!(
+        std::fs::read_to_string(dir.path().join(POLICY_PATH)).unwrap(),
+        policy
+    );
+
+    // A key of another spec: refused, the policy as it was.
+    aws.held.lock().unwrap().spec = Some("RSA_2048".into());
+    let other = codebuild_copy(INIT_POLICY);
+    let e = sluice_err(
+        &f,
+        &[
+            "init",
+            "codebuild",
+            "--worktree",
+            other.path().to_str().unwrap(),
+            "--stack",
+            "sluice",
+            "--region",
+            "us-east-1",
+        ],
+    );
+    assert!(e.contains("RSA_2048") && e.contains("ECC_NIST_P256"), "{e}");
+    assert_eq!(
+        std::fs::read_to_string(other.path().join(POLICY_PATH)).unwrap(),
+        INIT_POLICY
+    );
+}
+
+/// `main` on `origin` trusting the CodeBuild pool `codebuild`, its key's
+/// public half `public`, and `lead`, its leading hosts' signer, which may
+/// claim no system, testing as `rules` say.
+fn fleet_policy(public: &str, rules: &str) -> String {
+    format!(
+        "[tests]\nrunner = \"fake\"\n\n[checkout]\n\n\
+         [branches.main]\nrequired = [\"#gate\"]\n{rules}timeout = \"45m\"\n\
+         trust = [\"lead\", \"codebuild\"]\nremote = \"origin\"\nsystems = [\"linux-x64\"]\n\
+         \n[signers.lead]\nssh = \"lead ssh-ed25519 AAAA\"\nsystems = []\n\
+         \n[signers.codebuild]\nkms = {{ key = \"{key}\", public = \"{public}\" }}\nsystems = [\"linux-x64\"]\n\
+         \n[pools.codebuild]\ncodebuild = {{ region = \"us-east-1\", sign = \"sluice-sign\" }}\nsigner = \"codebuild\"\n\
+         runners = {{ linux-x64 = \"sluice-run-linux-x64\" }}\n\
+         \n[systems]\nlinux-x64 = {{ os = \"linux\", arch = \"x86_64\" }}\n",
+        key = support::aws::KEY
+    )
+}
+
+/// A fake AWS holding the stack `sluice` for `acme/widgets`, its fleet
+/// growing to ten, the environment pointed at it, and no host settings
+/// naming a profile.
+fn fleet_deployed() -> (support::aws::FakeAws, p256::ecdsa::SigningKey) {
+    let aws = support::aws::FakeAws::start();
+    let key = aws.with_key("alias/sluice-sign");
+    aws.deploy("sluice", "acme/widgets", 10);
+    aws.point_here();
+    let settings = support::Scratch::new("pool-check-settings");
+    std::env::set_var("XDG_CONFIG_HOME", settings.path());
+    std::mem::forget(settings);
+    (aws, key)
+}
+
+/// satisfies: record 0119 (design D11); the codebuild-pool spec's "A branch
+/// that tests one combination at a time": with `batch = true` and
+/// `parallel = 3` beside a fleet growing to ten, `sluice pool check` says a
+/// branch on a fleet tests side by side, `batch = false` with `parallel =
+/// 10`, and exits 0 where every other line passes
+#[test]
+fn pool_check_says_a_fleet_tests_side_by_side() {
+    if !alone("pool_check_says_a_fleet_tests_side_by_side") {
+        return;
+    }
+    let (aws, key) = fleet_deployed();
+    let f = Fakes::new();
+    let policy = fleet_policy(&support::aws::public(&key), "batch = true\nparallel = 3\n");
+    f.world.init("main", &[(POLICY_PATH, policy.as_str())]);
+    let (code, said) = sluice(&f, &["pool", "check", "main"]);
+    assert_eq!(code, 0, "{said}");
+    assert!(!said.contains("failed"), "{said}");
+    for line in [
+        "ok      main is led by a host signing as lead",
+        "ok      [pools.codebuild] is reached in us-east-1 as arn:aws:sts::111122223333:assumed-role/sluice-lead/host",
+        "ok      sluice-run-linux-x64 runs linux-x64 on the reserved-capacity fleet sluice-linux-x64, LINUX_EC2",
+        "ok      sluice-run-linux-x64's buildspec is as sluice",
+        "ok      sluice-run-linux-x64 may take 90 minutes, longer than the branch's timeout of 45",
+        "ok      sluice-sign's buildspec is as sluice",
+        "is ECC_NIST_P256, SIGN_VERIFY, and its public half is the one [signers.codebuild] lists",
+        "note    a branch on a fleet tests side by side: batch = false, with parallel = 10, the fleets' maximum",
+    ] {
+        assert!(said.contains(line), "{line}\n{said}");
+    }
+    let ops = aws.operations();
+    for op in [
+        "GetCallerIdentity",
+        "BatchGetProjects",
+        "BatchGetFleets",
+        "GetPublicKey",
+    ] {
+        assert!(ops.iter().any(|o| o == op), "{op}: {ops:?}");
+    }
+
+    // Side by side at the fleets' size: nothing to say.
+    let f = Fakes::new();
+    let policy = fleet_policy(
+        &support::aws::public(&key),
+        "batch = false\nparallel = 10\n",
+    );
+    f.world.init("main", &[(POLICY_PATH, policy.as_str())]);
+    let (code, said) = sluice(&f, &["pool", "check", "main"]);
+    assert_eq!(code, 0, "{said}");
+    assert!(!said.contains("note"), "{said}");
+}
+
+/// satisfies: record 0119 (design D11); rule core.60; the codebuild-pool
+/// spec's "A branch no host can lead": `main` trusting the pool's signer
+/// alone, `sluice pool check main` says no host can lead it and exits 1
+#[test]
+fn pool_check_names_a_branch_no_host_can_lead() {
+    if !alone("pool_check_names_a_branch_no_host_can_lead") {
+        return;
+    }
+    let (_aws, key) = fleet_deployed();
+    let f = Fakes::new();
+    let policy = fleet_policy(
+        &support::aws::public(&key),
+        "batch = false\nparallel = 10\n",
+    )
+    .replace(
+        "trust = [\"lead\", \"codebuild\"]",
+        "trust = [\"codebuild\"]",
+    );
+    f.world.init("main", &[(POLICY_PATH, policy.as_str())]);
+    let (code, said) = sluice(&f, &["pool", "check", "main"]);
+    assert_eq!(code, FAILED, "{said}");
+    assert!(
+        said.contains(
+            "failed  main's trust names no signer a host signs as, so no host can lead it and it \
+             forms nothing: trust the signer its leading hosts sign as beside the pool's, with \
+             systems = [] so it claims no run"
+        ),
+        "{said}"
+    );
+    assert_eq!(said.matches("failed").count(), 1, "{said}");
+}
+
+/// satisfies: record 0119 (design D11); the codebuild-pool spec's "A key
+/// the policy does not list": the key KMS answers differs from the half
+/// `[signers.codebuild]` lists, and `sluice pool check` names the key and
+/// exits 1
+#[test]
+fn pool_check_names_a_key_the_policy_does_not_list() {
+    if !alone("pool_check_names_a_key_the_policy_does_not_list") {
+        return;
+    }
+    let (_aws, _key) = fleet_deployed();
+    let another = p256::ecdsa::SigningKey::random(&mut rand_core::OsRng);
+    let f = Fakes::new();
+    let policy = fleet_policy(
+        &support::aws::public(&another),
+        "batch = false\nparallel = 10\n",
+    );
+    f.world.init("main", &[(POLICY_PATH, policy.as_str())]);
+    let (code, said) = sluice(&f, &["pool", "check", "main"]);
+    assert_eq!(code, FAILED, "{said}");
+    assert!(
+        said.contains(&format!(
+            "failed  the key {}'s public half is not the one [signers.codebuild] lists",
+            support::aws::KEY
+        )),
+        "{said}"
+    );
+    assert_eq!(said.matches("failed").count(), 1, "{said}");
 }
 
 /// satisfies: record 0119 (design D14); the actions-pool spec's "A pool the

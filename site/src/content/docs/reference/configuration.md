@@ -290,11 +290,12 @@ ssh = ".config/sluice.sessions"
 | key | meaning |
 |---|---|
 | `ssh` | An SSH public key in `allowed_signers` form, or the path in the repository of a file of them, one per host. A host signs with the private half its own [`[signing]`](#signing) names. |
-| `github` | A workflow's own identity on GitHub Actions: `{ workflow = ".github/workflows/sluice.yml", ref = "refs/heads/main" }`, the workflow and the branch it runs from, in the repository the branch's remote is. A result counts only when that workflow on that branch signed it, checked against the roots sluice carries ([GitHub Actions](/sluice/guides/github-actions/)). |
+| `github` | A workflow's own identity on GitHub Actions: `{ workflow = ".github/workflows/sluice.yml", ref = "refs/heads/main" }`, the workflow and the branch it runs from, in the repository the branch's remote is. A result counts only when that workflow on that branch signed it, checked against the roots sluice carries ([Running checks on a pool](/sluice/guides/pools/#github-actions)). |
+| `kms` | A key in AWS KMS: `{ key = "arn:aws:kms:us-east-1:111122223333:key/1234abcd-...", public = "MFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAE..." }`, the key by its ARN, never an alias, and its public half, the base64 of its DER public key as KMS gives it, an `ECC_NIST_P256` key. A result counts only when that key signed it, which every host verifies with the public half, asking AWS nothing. A CodeBuild pool's sign build signs with it ([Running checks on a pool](/sluice/guides/pools/#a-codebuild-fleet)). |
 | `confined` | Whether results it signs may count as confined: no agent could reach the checkout or what the test wrote. Say it only of a host that runs no agents; sluice never works it out. The default is `false`. |
-| `systems` | The systems its results may say they ran on. The default is every system. |
+| `systems` | The systems its results may say they ran on. The default is every system. An empty list, `systems = []`, claims no run and counts for no result, whatever the run's system. A branch trusts such a signer so that its hosts lead the branch and run none of its checks, as a branch on a CodeBuild fleet trusts its leading hosts ([Running checks on a pool](/sluice/guides/pools/#test-side-by-side)). |
 
-A signer has exactly one `ssh` or one `github`.
+A signer has exactly one `ssh`, one `github` or one `kms`.
 
 ### `ssh`: one key, or a file of them
 
@@ -336,16 +337,21 @@ signer, which a branch's `trust` names like any other.
 github = { workflow = ".github/workflows/sluice.yml" }
 signer = "forge"
 runners = { linux-x64 = "ubuntu-24.04", macos-arm64 = "macos-15" }
+
+[pools.codebuild]
+codebuild = { region = "us-east-1", sign = "sluice-sign" }
+signer = "codebuild"
+runners = { linux-x64 = "sluice-run-linux-x64" }
 ```
 
 | key | meaning |
 |---|---|
-| `github` | A pool on GitHub Actions: the workflow sluice starts for each run, which `sluice init actions` writes. |
-| `signer` | The signer its results are signed as, one `[signers]` names. |
-| `runners` | For each system it takes runs of, by `[systems]`'s names, the runner it asks for. A run of a system it names no runner for waits for a host. |
+| `github` | A pool on GitHub Actions: the workflow sluice starts for each run, which `sluice init actions` writes. Its signer is a `github` signer. |
+| `codebuild` | A pool on CodeBuild fleets: `region`, where its projects are, and `sign`, the project of the build that signs each run, which `sluice init codebuild` writes. Its signer is a `kms` signer. |
+| `signer` | The signer its results are signed as, one `[signers]` names, of the pool's kind. |
+| `runners` | For each system it takes runs of, by `[systems]`'s names, the runner a GitHub pool asks for, or the run project of a CodeBuild pool's. A run of a system it names no runner for waits for a host. |
 
-[Running checks on GitHub Actions](/sluice/guides/github-actions/) sets
-one up.
+[Running checks on a pool](/sluice/guides/pools/) sets one up.
 
 ## `[branches."<pattern>"]`: rules per target branch
 
@@ -632,6 +638,9 @@ discovery = "60s"                # default: 60s; how often it asks for pull requ
 signer = "box"                   # the policy's name for this host's key
 key = "~/.config/sluice/signing" # an SSH private key on this host
 
+[aws]
+profile = "sluice-lead"          # the AWS profile a CodeBuild pool is reached as
+
 [peers]
 lease = "5m"   # how long a quiet host keeps a branch
 alive = "2m"   # how often this host shows it is alive
@@ -656,6 +665,7 @@ collector = "http://localhost:4318"  # a receiver on the host; needed where send
 | [`[runs] systems`](#runs-systems) | The systems the host runs. | It runs only some of the systems a policy names. |
 | [`[forge]`](#forge) | The GitHub App sluice pushes as, its key or a command that gives its token, and how often sluice asks GitHub for a branch's pull requests. | It lands on a branch whose remote is on GitHub. |
 | [`[signing]`](#signing) | The signer the host signs its results as, and its key. | It runs checks for a branch whose state is on its remote. |
+| [`[aws]`](#aws) | The AWS profile sluice reaches a CodeBuild pool as. | It leads a branch whose runs go to a CodeBuild pool. |
 | [`[peers]`](#peers) | How long a quiet host keeps a branch, how often this host shows it is alive, and its name among the hosts. | It shares a branch's remote with other hosts. |
 | [`[deliveries]`](#deliveries) | How long an outcome is owed to its worktree before it shows as expired. | Its agents confirm their outcomes sooner or later than in a week. |
 | [`[[caches]]`](#caches) | The caches every run on the host shares. | Its builds share a cache, a compile server's or the task runner's. |
@@ -884,6 +894,17 @@ sluice refuses a key file anyone but its owner may read, as it does
 `[forge] key`. A host with no `[signing]` records no result on a branch
 whose state is on its remote, and says so on every run. Make the key
 with `ssh-keygen -t ed25519 -f ~/.config/sluice/signing -N ""`.
+
+### `[aws]`
+
+The AWS profile, `profile`, every call sluice makes to a CodeBuild pool
+on this host uses, as the AWS tools read it: its credentials, and its
+SSO session or credential command, from your AWS config. sluice uses it
+whatever profile the command that started sluice names, so a host that
+leads a branch on a fleet always reaches AWS as the role you gave it,
+the stack's lead role. Without `[aws]`, sluice finds credentials as the
+AWS tools do, from the environment or the profile it names. sluice keeps
+no credential between calls.
 
 ### `[peers]`
 
