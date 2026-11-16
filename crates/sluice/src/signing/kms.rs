@@ -45,6 +45,18 @@ pub fn envelope_of(
     Ok(envelope)
 }
 
+/// timber record 0017 (design D7): `statement`'s envelope signed by `key`,
+/// a key in KMS by its ARN, through `aws`: one `Sign` of `ECDSA_SHA_256`
+/// over the 32 bytes of the encoding's SHA-256, sent as a digest, so
+/// nothing of the statement leaves the host.
+pub fn sign(
+    aws: &dyn crate::profiles::codebuild::aws::Aws,
+    key: &str,
+    statement: &Statement,
+) -> Result<Envelope> {
+    envelope_of(statement, key, |digest| aws.sign(key, digest))
+}
+
 /// A key-service signer's public half as the policy lists it: the base64
 /// of its DER SubjectPublicKeyInfo, a P-256 key.
 pub fn public_half(listed: &str) -> Result<VerifyingKey> {
@@ -166,6 +178,37 @@ pub(crate) mod tests {
             .to_string();
         assert!(e.contains("does not verify"), "{e}");
         assert!(envelope_of(&statement, KEY, |_| Ok(b"not der".to_vec())).is_err());
+    }
+
+    /// timber record 0017 (design D7): the sign asks KMS for one signature
+    /// of the key, by its ARN, over the 32 bytes of the encoding's SHA-256,
+    /// and the envelope carries the answer under that ARN, verifying by the
+    /// key's public half.
+    #[test]
+    fn a_kms_sign_sends_the_encodings_digest() {
+        use crate::profiles::codebuild::aws::Aws as _;
+        use crate::profiles::codebuild::fake::Fake;
+        let aws = Fake::new().with_key("alias/sluice-sign");
+        let arn = aws.get_public_key("alias/sluice-sign").unwrap().arn;
+        let statement = Statement::of(run());
+        let envelope = sign(&aws, &arn, &statement).unwrap();
+        let calls = aws.calls();
+        let signs: Vec<&String> = calls.iter().filter(|c| c.starts_with("Sign ")).collect();
+        let sent = crate::profiles::remote_refs::sha256_hex(&digest(&envelope).unwrap());
+        assert_eq!(signs, [&format!("Sign {arn} {sent}")]);
+        assert_eq!(envelope.signatures.len(), 1);
+        assert_eq!(envelope.signatures[0].keyid, arn);
+        assert_eq!(Statement::from_envelope(&envelope).unwrap(), statement);
+        let der = aws.get_public_key(&arn).unwrap().der;
+        let half = public_half(&STANDARD.encode(der)).unwrap();
+        verify(&envelope, &arn, &half).unwrap();
+        // A key KMS does not hold signs nothing.
+        assert!(sign(
+            &aws,
+            "arn:aws:kms:us-east-1:111122223333:key/other",
+            &statement
+        )
+        .is_err());
     }
 
     /// timber record 0017: KMS does not promise a low S; a signature with a
