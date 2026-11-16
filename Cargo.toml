@@ -150,6 +150,8 @@ aws-sdk-sts = { version = "1.122", default-features = false, features = [
 ] }
 aws-runtime = "1.10"
 aws-types = "1.7"
+aws-smithy-types = "1.9"
+http = "1"
 aws-smithy-http-client = { version = "1.5", features = ["rustls-ring"] }
 tokio = { version = "1", default-features = false, features = [
   "rt",

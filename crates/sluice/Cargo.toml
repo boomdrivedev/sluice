@@ -100,6 +100,8 @@ rustls.workspace = true
 # host's, and a client that replays what AWS answers.
 aws-config = { workspace = true, features = ["test-util"] }
 aws-types.workspace = true
+aws-smithy-types.workspace = true
+http.workspace = true
 aws-smithy-http-client = { workspace = true, features = ["test-util"] }
 
 [lib]

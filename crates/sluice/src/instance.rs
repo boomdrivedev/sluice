@@ -1029,6 +1029,7 @@ mod tests {
             let chain = crate::profiles::codebuild::sdk::Chain {
                 aws: aws.clone(),
                 files: Some(files.clone()),
+                ..Default::default()
             };
             let loaded =
                 runtime.block_on(chain.loader("us-east-1").env(Env::from_slice(env)).load());

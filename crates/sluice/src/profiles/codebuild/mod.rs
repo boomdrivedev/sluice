@@ -4,4 +4,7 @@
 //! system's run project, which holds no key, and its end starts a build of
 //! the sign project, which runs none of the combination's code.
 
+pub mod aws;
+#[cfg(test)]
+pub mod fake;
 pub mod sdk;
