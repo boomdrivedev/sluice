@@ -1048,13 +1048,15 @@ fn a_pools_run_is_running_from_its_run_jobs_start() {
     assert!(life(&h).contains(&("running", Some(0))));
 }
 
-/// satisfies: record 0122; 77, 88; the actions-pool spec's "A job that
-/// ended with no record"
+/// satisfies: record 0122; 77, 88; the actions-pool spec's "A cancelled
+/// workflow run": its sign job skipped, the workflow run ended with no
+/// record of the run, which ends with no outcome saying so, nothing of it
+/// recorded and nobody blamed, its follow-up claimed for the pool again
 #[test]
 fn a_pools_job_ended_with_no_record_is_a_lapsed_claim() {
     let h = with_pool();
     h.work("unit/a", "agent-a", &[("a/lib", Some("a2"))]);
-    h.submit("unit/a");
+    let one = h.submit("unit/a");
     lead(&h).step(BRANCH).unwrap();
     let claim = pool_run(&h).claim.unwrap().by;
     h.w()
@@ -1062,11 +1064,20 @@ fn a_pools_job_ended_with_no_record_is_a_lapsed_claim() {
     lead(&h).step(BRANCH).unwrap();
     let runs = candidates(&h)[0].runs.clone();
     assert_eq!(runs[0].state, RunState::Closed);
-    let why = format!("{claim}'s claim lapsed");
-    assert_eq!(
-        runs[0].ended.as_ref().and_then(|e| e.why.as_deref()),
-        Some(why.as_str())
+    let why = format!("{claim}'s job ended with no record of its run");
+    let ended = runs[0].ended.as_ref().expect("ended");
+    assert_eq!(ended.why.as_deref(), Some(why.as_str()));
+    assert!(ended
+        .outcomes
+        .values()
+        .all(|o| *o == CheckOutcome::None { why: why.clone() }));
+    assert!(h.results().is_empty(), "nothing of it recorded");
+    assert!(
+        !h.events().iter().any(|e| matches!(e, Event::Blamed { .. })),
+        "nobody blamed"
     );
+    assert!(h.sub(one).failed.is_empty());
+    assert_ne!(h.sub(one).state, State::Failed);
     assert_eq!(runs[1].follows, Some(0));
     let again = runs[1].claim.clone().expect("claimed for the pool again");
     assert_ne!(again.by, claim, "under a new claim");

@@ -299,12 +299,14 @@ wake is lost, which only delays the submission (59). The jobs:
 - **run**, on `${{ inputs.runner }}`, `permissions: contents: read`, no
   environment: installs sluice's release and the toolchain the policy
   names, runs `sluice job run`, uploads its directory.
-- **sign**, `needs: run`, `if: always()`, on `ubuntu-latest`, the
+- **sign**, `needs: run`, `if: !cancelled()`, on `ubuntu-latest`, the
   `sluice` environment, `id-token: write`, `attestations: write`:
   downloads the artifact, runs `sluice job sign`, signs with
   `actions/attest` (subjects and predicate as `sluice job sign` writes
   them), runs `sluice job record` with the bundle. A run job that wrote
   no report gets a sign job that records the run ended with no outcome.
+  A cancelled workflow run signs nothing: its sign job is skipped, and
+  the lead ends the run as a job that ended with no record (D12).
 
 `sluice job` is one subcommand with `run`, `sign` and `record`.
 `sluice job run` starts its run through `Sluice::start_claimed` under

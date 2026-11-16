@@ -2233,9 +2233,11 @@ impl Sluice<'_> {
                         }
                     }
                     let claimed = r.claim.as_ref().map(|k| k.at.as_str());
-                    if r.state.held()
-                        && self.lapsed(&host, now, &pools, rules.remote.as_deref(), claimed)?
-                    {
+                    let lapse = match r.state.held() {
+                        true => self.lapse(&host, now, &pools, rules.remote.as_deref(), claimed)?,
+                        false => None,
+                    };
+                    if let Some(why) = lapse {
                         line.log(
                             now,
                             Event::Lapsed {
@@ -2243,7 +2245,6 @@ impl Sluice<'_> {
                                 host: host.clone(),
                             },
                         );
-                        let why = format!("{host}'s claim lapsed");
                         let none: Vec<NotRun> = given_checks(r, rules)
                             .into_iter()
                             .map(|task| NotRun {
@@ -4411,21 +4412,42 @@ impl Sluice<'_> {
         remote: Option<&str>,
         claimed: Option<&str>,
     ) -> Result<bool> {
+        Ok(self.lapse(host, now, pools, remote, claimed)?.is_some())
+    }
+
+    /// [`Sluice::lapsed`], with why `host`'s claim lapsed where it did: a
+    /// pool's job that ended with no record of its run, cancelled or lost
+    /// before its sign job wrote the run's end, says so (88; the
+    /// actions-pool spec's "A cancelled workflow run"); any other, that its
+    /// claim lapsed.
+    fn lapse(
+        &self,
+        host: &str,
+        now: &str,
+        pools: &[crate::policy::Pool],
+        remote: Option<&str>,
+        claimed: Option<&str>,
+    ) -> Result<Option<String>> {
+        let lapsed = || format!("{host}'s claim lapsed");
         if let Some(rest) = host.strip_prefix("pool/") {
             let name = rest.split('/').next().unwrap_or_default();
             let Some(p) = pools.iter().find(|p| p.name == name) else {
                 // A pool the policy no longer names runs nothing for it.
-                return Ok(true);
+                return Ok(Some(lapsed()));
             };
             // Record 0122 (design D12): a job that ended with no record, or
             // none of the claim's title past the sign-of-life bound since
             // the claim, is a lapsed claim.
             return Ok(match self.seams.tests.job(&p.kind, host, remote)? {
-                Job::Ended { recorded } => !recorded,
+                Job::Ended { recorded: false } => {
+                    Some(format!("{host}'s job ended with no record of its run"))
+                }
+                Job::Ended { recorded: true } => None,
                 Job::None => claimed
                     .and_then(|at| seconds_between(at, now))
-                    .is_none_or(|s| s >= self.peer.alive.as_secs_f64()),
-                Job::Queued | Job::Running { .. } => false,
+                    .is_none_or(|s| s >= self.peer.alive.as_secs_f64())
+                    .then(lapsed),
+                Job::Queued | Job::Running { .. } => None,
             });
         }
         let marker = self
@@ -4436,12 +4458,12 @@ impl Sluice<'_> {
             .map(|(m, _)| m)
             .unwrap_or_default();
         match self.seams.state.observed_beat(host)? {
-            Some((m, since)) if m == marker => Ok(
-                seconds_between(&since, now).is_some_and(|s| s >= self.peer.alive.as_secs_f64())
-            ),
+            Some((m, since)) if m == marker => Ok(seconds_between(&since, now)
+                .is_some_and(|s| s >= self.peer.alive.as_secs_f64())
+                .then(lapsed)),
             _ => {
                 self.seams.state.observe_beat(host, &marker, now)?;
-                Ok(false)
+                Ok(None)
             }
         }
     }

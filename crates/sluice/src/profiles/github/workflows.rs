@@ -125,7 +125,7 @@ mod tests {
         let sign = &j["sign"];
         for needed in [
             "needs: run",
-            "if: always()",
+            "if: ${{ !cancelled() && github.event_name == 'workflow_dispatch' }}",
             "environment: sluice",
             "id-token: write",
             "attestations: write",
