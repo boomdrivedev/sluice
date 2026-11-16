@@ -716,6 +716,10 @@ impl Tests for Roomed<'_> {
         })
     }
 
+    fn found(&self, place: &str) -> Result<Option<sluice_seams::Found>> {
+        self.inner.found(place)
+    }
+
     fn progress(&self, run: &RunHandle) -> Result<Progress> {
         self.inner.progress(run)
     }

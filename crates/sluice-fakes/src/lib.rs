@@ -39,6 +39,18 @@ pub enum Crash {
     BeforeMove,
     /// The process stops after the branch moved, before it is recorded.
     AfterMove,
+    /// Record 0122 (design D3): the step stops once, after the next
+    /// checkout is made, before anything is written of it.
+    AfterCheckout,
+    /// Record 0122 (design D3): the step stops once, after the next run's
+    /// checks are started, before its `running` is written.
+    AfterStart,
+    /// Record 0122 (design D3): the step stops once, after the next run's
+    /// results are recorded, before its end is written.
+    AfterResults,
+    /// Record 0122 (design D3): the step stops once, after the next
+    /// checkout is released, before its run is written closed.
+    AfterRelease,
 }
 
 #[derive(Clone, Debug)]
@@ -89,6 +101,8 @@ struct RunState {
     lost: bool,
     killed: bool,
     report: Option<RunReport>,
+    /// Record 0122 (design D3): its own start, by the world's clock.
+    started: String,
 }
 
 impl RunState {
@@ -2577,6 +2591,7 @@ impl Tests for FakeTests {
         let nix_system = inner.nix_systems.get(&host).cloned();
         let live = inner.places.keys().cloned().collect();
         inner.live_at_start.push((request.place.name.clone(), live));
+        let started = inner.now.to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
         inner.runs.push(RunState {
             request: request.clone(),
             host,
@@ -2585,8 +2600,30 @@ impl Tests for FakeTests {
             lost: false,
             killed: false,
             report: None,
+            started,
         });
-        Ok(RunHandle(format!("run-{}", inner.runs.len() - 1)))
+        let run = RunHandle(format!("run-{}", inner.runs.len() - 1));
+        if inner.crash == Some(Crash::AfterStart) {
+            inner.crash = None;
+            bail!("crashed after starting a run in {}", request.place.name);
+        }
+        Ok(run)
+    }
+
+    /// Record 0122 (design D3): the last run this host started in the
+    /// checkout, as the supervisor's files would say, and its own start.
+    fn found(&self, place: &str) -> Result<Option<sluice_seams::Found>> {
+        let inner = self.0 .0.borrow();
+        Ok(inner
+            .runs
+            .iter()
+            .enumerate()
+            .rev()
+            .find(|(_, r)| r.request.place.name == place && r.host == inner.host)
+            .map(|(n, r)| sluice_seams::Found {
+                run: RunHandle(format!("run-{n}")),
+                since: r.started.clone(),
+            }))
     }
 
     fn progress(&self, run: &RunHandle) -> Result<Progress> {
@@ -3053,6 +3090,10 @@ impl Checkout for FakeCheckout {
         inner.made.push(name.into());
         let host = inner.host.clone();
         inner.place_host.insert(name.into(), host);
+        if inner.crash == Some(Crash::AfterCheckout) {
+            inner.crash = None;
+            bail!("crashed after making {name}");
+        }
         Ok(Place {
             name: name.into(),
             path: format!("/fake/places/{name}").into(),
@@ -3217,6 +3258,11 @@ impl Checkout for FakeCheckout {
             bail!("the release command of {name} failed");
         }
         self.drop_place(name);
+        let mut inner = self.0 .0.borrow_mut();
+        if inner.crash == Some(Crash::AfterRelease) {
+            inner.crash = None;
+            bail!("crashed after releasing {name}");
+        }
         Ok(())
     }
 
@@ -3986,6 +4032,10 @@ impl State for FakeState {
         let mut inner = self.0 .0.borrow_mut();
         let Some(signer) = inner.signer.clone() else {
             inner.results.extend(lines);
+            if inner.crash == Some(Crash::AfterResults) {
+                inner.crash = None;
+                bail!("crashed after recording results");
+            }
             return Ok(());
         };
         // Signed with a key no policy lists, it verifies for no gate.
@@ -3997,6 +4047,10 @@ impl State for FakeState {
         for mut l in sluice_core::records::parse_lines::<sluice_core::records::ResultLine>(lines)? {
             l.signer = Some(signer.clone());
             inner.results.extend(sluice_core::records::to_line(&l));
+        }
+        if inner.crash == Some(Crash::AfterResults) {
+            inner.crash = None;
+            bail!("crashed after recording results");
         }
         Ok(())
     }

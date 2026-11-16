@@ -15,6 +15,8 @@
 //! <common>/sluice/.runs/<place, flat>/
 //!   request.json   what to run; written before the supervisor starts
 //!   lock           held by the supervisor for its whole life; its pid
+//!   started        when the supervisor started: the run's own start,
+//!                  written before it holds `lock` (record 0122; design D3)
 //!   pgid           the command's process group, once it is spawned
 //!   out.log        the command's stdout and stderr
 //!   out.times      when out.log grew: `<length> <time>` a line (ADR 0042)
@@ -395,6 +397,40 @@ impl Runs {
         Ok(RunState::Lost)
     }
 
+    /// Record 0122 (design D3): whether a run was started for the place
+    /// `name`, and its own start, read from the supervisor's own files and
+    /// running nothing: `None` where none was, its directory holding no
+    /// request. The start is the one the supervisor noted as it started
+    /// the command, or its result's, or when its output first grew; for a
+    /// run whose supervisor never noted one, when its request was written.
+    pub fn found(&self, name: &str) -> Result<Option<String>> {
+        let dir = self.dir(name);
+        let request = dir.join("request.json");
+        let written = match std::fs::metadata(&request) {
+            Ok(m) => m.modified().ok(),
+            Err(e) if e.kind() == ErrorKind::NotFound => return Ok(None),
+            Err(e) => return Err(e).with_context(|| format!("reading {}", request.display())),
+        };
+        match std::fs::read_to_string(dir.join("started")) {
+            Ok(at) if !at.trim().is_empty() => return Ok(Some(at.trim().to_string())),
+            Ok(_) => {}
+            Err(e) if e.kind() == ErrorKind::NotFound => {}
+            Err(e) => return Err(e).with_context(|| format!("reading {}", dir.display())),
+        }
+        if let Some(ended) = read_ended(&dir)? {
+            return Ok(Some(ended.started));
+        }
+        if let Some((_, at)) = self.times(name)?.into_iter().next() {
+            return Ok(Some(at));
+        }
+        Ok(Some(
+            written
+                .map(chrono::DateTime::<chrono::Utc>::from)
+                .unwrap_or_else(chrono::Utc::now)
+                .to_rfc3339_opts(chrono::SecondsFormat::Millis, true),
+        ))
+    }
+
     /// ADR 0042: when the output of the run of the place `name` grew,
     /// as its length then and the time, oldest first; none for a run
     /// whose supervisor noted none.
@@ -632,6 +668,17 @@ pub fn supervised(dir: &Path) -> Result<bool> {
 
 /// `sluice supervise <dir>`: run the request in `dir` to its end.
 pub fn supervise(dir: &Path) -> Result<()> {
+    // Record 0122 (design D3): the run's own start, written before the
+    // supervisor holds the run, so whoever finds the run held, its start
+    // returned among them, finds when it began.
+    let started = match std::fs::read_to_string(dir.join("started")) {
+        Ok(at) if !at.trim().is_empty() => at.trim().to_string(),
+        _ => {
+            let at = now();
+            write_atomic(&dir.join("started"), at.as_bytes())?;
+            at
+        }
+    };
     let lock = OpenOptions::new()
         .create(true)
         .truncate(false)
@@ -647,14 +694,13 @@ pub fn supervise(dir: &Path) -> Result<()> {
         |ended: Ended| write_atomic(&dir.join("result.json"), &serde_json::to_vec(&ended)?);
 
     let Some((program, args)) = request.argv.split_first() else {
-        let at = now();
         return finish(Ended {
             exit: None,
             signal: None,
             timed_out: false,
             error: Some("the run names no command".into()),
-            started: at.clone(),
-            ended: at,
+            started,
+            ended: now(),
         });
     };
     // Design D5: the watch is ready, or said, before the command starts.
@@ -662,7 +708,6 @@ pub fn supervise(dir: &Path) -> Result<()> {
         Some(argv) if !argv.is_empty() => start_watch(dir, &request, argv)?,
         _ => None,
     };
-    let started = now();
     let out = File::create(dir.join("out.log"))?;
     let mut child = match Command::new(program)
         .args(args)

@@ -2193,6 +2193,10 @@ mod tests {
             unreachable!("a submit runs nothing")
         }
 
+        fn found(&self, _: &str) -> Result<Option<sluice_seams::Found>> {
+            unreachable!("a submit runs nothing")
+        }
+
         fn unmet(&self, _: &sluice_seams::Limits) -> Result<Option<String>> {
             unreachable!("a submit runs nothing")
         }

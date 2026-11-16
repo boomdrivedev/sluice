@@ -195,6 +195,10 @@ impl Tests for RecordedChecks {
         self.inner.progress(run)
     }
 
+    fn found(&self, place: &str) -> Result<Option<sluice_seams::Found>> {
+        self.inner.found(place)
+    }
+
     fn unmet(&self, limits: &sluice_seams::Limits) -> Result<Option<String>> {
         self.inner.unmet(limits)
     }

@@ -930,6 +930,14 @@ pub enum Progress {
     Lost,
 }
 
+/// Record 0122 (design D3): a run found started in a checkout, by the
+/// supervisor's own files: its handle, and its own start.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Found {
+    pub run: RunHandle,
+    pub since: String,
+}
+
 /// Where one task of a run still going has got, as its runner tells it.
 /// No run and no result (16, 38): no verdict, gate, blame or result reads
 /// it (rules core.7, core.9; ADR 0028).
@@ -996,6 +1004,12 @@ pub trait Tests {
     /// 37: a started run's progress; once finished, every check's key,
     /// outcome, executor and whether it was replayed.
     fn progress(&self, run: &RunHandle) -> Result<Progress>;
+
+    /// Record 0122 (design D3): whether a run was started in the checkout
+    /// `place`, and its own start, read from the supervisor's own files,
+    /// running nothing: the proof a reader checks before it starts one, so
+    /// a start found done is not done again. `None` where none was.
+    fn found(&self, place: &str) -> Result<Option<Found>>;
 
     /// 84, 87, record 0074: what of `limits` this host cannot meet, in
     /// words. First what its executor cannot hold, the executor kind,

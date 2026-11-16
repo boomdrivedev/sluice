@@ -62,10 +62,10 @@ use std::path::{Path, PathBuf};
 use anyhow::{anyhow, bail, Context as _, Result};
 use serde::{Deserialize, Serialize};
 use sluice_seams::{
-    log_tail, AtBound, Enforced, Equip, EquipStep, Equipped, HostRun, KeptOutTask, Limits, Network,
-    NotRun, Outcome, Part, Place, Progress, Proof, Reading, Reads, Refusals, Rev, RunHandle,
-    RunKind, RunReport, RunRequest, Running, Setting, Settings, Source, TaskLog, TaskProgress,
-    TaskResult, Tests, Through,
+    log_tail, AtBound, Enforced, Equip, EquipStep, Equipped, Found, HostRun, KeptOutTask, Limits,
+    Network, NotRun, Outcome, Part, Place, Progress, Proof, Reading, Reads, Refusals, Rev,
+    RunHandle, RunKind, RunReport, RunRequest, Running, Setting, Settings, Source, TaskLog,
+    TaskProgress, TaskResult, Tests, Through,
 };
 
 use super::moon::{self, Moon};
@@ -2121,6 +2121,19 @@ impl Tests for Checks {
             true => Refusals::None,
             false => Refusals::Refused(super::refusals::words(&refusals)),
         })
+    }
+
+    /// Record 0122 (design D3): the supervisor's run for the checkout, by
+    /// its own files ([`crate::runs::Runs::found`]); a session's place,
+    /// whose runs are each their own, has none to find.
+    fn found(&self, place: &str) -> Result<Option<Found>> {
+        if crate::runs::is_session(place) {
+            return Ok(None);
+        }
+        Ok(self.runs.found(place)?.map(|since| Found {
+            run: RunHandle(place.to_string()),
+            since,
+        }))
     }
 
     fn progress(&self, run: &RunHandle) -> Result<Progress> {
