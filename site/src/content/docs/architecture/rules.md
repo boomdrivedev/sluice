@@ -1,6 +1,6 @@
 ---
-# Written by site/scripts/rules.mjs from docs/architecture/core.md; site:rules
-# fails when the two differ. Change core.md, then run the script.
+# Written by site/scripts/rules.mjs from docs/architecture/core.md at each
+# build and dev; change core.md.
 title: Rules
 description: The rules that bind every change to the repository, cited by clause and decision.
 editUrl: https://github.com/agentplot/sluice/edit/main/docs/architecture/core.md

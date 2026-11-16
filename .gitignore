@@ -11,6 +11,7 @@ devenv.local.nix
 /site/dist/
 /site/.astro/
 /site/src/content/docs/decisions/
+/site/src/content/docs/architecture/rules.md
 /site/src/generated/
 /site/public/screenshots/
 
