@@ -748,7 +748,11 @@ fn a_combination_opens_one_run_per_system() {
     );
     // This host is linux-x64: it runs that run alone, and the other stays
     // open for an executor of its system (87).
-    assert_eq!(runs[0].state, sluice_core::records::RunState::Passed);
+    assert_eq!(runs[0].state, sluice_core::records::RunState::Ended);
+    assert_eq!(
+        runs[0].ended.as_ref().map(|e| e.verdict()),
+        Some(sluice_core::records::RunVerdict::Passed)
+    );
     assert_eq!(runs[1].state, sluice_core::records::RunState::Open);
     let req = &h.w().requests()[0];
     assert_eq!(req.system.as_deref(), Some("linux-x64"));

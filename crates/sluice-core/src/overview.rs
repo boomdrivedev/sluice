@@ -338,13 +338,13 @@ pub fn branch_view(read: BranchRead) -> Result<BranchView> {
             ran: c.ran,
             replayed: c.replayed,
             failed: c.failed.clone(),
-            tasks: matches!(c.state, CandidateState::Starting | CandidateState::Testing)
+            tasks: (c.state == CandidateState::Testing)
                 .then(|| progress.remove(&c.id))
                 .flatten(),
             waiting: c
                 .runs
                 .iter()
-                .filter(|r| r.state == RunState::Open && r.host.is_none())
+                .filter(|r| r.state == RunState::Open && r.claim.is_none())
                 .flat_map(|r| r.declined.clone())
                 .collect(),
             lost: c.runs.iter().filter_map(|r| r.lost.clone()).collect(),

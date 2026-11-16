@@ -166,7 +166,11 @@ fn runs(h: &Harness) -> Vec<(Option<String>, sluice_core::records::RunState)> {
     line.doc
         .candidates
         .iter()
-        .flat_map(|c| c.runs.iter().map(|r| (r.host.clone(), r.state)))
+        .flat_map(|c| {
+            c.runs
+                .iter()
+                .map(|r| (r.holder().map(str::to_string), r.state))
+        })
         .collect()
 }
 
@@ -235,7 +239,7 @@ fn a_claim_refused_at_the_bound_is_open_to_another_host() {
     assert_eq!(runs(&h), [(None, RunState::Open)]);
     as_signer(&h, "c", Some("box")).step(BRANCH).unwrap();
     assert_eq!(claims(&h), ["b", "c"]);
-    assert_eq!(runs(&h), [(Some("c".into()), RunState::Testing)]);
+    assert_eq!(runs(&h), [(Some("c".into()), RunState::Running)]);
     assert_eq!(h.w().requests().len(), 1);
 }
 
@@ -348,7 +352,7 @@ fn a_place_left_by_a_lapsed_claim_is_released_by_its_host_as_the_lead() {
         .events()
         .iter()
         .any(|e| matches!(e, Event::Released { place, .. } if *place == left[0])));
-    assert_eq!(runs(&h), [(Some("b".into()), RunState::Testing)]);
+    assert_eq!(runs(&h), [(Some("b".into()), RunState::Running)]);
 }
 
 /// satisfies: 74, 77; the run-claims spec's "A long run keeps its claim"
@@ -410,7 +414,7 @@ fn a_host_claims_only_runs_of_its_systems() {
         line.doc.candidates[0]
             .runs
             .iter()
-            .map(|r| (r.system.clone(), r.host.clone()))
+            .map(|r| (r.system.clone(), r.holder().map(str::to_string)))
             .collect()
     };
     assert_eq!(
@@ -518,7 +522,17 @@ fn a_verdict_the_state_alone_holds_lands_nothing() {
     for c in &mut line.doc.candidates {
         c.state = sluice_core::records::CandidateState::Passed;
         for r in &mut c.runs {
-            r.state = sluice_core::records::RunState::Passed;
+            r.state = sluice_core::records::RunState::Ended;
+            r.ended = Some(sluice_core::records::Ended {
+                at: "2026-11-16T09:00:00Z".into(),
+                outcomes: r
+                    .checks
+                    .iter()
+                    .map(|c| (c.clone(), sluice_core::records::CheckOutcome::Passed))
+                    .collect(),
+                timed_out: false,
+                why: None,
+            });
             r.place = None;
             r.run = None;
         }
@@ -882,7 +896,7 @@ fn a_run_whose_dispatch_went_unanswered_is_claimed_once() {
     assert!(runs(&h)
         .iter()
         .any(|(host, state)| host.as_deref() == Some(first[0].as_str())
-            && *state == sluice_core::records::RunState::Starting));
+            && *state == sluice_core::records::RunState::Claimed));
 
     // A round while the job may run launches nothing more.
     lead().step(BRANCH).unwrap();

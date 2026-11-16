@@ -76,7 +76,7 @@ fn a_run_whose_toolchain_fails_to_enter_is_recorded_with_its_words() {
     assert_ne!(h.sub(one).state, State::Failed);
     let r = &runs(&h)[0];
     assert_eq!(
-        (r.state, r.host.clone(), r.place.clone()),
+        (r.state, r.holder().map(str::to_string), r.place.clone()),
         (RunState::Open, None, None)
     );
     assert!(h.doc().release.is_empty(), "nothing left to release");
@@ -104,7 +104,7 @@ fn a_run_whose_checkout_cannot_be_made_is_recorded_with_why() {
     assert_ne!(h.sub(one).state, State::Failed);
     let r = &runs(&h)[0];
     assert_eq!(
-        (r.state, r.host.clone(), r.place.clone()),
+        (r.state, r.holder().map(str::to_string), r.place.clone()),
         (RunState::Open, None, None)
     );
     let lost = r.lost.as_ref().expect("its record says why");
@@ -245,8 +245,8 @@ fn a_pools_job_makes_its_place_at_a_combination_only_the_remote_holds() {
     assert_eq!(asked[0].revision, combination, "its place is at it");
     let r = &runs(&h)[0];
     assert_eq!(
-        (r.state, r.host.as_deref()),
-        (RunState::Testing, Some(claim.as_str()))
+        (r.state, r.holder()),
+        (RunState::Running, Some(claim.as_str()))
     );
     assert!(not_run(&h).is_empty());
 }
@@ -275,7 +275,10 @@ fn a_claimed_run_whose_combination_the_remote_no_longer_holds_never_began() {
     assert_eq!(in_a_row(&h), 0, "it counts toward nothing");
     assert!(h.w().delivered().is_empty(), "nobody is blamed");
     let r = &runs(&h)[0];
-    assert_eq!((r.state, r.host.clone()), (RunState::Open, None));
+    assert_eq!(
+        (r.state, r.holder().map(str::to_string)),
+        (RunState::Open, None)
+    );
 }
 
 /// satisfies: 82; the run-claims spec's "A host that holds the
@@ -320,7 +323,7 @@ fn a_run_one_signing_host_could_not_start_is_taken_by_another() {
     assert_eq!(not_run(&h), [gate_not_run(&could_not_start(TOOLCHAIN))]);
     let r = &runs(&h)[0];
     assert_eq!(
-        (r.state, r.host.clone()),
+        (r.state, r.holder().map(str::to_string)),
         (RunState::Open, None),
         "no host holds it"
     );
@@ -330,7 +333,7 @@ fn a_run_one_signing_host_could_not_start_is_taken_by_another() {
     on(&h, "b", Some("box")).step(BRANCH).unwrap();
     assert_eq!(claims(&h), ["a", "b"]);
     let r = &runs(&h)[0];
-    assert_eq!((r.state, r.host.as_deref()), (RunState::Testing, Some("b")));
+    assert_eq!((r.state, r.holder()), (RunState::Running, Some("b")));
     assert_eq!(h.w().requests().len(), 1);
 }
 
@@ -344,7 +347,10 @@ fn a_run_refused_at_the_bound_is_recorded_as_nothing_and_counts_for_nothing() {
     h.w().refuse_next_start();
     h.step();
     let r = &runs(&h)[0];
-    assert_eq!((r.state, r.host.clone()), (RunState::Open, None));
+    assert_eq!(
+        (r.state, r.holder().map(str::to_string)),
+        (RunState::Open, None)
+    );
     assert!(not_run(&h).is_empty(), "no record of a run with no result");
     assert_eq!(in_a_row(&h), 0, "it counts toward nothing");
     h.settle();

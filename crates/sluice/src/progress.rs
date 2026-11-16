@@ -44,7 +44,7 @@ pub fn lines(
 fn under_test(view: &BranchView) -> impl Iterator<Item = &CandidateView> {
     view.candidates
         .iter()
-        .filter(|c| matches!(c.state, CandidateState::Starting | CandidateState::Testing))
+        .filter(|c| matches!(c.state, CandidateState::Testing))
 }
 
 /// Submission `id`'s combination under test: the one whose last

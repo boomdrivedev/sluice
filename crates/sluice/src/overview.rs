@@ -450,7 +450,7 @@ fn write_overview(
         write_refused_writes(&b.branch, &b.refused_writes, out)?;
         let names = branch_names(b);
         for c in &b.candidates {
-            if !matches!(c.state, CandidateState::Starting | CandidateState::Testing) {
+            if !matches!(c.state, CandidateState::Testing) {
                 continue;
             }
             // ADR 0042: how far it has got, as of when the overview was read.

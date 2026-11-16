@@ -261,7 +261,7 @@ fn run_states(h: &Harness) -> Vec<(sluice_core::records::RunState, bool, bool)> 
         .candidates
         .iter()
         .flat_map(|c| &c.runs)
-        .map(|r| (r.state, r.place.is_some(), r.host.is_some()))
+        .map(|r| (r.state, r.place.is_some(), r.claim.is_some()))
         .collect()
 }
 
@@ -291,7 +291,7 @@ fn a_start_refused_at_the_bound_waits_for_a_later_round() {
 
     h.step();
     assert_eq!(h.w().started().len(), 1);
-    assert_eq!(run_states(&h), [(RunState::Testing, true, false)]);
+    assert_eq!(run_states(&h), [(RunState::Running, true, false)]);
     h.w().hold_runs(false);
     h.w().complete_all();
     h.settle();

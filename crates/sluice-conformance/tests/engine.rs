@@ -59,7 +59,10 @@ fn a_host_whose_engine_does_not_answer_claims_no_run_that_asks_for_one() {
     assert!(h.w().delivered().is_empty(), "nobody is blamed");
     let r = runs(&h);
     assert_eq!(r.len(), 1);
-    assert_eq!((r[0].state, r[0].host.clone()), (RunState::Open, None));
+    assert_eq!(
+        (r[0].state, r[0].holder().map(str::to_string)),
+        (RunState::Open, None)
+    );
     assert_ne!(h.sub(one).state, State::Failed);
     // Once a round, and only where a run would be claimed.
     assert_eq!(h.w().engine_looks().len(), 4);
@@ -120,7 +123,7 @@ fn a_host_says_once_for_each_reason_and_its_claim_clears_it() {
     h.w().engine_unmet(None);
     h.step();
     let r = &runs(&h)[0];
-    assert_eq!(r.state, RunState::Testing);
+    assert_eq!(r.state, RunState::Running);
     assert!(r.declined.is_empty(), "its claim clears its entry");
 }
 
@@ -219,7 +222,7 @@ fn a_host_whose_engine_answers_takes_the_run_another_turned_down() {
     assert_eq!(claims(&h), ["b"]);
     assert_eq!(h.w().requests().len(), 1);
     let r = &runs(&h)[0];
-    assert_eq!((r.host.as_deref(), r.state), (Some("b"), RunState::Testing));
+    assert_eq!((r.holder(), r.state), (Some("b"), RunState::Running));
 }
 
 /// satisfies: 107, 88; record 0074: a lead whose engine does not answer
@@ -348,7 +351,10 @@ fn a_host_whose_executor_cannot_hold_the_limits_claims_none_and_says_why() {
         [(HOST.to_string(), SANDBOX_MEMORY.to_string())]
     );
     let r = &runs(&h)[0];
-    assert_eq!((r.state, r.host.clone()), (RunState::Open, None));
+    assert_eq!(
+        (r.state, r.holder().map(str::to_string)),
+        (RunState::Open, None)
+    );
     assert_ne!(h.sub(one).state, State::Failed);
     assert_eq!(
         waiting(&h),
@@ -390,7 +396,7 @@ fn a_host_whose_executor_holds_the_limits_takes_the_run_another_turned_down() {
         "the host that can claims it, and a nothing"
     );
     let r = &runs(&h)[0];
-    assert_eq!((r.host.as_deref(), r.state), (Some("b"), RunState::Testing));
+    assert_eq!((r.holder(), r.state), (Some("b"), RunState::Running));
 }
 
 /// satisfies: 84; the host-requirements spec's "Limits the executor
@@ -544,7 +550,10 @@ fn a_pools_job_on_a_machine_with_no_engine_runs_nothing_and_is_counted() {
     );
     assert_eq!(h.doc().candidates[0].not_run_runs, 1, "it counts");
     let r = &runs(&h)[0];
-    assert_eq!((r.state, r.host.clone()), (RunState::Open, None));
+    assert_eq!(
+        (r.state, r.holder().map(str::to_string)),
+        (RunState::Open, None)
+    );
 
     // Nothing of the claim waits to start any more.
     let again = h.sluice().start_claimed(BRANCH, &claim, &mut releases);
@@ -567,8 +576,8 @@ fn a_pools_job_on_a_machine_whose_engine_answers_starts_its_tests() {
     assert_eq!(h.w().requests().len(), 1);
     let r = &runs(&h)[0];
     assert_eq!(
-        (r.state, r.host.as_deref()),
-        (RunState::Testing, Some(claim.as_str()))
+        (r.state, r.holder()),
+        (RunState::Running, Some(claim.as_str()))
     );
     assert!(not_run(&h).is_empty());
 }
@@ -587,10 +596,7 @@ fn a_run_claimed_in_one_round_reads_the_host_again_at_its_start() {
     h.w().unanswer_starts(1);
     assert!(on(&h, "a", Some("box")).step(BRANCH).is_err());
     let r = &runs(&h)[0];
-    assert_eq!(
-        (r.state, r.host.as_deref()),
-        (RunState::Starting, Some("a"))
-    );
+    assert_eq!((r.state, r.holder()), (RunState::Claimed, Some("a")));
     assert_eq!(h.w().made_places().len(), 1);
 
     h.w().engine_unmet(Some(NO_ENGINE));
@@ -603,7 +609,10 @@ fn a_run_claimed_in_one_round_reads_the_host_again_at_its_start() {
         [vec![("#gate".to_string(), NO_ENGINE.to_string())]]
     );
     let r = &runs(&h)[0];
-    assert_eq!((r.state, r.host.clone()), (RunState::Open, None));
+    assert_eq!(
+        (r.state, r.holder().map(str::to_string)),
+        (RunState::Open, None)
+    );
 }
 
 /// The results log, as the fake keeps it.
