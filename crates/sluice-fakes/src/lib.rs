@@ -803,6 +803,12 @@ impl World {
         self.0.borrow_mut().skip.insert(task.into());
     }
 
+    /// Runs give `task` a result again, as a runner that no longer skips
+    /// it.
+    pub fn stops_skipping(&self, task: &str) {
+        self.0.borrow_mut().skip.remove(task);
+    }
+
     /// The runner keeps `task` out of its CI mode: never run, missing, and
     /// named kept out (ADR 0044); and a submission whose gate requires it
     /// is refused (ADR 0050).

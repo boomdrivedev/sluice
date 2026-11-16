@@ -331,3 +331,211 @@ fn a_report_is_not_read_while_its_run_goes() {
     assert_eq!(h.sub(one).state, State::Landed);
     assert!(!h.results().is_empty());
 }
+
+/// `bolt/y`, its runs held to a container engine, so the passes `bolt/x`'s
+/// runs record, held to none, prove none of its keys (19, 83); `bolt/x`
+/// has landed work in `a/`, so a run on `bolt/y` replays `b:test` and
+/// `c:test` from the runner's cache, with no counted pass behind them.
+fn replaying(h: &Harness) -> &'static str {
+    let other = "bolt/y";
+    let docker = format!("{}\n[executor]\ndocker = true\n", policy(false, "fail", 4));
+    h.w().init(
+        other,
+        &[
+            (".config/sluice.toml", &docker),
+            ("a/lib", "a1"),
+            ("b/lib", "b1"),
+            ("c/lib", "c1"),
+        ],
+    );
+    h.work("unit/a", "agent-a", &[("a/lib", Some("a2"))]);
+    let one = h.submit("unit/a");
+    h.settle();
+    assert_eq!(h.sub(one).state, State::Landed);
+    other
+}
+
+/// A submission of `changes` from `unit/y` to `branch`.
+fn submit_to(h: &Harness, branch: &str, changes: &[(&str, Option<&str>)]) -> u64 {
+    let head = h.w().work(&h.w().tip(branch), changes);
+    h.w().session("unit/y", "agent-y", &head);
+    h.sluice()
+        .submit(&sluice_core::SubmitRequest {
+            head: sluice_core::SubmitHead::Worktree("unit/y".into()),
+            branch: branch.into(),
+            after: vec![],
+            priority: 0,
+            subject: None,
+        })
+        .unwrap()
+        .unwrap()
+        .id
+}
+
+/// The candidates of `branch`, as its records hold them.
+fn candidates_on(h: &Harness, branch: &str) -> Vec<Candidate> {
+    let s = h.sluice();
+    sluice_core::line::Line::load(branch, s.seams().state.read(branch).unwrap())
+        .unwrap()
+        .doc
+        .candidates
+}
+
+/// The events of `branch`'s log.
+fn events_on(h: &Harness, branch: &str) -> Vec<Event> {
+    let s = h.sluice();
+    sluice_core::line::Line::read_log(&s.seams().state.read(branch).unwrap())
+        .unwrap()
+        .into_iter()
+        .map(|l| l.event)
+        .collect()
+}
+
+/// satisfies: record 0122; 108, S42; the run-life spec's "A follow-up run
+/// holds only what a run left undecided"
+#[test]
+fn an_unproven_replay_runs_again_alone() {
+    let h = local();
+    let other = replaying(&h);
+    let two = submit_to(&h, other, &[("a/lib", Some("a3"))]);
+    let s = h.sluice();
+    s.step(other).unwrap();
+    s.step(other).unwrap();
+    let runs = candidates_on(&h, other)[0].runs.clone();
+    let ended = runs[0].ended.as_ref().expect("the first run ended");
+    assert_eq!(ended.outcomes.get("a:test"), Some(&CheckOutcome::Passed));
+    assert_eq!(ended.outcomes.get("b:test"), Some(&CheckOutcome::Unproven));
+    assert_eq!(ended.outcomes.get("c:test"), Some(&CheckOutcome::Unproven));
+    let follow = &runs[1];
+    assert_eq!(follow.follows, Some(0));
+    assert_eq!(
+        follow.checks,
+        ["b:test", "c:test"],
+        "the unproven ones alone"
+    );
+    assert!(follow.no_replay);
+    for _ in 0..8 {
+        s.step(other).unwrap();
+    }
+    assert_eq!(h.sub(two).state, State::Landed);
+    let asked: Vec<(Vec<String>, bool)> = h
+        .w()
+        .requests()
+        .into_iter()
+        .filter(|r| r.revision == candidates_or_landed(&h, other, two))
+        .map(|r| (r.required, r.replay))
+        .collect();
+    assert_eq!(
+        asked,
+        [
+            (vec!["#gate".to_string()], true),
+            (vec!["b:test".to_string(), "c:test".to_string()], false),
+        ]
+    );
+}
+
+/// The combination submission `id` of `branch` was tested in.
+fn candidates_or_landed(h: &Harness, _branch: &str, id: u64) -> sluice_seams::Rev {
+    h.sub(id).tested.expect("tested").combination
+}
+
+/// satisfies: record 0122; 108, 17; the run-life spec's "A combination's
+/// verdict is read over a run and its follow-ups", a fail beside an
+/// unproven replay
+#[test]
+fn a_fail_beside_an_unproven_replay_is_read_at_once() {
+    let h = local();
+    let other = replaying(&h);
+    h.w().fails_with("a:test", "a/lib", "a3");
+    let two = submit_to(&h, other, &[("a/lib", Some("a3"))]);
+    let s = h.sluice();
+    for _ in 0..4 {
+        s.step(other).unwrap();
+    }
+    assert_eq!(h.sub(two).state, State::Failed);
+    let failed: Vec<String> = h.sub(two).failed.iter().map(|f| f.task.clone()).collect();
+    assert_eq!(failed, ["a:test"]);
+    assert!(
+        !events_on(&h, other)
+            .iter()
+            .any(|e| matches!(e, Event::Opened { run, .. } if *run > 0)),
+        "no follow-up opened"
+    );
+}
+
+/// satisfies: record 0122; 60, 114; rule core.22; the run-life spec's "A
+/// check the report holds no outcome for has none"
+#[test]
+fn a_check_the_report_holds_no_outcome_for_is_never_failed() {
+    let h = local();
+    h.w().skips("b:test");
+    h.w().skips("c:test");
+    h.work("unit/a", "agent-a", &[("a/lib", Some("a2"))]);
+    let one = h.submit("unit/a");
+    h.step();
+    h.step();
+    let runs = runs_of(&h, &[one]);
+    let ended = runs[0].ended.as_ref().expect("the first run ended");
+    assert_eq!(ended.outcomes.get("a:test"), Some(&CheckOutcome::Passed));
+    for check in ["b:test", "c:test"] {
+        assert_eq!(
+            ended.outcomes.get(check),
+            Some(&CheckOutcome::None {
+                why: "the run's report holds no outcome for it".into()
+            })
+        );
+    }
+    assert!(h.results().iter().any(|r| r.task == "a:test"));
+    assert_eq!(runs[1].follows, Some(0));
+    assert_eq!(runs[1].checks, ["b:test", "c:test"]);
+    assert_ne!(h.sub(one).state, State::Failed);
+    assert!(h.sub(one).failed.is_empty());
+    assert!(!h.events().iter().any(|e| matches!(e, Event::Blamed { .. })));
+    h.w().stops_skipping("b:test");
+    h.w().stops_skipping("c:test");
+    h.settle();
+    assert_eq!(h.sub(one).state, State::Landed);
+}
+
+/// satisfies: record 0122; 66; the run-life spec's "A run's time limit
+/// counts from its own running", a follow-up run's limit
+#[test]
+fn a_follow_up_run_has_a_limit_of_its_own() {
+    let h = local();
+    h.w().hold_runs(true);
+    h.w().skips("b:test");
+    h.work("unit/a", "agent-a", &[("a/lib", Some("a2"))]);
+    let one = h.submit("unit/a");
+    h.step();
+    // The first run takes 15 minutes of the branch's 20.
+    h.w().advance(chrono::Duration::minutes(15));
+    h.w().complete_all();
+    h.step();
+    h.w().stops_skipping("b:test");
+    let runs = runs_of(&h, &[one]);
+    let follow = &runs[1];
+    assert_eq!(follow.follows, Some(0));
+    assert_eq!(follow.state, RunState::Running);
+    let began =
+        |at: &Option<String>| chrono::DateTime::parse_from_rfc3339(at.as_deref().unwrap()).unwrap();
+    assert!(
+        began(&follow.running) - began(&runs[0].running) >= chrono::Duration::minutes(15),
+        "its own start"
+    );
+    let asked = h.w().requests();
+    assert_eq!(asked.len(), 2);
+    assert_eq!(
+        asked[1].limit,
+        Some(Duration::from_secs(20 * 60)),
+        "the whole limit from its own start"
+    );
+    // It runs 10 minutes: 25 since the combination opened, 10 of its own.
+    h.w().advance(chrono::Duration::minutes(10));
+    h.w().complete_all();
+    h.settle();
+    assert_eq!(h.sub(one).state, State::Landed);
+    assert!(!h.events().iter().any(|e| matches!(
+        e,
+        Event::Result { result, .. } if result == "timed out"
+    )));
+}
