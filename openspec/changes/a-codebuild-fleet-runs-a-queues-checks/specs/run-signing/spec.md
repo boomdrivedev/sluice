@@ -40,10 +40,8 @@ an in-toto statement in a DSSE envelope: one subject per check, its key and
 system, its contents the outcome, the claims, the combination, the
 claim it ran under and the time. An `ssh` signer SHALL sign with its
 SSH key, a `github` signer keylessly, as a sigstore bundle holding the
-envelope, and a `kms` signer with its key in KMS, as an envelope whose
-signature is the key's over the encoding's SHA-256 and whose `keyid` is
-the key's ARN. A record whose signature sluice cannot verify SHALL count
-for nothing.
+envelope, and a `kms` signer with its key in KMS. A record whose
+signature sluice cannot verify SHALL count for nothing.
 
 #### Scenario: A box's result
 - **WHEN** the `box` host records a pass of `cli:build` on `linux-x64`
@@ -64,10 +62,10 @@ for nothing.
 ### Requirement: A shared branch's run is taken only by a host whose signature its gate would count
 On a branch whose records are on its remote, a run SHALL be taken only by
 a host signing as a signer its policy names, with a key the policy
-lists for it at the revision the round read, or by a pool whose jobs
-sign as a `github` or `kms` signer it names; the name alone SHALL take
-nothing. A run none takes SHALL end at the time limit with no outcome,
-its candidate not passed (87, 66). A result signed with an unlisted key
+lists for it at the revision the round read, or by a pool signing as a
+`github` or `kms` signer it names; the name alone SHALL take nothing. A
+run none takes SHALL end at the time limit with no outcome, its
+candidate not passed (87, 66). A result signed with an unlisted key
 SHALL be missing, never a fail (28, S18). The records seam SHALL read
 the key.
 
