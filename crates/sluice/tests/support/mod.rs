@@ -3,6 +3,7 @@
 
 #![allow(dead_code)]
 
+pub mod aws;
 pub mod http;
 
 use std::cell::{Cell, RefCell};

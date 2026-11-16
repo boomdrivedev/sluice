@@ -21,6 +21,8 @@ use sluice_seams::{
 
 use crate::{JobCommand, Pause, FAILED, INTERNAL, STOPPED};
 
+pub mod codebuild;
+
 /// The file of a run job's directory holding its run's report, as JSON.
 pub const REPORT: &str = "report.json";
 
@@ -137,6 +139,7 @@ pub fn run(
         JobCommand::Sign {
             claim,
             head,
+            build,
             branch,
             system,
             from,
@@ -151,6 +154,12 @@ pub fn run(
                 clock,
             )
             .as_peer(host.peer());
+            if let Some(build) = &build {
+                return codebuild::sign(&s, build, &dir, clock, out);
+            }
+            let (Some(branch), Some(from)) = (branch, from) else {
+                bail!("sluice job sign: give --branch and --from, or --build");
+            };
             let target = match (&claim, &head) {
                 (Some(claim), None) => claimed(&s, &branch, claim)?,
                 (None, Some(head)) => Signed {
@@ -166,11 +175,19 @@ pub fn run(
         JobCommand::Record {
             claim,
             head,
+            build,
             branch,
             bundle,
             from,
         } => {
             let s = Sluice::new(seams, clock).as_peer(host.peer());
+            if let Some(build) = &build {
+                let from = from.ok_or_else(|| anyhow::anyhow!("--build needs --from"))?;
+                return codebuild::record(&s, build, &from, out);
+            }
+            let Some(branch) = branch else {
+                bail!("sluice job record: give --branch, or --build");
+            };
             match (claim, head, bundle) {
                 (Some(claim), None, bundle) => {
                     record(&s, &branch, &claim, bundle.as_deref(), from.as_deref(), out)
@@ -184,11 +201,21 @@ pub fn run(
     }
 }
 
-/// The run a bundle's statement holds, read without verifying it: the
-/// readers of the signer's runs verify it (78).
+/// The run a signed record's statement holds, read without verifying it:
+/// the readers of the signer's runs verify it (78). A Sigstore bundle's,
+/// or a `kms` signer's DSSE envelope's (record 0119; design D6 of the
+/// change `a-codebuild-fleet-runs-a-queues-checks`).
 fn bundled_run(bytes: &[u8]) -> Result<crate::signing::statement::Run> {
     use crate::signing::statement::Statement;
     let text = std::str::from_utf8(bytes).context("the bundle is no JSON")?;
+    let v: serde_json::Value = serde_json::from_str(text).context("the bundle is no JSON")?;
+    if v.get("dsseEnvelope").is_none() && v.get("payloadType").is_some() {
+        let envelope: crate::signing::dsse::Envelope =
+            serde_json::from_value(v).context("the record is no DSSE envelope")?;
+        return Ok(Statement::from_envelope(&envelope)
+            .context("the envelope's statement is no run's")?
+            .predicate);
+    }
     let statement = crate::profiles::github::keyless::statement_of(text)?;
     let st: Statement = serde_json::from_value(statement)
         .context("the bundle's statement is no run's")
@@ -536,7 +563,7 @@ fn sign(
     clock: &dyn Clock,
     out: &mut dyn Write,
 ) -> Result<i32> {
-    use crate::signing::statement::{Claims, Held, Run, Statement, RUN_PREDICATE};
+    use crate::signing::statement::RUN_PREDICATE;
     let from = handed_dir(from);
     std::fs::create_dir_all(dir)
         .with_context(|| format!("making the job's directory {}", dir.display()))?;
@@ -564,28 +591,7 @@ fn sign(
         writeln!(out, "sluice job sign: no key the tree bears out")?;
         return Ok(0);
     }
-    let e = &report.executor;
-    let held = Held {
-        memory: e.memory,
-        network: e.network,
-        docker: e.docker,
-        grant: e.grant.clone(),
-    };
-    let statement = Statement::of(Run {
-        results,
-        claims: Claims {
-            executor: e.kind.clone(),
-            confined: e.confined,
-            system: target.system.clone().unwrap_or_default(),
-        },
-        branch: branch.to_string(),
-        combination: target.revision.clone(),
-        claim: target.claim.clone(),
-        at: clock
-            .now()
-            .to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
-        held: (held != Held::default()).then_some(held),
-    });
+    let statement = statement_of(branch, target, &report, results, clock);
     let subjects: String = statement
         .subject
         .iter()
@@ -604,6 +610,40 @@ fn sign(
         target.revision
     )?;
     Ok(0)
+}
+
+/// Record 0119 (design D11): the statement a pool's job signs of `report`'s
+/// `results` for `target`, as the run's executor held it.
+fn statement_of(
+    branch: &str,
+    target: &Signed,
+    report: &RunReport,
+    results: Vec<crate::signing::statement::RunResult>,
+    clock: &dyn Clock,
+) -> crate::signing::statement::Statement {
+    use crate::signing::statement::{Claims, Held, Run, Statement};
+    let e = &report.executor;
+    let held = Held {
+        memory: e.memory,
+        network: e.network,
+        docker: e.docker,
+        grant: e.grant.clone(),
+    };
+    Statement::of(Run {
+        results,
+        claims: Claims {
+            executor: e.kind.clone(),
+            confined: e.confined,
+            system: target.system.clone().unwrap_or_default(),
+        },
+        branch: branch.to_string(),
+        combination: target.revision.clone(),
+        claim: target.claim.clone(),
+        at: clock
+            .now()
+            .to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
+        held: (held != Held::default()).then_some(held),
+    })
 }
 
 /// Record 0119 (design D11): the run's report, and what proves its keys,

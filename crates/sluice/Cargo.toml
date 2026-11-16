@@ -50,6 +50,7 @@ aws-sdk-sts.workspace = true
 aws-runtime.workspace = true
 aws-smithy-http-client.workspace = true
 tokio.workspace = true
+zip.workspace = true
 sigstore-verify.workspace = true
 sigstore-trust-root.workspace = true
 

@@ -159,6 +159,14 @@ tokio = { version = "1", default-features = false, features = [
   "time",
 ] }
 
+# A CodeBuild run build's hand-over, a zip CodeBuild uploads, read and
+# never written by sluice (design D6 of the change
+# `a-codebuild-fleet-runs-a-queues-checks`). Pinned exactly, two weeks old
+# at the least.
+zip = { version = "=9.2.1", default-features = false, features = [
+  "deflate-flate2-zlib-rs",
+] }
+
 # The tests' container engine over TLS: its certificates, made in each
 # test's scratch directory, and its server, on the ring provider ureq uses.
 rcgen = { version = "0.14", default-features = false, features = [

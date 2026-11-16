@@ -142,12 +142,46 @@ fn answer(mut stream: TcpStream, kept: &Mutex<Vec<Request>>, handler: &dyn Fn(&R
     if status == CUT {
         return;
     }
+    // A body no string holds is sent as the bytes its base64 says.
+    let binary = headers.iter().any(|(k, _)| k.eq_ignore_ascii_case(BYTES));
+    let body = match binary {
+        true => {
+            use base64::Engine as _;
+            base64::engine::general_purpose::STANDARD
+                .decode(body.trim())
+                .expect("a body of base64")
+        }
+        false => body.into_bytes(),
+    };
     let mut out = format!("HTTP/1.1 {status} X\r\nConnection: close\r\n");
-    for (k, v) in headers {
+    for (k, v) in headers
+        .iter()
+        .filter(|(k, _)| !k.eq_ignore_ascii_case(BYTES))
+    {
         out.push_str(&format!("{k}: {v}\r\n"));
     }
-    out.push_str(&format!("Content-Length: {}\r\n\r\n{body}", body.len()));
-    let _ = stream.write_all(out.as_bytes());
+    out.push_str(&format!("Content-Length: {}\r\n\r\n", body.len()));
+    let mut out = out.into_bytes();
+    out.extend(body);
+    let _ = stream.write_all(&out);
+}
+
+/// The header an answer names to have its body, base64, sent as the bytes
+/// it says: one no string holds, as an object S3 keeps.
+pub const BYTES: &str = "x-fake-body-base64";
+
+/// An answer of `bytes`, as `content_type`.
+#[allow(dead_code)]
+pub fn bytes(status: u16, content_type: &str, bytes: &[u8]) -> Answer {
+    use base64::Engine as _;
+    (
+        status,
+        vec![
+            ("Content-Type".into(), content_type.into()),
+            (BYTES.into(), "1".into()),
+        ],
+        base64::engine::general_purpose::STANDARD.encode(bytes),
+    )
 }
 
 fn read(r: &mut impl BufRead) -> Option<Request> {

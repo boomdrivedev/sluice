@@ -65,6 +65,26 @@ fn sluice(f: &Fakes, args: &[&str]) -> (i32, String) {
     (code, String::from_utf8(out).unwrap())
 }
 
+/// The error `sluice <args>` stops with, in its words.
+fn sluice_err(f: &Fakes, args: &[&str]) -> String {
+    let cli = Cli::try_parse_from(std::iter::once("sluice").chain(args.iter().copied())).unwrap();
+    let mut out = Vec::new();
+    let e = settled(|| {
+        run(
+            cli,
+            f.seams(),
+            &support::FakeHost::new(f.world.clone(), 0),
+            &(),
+            &(),
+            &f.clock,
+            &Rounds(Cell::new(0)),
+            &mut out,
+        )
+    })
+    .expect_err("an error");
+    format!("{e:#}")
+}
+
 /// `command`, a sluice run in this process, and then a moment for each
 /// lock of the host's reader and driver it found free to be free again.
 /// A lock a command lets go may still be held by a process another
@@ -9851,11 +9871,16 @@ const POOLED: &str = "[tests]\nrunner = \"fake\"\n\n[checkout]\n\n\
 /// pool and dispatched; the world's host is then `runner`, the pool's
 /// job's. The claim is answered.
 fn pooled(f: &Fakes, projects: &[&str]) -> String {
+    pooled_as(f, POOLED, projects)
+}
+
+/// [`pooled`], under `policy`.
+fn pooled_as(f: &Fakes, policy: &str, projects: &[&str]) -> String {
     let libs: Vec<(String, String)> = projects
         .iter()
         .map(|p| (format!("{p}/lib"), format!("{p}1")))
         .collect();
-    let mut files = vec![(POLICY_PATH, POOLED)];
+    let mut files = vec![(POLICY_PATH, policy)];
     files.extend(libs.iter().map(|(p, c)| (p.as_str(), c.as_str())));
     f.world.init("main", &files);
     for p in projects {
@@ -10118,6 +10143,206 @@ fn job_run_stopped_releases_its_checkout() {
         why.contains("the job was stopped before its run ended"),
         "{why}"
     );
+}
+
+/// Whether this is the child `test` runs alone in, where it may set the
+/// process's environment, as pointing the AWS SDK at a fake; outside it,
+/// that child is run, and must pass.
+fn alone(test: &str) -> bool {
+    if std::env::var("SLUICE_TEST_ALONE").as_deref() == Ok(test) {
+        return true;
+    }
+    let out = support::isolated(&mut std::process::Command::new(
+        std::env::current_exe().unwrap(),
+    ))
+    .args(["--exact", test, "--nocapture"])
+    .env("SLUICE_TEST_ALONE", test)
+    .output()
+    .unwrap();
+    let said = String::from_utf8_lossy(&out.stdout);
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        out.status.success() && said.contains(&format!("test {test} ... ok")),
+        "{test}, alone:\n{said}{err}"
+    );
+    false
+}
+
+/// Record 0119 (design D1): `main` on `origin`, its runs for `linux-x64`,
+/// which this world's hosts are not, taken by the CodeBuild pool
+/// `codebuild`, whose `kms` signer lists `public`.
+fn on_codebuild(public: &str) -> String {
+    format!(
+        "[tests]\nrunner = \"fake\"\n\n[checkout]\n\n\
+         [branches.main]\nrequired = [\"#gate\"]\nparallel = 4\ntimeout = \"20m\"\n\
+         trust = [\"box\", \"codebuild\"]\nremote = \"origin\"\nsystems = [\"linux-x64\"]\n\
+         \n[signers.box]\nssh = \"box ssh-ed25519 AAAA\"\n\
+         \n[signers.codebuild]\nkms = {{ key = \"{key}\", public = \"{public}\" }}\nsystems = [\"linux-x64\"]\n\
+         \n[pools.codebuild]\ncodebuild = {{ region = \"us-east-1\", sign = \"sluice-sign\" }}\nsigner = \"codebuild\"\n\
+         runners = {{ linux-x64 = \"sluice-run-linux-x64\" }}\n\
+         \n[systems]\nlinux-x64 = {{ os = \"linux\", arch = \"x86_64\" }}\n\
+         macos-arm64 = {{ os = \"macos\", arch = \"aarch64\" }}\n",
+        key = support::aws::KEY
+    )
+}
+
+/// The run build of `claim`'s run on `main` the CodeBuild fake holds, its
+/// hand-over the zip of `ran` as CodeBuild recorded it; its ARN.
+fn run_build(aws: &support::aws::FakeAws, claim: &str, ran: &std::path::Path) -> String {
+    let zip = support::aws::zip_of(ran);
+    aws.put_object(
+        "sluice-hand-over",
+        "sluice-run-linux-x64/1/sluice-run.zip",
+        &zip,
+    );
+    aws.put_build(
+        "sluice-run-linux-x64",
+        "SUCCEEDED",
+        &[
+            ("SLUICE_CLAIM", claim),
+            ("SLUICE_BRANCH", "main"),
+            ("SLUICE_SYSTEM", "linux-x64"),
+        ],
+        Some((
+            "arn:aws:s3:::sluice-hand-over/sluice-run-linux-x64/1/sluice-run.zip",
+            &support::aws::sha256(&zip),
+        )),
+    )
+}
+
+/// satisfies: record 0119 (design D6); 78, 109; rule core.62; the
+/// codebuild-pool spec's "A hand-over another build wrote": the sign build
+/// keeps a run build's hand-over only where its SHA-256 is the one
+/// CodeBuild recorded, signs what the tree bears out with the pool's key,
+/// and otherwise signs nothing and the run ends with no outcome saying so,
+/// nobody blamed; a build no pool's run project made, one not ended, and
+/// one naming no claim are refused
+#[test]
+fn job_sign_keeps_a_hand_over_only_as_codebuild_recorded_it() {
+    use sluice_core::records::{CheckOutcome, RunState};
+    if !alone("job_sign_keeps_a_hand_over_only_as_codebuild_recorded_it") {
+        return;
+    }
+    let aws = support::aws::FakeAws::start();
+    let key = aws.with_key("alias/sluice-sign");
+    aws.point_here();
+    let f = Fakes::new();
+    let claim = pooled_as(&f, &on_codebuild(&support::aws::public(&key)), &["a"]);
+    let out = support::Scratch::new("job-sign-build");
+    let ran = job_run(&f, &claim, out.path());
+    let arn = run_build(&aws, &claim, &ran);
+
+    // As CodeBuild recorded it: what the tree bears out is signed.
+    let sign = out.path().join("sign");
+    let (code, said) = sluice(
+        &f,
+        &[
+            "job",
+            "sign",
+            "--build",
+            &arn,
+            "--out",
+            sign.to_str().unwrap(),
+        ],
+    );
+    assert_eq!(code, 0, "{said}");
+    assert!(said.contains("signed 1 keys"), "{said}");
+    assert!(sign.join("run/report.json").exists());
+    let envelope: sluice::signing::dsse::Envelope =
+        serde_json::from_slice(&std::fs::read(sign.join("record.json")).unwrap()).unwrap();
+    assert_eq!(envelope.signatures[0].keyid, support::aws::KEY);
+    let half = sluice::signing::kms::public_half(&support::aws::public(&key)).unwrap();
+    sluice::signing::kms::verify(&envelope, support::aws::KEY, &half).unwrap();
+    let statement = sluice::signing::statement::Statement::from_envelope(&envelope).unwrap();
+    assert_eq!(statement.predicate.claim.as_deref(), Some(claim.as_str()));
+    assert_eq!(statement.predicate.claims.system, "linux-x64");
+    assert_eq!(statement.predicate.results[0].check, "a:test");
+    let ops = aws.operations();
+    assert!(ops.contains(&"BatchGetBuilds".to_string()), "{ops:?}");
+    assert!(ops.contains(&"Sign".to_string()), "{ops:?}");
+
+    // Another build's object in its place: nothing signed.
+    let forged = out.path().join("forged");
+    std::fs::create_dir_all(&forged).unwrap();
+    std::fs::write(forged.join("report.json"), b"{}").unwrap();
+    aws.put_object(
+        "sluice-hand-over",
+        "sluice-run-linux-x64/1/sluice-run.zip",
+        &support::aws::zip_of(&forged),
+    );
+    let differs = out.path().join("differs");
+    let (code, said) = sluice(
+        &f,
+        &[
+            "job",
+            "sign",
+            "--build",
+            &arn,
+            "--out",
+            differs.to_str().unwrap(),
+        ],
+    );
+    assert_eq!(code, 0, "{said}");
+    assert!(said.contains("is not what CodeBuild recorded"), "{said}");
+    assert!(!differs.join("record.json").exists());
+    assert!(!differs.join("run/report.json").exists());
+    // Builds a sign build refuses.
+    let stray = aws.put_build(
+        "someone-elses-project",
+        "SUCCEEDED",
+        &[("SLUICE_CLAIM", &claim), ("SLUICE_BRANCH", "main")],
+        None,
+    );
+    let running = aws.put_build(
+        "sluice-run-linux-x64",
+        "IN_PROGRESS",
+        &[("SLUICE_CLAIM", &claim), ("SLUICE_BRANCH", "main")],
+        None,
+    );
+    let unclaimed = aws.put_build("sluice-run-linux-x64", "SUCCEEDED", &[], None);
+    for (build, said) in [
+        (&stray, "names for no system"),
+        (&running, "has not ended"),
+        (&unclaimed, "names no SLUICE_CLAIM"),
+    ] {
+        let dir = out.path().join("refused");
+        let e = sluice_err(
+            &f,
+            &[
+                "job",
+                "sign",
+                "--build",
+                build,
+                "--out",
+                dir.to_str().unwrap(),
+            ],
+        );
+        assert!(e.contains(said), "{build}: {e}");
+        assert!(!dir.join("record.json").exists());
+    }
+
+    let (code, said) = sluice(
+        &f,
+        &[
+            "job",
+            "record",
+            "--build",
+            &arn,
+            "--from",
+            differs.to_str().unwrap(),
+        ],
+    );
+    assert_eq!(code, 0, "{said}");
+    let runs = pooled_runs(&f);
+    assert_eq!(runs[0].state, RunState::Closed);
+    let ended = runs[0].ended.as_ref().expect("ended");
+    let why = ended.why.clone().unwrap_or_default();
+    assert!(why.contains("is not what CodeBuild recorded"), "{why}");
+    assert!(ended
+        .outcomes
+        .values()
+        .all(|o| matches!(o, CheckOutcome::None { .. })));
+    assert!(f.world.results_log().is_empty(), "nothing recorded");
 }
 
 /// `sluice job run` under `claim` on `main`, its directory under `out`.

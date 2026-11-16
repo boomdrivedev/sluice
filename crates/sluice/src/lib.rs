@@ -1310,26 +1310,34 @@ pub enum JobCommand {
     /// Keep of a run job's report only the keys the combination's tree
     /// bears out, running nothing of it, and write the subjects and the
     /// predicate `actions/attest` signs to --out; where none is borne out,
-    /// or the run job kept no report, it writes no subjects.
+    /// or the run job kept no report, it writes no subjects. With --build,
+    /// a CodeBuild pool's run build is read from CodeBuild, its hand-over
+    /// kept in --out's `run` only as CodeBuild recorded it, and what the
+    /// tree bears out signed with the pool's key in KMS into --out's
+    /// `record.json`.
     #[command(
-        after_help = "Example:\n  $ sluice job sign --claim pool/forge/3 --branch main --from run --out sign"
+        after_help = "Examples:\n  $ sluice job sign --claim pool/forge/3 --branch main --from run --out sign\n  $ sluice job sign --build \"$SLUICE_RUN_BUILD\" --out sign"
     )]
     Sign {
         /// The claim the pool's job ran under.
-        #[arg(long, conflicts_with = "head")]
+        #[arg(long, conflicts_with_all = ["head", "build"])]
         claim: Option<String>,
         /// A pull request's head, signed with no claim.
-        #[arg(long, required_unless_present = "claim")]
+        #[arg(long, required_unless_present_any = ["claim", "build"], conflicts_with = "build")]
         head: Option<String>,
-        /// The branch the run's combination, or the head, lands on.
+        /// A CodeBuild pool's run build, by its ARN: its claim and branch
+        /// are read from it.
         #[arg(long)]
-        branch: String,
+        build: Option<String>,
+        /// The branch the run's combination, or the head, lands on.
+        #[arg(long, required_unless_present = "build", conflicts_with = "build")]
+        branch: Option<String>,
         /// With --head, the system the head's run job ran as.
         #[arg(long, requires = "head")]
         system: Option<String>,
         /// The run job's directory, as `sluice job run --out` kept it.
-        #[arg(long)]
-        from: PathBuf,
+        #[arg(long, required_unless_present = "build", conflicts_with = "build")]
+        from: Option<PathBuf>,
         /// The directory the subjects and the predicate are written to.
         #[arg(long)]
         out: PathBuf,
@@ -1340,20 +1348,32 @@ pub enum JobCommand {
     /// where the claim no longer holds the run. With --head, a pull
     /// request's head run's bundle is added, under no claim, writing no
     /// state.
+    /// With --build, a CodeBuild pool's run build's claim and branch are
+    /// read from CodeBuild again, and --from is the sign build's directory,
+    /// whose `record.json`, where it holds one, is added.
     #[command(
-        after_help = "Examples:\n  $ sluice job record --claim pool/forge/3 --branch main --bundle attestation.json\n  $ sluice job record --head 4f2c9e1 --branch main --bundle attestation.json"
+        after_help = "Examples:\n  $ sluice job record --claim pool/forge/3 --branch main --bundle attestation.json\n  $ sluice job record --head 4f2c9e1 --branch main --bundle attestation.json\n  $ sluice job record --build \"$SLUICE_RUN_BUILD\" --from sign"
     )]
     Record {
         /// The claim the pool's job ran under.
-        #[arg(long, conflicts_with = "head")]
+        #[arg(long, conflicts_with_all = ["head", "build"])]
         claim: Option<String>,
         /// A pull request's head, whose signed results are added with no
         /// claim.
-        #[arg(long, required_unless_present = "claim", requires = "bundle")]
+        #[arg(
+            long,
+            required_unless_present_any = ["claim", "build"],
+            requires = "bundle",
+            conflicts_with = "build"
+        )]
         head: Option<String>,
+        /// A CodeBuild pool's run build, by its ARN: its claim and branch
+        /// are read from it, and --from is the sign build's directory.
+        #[arg(long, requires = "from", conflicts_with = "bundle")]
+        build: Option<String>,
         /// The branch the run's combination lands on.
-        #[arg(long)]
-        branch: String,
+        #[arg(long, required_unless_present = "build", conflicts_with = "build")]
+        branch: Option<String>,
         /// The bundle `actions/attest` made of the run's statement.
         #[arg(long)]
         bundle: Option<PathBuf>,
