@@ -1,3 +1,10 @@
+## Purpose
+
+How a branch's records let go of what has finished, so a read costs the
+branch's queue and not its history: a landed or withdrawn submission
+moves whole to the finished records, named by a line of an index, and
+the log is kept in parts (61, 130 to 132).
+
 ## ADDED Requirements
 
 ### Requirement: A finished submission moves out of its branch's live state
