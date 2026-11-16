@@ -1877,3 +1877,141 @@ fn a_branch_comes_home_each_host_taking_its_own_submissions() {
     assert_eq!(carry_main(&ra), sluice_seams::Carried::default());
     assert_eq!(theirs.read("main").unwrap().version, written);
 }
+
+/// The key in KMS a CodeBuild pool's sign build signs with, by its ARN.
+const KMS_KEY: &str = "arn:aws:kms:us-east-1:111122223333:key/1234abcd-12ab-34cd-56ef-1234567890ab";
+
+/// `key`'s public half as KMS's `GetPublicKey` answers it and the policy
+/// lists it: the base64 of its DER SubjectPublicKeyInfo.
+fn kms_public(key: &p256::ecdsa::SigningKey) -> String {
+    use base64::Engine as _;
+    const PREFIX: &[u8] = &[
+        0x30, 0x59, 0x30, 0x13, 0x06, 0x07, 0x2a, 0x86, 0x48, 0xce, 0x3d, 0x02, 0x01, 0x06, 0x08,
+        0x2a, 0x86, 0x48, 0xce, 0x3d, 0x03, 0x01, 0x07, 0x03, 0x42, 0x00,
+    ];
+    let point = key.verifying_key().to_encoded_point(false);
+    base64::engine::general_purpose::STANDARD.encode([PREFIX, point.as_bytes()].concat())
+}
+
+/// A pool's run of `cli:build` on `main`, passed, under `claim`, as its
+/// sign build signs it with `key` under `KMS_KEY`, the signature's S made
+/// high, as KMS may answer it.
+fn kms_record(key: &p256::ecdsa::SigningKey, claim: &str) -> Vec<u8> {
+    use p256::ecdsa::signature::hazmat::PrehashSigner as _;
+    use sluice::signing::statement::{Claims, Run, RunResult, Statement};
+    let statement = Statement::of(Run {
+        results: vec![RunResult {
+            check: "cli:build".into(),
+            key: "cli-build-key".into(),
+            outcome: Outcome::Pass,
+            replayed: false,
+            took_ms: Some(1_000),
+            attempts: Some(1),
+        }],
+        claims: Claims {
+            executor: "codebuild".into(),
+            confined: false,
+            system: "linux-x64".into(),
+        },
+        branch: "main".into(),
+        combination: Rev::new("c0ffee"),
+        claim: Some(claim.into()),
+        at: "2026-11-16T12:00:00Z".into(),
+        held: None,
+    });
+    let envelope = sluice::signing::kms::envelope_of(&statement, KMS_KEY, |digest| {
+        let sig: p256::ecdsa::Signature = key.sign_prehash(digest).unwrap();
+        let low = sig.normalize_s().unwrap_or(sig);
+        let (r, s) = low.split_scalars();
+        let high = p256::ecdsa::Signature::from_scalars(r, -s).unwrap();
+        Ok(high.to_der().as_bytes().to_vec())
+    })
+    .unwrap();
+    serde_json::to_vec(&envelope).unwrap()
+}
+
+/// 78, 79, record 0119 (design D7): a `kms` signer's envelope on its ref,
+/// signed by the listed key with a high S, reads on another host as signed
+/// by the signer, verified by the public half the policy lists alone; no
+/// AWS service is reached, since nothing but git and the half is read; and
+/// the signer lists a pool's job, which holds no SSH key, so it may claim.
+#[test]
+fn a_kms_record_verifies_by_the_listed_half_alone() {
+    use sluice_seams::State as _;
+    let (a, _bare, b) = two_hosts("rr-kms");
+    let kms_key = p256::ecdsa::SigningKey::random(&mut rand_core::OsRng);
+    host(&a, None)
+        .add_signed(
+            "main",
+            "codebuild",
+            "pool-codebuild-4",
+            &kms_record(&kms_key, "pool/codebuild/4"),
+        )
+        .unwrap();
+    let signers = BTreeMap::from([(
+        "codebuild".into(),
+        SignerKey::kms(KMS_KEY, &kms_public(&kms_key)).unwrap(),
+    )]);
+    let read: Vec<ResultLine> =
+        parse_lines(&host(&b, None).results_with(&signers).unwrap()).unwrap();
+    assert_eq!(read.len(), 1, "{read:?}");
+    let l = &read[0];
+    assert_eq!(l.task, "cli:build");
+    assert_eq!(l.outcome, Outcome::Pass);
+    assert_eq!(l.signer.as_deref(), Some("codebuild"));
+    assert_eq!(l.host.as_deref(), Some("pool/codebuild/4"));
+    assert_eq!(l.system.as_deref(), Some("linux-x64"));
+    assert!(SignerKey::kms(KMS_KEY, &kms_public(&kms_key))
+        .unwrap()
+        .lists(key().public_key()));
+}
+
+/// 78, 79, S18, record 0119 (design D7): an envelope under the listed ARN
+/// that another P-256 key signed counts for nothing, its check missing and
+/// never failed, and why it is left out names the signer and the key; one
+/// the listed key signed under another ARN counts for nothing either.
+#[test]
+fn a_kms_record_by_another_key_counts_for_nothing() {
+    use sluice::host_process::results::SignerRef as _;
+    use sluice_seams::State as _;
+    let (a, _bare, b) = two_hosts("rr-kms-other");
+    let (listed, other) = (
+        p256::ecdsa::SigningKey::random(&mut rand_core::OsRng),
+        p256::ecdsa::SigningKey::random(&mut rand_core::OsRng),
+    );
+    let forged = kms_record(&other, "pool/codebuild/4");
+    host(&a, None)
+        .add_signed("main", "codebuild", "pool-codebuild-4", &forged)
+        .unwrap();
+    let signer = SignerKey::kms(KMS_KEY, &kms_public(&listed)).unwrap();
+    let signers = BTreeMap::from([("codebuild".into(), signer.clone())]);
+    let hb = host(&b, None);
+    let read: Vec<ResultLine> = parse_lines(&hb.results_with(&signers).unwrap()).unwrap();
+    assert!(read.is_empty(), "missing, never failed: {read:?}");
+    let why = format!(
+        "{:#}",
+        hb.signer_ref("codebuild", &signer)
+            .verify(&forged)
+            .unwrap_err()
+    );
+    assert!(
+        why.contains("[signers.codebuild]")
+            && why.contains(KMS_KEY)
+            && why.contains("does not verify"),
+        "{why}"
+    );
+
+    let elsewhere = String::from_utf8(kms_record(&listed, "pool/codebuild/5"))
+        .unwrap()
+        .replace(KMS_KEY, "arn:aws:kms:us-east-1:111122223333:key/another");
+    let why = format!(
+        "{:#}",
+        hb.signer_ref("codebuild", &signer)
+            .verify(elsewhere.as_bytes())
+            .unwrap_err()
+    );
+    assert!(
+        why.contains("[signers.codebuild]") && why.contains("key/another"),
+        "{why}"
+    );
+}
