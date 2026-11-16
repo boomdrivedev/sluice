@@ -858,6 +858,52 @@ fn a_run_that_waited_for_room_has_its_whole_limit() {
     )));
 }
 
+/// satisfies: record 0122; 26; the run-progress spec's "A combination with
+/// no run running reads each run's state" and the run-life spec's "A status
+/// reads each run's state": a run naming a system reads waiting for room
+/// while a live host of that system may take it, and waiting for a host of
+/// it once none may, by the lead's reading, from the records alone
+#[test]
+fn a_waiting_run_reads_whether_a_live_executor_may_take_it() {
+    let h = on_macos();
+    h.work("unit/a", "agent-a", &[("a/lib", Some("a2"))]);
+    h.submit("unit/a");
+    lead(&h).step(BRANCH).unwrap();
+    // m, the one host of macos-arm64, is live and has no room.
+    let m = taking(&h, "m", &["macos-arm64"]);
+    h.w().no_room();
+    m.step(BRANCH).unwrap();
+    lead(&h).step(BRANCH).unwrap();
+    let opened = candidates(&h)[0].runs[0]
+        .opened
+        .clone()
+        .expect("when it opened");
+    let read = |h: &Harness| {
+        let view = h.sluice().branch_view_of(BRANCH).unwrap();
+        let now = chrono::Utc::now();
+        sluice_core::overview::run_time(&view.candidates[0], now).expect("a line of its runs")
+    };
+    assert_eq!(read(&h), format!("waiting for room since {opened}"));
+    assert!(!candidates(&h)[0].runs[0].no_executor);
+
+    // m shows no sign of life for longer than the bound: none may take it.
+    h.w().advance(chrono::Duration::minutes(3));
+    lead(&h).step(BRANCH).unwrap();
+    assert_eq!(candidates(&h)[0].runs[0].state, RunState::Open);
+    assert!(candidates(&h)[0].runs[0].no_executor);
+    assert_eq!(
+        read(&h),
+        format!("waiting for a host of macos-arm64 since {opened}")
+    );
+
+    // m is back: it may take the run again.
+    let m = taking(&h, "m", &["macos-arm64"]);
+    h.w().no_room();
+    m.step(BRANCH).unwrap();
+    lead(&h).step(BRANCH).unwrap();
+    assert_eq!(read(&h), format!("waiting for room since {opened}"));
+}
+
 /// satisfies: record 0122; 66, 87, 115; rule core.22; the run-life spec's
 /// "A run no live executor may take ends with no outcome" and "A
 /// combination whose run no executor took is not passed and blames no one"

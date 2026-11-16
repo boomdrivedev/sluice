@@ -30,7 +30,8 @@ kept, it SHALL give that time alone.
 Where no run of a combination under test is running, its line SHALL
 give each run's state in place of its time: `waiting for room since
 <time>` for an open run a live executor may take, `waiting for a host
-of <system> since <time>` for one none may, and `starting on <host>`
+of <system> since <time>` for one none may, whatever system it names,
+by the lead's last reading kept on the run, and `starting on <host>`
 for a claimed run (run-life).
 
 #### Scenario: A run waiting for room
@@ -41,3 +42,14 @@ for a claimed run (run-life).
   opened, and no time against a limit
   (`a_waiting_run_reads_waiting_since_it_opened` in
   `crates/sluice/src/progress.rs`)
+
+#### Scenario: A run waiting for a host of its system
+
+- **WHEN** `main + #3`'s one run needs `macos-arm64`, and the one host of
+  `macos-arm64` is live with no room, then shows no sign of life for
+  longer than the bound
+- **THEN** its line is `waiting for room since` the time it opened while
+  that host is live, and `waiting for a host of macos-arm64 since` that
+  time once it is not
+  (`a_waiting_run_reads_whether_a_live_executor_may_take_it` in
+  `crates/sluice-conformance/tests/run_life.rs`)

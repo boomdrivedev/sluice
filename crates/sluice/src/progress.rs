@@ -473,10 +473,12 @@ mod tests {
     }
 
     /// Record 0122 (design D6; 26): a combination with no run running reads
-    /// by its runs: an open run waiting since it opened, for room or for a
-    /// host of its system, a claimed run starting on its host, and a running
-    /// run's time from its own start, never from its testing line; a
-    /// combination read not passed says why, and blames no one.
+    /// by each of its runs: an open run waiting since it opened, for room
+    /// where a live executor may take it and for a host of its system where
+    /// none may, whatever system it names, a claimed run starting on its
+    /// host, and a running run's time from its own start, never from its
+    /// testing line; a combination read not passed says why, and blames no
+    /// one.
     #[test]
     fn a_waiting_run_reads_waiting_since_it_opened() {
         use sluice_core::overview::RunView;
@@ -488,6 +490,11 @@ mod tests {
             host: host.map(String::from),
             why: None,
             untaken: false,
+            no_executor: false,
+        };
+        let hostless = |system: Option<&str>| RunView {
+            no_executor: true,
+            ..run(RunState::Open, system, "2026-10-21T12:10:00Z", None)
         };
         let mut c = candidate(None, Some(1800));
         c.runs = vec![run(RunState::Open, None, "2026-10-21T12:10:00Z", None)];
@@ -503,15 +510,31 @@ mod tests {
         )];
         assert_eq!(
             line(&c, now()),
+            "waiting for room since 2026-10-21T12:10:00Z",
+            "a live host of macos-arm64 may take it"
+        );
+        c.runs = vec![hostless(Some("macos-arm64"))];
+        assert_eq!(
+            line(&c, now()),
             "waiting for a host of macos-arm64 since 2026-10-21T12:10:00Z"
         );
+        c.runs = vec![hostless(None)];
+        assert_eq!(
+            line(&c, now()),
+            "waiting for a host since 2026-10-21T12:10:00Z",
+            "every host turned it down"
+        );
+        c.runs = vec![hostless(Some("macos-arm64"))];
         c.runs.push(run(
             RunState::Claimed,
-            None,
+            Some("linux-x64"),
             "2026-10-21T12:29:00Z",
             Some("box"),
         ));
-        assert_eq!(line(&c, now()), "starting on box");
+        assert_eq!(
+            line(&c, now()),
+            "waiting for a host of macos-arm64 since 2026-10-21T12:10:00Z, starting on box"
+        );
         c.runs.push(run(
             RunState::Running,
             None,

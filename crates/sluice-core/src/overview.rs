@@ -322,6 +322,11 @@ pub struct RunView {
     /// it, its combination not passed.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub untaken: bool,
+    /// 26 (design D6): open, and the lead's last reading found no live
+    /// executor that may take it: it waits for a host of its system, not
+    /// for room.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub no_executor: bool,
 }
 
 impl RunView {
@@ -341,16 +346,19 @@ impl RunView {
             host: r.holder().map(str::to_string),
             why: r.ended.as_ref().and_then(|e| e.why.clone()),
             untaken: r.ended.as_ref().is_some_and(|e| e.untaken),
+            no_executor: r.state == RunState::Open && r.no_executor,
         }
     }
 }
 
 /// Record 0122 (design D6; 26, 66): a combination's time as a person reads
 /// it: its longest running run's time from that run's own start, against
-/// the limit; where none runs, `starting on <host>` for a claimed run; else,
-/// for an open run, `waiting for a host of <system> since <time>` or
-/// `waiting for room since <time>`, the time it opened. `None` where its
-/// runs say none of these, as in a document from before them.
+/// the limit; where none runs, each run's state, in order: `starting on
+/// <host>` for a claimed run, and for an open run `waiting for room since
+/// <time>` where a live executor may take it and `waiting for a host of
+/// <system> since <time>` where none may, by the lead's last reading, the
+/// time it opened. `None` where its runs say none of these, as in a
+/// document from before them.
 pub fn run_time(c: &CandidateView, now: chrono::DateTime<chrono::Utc>) -> Option<String> {
     let running = c
         .runs
@@ -365,18 +373,29 @@ pub fn run_time(c: &CandidateView, now: chrono::DateTime<chrono::Utc>) -> Option
             None => duration(s),
         });
     }
-    if let Some(r) = c.runs.iter().find(|r| r.state == RunState::Claimed) {
-        return Some(format!(
-            "starting on {}",
-            r.host.as_deref().unwrap_or("this host")
-        ));
+    let mut states: Vec<String> = Vec::new();
+    for r in &c.runs {
+        let state = match r.state {
+            RunState::Claimed => {
+                format!("starting on {}", r.host.as_deref().unwrap_or("this host"))
+            }
+            RunState::Open => {
+                let Some(since) = r.since.as_deref() else {
+                    continue;
+                };
+                match (r.no_executor, &r.system) {
+                    (true, Some(system)) => format!("waiting for a host of {system} since {since}"),
+                    (true, None) => format!("waiting for a host since {since}"),
+                    (false, _) => format!("waiting for room since {since}"),
+                }
+            }
+            _ => continue,
+        };
+        if !states.contains(&state) {
+            states.push(state);
+        }
     }
-    let r = c.runs.iter().find(|r| r.state == RunState::Open)?;
-    let since = r.since.as_deref()?;
-    Some(match &r.system {
-        Some(system) => format!("waiting for a host of {system} since {since}"),
-        None => format!("waiting for room since {since}"),
-    })
+    (!states.is_empty()).then(|| states.join(", "))
 }
 
 /// Whole seconds from `at` to `now`; none for a time that cannot be read.

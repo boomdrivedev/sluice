@@ -2296,18 +2296,35 @@ impl Sluice<'_> {
             // and why, where any did. A run a live executor may take is
             // under no limit while it waits: its limit counts from its own
             // running, as its executor holds it (66).
+            // 26 (the run-progress spec's "A combination with no run running
+            // reads each run's state"): each open run marked by whether a
+            // live executor may take it, so a status reads it waiting for
+            // room or for a host of its system, from the records alone.
             let x = line.candidate(&c.id).expect("polled candidate").clone();
             let mut ending = BTreeSet::new();
-            if let Some(limit) = rules.timeout {
-                for (n, r) in x.runs.iter().enumerate() {
-                    let opened = r.opened.as_deref().or(x.opened.as_deref());
-                    let over = r.state == RunState::Open
-                        && opened
-                            .and_then(|o| seconds_between(o, now))
-                            .is_some_and(|s| s >= limit.as_secs_f64());
-                    if over && !self.takeable(r, home, rules, listed, unmet, &pools, now)? {
-                        ending.insert(n);
-                    }
+            let mut marked = Vec::new();
+            for (n, r) in x.runs.iter().enumerate() {
+                if r.state != RunState::Open {
+                    continue;
+                }
+                let takeable = self.takeable(r, home, rules, listed, unmet, &pools, now)?;
+                if r.no_executor == takeable {
+                    marked.push((n, !takeable));
+                }
+                let opened = r.opened.as_deref().or(x.opened.as_deref());
+                let over = rules.timeout.is_some_and(|limit| {
+                    opened
+                        .and_then(|o| seconds_between(o, now))
+                        .is_some_and(|s| s >= limit.as_secs_f64())
+                });
+                if over && !takeable {
+                    ending.insert(n);
+                }
+            }
+            if !marked.is_empty() {
+                let x = line.candidate_mut(&c.id).expect("polled candidate");
+                for (n, none) in marked {
+                    x.runs[n].no_executor = none;
                 }
             }
             {
@@ -2903,6 +2920,7 @@ impl Sluice<'_> {
                 ended: None,
                 closed: None,
                 follows: Some(*last),
+                no_executor: false,
             };
             let system = run.system.clone();
             x.runs.push(run);
@@ -5268,6 +5286,7 @@ fn open_runs(rules: &Rules, home: Option<&str>) -> Vec<SystemRun> {
         ended: None,
         closed: None,
         follows: None,
+        no_executor: false,
     };
     if by.is_empty() {
         return vec![run(None, any)];

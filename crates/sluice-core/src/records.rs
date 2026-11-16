@@ -549,6 +549,12 @@ pub struct SystemRun {
     /// up, by its index, holding only the checks that run left undecided.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub follows: Option<usize>,
+    /// Record 0122 (design D6; 26): while it is open, the lead's last
+    /// reading found no live executor that may take it, so a status reads
+    /// it as waiting for a host of its system rather than for room; `false`
+    /// once one may, and in records written before it.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub no_executor: bool,
 }
 
 impl SystemRun {
@@ -778,6 +784,7 @@ impl From<CandidateForm> for Candidate {
                 ended: None,
                 closed: None,
                 follows: None,
+                no_executor: false,
             });
         }
         Candidate {
