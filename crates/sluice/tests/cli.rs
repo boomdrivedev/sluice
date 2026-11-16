@@ -10345,6 +10345,111 @@ fn job_sign_keeps_a_hand_over_only_as_codebuild_recorded_it() {
     assert!(f.world.results_log().is_empty(), "nothing recorded");
 }
 
+/// satisfies: record 0119 (design D6); 77, 109; the codebuild-pool spec's
+/// "A run build's passes": the sign build's record of both passes, signed
+/// by the pool's key, is added among `codebuild`'s runs, and the run reads
+/// ended and closed under its claim in one write; recorded again under a
+/// claim that no longer holds the run, nothing is written
+#[test]
+fn job_record_build_ends_the_run_with_what_the_key_signed() {
+    use sluice_core::records::{CheckOutcome, RunState};
+    if !alone("job_record_build_ends_the_run_with_what_the_key_signed") {
+        return;
+    }
+    let aws = support::aws::FakeAws::start();
+    let key = aws.with_key("alias/sluice-sign");
+    aws.point_here();
+    let f = Fakes::new();
+    let claim = pooled_as(&f, &on_codebuild(&support::aws::public(&key)), &["a", "b"]);
+    let out = support::Scratch::new("job-record-build");
+    let ran = job_run(&f, &claim, out.path());
+    let arn = run_build(&aws, &claim, &ran);
+    let sign = out.path().join("sign");
+    let (code, said) = sluice(
+        &f,
+        &[
+            "job",
+            "sign",
+            "--build",
+            &arn,
+            "--out",
+            sign.to_str().unwrap(),
+        ],
+    );
+    assert_eq!(code, 0, "{said}");
+    assert!(said.contains("signed 2 keys"), "{said}");
+    let record = std::fs::read(sign.join("record.json")).unwrap();
+
+    let version = f.world.version("main");
+    let results = f.world.results_log();
+    let (code, said) = sluice(
+        &f,
+        &[
+            "job",
+            "record",
+            "--build",
+            &arn,
+            "--from",
+            sign.to_str().unwrap(),
+        ],
+    );
+    assert_eq!(code, 0, "{said}");
+    assert!(said.contains(&format!("ended {claim}'s run")), "{said}");
+    assert!(said.contains("2 of 2 signed results passed"), "{said}");
+    assert_eq!(f.world.version("main"), version + 1, "one write");
+    let adds = f.world.signed_adds();
+    assert_eq!(adds.len(), 1, "one envelope among the signer's runs");
+    assert_eq!(adds[0].0, "codebuild", "refs/sluice/runs/codebuild");
+    let combination = pooled_combination(&f);
+    assert!(
+        adds[0].1.starts_with(&format!("{combination}/linux-x64/")),
+        "{}",
+        adds[0].1
+    );
+    assert_eq!(adds[0].2, record);
+    let envelope: sluice::signing::dsse::Envelope = serde_json::from_slice(&adds[0].2).unwrap();
+    let half = sluice::signing::kms::public_half(&support::aws::public(&key)).unwrap();
+    sluice::signing::kms::verify(&envelope, support::aws::KEY, &half).unwrap();
+    let statement = sluice::signing::statement::Statement::from_envelope(&envelope).unwrap();
+    let mut checks: Vec<&str> = statement
+        .predicate
+        .results
+        .iter()
+        .map(|r| r.check.as_str())
+        .collect();
+    checks.sort();
+    assert_eq!(checks, ["a:test", "b:test"]);
+    let run = pooled_runs(&f)[0].clone();
+    assert_eq!(run.state, RunState::Closed);
+    let ended = run.ended.expect("ended");
+    for check in ["a:test", "b:test"] {
+        assert_eq!(
+            ended.outcomes.get(check),
+            Some(&CheckOutcome::Passed),
+            "{ended:?}"
+        );
+    }
+    assert_eq!(f.world.results_log(), results, "nothing of this host's");
+
+    // Its claim no longer holds the run: refused, with nothing written.
+    let version = f.world.version("main");
+    let (code, said) = sluice(
+        &f,
+        &[
+            "job",
+            "record",
+            "--build",
+            &arn,
+            "--from",
+            sign.to_str().unwrap(),
+        ],
+    );
+    assert_eq!(code, FAILED, "{said}");
+    assert!(said.contains("no longer holds a run"), "{said}");
+    assert_eq!(f.world.version("main"), version, "nothing written");
+    assert_eq!(f.world.signed_adds().len(), 1);
+}
+
 /// `sluice job run` under `claim` on `main`, its directory under `out`.
 fn job_run(f: &Fakes, claim: &str, out: &std::path::Path) -> std::path::PathBuf {
     let dir = out.join("sluice-run");
