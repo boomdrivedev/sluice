@@ -4076,6 +4076,12 @@ fn open_runs(rules: &Rules, home: Option<&str>) -> Vec<SystemRun> {
         host: None,
         declined: BTreeMap::new(),
         lost: None,
+        opened: None,
+        claim: None,
+        running: None,
+        ended: None,
+        closed: None,
+        follows: None,
     };
     if by.is_empty() {
         return vec![run(None, any)];
