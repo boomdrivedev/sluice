@@ -493,4 +493,154 @@ mod tests {
         p.launch(&launch("pool/codebuild/7")).unwrap();
         assert_eq!(aws.state().builds.len(), 4);
     }
+    /// The time `secs` seconds into the day the tests are set on.
+    fn at(secs: i64) -> DateTime<Utc> {
+        DateTime::from_timestamp(1_794_000_000 + secs, 0).unwrap()
+    }
+
+    /// A pool whose clock reads `now`.
+    fn pool_at(aws: &Rc<Fake>, scratch: &Scratch, now: i64) -> CodeBuild {
+        pool(aws, scratch).at(move || at(now))
+    }
+
+    /// 77, 88 (design D5): the claim's run build through its life reads
+    /// queued while submitted or queued, running since its queued phase's
+    /// end while it runs and while its sign build runs, and ended, recorded,
+    /// once its sign build succeeded; a sign build that failed ends it with
+    /// no record, saying so.
+    #[test]
+    fn a_claims_builds_read_as_its_job() {
+        let scratch = Scratch::new("life");
+        let aws = Rc::new(Fake::new());
+        let p = pool_at(&aws, &scratch, 600);
+        p.launch(&launch("pool/codebuild/4")).unwrap();
+        let job = || {
+            p.job(&kind(), &runners(), "pool/codebuild/4", None)
+                .unwrap()
+        };
+        let run = aws.state().builds[0].clone();
+        assert_eq!(job(), Job::Queued);
+        aws.change(&run.id, |b| b.phase = "QUEUED".into());
+        assert_eq!(job(), Job::Queued);
+        aws.change(&run.id, |b| {
+            b.phase = "BUILD".into();
+            b.queued_end = Some(at(60));
+        });
+        let since = Job::Running {
+            since: "2026-11-06T21:21:00Z".into(),
+        };
+        assert_eq!(stamp(at(60)), "2026-11-06T21:21:00Z");
+        assert_eq!(job(), since);
+        aws.change(&run.id, |b| {
+            b.phase = "COMPLETED".into();
+            b.status = "FAILED".into();
+            b.complete = true;
+            b.end = Some(at(500));
+        });
+        assert_eq!(job(), since, "its sign build not yet started");
+        let sign = aws.put_build("sluice-sign", &[(RUN_BUILD, &run.arn)]);
+        assert_eq!(job(), since, "its sign build runs");
+        aws.change(&sign.id, |b| {
+            b.complete = true;
+            b.status = "SUCCEEDED".into();
+            b.phase = "COMPLETED".into();
+        });
+        assert_eq!(
+            job(),
+            Job::Ended {
+                recorded: true,
+                why: None
+            }
+        );
+        aws.change(&sign.id, |b| b.status = "FAILED".into());
+        let Job::Ended {
+            recorded: false,
+            why: Some(why),
+        } = job()
+        else {
+            panic!("{:?}", job())
+        };
+        assert!(why.contains(&sign.id) && why.contains("FAILED"), "{why}");
+    }
+
+    /// 77, 88, record 0122 (design D5): a run build someone stopped is a
+    /// job ended with no record, saying its build was stopped, whatever
+    /// sign build there is not.
+    #[test]
+    fn a_stopped_run_build_is_a_job_ended_with_no_record() {
+        let scratch = Scratch::new("stopped");
+        let aws = Rc::new(Fake::new());
+        let p = pool_at(&aws, &scratch, 600);
+        p.launch(&launch("pool/codebuild/4")).unwrap();
+        let run = aws.state().builds[0].clone();
+        aws.change(&run.id, |b| {
+            b.phase = "COMPLETED".into();
+            b.status = "STOPPED".into();
+            b.complete = true;
+            b.queued_end = Some(at(60));
+            b.end = Some(at(590));
+        });
+        let Job::Ended {
+            recorded: false,
+            why: Some(why),
+        } = p
+            .job(&kind(), &runners(), "pool/codebuild/4", None)
+            .unwrap()
+        else {
+            panic!("not ended with why")
+        };
+        assert!(
+            why.contains(&run.id) && why.contains("was stopped"),
+            "{why}"
+        );
+        assert!(!aws.calls().iter().any(|c| c.contains("sluice-sign")));
+    }
+
+    /// 77, 88, record 0122 (design D5): a run build that ended and that no
+    /// sign build bears once `[peers] alive` has passed since is a job
+    /// ended with no record, naming the rule that starts the sign build;
+    /// within it, the job still runs.
+    #[test]
+    fn a_run_build_no_sign_build_took_is_a_job_ended_with_no_record() {
+        let scratch = Scratch::new("untaken");
+        let aws = Rc::new(Fake::new());
+        pool_at(&aws, &scratch, 0)
+            .launch(&launch("pool/codebuild/4"))
+            .unwrap();
+        let run = aws.state().builds[0].clone();
+        aws.change(&run.id, |b| {
+            b.phase = "COMPLETED".into();
+            b.status = "SUCCEEDED".into();
+            b.complete = true;
+            b.queued_end = Some(at(60));
+            b.end = Some(at(500));
+        });
+        // Another run build's sign build bears another run.
+        aws.put_build(
+            "sluice-sign",
+            &[(
+                RUN_BUILD,
+                "arn:aws:codebuild:us-east-1:111122223333:build/other:1",
+            )],
+        );
+        let job = |now| {
+            pool_at(&aws, &scratch, now)
+                .job(&kind(), &runners(), "pool/codebuild/4", None)
+                .unwrap()
+        };
+        assert!(matches!(job(560), Job::Running { .. }));
+        let Job::Ended {
+            recorded: false,
+            why: Some(why),
+        } = job(620)
+        else {
+            panic!("not ended with why")
+        };
+        assert!(
+            why.contains(&run.id)
+                && why.contains("[peers] alive")
+                && why.contains("EventBridge rule that starts sluice-sign"),
+            "{why}"
+        );
+    }
 }

@@ -1090,3 +1090,41 @@ fn a_pools_job_ended_with_no_record_is_a_lapsed_claim() {
     assert_eq!(launches.len(), 2);
     assert_eq!(launches[1].claim, again.by);
 }
+
+/// satisfies: record 0122; 77, 88; the codebuild-pool spec's "The lead's
+/// lapse gives the pool's why": a pool's job that ended with no record
+/// and says why ends its run with no outcome under the pool's words,
+/// nobody blamed, and a follow-up run holds its checks
+#[test]
+fn a_pools_job_ended_with_its_why_lapses_with_it() {
+    let h = with_pool();
+    h.work("unit/a", "agent-a", &[("a/lib", Some("a2"))]);
+    let one = h.submit("unit/a");
+    lead(&h).step(BRANCH).unwrap();
+    let claim = pool_run(&h).claim.unwrap().by;
+    let why = format!("{claim}'s run build sluice-run:1 was stopped, which starts no sign build");
+    h.w().move_job(
+        &claim,
+        sluice_seams::Job::Ended {
+            recorded: false,
+            why: Some(why.clone()),
+        },
+    );
+    lead(&h).step(BRANCH).unwrap();
+    let runs = candidates(&h)[0].runs.clone();
+    assert_eq!(runs[0].state, RunState::Closed);
+    let ended = runs[0].ended.as_ref().expect("ended");
+    assert_eq!(ended.why.as_deref(), Some(why.as_str()));
+    assert!(ended
+        .outcomes
+        .values()
+        .all(|o| *o == CheckOutcome::None { why: why.clone() }));
+    assert!(h.results().is_empty(), "nothing of it recorded");
+    assert!(
+        !h.events().iter().any(|e| matches!(e, Event::Blamed { .. })),
+        "nobody blamed"
+    );
+    assert!(h.sub(one).failed.is_empty());
+    assert_eq!(runs[1].follows, Some(0), "a follow-up holds its checks");
+    assert!(runs[1].claim.is_some());
+}
