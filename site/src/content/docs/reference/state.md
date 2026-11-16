@@ -475,6 +475,43 @@ counts that host's runs it touched. A reason leaves the list with its
 `proof-kept` event. No round, gate or landing reads it. The field is
 left out when it is empty, and an older sluice passes over it.
 
+## A combination and its runs
+
+`candidates` in `branch.json` holds each combination under test, with
+its `state`: `formed`, `testing`, `passed`, `failed`, `timed-out`, or
+`not-passed`, a combination one of whose runs no host or pool that
+could take it was there to take before its time limit. A `not-passed`
+combination blames no one and is formed again.
+
+Each combination's `runs` holds one run for each system it needs, and
+a run's state is written before anything acts on it, so a sluice that
+stops at any point leaves the next one what to do:
+
+- `open`, with `opened`, when it was opened. Its time limit counts from
+  `running`, never from here.
+- `claimed`, with `claim`: `{"by": "build-1", "at":
+  "2026-11-16T09:16:40Z"}`, the host or pool's claim that holds it, and
+  `place`, the checkout it runs in. A pool's claim is `pool/<pool>/<n>`,
+  and it has `dispatched` once its job was asked for.
+- `running`, with `running`, when its tests started, read from the
+  run's own start, or, for a pool's run, from its run job's.
+- `ended`, with `ended`: when, and each check's `outcomes`, `passed`,
+  `failed`, `unproven` or `{"none": {"why": "..."}}`, with `why` where
+  it ended with checks undecided, `timed_out` where its time limit
+  ended it, and `untaken` where nothing could take it.
+- `closed`, with `closed`, once its checkout was released.
+
+A run that ended with checks undecided is followed by a run of those
+checks alone, whose `follows` names the run's number among the
+combination's runs.
+
+A landing the forge refused stays in `landing`, with `refused`:
+`{"words": "remote: error: GH013: Repository rule violations found for
+refs/heads/main.", "at": "2026-11-16T09:16:40Z"}`, the forge's words
+whole. Nothing is pushed or formed on the branch while it stands.
+`sluice push <branch>` pushes it again, and it is dropped once any of
+its submissions is withdrawn.
+
 ## A submission
 
 ```json
@@ -500,9 +537,10 @@ left out when it is empty, and an older sluice passes over it.
 
 `state` is one of `queued`, `waiting` (behind the submissions in
 `after`), `testing`, `passed`, `landing`, `landed`, `failed`,
-`conflict` and `withdrawn`. These nine are stable: under
-`sluice/submission@1` none of them is renamed or removed, and none is
-added, so a script that reads `state`, such as an agent looping on
+`conflict`, `withdrawn` and `refused`, a submission whose landing the
+forge refused, held until it is pushed again or withdrawn. These ten
+are stable: under `sluice/submission@1` none of them is renamed or
+removed, so a script that reads `state`, such as an agent looping on
 `sluice wait --json`, can match all of them.
 
 `failed` lists each test that failed, with its `hash`, the key its
@@ -676,7 +714,25 @@ run:
 
 `landing` is written before the branch moves and `landed` after, so a
 round that crashes between the two is finished correctly by the next
-one.
+one. A landing the forge refused is logged once, `forge_refused`, with
+the forge's words:
+
+```json
+{"schema":"sluice/log@1","event":"forge_refused","ids":[12],"words":"remote: error: GH013: Repository rule violations found for refs/heads/main."}
+```
+
+Each state a run is written in is logged with it, naming its
+combination and its system: `claimed` with the claim's holder as
+`host`, and `opened`, `running`, `ended`, with `why` where it ended
+with checks undecided, and `closed`, each with its number among the
+combination's runs:
+
+```json
+{"schema":"sluice/log@1","event":"opened","combination":"9ab3d07c11","system":"macos-arm64","run":1}
+{"schema":"sluice/log@1","event":"running","combination":"9ab3d07c11","system":"macos-arm64","run":1}
+{"schema":"sluice/log@1","event":"ended","combination":"9ab3d07c11","system":"macos-arm64","run":1}
+{"schema":"sluice/log@1","event":"closed","combination":"9ab3d07c11","system":"macos-arm64","run":1}
+```
 
 A move of the queue between its homes is logged as it is written:
 `moving` in the home it leaves, naming where to and the revision whose
