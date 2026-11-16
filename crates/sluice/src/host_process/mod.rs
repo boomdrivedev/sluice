@@ -26,6 +26,7 @@
 pub mod ask;
 pub mod client;
 pub mod environment;
+pub mod folder;
 pub mod index;
 pub mod pass;
 pub mod protocol;
@@ -34,7 +35,7 @@ pub mod room;
 pub mod tasks;
 
 use std::ffi::OsString;
-use std::fs::{File, OpenOptions};
+use std::fs::File;
 use std::io::{BufReader, ErrorKind, Read};
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::{Path, PathBuf};
@@ -49,6 +50,7 @@ use crate::host_settings::{HostSettings, Look};
 use crate::instance::Instance;
 use crate::profiles::places::{repository_key, user_scratch, USER_SCRATCH_VAR};
 pub use ask::{Following, Here, Holding, Holds, HostProcess, Socketed};
+use folder::{Folder, How};
 use protocol::{receive, send, Answer, Hello, Named, Request, RoomView, Started};
 use room::{Asked, Asker, Room, Shared};
 
@@ -73,6 +75,13 @@ pub const READ_TICK: Duration = Duration::from_secs(3);
 pub fn read_for() -> Duration {
     crate::retry::COMMAND_FOR + READ_TICK
 }
+
+/// The files of `host/`, by their names in it.
+const LOCK: &str = "lock";
+const START_LOCK: &str = "start.lock";
+const VERSION: &str = "version";
+const LOG: &str = "log";
+const PREVIOUS_LOG: &str = "log.1";
 
 /// Where one state folder's host process keeps its files and its socket.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -124,26 +133,27 @@ impl Paths {
     }
 
     pub fn lock(&self) -> PathBuf {
-        self.dir.join("lock")
+        self.dir.join(LOCK)
     }
 
     pub fn start_lock(&self) -> PathBuf {
-        self.dir.join("start.lock")
+        self.dir.join(START_LOCK)
     }
 
     pub fn version(&self) -> PathBuf {
-        self.dir.join("version")
+        self.dir.join(VERSION)
     }
 
     pub fn log(&self) -> PathBuf {
-        self.dir.join("log")
+        self.dir.join(LOG)
     }
 
     /// The process before's log.
     pub fn previous_log(&self) -> PathBuf {
-        self.dir.join("log.1")
+        self.dir.join(PREVIOUS_LOG)
     }
 
+    /// A command's index, of the folder at `host/` as each call finds it.
     pub fn index(&self) -> index::Index {
         index::Index::at(&self.dir)
     }
@@ -152,23 +162,6 @@ impl Paths {
     pub fn named(&self) -> Option<Named> {
         let bytes = std::fs::read(self.version()).ok()?;
         serde_json::from_slice(&bytes).ok()
-    }
-}
-
-/// The lock on `path` taken now, or `None` where another process holds it.
-pub(crate) fn try_lock(path: &Path) -> Result<Option<File>> {
-    let file = OpenOptions::new()
-        .create(true)
-        .write(true)
-        .truncate(false)
-        .open(path)
-        .with_context(|| format!("creating {}", path.display()))?;
-    match file.try_lock() {
-        Ok(()) => Ok(Some(file)),
-        Err(std::fs::TryLockError::WouldBlock) => Ok(None),
-        Err(std::fs::TryLockError::Error(e)) => {
-            Err(e).with_context(|| format!("locking {}", path.display()))
-        }
     }
 }
 
@@ -195,9 +188,11 @@ pub(crate) struct Hosting {
     pub connections: AtomicUsize,
     /// A newer sluice asked it to end, or its state folder is gone.
     pub stopping: AtomicBool,
-    /// Its folder, `host/`, as it found it when it started: the device and
-    /// inode, so a folder made again at that path is not its own.
-    pub folder: (u64, u64),
+    /// Its folder, `host/`, held open since it started: every file it
+    /// opens or moves there is named through it, and its device and inode
+    /// tell a folder made again at that path, which is not its own
+    /// (design D6).
+    pub folder: Arc<Folder>,
     /// The host's settings it holds, which every binding it makes is of
     /// (record 0107; design D19).
     pub settings: Arc<tasks::Settings>,
@@ -209,7 +204,12 @@ impl Hosting {
     fn folder_gone(&self) -> bool {
         use std::os::unix::fs::MetadataExt;
         !std::fs::metadata(&self.paths.dir)
-            .is_ok_and(|m| m.is_dir() && (m.dev(), m.ino()) == self.folder)
+            .is_ok_and(|m| m.is_dir() && (m.dev(), m.ino()) == self.folder.id())
+    }
+
+    /// Its index, of the folder it holds (design D4, D6).
+    fn index(&self) -> index::Index {
+        index::Index::held(self.folder.clone())
     }
 }
 
@@ -244,30 +244,31 @@ pub fn run(choices: crate::telemetry::Choices) -> Result<i32> {
             .map_err(|e| format!("the executable the host process started as: {e}")),
     };
     let paths = Paths::host()?;
-    let Some(lock) = try_lock(&paths.lock())? else {
+    let folder =
+        Folder::open(&paths.dir).with_context(|| format!("opening {}", paths.dir.display()))?;
+    let Some(lock) = folder.try_lock(LOCK)? else {
         log("sluice host: another host process holds this host's lock; this one ends");
         return Ok(0);
     };
-    run_holding(paths, lock, choices, successor)
+    run_holding(paths, Arc::new(folder), lock, choices, successor)
 }
 
 fn run_holding(
     paths: Paths,
+    folder: Arc<Folder>,
     lock: File,
     choices: crate::telemetry::Choices,
     successor: Successor,
 ) -> Result<i32> {
     let mut lock = Some(lock);
-    take_log(&paths)?;
+    take_log(&folder)?;
     let named = Named {
         version: crate::VERSION.to_string(),
         pid: std::process::id(),
         since: chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
         asked_only: asked_only(),
     };
-    let tmp = paths.dir.join(".version.tmp");
-    std::fs::write(&tmp, serde_json::to_vec(&named)?)?;
-    std::fs::rename(&tmp, paths.version())?;
+    folder.write(VERSION, &serde_json::to_vec(&named)?)?;
     // A socket a dead process left: nothing answers on it while this
     // process holds the lock.
     match std::fs::remove_file(&paths.socket) {
@@ -279,12 +280,6 @@ fn run_holding(
     let listener = UnixListener::bind(&paths.socket)
         .with_context(|| format!("binding {}", paths.socket.display()))?;
     listener.set_nonblocking(true)?;
-    let folder = {
-        use std::os::unix::fs::MetadataExt;
-        let m = std::fs::metadata(&paths.dir)
-            .with_context(|| format!("reading {}", paths.dir.display()))?;
-        (m.dev(), m.ino())
-    };
     // Record 0107 (design D19): the host's settings, held with the sign of
     // their file, which it looks at between its ticks.
     let host_settings = HostSettings::read()?;
@@ -353,7 +348,7 @@ fn run_holding(
     ));
     // 135 (design D4): the repositories it holds, found again; a gone one,
     // or one with no sluice, leaves the index.
-    let index = hosting.paths.index();
+    let index = hosting.index();
     match index.prune(|r| !index::has_sluice(r).unwrap_or(true)) {
         Ok(gone) => {
             for r in gone {
@@ -391,16 +386,17 @@ fn run_holding(
 /// Keep the previous process's log as `log.1`, and send this one's output
 /// to `log`. A log the command that started it made, which holds nothing
 /// yet, is this process's own.
-fn take_log(paths: &Paths) -> Result<()> {
-    let log = paths.log();
-    if std::fs::metadata(&log).is_ok_and(|m| m.len() > 0) {
-        let _ = std::fs::rename(&log, paths.previous_log());
+fn take_log(folder: &Folder) -> Result<()> {
+    let held = folder
+        .file(LOG, How::Read)
+        .and_then(|f| f.metadata())
+        .is_ok_and(|m| m.len() > 0);
+    if held {
+        let _ = folder.rename(LOG, PREVIOUS_LOG);
     }
-    let file = OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(&log)
-        .with_context(|| format!("opening {}", log.display()))?;
+    let file = folder
+        .file(LOG, How::Append)
+        .with_context(|| format!("opening {}", folder.path().join(LOG).display()))?;
     nix::unistd::dup2_stdout(&file).context("sending the host process's output to its log")?;
     nix::unistd::dup2_stderr(&file).context("sending the host process's output to its log")?;
     Ok(())
@@ -501,7 +497,7 @@ impl TakeUp {
                 let tables = self.settings.held().changed_tables(&instance);
                 let mut repositories = hosting.tasks.held();
                 if repositories.is_empty() {
-                    repositories = hosting.paths.index().list().unwrap_or_default();
+                    repositories = hosting.index().list().unwrap_or_default();
                 }
                 let (tx, rx) = mpsc::channel();
                 let checked = instance.clone();
@@ -586,7 +582,7 @@ fn hand_over(
             return false;
         }
     };
-    let start = match lock_start(&hosting.paths) {
+    let start = match hosting.folder.lock(START_LOCK) {
         Ok(f) => f,
         Err(e) => {
             take_up.not_handed(tables, "its successor could not start", &format!("{e:#}"));
@@ -606,30 +602,26 @@ fn hand_over(
     drop(lock.take());
     let _ = std::fs::remove_file(&hosting.paths.socket);
     let log_path = hosting.paths.log();
-    let spawned = OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(&log_path)
-        .and_then(|out| {
-            let mut command = std::process::Command::new(&program);
-            command
-                .arg("host")
-                .current_dir("/")
-                .stdin(std::process::Stdio::null())
-                .stdout(out.try_clone()?)
-                .stderr(out)
-                .env_clear()
-                .envs(successor.env.iter().cloned());
-            // SAFETY: setsid is async-signal-safe; nothing else runs here.
-            unsafe {
-                use std::os::unix::process::CommandExt;
-                command.pre_exec(|| {
-                    nix::unistd::setsid().map_err(std::io::Error::from)?;
-                    Ok(())
-                });
-            }
-            command.spawn()
-        });
+    let spawned = hosting.folder.file(LOG, How::Append).and_then(|out| {
+        let mut command = std::process::Command::new(&program);
+        command
+            .arg("host")
+            .current_dir("/")
+            .stdin(std::process::Stdio::null())
+            .stdout(out.try_clone()?)
+            .stderr(out)
+            .env_clear()
+            .envs(successor.env.iter().cloned());
+        // SAFETY: setsid is async-signal-safe; nothing else runs here.
+        unsafe {
+            use std::os::unix::process::CommandExt;
+            command.pre_exec(|| {
+                nix::unistd::setsid().map_err(std::io::Error::from)?;
+                Ok(())
+            });
+        }
+        command.spawn()
+    });
     let own = std::process::id();
     let answered = match spawned {
         Ok(child) => {
@@ -661,7 +653,7 @@ fn hand_over(
         return true;
     }
     // A successor that took the lock late holds the host now.
-    match try_lock(&hosting.paths.lock()) {
+    match hosting.folder.try_lock(LOCK) {
         Ok(Some(f)) => *lock = Some(f),
         _ => {
             drop(start);
@@ -690,20 +682,6 @@ fn hand_over(
         &format!("see {}", log_path.display()),
     );
     false
-}
-
-/// The host's start lock, once whatever holds it lets go.
-fn lock_start(paths: &Paths) -> Result<File> {
-    let path = paths.start_lock();
-    let file = OpenOptions::new()
-        .create(true)
-        .write(true)
-        .truncate(false)
-        .open(&path)
-        .with_context(|| format!("creating {}", path.display()))?;
-    file.lock()
-        .with_context(|| format!("locking {}", path.display()))?;
-    Ok(file)
 }
 
 /// Accept connections, each answered on a thread of its own, until the
@@ -765,7 +743,7 @@ fn serve(
         }
         // Idle: it decides under the start lock, which it keeps until it
         // ends, after taking every connection already queued (design D6).
-        let Ok(Some(start)) = try_lock(&hosting.paths.start_lock()) else {
+        let Ok(Some(start)) = hosting.folder.try_lock(START_LOCK) else {
             continue;
         };
         if accept_all(hosting, listener) > 0 {
@@ -787,7 +765,7 @@ fn serve(
 /// ([`tasks::Tasks::look`]), so the loop that accepts commands' connections
 /// never waits on a remote.
 fn scan(hosting: &Hosting) {
-    let index = hosting.paths.index();
+    let index = hosting.index();
     match index.prune(|r| !r.is_dir()) {
         Ok(gone) => {
             for r in gone {
@@ -969,7 +947,7 @@ fn results_of(
 
 /// Note `repository` in the index (design D4).
 fn note(hosting: &Hosting, repository: &Path) {
-    if let Err(e) = hosting.paths.index().note(repository) {
+    if let Err(e) = hosting.index().note(repository) {
         log(&format!(
             "sluice host: noting {} in the index: {e:#}",
             repository.display()
