@@ -9,7 +9,7 @@ number and rules by id.
 
 ## 1. The open changes archive cleanly
 
-- [ ] 1.1 Remove `a-host-hands-over-only-to-the-host-its-mark-names` and `a-hand-overs-withdrawal-holds-no-request`. In `a-places-scratch-fits-a-socket`'s `place-scratch` delta, make the requirement on a worktree's former scratch three, each with its scenarios; in `actions-pool`'s `forge-identity` delta, make the pool's reports from `sluice forge check` an added requirement of their own; give `finished-submissions`' `finished-records` delta a Purpose. True when `sluice exec bolt/sluices-checks-read-no-markdown -- moon run root:changes` passes once 2.1 is done.
+- [x] 1.1 Remove `a-host-hands-over-only-to-the-host-its-mark-names` and `a-hand-overs-withdrawal-holds-no-request`. In `a-places-scratch-fits-a-socket`'s `place-scratch` delta, make the requirement on a worktree's former scratch three, each with its scenarios; in `actions-pool`'s `forge-identity` delta, make the pool's reports from `sluice forge check` an added requirement of their own; give `finished-submissions`' `finished-records` delta a Purpose. True when `sluice exec bolt/sluices-checks-read-no-markdown -- moon run root:changes` passes once 2.1 is done.
 
 ## 2. root:changes validates each open change as archived
 

@@ -13,12 +13,9 @@ A worktree's checkout whose record names a scratch under the
 repository's `sluice/.tmp/`, or names none, SHALL be given a scratch
 under the user's directory at its first run with none of its runs going.
 Its record SHALL name the new path before the scratch is moved. Its
-former scratch SHALL be moved to the new path, what is in it kept. Where
-the system cannot move it, the new path SHALL be made empty and the
-former scratch removed. While a run of the worktree is going, a run
-beside it SHALL be given the former scratch (35 as amended at
-agentplot/blueprints f15896b; record 0063 as amended 2026-11-05; rule
-core.30).
+former scratch SHALL be moved to the new path, what is in it kept (35
+as amended at agentplot/blueprints f15896b; record 0063 as amended
+2026-11-05; rule core.30).
 
 #### Scenario: A worktree's checkout with no scratch on its record
 
@@ -40,27 +37,6 @@ core.30).
   directory is gone
   (`a_place_in_the_repository_takes_the_short_scratch_at_its_next_run`
   in `crates/sluice/tests/profiles/places.rs`)
-
-#### Scenario: A run of the worktree is going
-
-- **WHEN** a worktree's checkout record names a scratch under the
-  repository's `sluice/.tmp/`, a run of the worktree is going, and the
-  worktree runs `sluice exec` beside it
-- **THEN** the run beside it is given the former scratch and the record
-  still names it; once the going run has ended, the next run is given a
-  scratch under the user's directory with the former scratch's file in
-  it (`a_place_with_a_run_going_keeps_its_former_scratch_for_it` in
-  `crates/sluice/tests/profiles/places.rs`)
-
-#### Scenario: A former scratch that cannot be moved
-
-- **WHEN** a worktree's checkout record names a scratch under the
-  repository's `sluice/.tmp/`, a directory that is not empty already
-  stands at its new path, and the worktree runs `sluice exec`
-- **THEN** the run is given the new path, the record names it, and the
-  former directory is gone
-  (`a_former_scratch_that_cannot_be_moved_is_removed` in
-  `crates/sluice/tests/profiles/places.rs`)
 
 ### Requirement: A check under the sandbox writes its scratch and binds sockets in it
 
@@ -97,6 +73,41 @@ and at a landing's alike (35 as amended, C.4 sandbox row).
   `SLUICE_USER_SCRATCH`)
 
 ## ADDED Requirements
+
+### Requirement: A run beside a worktree's going run keeps its former scratch
+
+While a run of a worktree whose checkout record names its former scratch
+is going, a run beside it SHALL be given the former scratch, and the
+record SHALL still name it (35 as amended at agentplot/blueprints
+f15896b; record 0063 as amended 2026-11-05; rule core.30).
+
+#### Scenario: A run of the worktree is going
+
+- **WHEN** a worktree's checkout record names a scratch under the
+  repository's `sluice/.tmp/`, a run of the worktree is going, and the
+  worktree runs `sluice exec` beside it
+- **THEN** the run beside it is given the former scratch and the record
+  still names it; once the going run has ended, the next run is given a
+  scratch under the user's directory with the former scratch's file in
+  it (`a_place_with_a_run_going_keeps_its_former_scratch_for_it` in
+  `crates/sluice/tests/profiles/places.rs`)
+
+### Requirement: A former scratch the system cannot move is removed
+
+Where the system cannot move a worktree's former scratch to its new
+path, the new path SHALL be made empty and the former scratch removed
+(35 as amended at agentplot/blueprints f15896b; record 0063 as amended
+2026-11-05; rule core.30).
+
+#### Scenario: A former scratch that cannot be moved
+
+- **WHEN** a worktree's checkout record names a scratch under the
+  repository's `sluice/.tmp/`, a directory that is not empty already
+  stands at its new path, and the worktree runs `sluice exec`
+- **THEN** the run is given the new path, the record names it, and the
+  former directory is gone
+  (`a_former_scratch_that_cannot_be_moved_is_removed` in
+  `crates/sluice/tests/profiles/places.rs`)
 
 ### Requirement: A candidate's checkout from an older sluice is released where its record names
 
