@@ -50,6 +50,26 @@ pub fn unanswered(e: &anyhow::Error) -> bool {
     e.chain().any(|c| c.is::<Unanswered>())
 }
 
+/// Record 0122 (design D3): the process stopped part way through an act,
+/// as a host that stops does: whatever the core does with a seam's error,
+/// it reads nothing of this one, and the round ends with what came after
+/// the act unwritten. A fake raises it, standing for a host that stopped.
+#[derive(Debug)]
+pub struct Stopped(pub String);
+
+impl fmt::Display for Stopped {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
+impl std::error::Error for Stopped {}
+
+/// Whether `e`, or anything that caused it, is a [`Stopped`].
+pub fn stopped(e: &anyhow::Error) -> bool {
+    e.chain().any(|c| c.is::<Stopped>())
+}
+
 /// 133: a read of a branch's remote that could not be made: a fetch that
 /// failed for any reason but the remote having no such ref.
 #[derive(Clone, Debug, PartialEq, Eq)]

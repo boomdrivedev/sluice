@@ -433,45 +433,13 @@ impl Sluice<'_> {
     // 1. Recover
     // -----------------------------------------------------------------------
 
+    /// Record 0122 (design D3): what was written and not yet done is done
+    /// from what is written, each act checked against its proof first: a
+    /// claimed run whose checks a stopped step started is written running
+    /// from their own start, and one whose checkout it made is started in
+    /// it ([`Sluice::perform_starts`]); nothing of a claimed run is released
+    /// or opened again.
     fn recover(&self, branch: &str, releases: &mut Vec<ReleaseOutcome>) -> Result<()> {
-        // A place decided by a step that stopped before confirming its run
-        // started: release it by its name and open the run again, whatever
-        // its release did (123); one that failed is tried again by the
-        // rounds after.
-        let line = self.read_line(branch)?;
-        let stale: Vec<(String, String)> = line
-            .doc
-            .candidates
-            .iter()
-            .flat_map(|c| {
-                c.runs
-                    .iter()
-                    .filter(|r| r.state == RunState::Claimed && self.mine(r))
-                    .filter_map(|r| r.place.clone().map(|p| (c.id.clone(), p)))
-            })
-            .collect();
-        for (cand, place) in stale {
-            let outcome = self.release_made(branch, &place)?;
-            let retry = matches!(outcome.how, Releasing::Failed { .. });
-            self.update(branch, |l| {
-                if let Some(c) = l.candidate_mut(&cand) {
-                    for r in &mut c.runs {
-                        if r.state == RunState::Claimed && r.place.as_deref() == Some(&place) {
-                            r.state = RunState::Open;
-                            r.place = None;
-                            r.run = None;
-                        }
-                    }
-                }
-                if retry && !l.doc.release.contains(&place) {
-                    l.doc.release.push(place.clone());
-                }
-                Ok(())
-            })?;
-            if outcome.how != Releasing::Released {
-                releases.push(outcome);
-            }
-        }
         self.perform(branch, None, Parts::new(), releases)
     }
 
@@ -847,14 +815,18 @@ impl Sluice<'_> {
         Ok(())
     }
 
-    /// 33, 37: make each decided run's place and start its checks
+    /// 33, 37: make each claimed run's place and start its checks
     /// ([`Sluice::start_run`]) in the part `parts` holds for it, reading
-    /// the host where `unmet`, the round's look, has not (design D4). 71
-    /// (rule core.49): a run marked starting with no part held, a stopped
-    /// round's, goes back to open for a later round, as does one the check
-    /// seam refuses at the bound and every run decided behind it; a place
-    /// made for it is released as any candidate's is (123), into
-    /// `releases` when its release was not plain. 84, 139 (rule core.38):
+    /// the host where `unmet`, the round's look, has not (design D4).
+    /// Record 0122 (design D3): each is acted on from its written state, its
+    /// proof read first: a run whose checks were started is written running
+    /// from their own start and started no second time. 71 (rule core.49):
+    /// a run claimed with no part held, a stopped round's, is started once
+    /// this host holds room for it, in the checkout that round made, and
+    /// waits claimed otherwise; one the check seam refuses at the bound,
+    /// and every run decided behind it, goes back to open for a later
+    /// round, a place made for it released as any candidate's is (123),
+    /// into `releases` when its release was not plain. 84, 139 (rule core.38):
     /// the stopped round's run is read against the host first, as its
     /// start would have read it, so an engine gone since its claim leaves
     /// it a run whose tests could not run, with the reason. 88, S19: a run
@@ -899,11 +871,31 @@ impl Sluice<'_> {
         let mut full = false;
         for (c, i) in starting {
             let name = c.runs[i].place.clone().expect("a starting run has a place");
-            let held = parts.remove(&name);
+            let mut held = parts.remove(&name);
+            // Record 0122 (design D3): a start found done is not done again:
+            // the run is written running from its own start, nothing is
+            // started, and the room held for it goes back.
+            if let Some(found) = self.seams.tests.found(&name)? {
+                drop(held);
+                self.write_running(branch, &c.id, i, &name, &found.run, &found.since)?;
+                continue;
+            }
             if held.is_none() && !given_out(&c.runs[i]) {
                 // No room was held for it: a stopped round's (core.49).
+                // Record 0122 (design D3): it is started, in the checkout
+                // that round made where it made one, once this host holds
+                // room for it, and waits claimed for a round with room.
                 if self.meets(unmet) {
-                    self.reopen_made(branch, &c.id, i, &name, releases)?;
+                    if full {
+                        continue;
+                    }
+                    match self.seams.tests.hold(RunKind::Queue)? {
+                        Some(part) => held = Some(part),
+                        None => {
+                            full = true;
+                            continue;
+                        }
+                    }
                 } else {
                     let checks = match c.runs[i].checks.is_empty() {
                         true => from.rules.required.clone(),
@@ -914,8 +906,8 @@ impl Sluice<'_> {
                     let report = unstarted(&checks, kind, why);
                     let home = from.home.as_deref();
                     self.not_started(branch, &c, i, &name, &report, home, releases)?;
+                    continue;
                 }
-                continue;
             }
             // 71: once a start is refused at the bound, the host holds none
             // of the room this round counted on; each run decided behind it
@@ -1107,7 +1099,7 @@ impl Sluice<'_> {
             Ok(place) => place,
             // 133, 134: a remote that could not answer says nothing of the
             // run; the round is refused as any such read.
-            Err(e) if sluice_seams::unanswered(&e) || read_refused(&e).is_some() => return Err(e),
+            Err(e) if passes_through(&e) => return Err(e),
             Err(e) => {
                 let why = could_not_start(&e);
                 let report = unstarted(&checks, kind, why.clone());
@@ -1134,18 +1126,13 @@ impl Sluice<'_> {
         );
         let e = match started {
             Ok(run) => {
-                self.update(branch, |l| {
-                    if let Some(x) = l.candidate_mut(&c.id) {
-                        if let Some(xr) = x.runs.get_mut(i) {
-                            if xr.state == RunState::Claimed && xr.place.as_deref() == Some(&name) {
-                                xr.state = RunState::Running;
-                                xr.run = Some(run.clone());
-                                xr.running = Some(self.now());
-                            }
-                        }
-                    }
-                    Ok(())
-                })?;
+                // Record 0122 (design D3): written running from the run's own
+                // start, as the supervisor's files give it.
+                let since = match self.seams.tests.found(&name)? {
+                    Some(found) => found.since,
+                    None => self.now(),
+                };
+                self.write_running(branch, &c.id, i, &name, &run, &since)?;
                 return Ok(Started::Running(run));
             }
             // Refused before anything of it ran: no run, no outcome.
@@ -1160,13 +1147,37 @@ impl Sluice<'_> {
             }
             // 133, 134: a remote that could not answer says nothing of the
             // run; the round is refused as any such read.
-            Err(e) if sluice_seams::unanswered(&e) || read_refused(&e).is_some() => return Err(e),
+            Err(e) if passes_through(&e) => return Err(e),
             Err(e) => e,
         };
         let why = could_not_start(&e);
         let report = unstarted(&checks, kind, why.clone());
         self.not_started(branch, c, i, &name, &report, home, releases)?;
         Ok(Started::NotRun(why))
+    }
+
+    /// Record 0122 (design D3): run `i` of candidate `cand`, claimed into
+    /// `place`, written running under `run` from its own start `since`;
+    /// nothing where it is no longer claimed into that place.
+    fn write_running(
+        &self,
+        branch: &str,
+        cand: &str,
+        i: usize,
+        place: &str,
+        run: &RunHandle,
+        since: &str,
+    ) -> Result<()> {
+        self.update(branch, |l| {
+            if let Some(xr) = l.candidate_mut(cand).and_then(|x| x.runs.get_mut(i)) {
+                if xr.state == RunState::Claimed && xr.place.as_deref() == Some(place) {
+                    xr.state = RunState::Running;
+                    xr.run = Some(run.clone());
+                    xr.running = Some(since.to_string());
+                }
+            }
+            Ok(())
+        })
     }
 
     /// Design D1 (16, 114, 115): run `i` of candidate `c`, decided into
@@ -3980,6 +3991,13 @@ fn read_not_run(
             })
             .collect(),
     )
+}
+
+/// 133, 134, record 0122 (design D3): an error a start reads nothing of
+/// and passes on, ending the round: a remote that could not answer, a read
+/// of it refused, or the process stopped part way through the act.
+fn passes_through(e: &anyhow::Error) -> bool {
+    sluice_seams::unanswered(e) || read_refused(e).is_some() || sluice_seams::stopped(e)
 }
 
 /// Design D1: how much of what a failing program printed a start's reason

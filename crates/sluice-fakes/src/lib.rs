@@ -25,8 +25,8 @@ use sluice_seams::{
     LandingCommit, LastResult, Moved, Network, NotRun, Notification, Outcome, Part, Place,
     PreviewPlace, Progress, Proof, ReadRefused, Reading, Reads, ReleaseFailure, ReleasePolicy,
     Released, ResultAsk, Rev, RunHandle, RunKind, RunReport, RunRequest, Running, Session,
-    SessionPlace, Settings, Snapshot, Source, State, Submitter, TaskLog, TaskProgress, TaskResult,
-    Tests, Unanswered, Written,
+    SessionPlace, Settings, Snapshot, Source, State, Stopped, Submitter, TaskLog, TaskProgress,
+    TaskResult, Tests, Unanswered, Written,
 };
 
 /// A tree: path to content.
@@ -1370,6 +1370,17 @@ impl World {
     }
 
     /// The revisions runs were started on, in order of starting.
+    /// Record 0122 (design D3): each run's own start, by the world's clock,
+    /// in the order they started.
+    pub fn run_starts(&self) -> Vec<String> {
+        self.0
+            .borrow()
+            .runs
+            .iter()
+            .map(|r| r.started.clone())
+            .collect()
+    }
+
     pub fn started(&self) -> Vec<Rev> {
         self.requests().into_iter().map(|r| r.revision).collect()
     }
@@ -2605,7 +2616,11 @@ impl Tests for FakeTests {
         let run = RunHandle(format!("run-{}", inner.runs.len() - 1));
         if inner.crash == Some(Crash::AfterStart) {
             inner.crash = None;
-            bail!("crashed after starting a run in {}", request.place.name);
+            return Err(Stopped(format!(
+                "crashed after starting a run in {}",
+                request.place.name
+            ))
+            .into());
         }
         Ok(run)
     }
@@ -3075,6 +3090,16 @@ impl Checkout for FakeCheckout {
         if let Some(words) = &inner.checkout_fails {
             bail!("{words}");
         }
+        // Record 0122 (design D3): a checkout this host made at `rev`, by a
+        // step that stopped before its run started, is the place.
+        if inner.places.get(name) == Some(rev) && inner.place_host.get(name) == Some(&inner.host) {
+            return Ok(Place {
+                name: name.into(),
+                path: format!("/fake/places/{name}").into(),
+                tmp: format!("/fake/tmp/{name}").into(),
+                env: Default::default(),
+            });
+        }
         // 32: two places on one host never collide.
         if inner.places.contains_key(name) || inner.worktrees.contains_key(name) {
             bail!("place {name} already exists");
@@ -3092,7 +3117,7 @@ impl Checkout for FakeCheckout {
         inner.place_host.insert(name.into(), host);
         if inner.crash == Some(Crash::AfterCheckout) {
             inner.crash = None;
-            bail!("crashed after making {name}");
+            return Err(Stopped(format!("crashed after making {name}")).into());
         }
         Ok(Place {
             name: name.into(),
@@ -3261,7 +3286,7 @@ impl Checkout for FakeCheckout {
         let mut inner = self.0 .0.borrow_mut();
         if inner.crash == Some(Crash::AfterRelease) {
             inner.crash = None;
-            bail!("crashed after releasing {name}");
+            return Err(Stopped(format!("crashed after releasing {name}")).into());
         }
         Ok(())
     }
@@ -4034,7 +4059,7 @@ impl State for FakeState {
             inner.results.extend(lines);
             if inner.crash == Some(Crash::AfterResults) {
                 inner.crash = None;
-                bail!("crashed after recording results");
+                return Err(Stopped("crashed after recording results".into()).into());
             }
             return Ok(());
         };
@@ -4050,7 +4075,7 @@ impl State for FakeState {
         }
         if inner.crash == Some(Crash::AfterResults) {
             inner.crash = None;
-            bail!("crashed after recording results");
+            return Err(Stopped("crashed after recording results".into()).into());
         }
         Ok(())
     }

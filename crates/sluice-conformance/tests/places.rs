@@ -3,7 +3,7 @@
 use std::collections::BTreeSet;
 use std::time::Duration;
 
-use sluice_conformance::{policy, shared, Harness, Rig, BRANCH};
+use sluice_conformance::{policy, shared, Crash, Harness, Rig, BRANCH};
 use sluice_core::records::{Event, State};
 use sluice_core::release::Releasing;
 use sluice_core::{Peer, Sluice};
@@ -94,44 +94,26 @@ fn places_of_two_lines_on_one_host_never_collide() {
     assert!(h.w().released_places().is_empty());
 }
 
-/// The checks each run that left checks not run named, with why, in
-/// order.
-fn not_run(h: &Harness) -> Vec<Vec<(String, String)>> {
-    h.events()
-        .into_iter()
-        .filter_map(|e| match e {
-            Event::Lost { not_run, .. } if !not_run.is_empty() => {
-                Some(not_run.into_iter().map(|n| (n.task, n.reason)).collect())
-            }
-            _ => None,
-        })
-        .collect()
-}
-
-/// satisfies: 59, 25, 34, 114: a place made for a run whose start failed
-/// is released by the step, which records the run with no result
+/// satisfies: 59, 25, 34; record 0122; rule core.16: a checkout made by a
+/// step that stopped before its run started is the run's: the next round
+/// finds it made at the combination, starts the run in it once, and makes
+/// no second checkout; it is released once, after the run ends
 #[test]
-fn a_place_made_by_a_step_that_stopped_before_its_run_started_is_released() {
+fn a_checkout_made_by_a_step_that_stopped_before_its_run_started_is_used() {
     let h = Harness::bolt();
     h.work("unit/a", "agent-a", &[("a/lib", Some("a2"))]);
     let one = h.submit("unit/a");
-    h.w().crash_next_start();
-    h.step();
+    h.w().crash(Crash::AfterCheckout);
+    assert!(h.sluice().step(BRANCH).is_err(), "the step stopped");
     let made = h.w().made_places();
     assert_eq!(made.len(), 1);
-    let crashed = format!(
-        "could not start: crashed before starting a run in {}",
-        made[0]
-    );
-    assert_eq!(
-        not_run(&h),
-        [vec![("#gate".to_string(), crashed)]],
-        "recorded with no result, its gate's entry not run"
-    );
-    assert!(h.w().live_places().is_empty());
+    assert!(h.w().started().is_empty());
+    assert_eq!(h.w().live_places(), made, "held for its run");
     h.settle();
     assert_eq!(h.sub(one).state, State::Landed);
-    assert_eq!(h.w().made_places().len(), 2);
+    assert_eq!(h.w().made_places(), made, "no second checkout");
+    assert_eq!(h.w().started().len(), 1);
+    assert_eq!(h.releases_of(&made[0]), 1);
     assert!(h.w().live_places().is_empty());
 }
 
