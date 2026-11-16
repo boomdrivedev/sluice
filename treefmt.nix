@@ -124,6 +124,14 @@ _: {
     "crates/sluice/src/profiles/github/workflows/*.yml"
   ];
 
+  # cfn-lint reads the CodeBuild pool's template's resources, properties
+  # and functions, which yamlfmt only lays out (record 0119; design D10 of
+  # the change `a-codebuild-fleet-runs-a-queues-checks`); its command is
+  # the build devenv.nix pins.
+  settings.formatter.cfn-lint.includes = [
+    "crates/sluice/src/profiles/codebuild/templates/*.yml"
+  ];
+
   # ruff lints and formats the diagram scripts: its default rules, then
   # its format.
   programs.ruff-check.enable = true;
