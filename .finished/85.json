@@ -1,0 +1,37 @@
+{
+  "schema": "sluice/submission@1",
+  "id": 85,
+  "branch": "bolt/sluice-is-refactored-and-runs-on-pools",
+  "head": "f49c508649ec7d8002da09432cef4818de990d81",
+  "from": {
+    "agent": "fix/sluice-is-refactored-and-runs-on-pools--a-new-state-folder-test-passes-under-load",
+    "worktree": "fix/sluice-is-refactored-and-runs-on-pools--a-new-state-folder-test-passes-under-load",
+    "path": "/Users/chuck/.local/share/flume/places/2db1db6f889b/fix--sluice-is-refactored-and-runs-on-pools--a-new-state-folder-test-passes-under-load",
+    "host": "deneb"
+  },
+  "submitted": "2026-11-16T03:07:18Z",
+  "after": [],
+  "priority": 0,
+  "attempt": 1,
+  "state": "withdrawn",
+  "tested": {
+    "combination": "f783c29c185c05cf3afea1877f5cda104a162fad",
+    "on": "74deef0080873586919a85a9dd5c71c836b1058e",
+    "submissions": [
+      85
+    ]
+  },
+  "result": "failed",
+  "failed": [
+    {
+      "task": "root:format",
+      "hash": "6a87bcb369dc8681a1069896f4b3898a72f8920af28cb76a187832a962b5950f",
+      "log": "/Users/chuck/.local/share/boomdrive/repositories/boomdrivedev/sluice/sluice.git/sluice-remote/origin/.logs/bolt/sluice-is-refactored-and-runs-on-pools/c4/root:format.log",
+      "unsigned": "root:format: .claude/settings.json is not in the tree"
+    }
+  ],
+  "withdrawn": {
+    "by": "resubmission",
+    "at": "2026-11-16T04:33:56Z"
+  }
+}

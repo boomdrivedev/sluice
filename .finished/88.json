@@ -1,0 +1,26 @@
+{
+  "schema": "sluice/submission@1",
+  "id": 88,
+  "branch": "bolt/sluice-is-refactored-and-runs-on-pools",
+  "head": "5cee54bcc839acd16ad9b87a61bd048a37caf5fb",
+  "from": {
+    "agent": "change/a-runs-life-is-written-first-and-actions-runs-its-checks",
+    "worktree": "change/a-runs-life-is-written-first-and-actions-runs-its-checks",
+    "path": "/Users/chuck/.local/share/flume/places/2db1db6f889b/change--a-runs-life-is-written-first-and-actions-runs-its-checks",
+    "host": "deneb"
+  },
+  "submitted": "2026-11-16T10:52:06Z",
+  "after": [],
+  "priority": 0,
+  "attempt": 1,
+  "state": "landed",
+  "tested": {
+    "combination": "29a81a58310b6aa3102ffafb3740e02aca485ad8",
+    "on": "e56a904ba58cd5e6ca266f793bea81296518d37f",
+    "submissions": [
+      88
+    ]
+  },
+  "result": "passed",
+  "landed_as": "44e33d4e10c517c14f5d69b6a5fe320787c819bb"
+}

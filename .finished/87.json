@@ -1,0 +1,26 @@
+{
+  "schema": "sluice/submission@1",
+  "id": 87,
+  "branch": "bolt/sluice-is-refactored-and-runs-on-pools",
+  "head": "3746ecf609a2150c03110ba74c319648cc212f6a",
+  "from": {
+    "agent": "change/a-queues-home-is-written-in-its-records",
+    "worktree": "change/a-queues-home-is-written-in-its-records",
+    "path": "/Users/chuck/.local/share/flume/places/2db1db6f889b/change--a-queues-home-is-written-in-its-records",
+    "host": "deneb"
+  },
+  "submitted": "2026-11-16T05:50:40Z",
+  "after": [],
+  "priority": 0,
+  "attempt": 2,
+  "state": "landed",
+  "tested": {
+    "combination": "ab382cf702cae599ecf1d8787391a9648d744fac",
+    "on": "48a9c3d5d38dae33de4d6a4d65d23395b4c48899",
+    "submissions": [
+      87
+    ]
+  },
+  "result": "passed",
+  "landed_as": "e56a904ba58cd5e6ca266f793bea81296518d37f"
+}

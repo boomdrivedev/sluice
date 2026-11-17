@@ -1,0 +1,26 @@
+{
+  "schema": "sluice/submission@1",
+  "id": 90,
+  "branch": "bolt/sluice-is-refactored-and-runs-on-pools",
+  "head": "5a136f320e92650c99ef24ece1e620e612b8c04e",
+  "from": {
+    "agent": "fix/sluice-is-refactored-and-runs-on-pools--every-submission-record-carries-its-refusal",
+    "worktree": "fix/sluice-is-refactored-and-runs-on-pools--every-submission-record-carries-its-refusal",
+    "path": "/Users/chuck/.local/share/flume/places/2db1db6f889b/fix--sluice-is-refactored-and-runs-on-pools--every-submission-record-carries-its-refusal",
+    "host": "deneb"
+  },
+  "submitted": "2026-11-16T14:43:22Z",
+  "after": [],
+  "priority": 0,
+  "attempt": 1,
+  "state": "landed",
+  "tested": {
+    "combination": "8b5d711716a9fe39545def834d2926ac2b99cc24",
+    "on": "038ef2ad462c676ccdc1b4ec39b0cee8b461bc2d",
+    "submissions": [
+      90
+    ]
+  },
+  "result": "passed",
+  "landed_as": "04b1475b6fa60aae82b617a1cbe340c8d0b1bb1b"
+}

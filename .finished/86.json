@@ -1,0 +1,26 @@
+{
+  "schema": "sluice/submission@1",
+  "id": 86,
+  "branch": "bolt/sluice-is-refactored-and-runs-on-pools",
+  "head": "5fd6682d50ab1f6a713560c2806eff7425e499e0",
+  "from": {
+    "agent": "fix/sluice-is-refactored-and-runs-on-pools--a-new-state-folder-test-passes-under-load",
+    "worktree": "fix/sluice-is-refactored-and-runs-on-pools--a-new-state-folder-test-passes-under-load",
+    "path": "/Users/chuck/.local/share/flume/places/2db1db6f889b/fix--sluice-is-refactored-and-runs-on-pools--a-new-state-folder-test-passes-under-load",
+    "host": "deneb"
+  },
+  "submitted": "2026-11-16T04:33:56Z",
+  "after": [],
+  "priority": 0,
+  "attempt": 2,
+  "state": "landed",
+  "tested": {
+    "combination": "1f294793ea2c1f4dfbf18e189d9c7ea521fd58cf",
+    "on": "74deef0080873586919a85a9dd5c71c836b1058e",
+    "submissions": [
+      86
+    ]
+  },
+  "result": "passed",
+  "landed_as": "48a9c3d5d38dae33de4d6a4d65d23395b4c48899"
+}

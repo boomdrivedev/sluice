@@ -1,0 +1,22 @@
+{
+  "schema": "sluice/branch@1",
+  "branch": "bolt/sluice-is-refactored-and-runs-on-pools",
+  "log": "sluice/log@1",
+  "base": "c409be0c127c2d7501b23f9351094fde56e4334f",
+  "verified": true,
+  "covered_by": {
+    "at": "c409be0c127c2d7501b23f9351094fde56e4334f",
+    "result": "passed",
+    "ran": 4,
+    "replayed": 0
+  },
+  "window": 4,
+  "next_place": 13,
+  "next_candidate": 13,
+  "candidates": [],
+  "landing": null,
+  "release": [],
+  "outbox": [],
+  "lead": "deneb",
+  "landed": "c409be0c127c2d7501b23f9351094fde56e4334f"
+}
