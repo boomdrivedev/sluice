@@ -12,7 +12,7 @@
 | `landed` | on the branch; `landed_as` is the landing commit |
 | `failed` | blamed for a failure |
 | `conflict` | does not merge with what is ahead of it |
-| `withdrawn` | taken out, by its agent, a planner, the operator, a resubmission, or a hand-over to the host that takes its pull requests in (`withdrawn.handed_over_to`) |
+| `withdrawn` | taken out, by its agent, a planner, the operator or a resubmission; an older sluice's hand-over to the host that took its pull requests in names that host in `withdrawn.handed_over_to` |
 
 `failed` and `conflict` are out of the queue until you submit again.
 These nine are all the states there are: `sluice wait --json` and
@@ -252,9 +252,9 @@ and `other`, the result that contradicts it: its `outcome`, `at`,
 
 A pull request your submit opened, sent back (blamed, timed out, in
 conflict or withdrawn), is marked a draft and waits for your next
-submit: nothing else takes it again in your name. A hand-over to the
-host that takes the pull requests in is none of these: that host takes
-it again, and a wait on it follows it there. Submit again from its
+submit: nothing else takes it again in your name. A hand-over, which
+only an older sluice made, is none of these: the host that keeps the
+branch takes it again, and a wait on it follows it there. Submit again from its
 worktree, with a fix or with the same commits after a time-out, and
 sluice marks it ready for review and tests it again like any other
 submission. A pull request a person opened is tested again only on new

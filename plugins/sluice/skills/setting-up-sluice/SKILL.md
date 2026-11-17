@@ -207,7 +207,8 @@ Then ask the user, before writing anything:
 3. **For each that lives on GitHub, whether the team lands on it through
    pull requests today.** Ask only for a branch whose policy will name a
    remote on GitHub: one kept on this host has no pull requests, and
-   sluice refuses the table without `remote`. Ask per branch, since a team
+   sluice refuses the table without `remote`, and in a policy with no
+   `[signers]`, whose branches' state each host keeps. Ask per branch, since a team
    often reviews everything into `main` and lets agents land on a family
    of integration branches straight from their worktrees. On no, write no `pull_requests` table
    for it; on yes, see [a branch the team lands by pull
@@ -257,9 +258,23 @@ its combination passes." Never stand in for one, such as by counting code
 owners into `reviews`: sluice would land a pull request the team's own
 rule would have held.
 
-Write what the user confirms:
+Write what the user confirms. A branch that takes pull requests keeps its
+state on its remote, where the host that keeps it takes its requests in,
+so propose `[signers]` with the table where the policy names none: a
+signer for the hosts whose runs count on the branch, and `trust` naming
+it ([peers](references/profiles/peers.md) sets up the keys). Without
+signers, sluice refuses the branch alone: `main takes pull requests,
+which only the host that keeps it on origin takes in, and its state is
+each host's own: name [signers] in .config/sluice.toml so its state is
+kept on origin, as `sluice init actions` names a pool's signer (137)`.
 
 ```toml
+[signers.box]
+ssh = ".config/sluice.boxes"   # one line per host's key
+
+[branches.main]
+trust = ["box"]
+
 [branches.main.pull_requests]
 reviews = 1
 checks = ["ci/test"]
@@ -277,9 +292,10 @@ requests means on that branch:
 - Nobody presses merge, uses GitHub's merge queue or merges by hand on
   that branch. Only who lands a pull request changes, from the merge
   button to sluice's push.
-- Keep `sluice run` going (a terminal, a login item, a service manager):
-  a pull request opened by hand has no submit waiting on it, and sluice
-  starts no service itself.
+- A pull request opened by hand has no submit telling sluice of it:
+  sluice's host process takes it in at its passes while it runs for the
+  repository, and any command of sluice's there starts it. `sluice step
+  <branch>` takes the branch's pull requests in at once.
 
 sluice has no mode in which GitHub's button lands and sluice only tests.
 Whenever the user asks for one (keep the merge button, have sluice only
@@ -303,6 +319,7 @@ ruleset with the button left on.
 | how work reaches the queue | straight from a worktree, or pull requests | [pull-requests](references/profiles/pull-requests.md) |
 | running copies of landed revisions (`[preview]`) | a command per repository | [previews](references/profiles/previews.md) |
 | more than one host, or more than one system (`[signers]`, `[systems]`) | peers on the git remote, standing hosts signing with SSH keys | [peers](references/profiles/peers.md) |
+| runs no standing host takes, a burst or a system none runs (`[pools]`) | a pool on GitHub Actions, set up by `sluice init actions`; or a CodeBuild fleet in the project's own AWS account, set up by `sluice init codebuild`, which can take every run of a branch whose `trust` names its signer beside the leading hosts' signer with `systems = []` | [running checks on a pool](https://agentplot.github.io/sluice/guides/pools/) |
 
 The rules per branch (`required`, `parallel`, `batch`, `hold`, `flaky`,
 `timeout`, `release_retries`, `trust`) and `[landing] subject` are in the
@@ -416,9 +433,9 @@ sluice protect        # git hook: only sluice moves a gated branch (submit, step
 Host settings live in one file on the host, never in the repository:
 `$XDG_CONFIG_HOME/sluice/config.toml`, `~/.config/sluice/config.toml` when
 `XDG_CONFIG_HOME` is unset. Every repository on the host shares it. sluice
-reads it as each command starts and never writes it; a `sluice run` kept
-running takes a change up before its next pass, so nothing restarts it. A
-change of `[telemetry]` starts it afresh, in the same process.
+reads it as each command starts and never writes it; sluice's host
+process takes a change up between its passes, so nothing restarts it, and
+hands a change of `[telemetry]` to a fresh host process it starts itself.
 Before writing it, find out who writes it:
 
 ```sh
@@ -520,8 +537,37 @@ For a branch on GitHub, do these in this order, or a step is refused:
 For more than one host or system, follow [peers](references/profiles/peers.md)'s
 "Set it up, in order": a signing key per host, `[signing]` in each host's
 file (checked first on each host, as *The host's file* says), then one
-landing that adds `[signers]` and rewrites `trust`, then `sluice run` kept
-running on each standing executor.
+landing that adds `[signers]` and rewrites `trust`, then each standing
+executor started as that page says.
+
+For runs no standing host takes, a burst or a system none of them runs,
+offer a pool on GitHub Actions, once the app is set up and the policy
+names `[signers]`; each workflow run spends the repository's Actions
+minutes, so the hosts take runs first. In a working copy of the branch
+the workflow runs from, run `sluice init actions`: it writes
+`.github/workflows/sluice.yml` and `sluice-pr.yml` and appends
+`[signers.forge]` and `[pools.forge]` where the policy names no pool on
+GitHub. Add `forge` to each branch's `trust` and name its `systems`. Then
+ask the user to give the app Actions read and write, and to make the
+`sluice` environment it prints, deployable from that branch alone,
+holding `SLUICE_APP_KEY` and `SLUICE_APP_ID`. Land the files, then
+`sluice forge check <branch>` reads all of it back.
+
+For a queue whose every run goes to a pool, offer a CodeBuild fleet in
+the project's own AWS account, once the app is set up and the policy
+names `[signers]`; its instances bill while they run, each for an hour
+at least. In a working copy of the branch, run `sluice init codebuild`:
+it writes `.config/sluice-codebuild.yml`, a fleet and a run project for
+each Linux system `[systems]` names, and prints the deploy command and
+the secret to fill. Ask the user to deploy the stack and fill the
+secret, and to name, on each host that leads the branch, the profile
+that assumes the stack's lead role as `[aws] profile`. Then
+`sluice init codebuild --stack <name>` appends `[signers.codebuild]`
+and `[pools.codebuild]`. Give the signer the leading hosts sign as
+`systems = []`, so they claim no run, and set each branch's `trust` to
+that signer and `codebuild`, with `batch = false` and `parallel` at the
+fleet's maximum. Land the policy, then `sluice pool check <branch>`
+reads the pool back from AWS.
 
 A pattern with `remote = "origin"` needs no push by hand: `sluice branch
 create <branch> --from main` makes each branch under it there as the app,

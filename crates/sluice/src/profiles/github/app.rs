@@ -154,6 +154,20 @@ enum Mint {
     Command(CredentialCommand),
 }
 
+/// Record 0119 (design D4): a token that reads one repository's contents
+/// and nothing else, for one run build, and when GitHub ends it.
+pub struct Reading {
+    pub secret: String,
+    pub ends: DateTime<Utc>,
+}
+
+/// Its end, never its secret.
+impl std::fmt::Debug for Reading {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "a token that reads one repository, ending {}", self.ends)
+    }
+}
+
 /// An installation token, and what it is for a report of its refusal.
 pub struct Issued {
     pub secret: String,
@@ -743,6 +757,78 @@ impl App {
         })
     }
 
+    /// Record 0119 (design D4 of the change
+    /// `a-codebuild-fleet-runs-a-queues-checks`): a token of the app's
+    /// installation on `repo` that reads `repo`'s contents and nothing
+    /// else, `contents: read` on `repo` alone, bought now for one run build
+    /// and never held by this process, ending when GitHub's answer says,
+    /// within its hour. A token GitHub gave more than that is refused, and
+    /// a host whose `[forge]` names a credential command in place of the
+    /// app's key buys none, since it cannot narrow what it is given.
+    pub fn reading(&self, repo: &Repo) -> Result<Reading> {
+        if let Mint::Command(command) = &self.mint {
+            bail!(
+                "a run build reads {repo} with a token of contents: read on it alone, which \
+                 sluice buys with the app's key; [forge] credential {command} gives tokens \
+                 sluice cannot narrow, so name the app's key as [forge] key on a host that \
+                 leads a branch on a CodeBuild pool"
+            );
+        }
+        let installation = self.installation(repo)?;
+        let body = serde_json::json!({
+            "repositories": [repo.name],
+            "permissions": { "contents": "read" },
+        })
+        .to_string();
+        // Buying a token changes nothing the repository holds: a read.
+        let v = self
+            .send(
+                "POST",
+                Call::Read,
+                &format!("/app/installations/{}/access_tokens", installation.id),
+                Bearer::App,
+                Some(&body),
+            )
+            .with_context(|| format!("making a token that reads {repo}"))?;
+        let secret = v["token"]
+            .as_str()
+            .ok_or_else(|| anyhow!("GitHub gave no token that reads {repo}"))?
+            .to_string();
+        let ends = v["expires_at"]
+            .as_str()
+            .and_then(|s| DateTime::parse_from_rfc3339(s).ok())
+            .ok_or_else(|| anyhow!("GitHub gave a token that reads {repo} with no end"))?
+            .with_timezone(&Utc);
+        if let Some(more) = v["permissions"].as_object().and_then(|p| {
+            p.iter().find(|(k, v)| {
+                v.as_str() != Some("read") || !["contents", "metadata"].contains(&k.as_str())
+            })
+        }) {
+            bail!(
+                "GitHub gave a token for reading {repo} that also holds {}: {}",
+                more.0,
+                more.1
+            );
+        }
+        let names: Vec<&str> = v["repositories"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter_map(|r| r["full_name"].as_str())
+            .collect();
+        if names.len() != 1 || !names[0].eq_ignore_ascii_case(&repo.to_string()) {
+            bail!(
+                "GitHub gave a token for reading {repo} that reaches {}",
+                if names.is_empty() {
+                    "no repository it named".to_string()
+                } else {
+                    names.join(", ")
+                }
+            );
+        }
+        Ok(Reading { secret, ends })
+    }
+
     /// `GET` an API path as `bearer`.
     pub fn get(&self, path: &str, bearer: Bearer) -> Result<Value> {
         self.send("GET", Call::Read, path, bearer, None)
@@ -1319,6 +1405,121 @@ mod tests {
         let (iat, exp) = (c["iat"].as_i64().unwrap(), c["exp"].as_i64().unwrap());
         assert_eq!(exp - iat, 600);
         assert!(iat <= at.timestamp() && exp > at.timestamp());
+    }
+
+    /// Requests a server on this host answers, each with what `answer`
+    /// gives for its method, path and body, until the test ends; and each
+    /// request's method, path and body as it came.
+    fn serve(
+        answer: impl Fn(&str, &str, &str) -> (u16, String) + Send + 'static,
+    ) -> (
+        String,
+        std::sync::Arc<std::sync::Mutex<Vec<(String, String, String)>>>,
+    ) {
+        use std::io::{BufRead, BufReader, Read, Write};
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = format!("http://{}", listener.local_addr().unwrap());
+        let seen = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let kept = seen.clone();
+        std::thread::spawn(move || {
+            for stream in listener.incoming() {
+                let Ok(mut stream) = stream else { return };
+                let mut reader = BufReader::new(stream.try_clone().unwrap());
+                let mut line = String::new();
+                if reader.read_line(&mut line).is_err() {
+                    continue;
+                }
+                let mut words = line.split_whitespace();
+                let (method, path) = (
+                    words.next().unwrap_or_default().to_string(),
+                    words.next().unwrap_or_default().to_string(),
+                );
+                let mut length = 0;
+                loop {
+                    let mut header = String::new();
+                    reader.read_line(&mut header).unwrap();
+                    if header.trim().is_empty() {
+                        break;
+                    }
+                    if let Some((k, v)) = header.split_once(':') {
+                        if k.eq_ignore_ascii_case("content-length") {
+                            length = v.trim().parse().unwrap();
+                        }
+                    }
+                }
+                let mut body = vec![0; length];
+                reader.read_exact(&mut body).unwrap();
+                let body = String::from_utf8(body).unwrap();
+                let (status, text) = answer(&method, &path, &body);
+                kept.lock().unwrap().push((method, path, body));
+                let _ = write!(
+                    stream,
+                    "HTTP/1.1 {status} OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{text}",
+                    text.len()
+                );
+            }
+        });
+        (address, seen)
+    }
+
+    /// Record 0119 (design D4): the token a run build reads its repository
+    /// with is asked of GitHub with `contents: read` on that repository
+    /// alone, bought for each start and held by none; one GitHub gave more
+    /// than that is refused.
+    #[test]
+    fn a_reading_token_asks_to_read_one_repository() {
+        let ends = (Utc::now() + chrono::Duration::hours(1)).to_rfc3339();
+        let wider = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let widened = wider.clone();
+        let (api, seen) = serve(move |method, path, _| match (method, path) {
+            ("GET", "/repos/acme/widgets/installation") => (
+                200,
+                r#"{"id": 99, "permissions": {"contents": "write"}}"#.into(),
+            ),
+            ("POST", "/app/installations/99/access_tokens") => {
+                let contents = match widened.load(std::sync::atomic::Ordering::SeqCst) {
+                    true => "write",
+                    false => "read",
+                };
+                (
+                    201,
+                    serde_json::json!({
+                        "token": "ghs_reads",
+                        "expires_at": ends,
+                        "permissions": { "contents": contents, "metadata": "read" },
+                        "repositories": [{ "full_name": "acme/widgets" }],
+                    })
+                    .to_string(),
+                )
+            }
+            _ => (404, r#"{"message": "Not Found"}"#.into()),
+        });
+        let policy = Rc::new(Policy::command().recording());
+        let app = App::new(4242, KEY, &api, Box::new(Utc::now), policy).unwrap();
+        let repo = Repo {
+            owner: "acme".into(),
+            name: "widgets".into(),
+        };
+        let token = app.reading(&repo).unwrap();
+        assert_eq!(token.secret, "ghs_reads");
+        assert!(token.ends > Utc::now());
+        app.reading(&repo).unwrap();
+        let asked: Vec<(String, String, String)> = seen
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|(_, path, _)| path.ends_with("/access_tokens"))
+            .cloned()
+            .collect();
+        assert_eq!(asked.len(), 2, "bought for each start, held by none");
+        let body: Value = serde_json::from_str(&asked[0].2).unwrap();
+        assert_eq!(
+            body,
+            serde_json::json!({ "repositories": ["widgets"], "permissions": { "contents": "read" } })
+        );
+        wider.store(true, std::sync::atomic::Ordering::SeqCst);
+        let e = format!("{:#}", app.reading(&repo).unwrap_err());
+        assert!(e.contains("also holds contents"), "{e}");
     }
 
     /// A 5xx is GitHub unable to answer just then, told apart from any

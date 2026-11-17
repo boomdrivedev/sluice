@@ -6,14 +6,21 @@ use std::time::Duration;
 use sluice_conformance::{policy, Crash, Harness, Rig, BRANCH};
 use sluice_core::records::{Event, State};
 use sluice_core::{Peer, Sluice, Step};
+use sluice_seams::RunKind;
 
 /// The bolt policy with its records on `origin`, trusting the signer
 /// `box` this host signs as.
 fn peers() -> Harness {
+    peers_with("")
+}
+
+/// [`peers`], its policy ending in `more`.
+fn peers_with(more: &str) -> Harness {
     let p = policy(false, "fail", 4).replace(
         "trust = [\"open\", \"sandbox\", \"container\"]\n",
         "trust = [\"box\"]\nremote = \"origin\"\n",
-    ) + "\n[signers.box]\nssh = \"box ssh-ed25519 AAAA\"\n";
+    ) + "\n[signers.box]\nssh = \"box ssh-ed25519 AAAA\"\n"
+        + more;
     let h = Harness::new(&p);
     h.w().signs_as("box");
     h
@@ -159,7 +166,11 @@ fn runs(h: &Harness) -> Vec<(Option<String>, sluice_core::records::RunState)> {
     line.doc
         .candidates
         .iter()
-        .flat_map(|c| c.runs.iter().map(|r| (r.host.clone(), r.state)))
+        .flat_map(|c| {
+            c.runs
+                .iter()
+                .map(|r| (r.holder().map(str::to_string), r.state))
+        })
         .collect()
 }
 
@@ -173,13 +184,22 @@ fn claims(h: &Harness) -> Vec<String> {
         .collect()
 }
 
-/// A lead that signs as no one the gate trusts, so other hosts take the
-/// runs; a submission it has opened a run for.
+/// Design D8: the instance that keeps the branch, `lead`, signing as
+/// `box`, which the branch accepts, with no room of its own, so other
+/// hosts take the runs.
+fn keeper<'a>(h: &'a Harness) -> Sluice<'a> {
+    let s = as_signer(h, "lead", Some("box"));
+    h.w().no_room();
+    s
+}
+
+/// A lead with no room of its own, so other hosts take the runs; a
+/// submission it has opened a run for.
 fn opened(h: &Harness) -> u64 {
     h.w().hold_runs(true);
     h.work("unit/a", "agent-a", &[("a/lib", Some("a2"))]);
     let one = h.submit("unit/a");
-    as_signer(h, "lead", None).step(BRANCH).unwrap();
+    keeper(h).step(BRANCH).unwrap();
     assert_eq!(runs(h), [(None, sluice_core::records::RunState::Open)]);
     one
 }
@@ -205,8 +225,9 @@ fn a_full_host_claims_nothing() {
     assert!(claims(&h).is_empty());
 }
 
-/// satisfies: 71, 75: a claim whose start the host refuses at its bound
-/// runs nothing and is given up, open to another host
+/// satisfies: 71, 75; record 0122: a claim whose start the host refuses
+/// at its bound runs nothing and ends with no outcome, and its follow-up,
+/// which the lead opens, is open to another host
 #[test]
 fn a_claim_refused_at_the_bound_is_open_to_another_host() {
     use sluice_core::records::RunState;
@@ -216,10 +237,21 @@ fn a_claim_refused_at_the_bound_is_open_to_another_host() {
     as_signer(&h, "b", Some("box")).step(BRANCH).unwrap();
     assert_eq!(claims(&h), ["b"]);
     assert!(h.w().requests().is_empty(), "nothing of it ran");
-    assert_eq!(runs(&h), [(None, RunState::Open)]);
+    assert_eq!(runs(&h), [(Some("b".into()), RunState::Closed)]);
+    keeper(&h).step(BRANCH).unwrap();
+    assert_eq!(
+        runs(&h),
+        [(Some("b".into()), RunState::Closed), (None, RunState::Open)]
+    );
     as_signer(&h, "c", Some("box")).step(BRANCH).unwrap();
     assert_eq!(claims(&h), ["b", "c"]);
-    assert_eq!(runs(&h), [(Some("c".into()), RunState::Testing)]);
+    assert_eq!(
+        runs(&h),
+        [
+            (Some("b".into()), RunState::Closed),
+            (Some("c".into()), RunState::Running)
+        ]
+    );
     assert_eq!(h.w().requests().len(), 1);
 }
 
@@ -243,7 +275,7 @@ fn runs_are_claimed_earliest_first() {
     h.submit("unit/a");
     h.work("unit/b", "agent-b", &[("b/lib", Some("b2"))]);
     h.submit("unit/b");
-    as_signer(&h, "lead", None).step(BRANCH).unwrap();
+    keeper(&h).step(BRANCH).unwrap();
     h.w().host_limit(1);
     as_signer(&h, "b", Some("box")).step(BRANCH).unwrap();
     let started = h.w().requests();
@@ -260,8 +292,9 @@ fn runs_are_claimed_earliest_first() {
     assert_eq!(started[0].revision, first.revision);
 }
 
-/// satisfies: 77, 60; the run-claims spec's "A host stops mid-run" and
-/// "A late report"; S20
+/// satisfies: 77, 60; record 0122; the run-claims spec's "A host stops
+/// mid-run" and "A late report"; S20: the lapsed run ends with no outcome,
+/// its follow-up passes elsewhere, and the late report writes nothing
 #[test]
 fn s20_a_lapsed_claim_runs_again_elsewhere_and_its_late_report_is_not_written() {
     let h = peers();
@@ -269,15 +302,31 @@ fn s20_a_lapsed_claim_runs_again_elsewhere_and_its_late_report_is_not_written() 
     as_signer(&h, "b", Some("box")).step(BRANCH).unwrap();
     assert_eq!(runs(&h)[0].0.as_deref(), Some("b"));
     // b stops; the lead watches its sign of life stand still.
-    as_signer(&h, "lead", None).step(BRANCH).unwrap();
+    keeper(&h).step(BRANCH).unwrap();
     h.w().advance(chrono::Duration::minutes(3));
-    as_signer(&h, "lead", None).step(BRANCH).unwrap();
+    keeper(&h).step(BRANCH).unwrap();
     assert!(h
         .events()
         .iter()
         .any(|e| matches!(e, Event::Lapsed { host, .. } if host == "b")));
-    assert_eq!(runs(&h)[0], (None, sluice_core::records::RunState::Open));
-    // c claims it again and passes it.
+    assert_eq!(
+        runs(&h),
+        [
+            (Some("b".into()), sluice_core::records::RunState::Closed),
+            (None, sluice_core::records::RunState::Open)
+        ]
+    );
+    let lapsed = {
+        let s = h.sluice();
+        let line =
+            sluice_core::line::Line::load(BRANCH, s.seams().state.read(BRANCH).unwrap()).unwrap();
+        line.doc.candidates[0].runs[0].clone()
+    };
+    assert_eq!(
+        lapsed.ended.as_ref().and_then(|e| e.why.as_deref()),
+        Some("b's claim lapsed")
+    );
+    // c claims its follow-up and passes it.
     h.w().hold_runs(false);
     as_signer(&h, "c", Some("box")).step(BRANCH).unwrap();
     as_signer(&h, "c", Some("box")).step(BRANCH).unwrap();
@@ -288,10 +337,11 @@ fn s20_a_lapsed_claim_runs_again_elsewhere_and_its_late_report_is_not_written() 
     as_signer(&h, "b", Some("box")).step(BRANCH).unwrap();
     assert!(h.w().live_places().len() < places_before);
     for _ in 0..4 {
-        as_signer(&h, "lead", None).step(BRANCH).unwrap();
+        keeper(&h).step(BRANCH).unwrap();
         as_signer(&h, "c", Some("box")).step(BRANCH).unwrap();
     }
     assert_eq!(h.sub(one).state, State::Landed);
+    assert_eq!(claims(&h), ["b", "c"], "b's late report took nothing back");
 }
 
 /// satisfies: 81, 123, 72, 73; the run-claims spec's "Back after a
@@ -307,10 +357,13 @@ fn a_place_left_by_a_lapsed_claim_is_released_by_its_host_as_the_lead() {
     as_signer(&h, "b", Some("box")).step(BRANCH).unwrap();
     let left = h.w().live_places();
     assert_eq!(left.len(), 1, "{left:?}");
-    as_signer(&h, "lead", None).step(BRANCH).unwrap();
+    keeper(&h).step(BRANCH).unwrap();
     h.w().advance(chrono::Duration::minutes(3));
-    as_signer(&h, "lead", None).step(BRANCH).unwrap();
-    assert_eq!(runs(&h), [(None, RunState::Open)]);
+    keeper(&h).step(BRANCH).unwrap();
+    assert_eq!(
+        runs(&h),
+        [(Some("b".into()), RunState::Closed), (None, RunState::Open)]
+    );
     assert!(h.w().live_places().contains(&left[0]));
 
     assert!(!as_signer(&h, "b", Some("box")).keeps(BRANCH).unwrap());
@@ -332,7 +385,13 @@ fn a_place_left_by_a_lapsed_claim_is_released_by_its_host_as_the_lead() {
         .events()
         .iter()
         .any(|e| matches!(e, Event::Released { place, .. } if *place == left[0])));
-    assert_eq!(runs(&h), [(Some("b".into()), RunState::Testing)]);
+    assert_eq!(
+        runs(&h),
+        [
+            (Some("b".into()), RunState::Closed),
+            (Some("b".into()), RunState::Running)
+        ]
+    );
 }
 
 /// satisfies: 74, 77; the run-claims spec's "A long run keeps its claim"
@@ -343,7 +402,7 @@ fn a_long_run_keeps_its_claim_while_its_host_shows_it_is_alive() {
     as_signer(&h, "b", Some("box")).step(BRANCH).unwrap();
     for _ in 0..10 {
         h.w().advance(chrono::Duration::minutes(1));
-        as_signer(&h, "lead", None).step(BRANCH).unwrap();
+        keeper(&h).step(BRANCH).unwrap();
         as_signer(&h, "b", Some("box")).step(BRANCH).unwrap();
     }
     assert!(!h.events().iter().any(|e| matches!(e, Event::Lapsed { .. })));
@@ -383,7 +442,7 @@ fn a_host_claims_only_runs_of_its_systems() {
     h.w().hold_runs(true);
     h.work("unit/a", "agent-a", &[("a/lib", Some("a2"))]);
     h.submit("unit/a");
-    as_signer(&h, "lead", None).step(BRANCH).unwrap();
+    keeper(&h).step(BRANCH).unwrap();
     with_systems(&h, "box", &["linux-x64"])
         .step(BRANCH)
         .unwrap();
@@ -394,7 +453,7 @@ fn a_host_claims_only_runs_of_its_systems() {
         line.doc.candidates[0]
             .runs
             .iter()
-            .map(|r| (r.system.clone(), r.host.clone()))
+            .map(|r| (r.system.clone(), r.holder().map(str::to_string)))
             .collect()
     };
     assert_eq!(
@@ -428,10 +487,11 @@ fn the_overview_shows_hosts_their_room_and_a_lapse() {
     opened(&h);
     h.w().host_limit(3);
     as_signer(&h, "b", Some("box")).step(BRANCH).unwrap();
-    let lead = as_signer(&h, "lead", None);
+    let lead = keeper(&h);
     let hosts = lead.hosts().unwrap();
-    assert_eq!(hosts.len(), 1);
-    assert_eq!(hosts[0].host, "b");
+    // Record 0122 (design D5): the lead shows its sign of life too.
+    let names: Vec<&str> = hosts.iter().map(|x| x.host.as_str()).collect();
+    assert_eq!(names, ["b", "lead"]);
     assert_eq!(hosts[0].signer.as_deref(), Some("box"));
     assert_eq!(
         (hosts[0].held, hosts[0].room, hosts[0].lapsed),
@@ -440,7 +500,7 @@ fn the_overview_shows_hosts_their_room_and_a_lapse() {
     // The lead watches b's beat stand still past the bound.
     lead.step(BRANCH).unwrap();
     h.w().advance(chrono::Duration::minutes(3));
-    let hosts = as_signer(&h, "lead", None).hosts().unwrap();
+    let hosts = keeper(&h).hosts().unwrap();
     assert!(hosts[0].lapsed);
     assert_eq!(hosts[0].room, 0);
 }
@@ -450,7 +510,7 @@ fn the_overview_shows_hosts_their_room_and_a_lapse() {
 fn the_overview_names_the_remote_a_branch_lands_on() {
     let h = peers();
     opened(&h);
-    let view = as_signer(&h, "lead", None).branch_view_of(BRANCH).unwrap();
+    let view = keeper(&h).branch_view_of(BRANCH).unwrap();
     assert_eq!(view.remote.as_deref(), Some("origin"));
 }
 
@@ -479,7 +539,7 @@ fn another_repositorys_runs_leave_less_room_in_a_hosts_sign_of_life() {
     h.w().be_host("b");
     h.w().other_runs(1);
     as_signer(&h, "b", Some("box")).step(BRANCH).unwrap();
-    let hosts = as_signer(&h, "lead", None).hosts().unwrap();
+    let hosts = keeper(&h).hosts().unwrap();
     assert_eq!(hosts[0].host, "b");
     assert_eq!((hosts[0].held, hosts[0].room), (2, 2));
 }
@@ -502,7 +562,18 @@ fn a_verdict_the_state_alone_holds_lands_nothing() {
     for c in &mut line.doc.candidates {
         c.state = sluice_core::records::CandidateState::Passed;
         for r in &mut c.runs {
-            r.state = sluice_core::records::RunState::Passed;
+            r.state = sluice_core::records::RunState::Ended;
+            r.ended = Some(sluice_core::records::Ended {
+                at: "2026-11-16T09:00:00Z".into(),
+                outcomes: r
+                    .checks
+                    .iter()
+                    .map(|c| (c.clone(), sluice_core::records::CheckOutcome::Passed))
+                    .collect(),
+                timed_out: false,
+                why: None,
+                untaken: false,
+            });
             r.place = None;
             r.run = None;
         }
@@ -532,6 +603,7 @@ fn a_host_whose_key_the_branch_does_not_list_takes_no_run() {
     let h = peers();
     h.work("unit/a", "agent-a", &[("a/lib", Some("a2"))]);
     let one = h.submit("unit/a");
+    keeper(&h).step(BRANCH).unwrap();
     h.w().be_host("a");
     h.w().key_unlisted(true);
     on(&h, "a").step(BRANCH).unwrap();
@@ -542,34 +614,58 @@ fn a_host_whose_key_the_branch_does_not_list_takes_no_run() {
     for _ in 0..4 {
         on(&h, "b").step(BRANCH).unwrap();
         on(&h, "a").step(BRANCH).unwrap();
+        keeper(&h).step(BRANCH).unwrap();
     }
     assert_eq!(claims(&h), ["b"]);
     assert_eq!(h.sub(one).state, State::Landed);
 }
 
-/// satisfies: 87, 66: a run no host whose key the branch lists takes
-/// stays open, and the candidate's time limit reads it not passed.
+/// satisfies: 87, 66: a run no host whose key the branch lists takes,
+/// its lead turning it down for what its host lacks (record 0074), stays
+/// open, and the candidate's time limit reads it not passed.
 #[test]
 fn a_run_no_listed_host_takes_is_not_passed_at_the_time_limit() {
-    let h = peers();
+    let h = peers_with("\n[executor]\ndocker = true\n");
     h.work("unit/a", "agent-a", &[("a/lib", Some("a2"))]);
     let one = h.submit("unit/a");
+    h.w().be_host("lead");
+    h.w().engine_unmet(Some("no container engine answers"));
+    keeper(&h).step(BRANCH).unwrap();
     h.w().be_host("a");
     h.w().key_unlisted(true);
     on(&h, "a").step(BRANCH).unwrap();
     h.w().advance(chrono::Duration::minutes(19));
     on(&h, "a").step(BRANCH).unwrap();
+    keeper(&h).step(BRANCH).unwrap();
     assert_eq!(runs(&h), [(None, sluice_core::records::RunState::Open)]);
     h.w().advance(chrono::Duration::minutes(2));
     on(&h, "a").step(BRANCH).unwrap();
-    assert_eq!(h.sub(one).state, State::Failed);
+    keeper(&h).step(BRANCH).unwrap();
+    // Record 0122 (design D6): not passed, nobody blamed and no check
+    // failed, each check naming the hosts that turned the run down.
+    let sub = h.sub(one);
+    assert_ne!(sub.state, State::Failed);
+    assert!(sub.failed.is_empty(), "{:?}", sub.failed);
+    let events = h.events();
+    assert!(!events.iter().any(|e| matches!(e, Event::Blamed { .. })));
+    assert!(
+        events.iter().any(|e| matches!(
+            e,
+            Event::Ended { why: Some(w), .. } if w.contains("a: the branch's policy lists no key")
+                && w.contains("lead: no container engine answers")
+        )),
+        "{events:?}"
+    );
+    assert!(events
+        .iter()
+        .any(|e| matches!(e, Event::Result { result, .. } if result == "not passed")));
     assert!(h.w().requests().is_empty());
 }
 
-/// satisfies: 87, 28; S18: a run whose result its host signed with a key
-/// the branch's policy no longer lists, read when it reports, is missing,
-/// never failed: it is open again, and a host whose key the branch lists
-/// settles it.
+/// satisfies: 87, 28; S18; record 0122: a run whose result its host signed
+/// with a key the branch's policy no longer lists, read when it reports, is
+/// missing, never failed: the run ends with no outcome for it, its
+/// follow-up is open, and a host whose key the branch lists settles it.
 #[test]
 fn s18_a_result_signed_with_a_key_the_branch_does_not_list_is_missing() {
     let h = peers();
@@ -587,14 +683,29 @@ fn s18_a_result_signed_with_a_key_the_branch_does_not_list_is_missing() {
         .events()
         .iter()
         .any(|e| matches!(e, Event::Uncounted { host, .. } if host == "a")));
-    assert_eq!(runs(&h), [(None, sluice_core::records::RunState::Open)]);
+    // a, which the branch no longer accepts, leads no more: it writes its
+    // own run's end, and the next lead opens the follow-up.
+    assert_eq!(
+        runs(&h),
+        [(Some("a".into()), sluice_core::records::RunState::Closed)]
+    );
     assert_ne!(h.sub(one).state, State::Failed);
     assert!(h.sub(one).failed.is_empty());
+    // Design D8: a, which the branch no longer accepts, leads no more; b,
+    // with no room as it first sees the state, takes the branch once the
+    // state has stood for the lease.
+    h.w().refuse_next_hold();
+    on(&h, "b").step(BRANCH).unwrap();
+    h.w().advance(chrono::Duration::minutes(6));
     for _ in 0..4 {
         on(&h, "b").step(BRANCH).unwrap();
         on(&h, "a").step(BRANCH).unwrap();
     }
     assert_eq!(h.sub(one).state, State::Landed);
+    assert!(h
+        .events()
+        .iter()
+        .any(|e| matches!(e, Event::Opened { run: 1, .. })));
 }
 
 /// satisfies: 108, 78; S42: a key whose only pass was signed by a signer
@@ -660,6 +771,11 @@ fn s42_a_replay_no_trusted_signer_proved_runs_again() {
         .events()
         .iter()
         .any(|e| matches!(e, Event::Unproven { .. })));
+    // Record 0122 (design D7): a follow-up ran the unproven checks.
+    assert!(h
+        .events()
+        .iter()
+        .any(|e| matches!(e, Event::Opened { run: 1, .. })));
     assert!(h.w().requests().iter().any(|r| !r.replay));
     assert!(h.w().observed().len() > ran);
 }
@@ -700,12 +816,12 @@ fn signer<'a>(h: &'a Harness, name: &str, signer: &str) -> Sluice<'a> {
 fn s41_a_box_with_room_comes_before_the_pool() {
     let h = with_pool();
     h.w().hold_runs(true);
-    as_signer(&h, "lead", None).step(BRANCH).unwrap();
+    keeper(&h).step(BRANCH).unwrap();
     signer(&h, "box", "box").step(BRANCH).unwrap();
     h.work("unit/a", "agent-a", &[("a/lib", Some("a2"))]);
     h.submit("unit/a");
     assert_eq!(h.w().wakes(), [BRANCH]);
-    as_signer(&h, "lead", None).step(BRANCH).unwrap();
+    keeper(&h).step(BRANCH).unwrap();
     let launched: Vec<(Option<String>, String)> = h
         .w()
         .launches()
@@ -721,13 +837,13 @@ fn s41_a_box_with_room_comes_before_the_pool() {
     // A full box: the pool takes linux-x64 too.
     let h = with_pool();
     h.w().hold_runs(true);
-    as_signer(&h, "lead", None).step(BRANCH).unwrap();
+    keeper(&h).step(BRANCH).unwrap();
     h.w().host_limit(0);
     signer(&h, "box", "box").step(BRANCH).unwrap();
     h.w().host_limit(4);
     h.work("unit/a", "agent-a", &[("a/lib", Some("a2"))]);
     h.submit("unit/a");
-    as_signer(&h, "lead", None).step(BRANCH).unwrap();
+    keeper(&h).step(BRANCH).unwrap();
     assert_eq!(h.w().launches().len(), 2);
 }
 
@@ -740,7 +856,7 @@ fn s19_a_pools_jobs_land_the_work_with_no_box() {
     h.w().hold_runs(true);
     h.work("unit/a", "agent-a", &[("a/lib", Some("a2"))]);
     let one = h.submit("unit/a");
-    let lead = || as_signer(&h, "lead", None);
+    let lead = || keeper(&h);
     lead().step(BRANCH).unwrap();
     let first: Vec<String> = h.w().launches().iter().map(|l| l.claim.clone()).collect();
     assert_eq!(first.len(), 2);
@@ -777,6 +893,40 @@ fn s19_a_pools_jobs_land_the_work_with_no_box() {
     assert_eq!(h.sub(one).state, State::Landed);
 }
 
+/// satisfies: 71, 88; records 0119, 0123; the run-bound spec's "A
+/// repository on a pool": with the host's one run another repository's,
+/// this repository's combination is launched on its pool with no part of
+/// the host's bound held, and counts in no repository's runs: the other
+/// repository's next run waits only for its own to end.
+#[test]
+fn a_pools_launch_holds_no_part() {
+    let h = with_pool();
+    h.w().hold_runs(true);
+    h.work("unit/a", "agent-a", &[("a/lib", Some("a2"))]);
+    h.submit("unit/a");
+    let lead = as_signer(&h, "lead", Some("box"));
+    h.w().host_limit(1);
+    h.w().other_runs(1);
+    lead.step(BRANCH).unwrap();
+    assert_eq!(
+        h.w().launches().len(),
+        2,
+        "each system launched on the pool"
+    );
+    assert!(h.w().holds().is_empty(), "no part was held for a launch");
+    assert_eq!(h.w().parts_held(), 0);
+    let tests = &h.sluice().seams().tests;
+    assert_eq!(
+        tests.running().unwrap().queue,
+        1,
+        "only the other repository's run counts"
+    );
+    assert!(tests.hold(RunKind::Queue).unwrap().is_none());
+    // The other repository's run ends: its next takes the host's run.
+    h.w().other_runs(0);
+    assert!(tests.hold(RunKind::Queue).unwrap().is_some());
+}
+
 /// Each claim in the branch's log, with the forge's words when its
 /// dispatch went unanswered.
 fn claimed(h: &Harness) -> Vec<(String, Option<String>)> {
@@ -803,7 +953,7 @@ fn a_run_whose_dispatch_went_unanswered_is_claimed_once() {
     h.w().hold_runs(true);
     h.work("unit/a", "agent-a", &[("a/lib", Some("a2"))]);
     h.submit("unit/a");
-    let lead = || as_signer(&h, "lead", None);
+    let lead = || keeper(&h);
     h.w().fail_next_launch(true);
     lead().step(BRANCH).unwrap();
     let first: Vec<String> = h.w().launches().iter().map(|l| l.claim.clone()).collect();
@@ -818,7 +968,22 @@ fn a_run_whose_dispatch_went_unanswered_is_claimed_once() {
     assert!(runs(&h)
         .iter()
         .any(|(host, state)| host.as_deref() == Some(first[0].as_str())
-            && *state == sluice_core::records::RunState::Starting));
+            && *state == sluice_core::records::RunState::Claimed));
+    // Record 0122 (design D3, D12): each claim was written before its
+    // dispatch, which is marked on it.
+    let written = {
+        let s = h.sluice();
+        let line =
+            sluice_core::line::Line::load(BRANCH, s.seams().state.read(BRANCH).unwrap()).unwrap();
+        line.doc.candidates[0].runs.clone()
+    };
+    for r in &written {
+        let k = r.claim.as_ref().expect("a claim");
+        assert!(
+            k.dispatched.as_deref().is_some_and(|d| d >= k.at.as_str()),
+            "{k:?}"
+        );
+    }
 
     // A round while the job may run launches nothing more.
     lead().step(BRANCH).unwrap();
@@ -839,8 +1004,9 @@ fn a_run_whose_dispatch_went_unanswered_is_claimed_once() {
     assert_eq!(claimed(&h).last(), Some(&(again.clone(), None)));
 }
 
-/// satisfies: 134; a launch the forge refused fails the round, and
-/// nothing is claimed.
+/// satisfies: 134; record 0122 (design D3, D12): a launch the forge
+/// refused fails the round, and nothing is claimed by a dispatch: the claim
+/// written before it ends with no outcome, naming the refusal.
 #[test]
 fn a_refused_launch_fails_the_round_with_nothing_claimed() {
     let h = with_pool();
@@ -848,10 +1014,24 @@ fn a_refused_launch_fails_the_round_with_nothing_claimed() {
     h.work("unit/a", "agent-a", &[("a/lib", Some("a2"))]);
     h.submit("unit/a");
     h.w().fail_next_launch(false);
-    let e = as_signer(&h, "lead", None).step(BRANCH).unwrap_err();
+    let e = keeper(&h).step(BRANCH).unwrap_err();
     assert!(format!("{e:#}").contains("404 Not Found"), "{e:#}");
     assert!(claimed(&h).is_empty(), "{:?}", claimed(&h));
     assert!(h.w().launches().is_empty());
+    let written = {
+        let s = h.sluice();
+        let line =
+            sluice_core::line::Line::load(BRANCH, s.seams().state.read(BRANCH).unwrap()).unwrap();
+        line.doc.candidates[0].runs.clone()
+    };
+    let refused = written
+        .iter()
+        .find(|r| r.holder().is_some_and(|h| h.starts_with("pool/")))
+        .expect("the claim written before its dispatch");
+    assert_eq!(refused.state, sluice_core::records::RunState::Closed);
+    let why = refused.ended.as_ref().and_then(|e| e.why.clone()).unwrap();
+    assert!(why.contains("the forge refused its dispatch"), "{why}");
+    assert!(why.contains("404 Not Found"), "{why}");
 }
 
 /// satisfies: 78, 79, 28, 29; S18: results signed by a signer the shared
@@ -919,4 +1099,268 @@ fn s18_a_signer_the_gate_does_not_trust_settles_nothing() {
         sessions().step("bolt/y").unwrap();
     }
     assert_eq!(sessions().state(y).unwrap().unwrap().state, State::Landed);
+}
+
+/// satisfies: 137, record 0093 as amended 2026-11-08, 58, 72 (design D8);
+/// the peer-lead spec's "A session host submits to a bolt held on origin":
+/// `bolt/x`'s home is origin, its policy trusts only `box`, host s signs as
+/// no one and submits while no host leads it; s writes its submission and
+/// no lead, its rounds are led, and a host signing as `box` with its key
+/// listed takes the lead at its next round and tests the submission.
+#[test]
+fn a_host_whose_signature_the_branch_does_not_accept_never_leads() {
+    let h = peers();
+    h.w().be_host("s");
+    h.work("unit/a", "agent-a", &[("a/lib", Some("a2"))]);
+    h.submit("unit/a");
+    assert_eq!(
+        h.w().home_in("origin", BRANCH).map(|h| h.at),
+        Some("origin".into())
+    );
+    for _ in 0..2 {
+        assert_eq!(as_signer(&h, "s", None).step(BRANCH).unwrap(), Step::Led);
+    }
+    assert_eq!(h.doc().lead, None);
+    assert!(took(&h).is_empty());
+    assert!(h.w().requests().is_empty());
+    assert!(!as_signer(&h, "s", None).keeps(BRANCH).unwrap());
+    assert_eq!(on(&h, "a").step(BRANCH).unwrap(), Step::Stepped);
+    assert_eq!(took(&h), [("a".to_string(), None)]);
+    assert_eq!(h.w().requests().len(), 1, "a tests the submission");
+}
+
+/// satisfies: 137, 87 (design D8); the peer-lead spec's "A host with an
+/// unlisted key": host k signs as `box` with a key `bolt/x`'s policy does
+/// not list, and `bolt/x`'s lead has been quiet past the lease; k does not
+/// take it, and keeps nothing, so takes none of its pull requests in.
+#[test]
+fn a_host_with_an_unlisted_key_never_leads() {
+    let h = peers();
+    h.work("unit/a", "agent-a", &[("a/lib", Some("a2"))]);
+    h.submit("unit/a");
+    keeper(&h).step(BRANCH).unwrap();
+    h.w().be_host("k");
+    h.w().key_unlisted(true);
+    assert_eq!(on(&h, "k").step(BRANCH).unwrap(), Step::Led);
+    h.w().advance(chrono::Duration::minutes(10));
+    assert_eq!(on(&h, "k").step(BRANCH).unwrap(), Step::Led);
+    assert!(!on(&h, "k").keeps(BRANCH).unwrap());
+    assert_eq!(took(&h), [("lead".to_string(), None)]);
+    assert_eq!(h.doc().lead.as_deref(), Some("lead"));
+}
+
+/// satisfies: 73, 137 (design D8); the peer-lead spec's "A lead the branch
+/// no longer accepts": `bolt/x`'s lead is host a; a's key is no longer
+/// listed, and host b, which `bolt/x` accepts, has a submission waiting; a
+/// writes nothing more as lead, and b takes the branch once it has seen
+/// its state stand for the lease.
+#[test]
+fn a_lead_the_branch_no_longer_accepts_is_taken_after_the_lease() {
+    let h = peers();
+    h.w().hold_runs(true);
+    h.work("unit/a", "agent-a", &[("a/lib", Some("a2"))]);
+    h.submit("unit/a");
+    on(&h, "a").step(BRANCH).unwrap();
+    assert_eq!(h.doc().lead.as_deref(), Some("a"));
+    h.w().be_host("a");
+    h.w().key_unlisted(true);
+    let version = h.version();
+    assert_eq!(on(&h, "a").step(BRANCH).unwrap(), Step::Led);
+    assert_eq!(h.version(), version, "a writes nothing as lead");
+    assert_eq!(on(&h, "b").step(BRANCH).unwrap(), Step::Led);
+    h.w().advance(chrono::Duration::minutes(6));
+    assert_eq!(on(&h, "b").step(BRANCH).unwrap(), Step::Stepped);
+    assert_eq!(
+        took(&h).last().cloned(),
+        Some(("b".to_string(), Some("a".to_string())))
+    );
+    assert_eq!(on(&h, "a").step(BRANCH).unwrap(), Step::Led);
+}
+
+/// satisfies: 72, 73, record 0122 (design D4, D8); the peer-lead spec's "A
+/// bolt whose signers went": `bolt/x`'s home is origin and a landing brings
+/// a policy naming no signers; host s, which signs as no one, steps it
+/// while no host leads it, takes the lead, and writes its move home.
+#[test]
+fn any_host_leads_a_remote_home_whose_policy_names_no_signer() {
+    let h = peers();
+    h.work("unit/a", "agent-a", &[("a/lib", Some("a2"))]);
+    h.submit("unit/a");
+    let unsigned = sluice_conformance::policy(false, "fail", 4);
+    h.w()
+        .hand_commit(BRANCH, &[(".config/sluice.toml", Some(&unsigned))]);
+    as_signer(&h, "s", None).step(BRANCH).unwrap();
+    let log = h.w().file_in("origin", BRANCH, "log.jsonl").unwrap();
+    assert!(log.contains("\"event\":\"took\",\"by\":\"s\""), "{log}");
+    assert!(
+        log.contains("\"event\":\"moving\",\"to\":\"here\""),
+        "{log}"
+    );
+    assert_eq!(
+        h.w().home_in("origin", BRANCH).unwrap().closed_to(),
+        Some("here")
+    );
+}
+
+fn lapses(h: &Harness) -> usize {
+    h.events()
+        .into_iter()
+        .filter(|e| matches!(e, Event::Lapsed { .. }))
+        .count()
+}
+
+/// satisfies: 72, 58, record 0122 (design D9); the peer-lead spec's "A run
+/// longer than the lease": host a leads `bolt/x` and runs a combination
+/// that takes 25 minutes against a five-minute lease, while host b, which
+/// `bolt/x` accepts, steps every minute; a writes `kept` every half lease,
+/// so b never takes `bolt/x`, the run's claim stands, and a lands the
+/// combination once its run passes.
+#[test]
+fn a_lead_keeps_its_branch_through_a_run_longer_than_the_lease() {
+    let h = peers();
+    let p = h.file(&h.tip(), ".config/sluice.toml").unwrap();
+    h.w().hand_commit(
+        BRANCH,
+        &[(
+            ".config/sluice.toml",
+            Some(&p.replace("timeout = \"20m\"", "timeout = \"40m\"")),
+        )],
+    );
+    h.w().hold_runs(true);
+    h.work("unit/a", "agent-a", &[("a/lib", Some("a2"))]);
+    let one = h.submit("unit/a");
+    on(&h, "a").step(BRANCH).unwrap();
+    assert_eq!(h.w().live_runs(), 1, "a runs the combination");
+    let mut kept = Vec::new();
+    for _ in 0..25 {
+        h.w().advance(chrono::Duration::minutes(1));
+        on(&h, "a").step(BRANCH).unwrap();
+        assert_eq!(on(&h, "b").step(BRANCH).unwrap(), Step::Led);
+        kept.push(h.doc().kept);
+    }
+    kept.dedup();
+    assert!(kept.len() >= 9, "kept every half lease: {kept:?}");
+    assert_eq!(took(&h), [("a".to_string(), None)]);
+    assert_eq!(lapses(&h), 0);
+    h.w().complete_all();
+    for _ in 0..4 {
+        on(&h, "a").step(BRANCH).unwrap();
+    }
+    assert_eq!(h.sub(one).state, State::Landed);
+    assert_eq!(took(&h), [("a".to_string(), None)]);
+}
+
+/// satisfies: 72, record 0122 (design D9); the peer-lead spec's "Nothing
+/// live": host a leads `bolt/x` and no run of it is claimed, under test or
+/// open; a's rounds write nothing that changes nothing, however long.
+#[test]
+fn a_lead_with_no_live_run_writes_nothing_to_keep_it() {
+    let h = peers();
+    h.work("unit/a", "agent-a", &[("a/lib", Some("a2"))]);
+    let one = h.submit("unit/a");
+    for _ in 0..4 {
+        on(&h, "a").step(BRANCH).unwrap();
+    }
+    assert_eq!(h.sub(one).state, State::Landed);
+    on(&h, "a").step(BRANCH).unwrap();
+    let version = h.version();
+    for _ in 0..12 {
+        h.w().advance(chrono::Duration::minutes(5));
+        on(&h, "a").step(BRANCH).unwrap();
+    }
+    assert_eq!(h.version(), version, "nothing written to keep it");
+}
+
+/// Record 0119 (design D11; 113): a branch whose gate trusts `trust`, its
+/// signers `box`, this rig's hosts, and `forge`, a pool's on GitHub.
+fn with_forge_signer(trust: &str) -> Harness {
+    let p = policy(false, "fail", 4).replace(
+        "trust = [\"open\", \"sandbox\", \"container\"]\n",
+        &format!("trust = {trust}\nremote = \"origin\"\n"),
+    ) + "\n[signers.box]\nssh = \"box ssh-ed25519 AAAA\"\n\
+         \n[signers.forge]\ngithub = { workflow = \".github/workflows/sluice.yml\", ref = \"refs/heads/main\" }\n";
+    let h = Harness::new(&p);
+    h.w().signs_as("box");
+    h
+}
+
+/// Record 0119 (design D11; 113): `head`, a pull request's head onto the
+/// branch, run as `sluice-pr`'s run job runs it, on host `job`, under no
+/// claim, and its results recorded signed by `signer`, as the records read
+/// back the bundle `sluice job record --head` adds.
+fn head_run(h: &Harness, head: &sluice_seams::Rev, signer: &str) {
+    use sluice_core::records::{to_line, ResultLine};
+    h.w().be_host("job");
+    let s = h.sluice();
+    let sluice_core::Started::Running(run) = s.start_head(BRANCH, head, None).unwrap() else {
+        panic!("the head's run started");
+    };
+    let sluice_seams::Progress::Finished(report) = s.seams().tests.progress(&run).unwrap() else {
+        panic!("the head's run finished");
+    };
+    let at = "2026-11-16T03:00:00Z";
+    let lines: Vec<u8> = report
+        .tasks
+        .iter()
+        .flat_map(|t| {
+            to_line(&ResultLine::of(
+                at,
+                t,
+                &report.executor,
+                BRANCH,
+                head,
+                None,
+                None,
+            ))
+        })
+        .collect();
+    h.w().signs_as(signer);
+    s.seams().state.record_results(&lines).unwrap();
+    h.w().signs_as("box");
+}
+
+/// satisfies: 15, 113, 108; record 0119 (design D11); S40: a pull
+/// request's head run, signed by a signer the gate trusts, counts for a
+/// combination by key: its replay is proven, and nothing runs again.
+#[test]
+fn s40_a_pull_requests_head_runs_count_by_key() {
+    let h = with_forge_signer("[\"box\", \"forge\"]");
+    let head = h.work("unit/a", "agent-a", &[("a/lib", Some("a2"))]);
+    head_run(&h, &head, "forge");
+    let ran = h.w().observed().len();
+    let one = h.submit("unit/a");
+    for _ in 0..6 {
+        on(&h, "a").step(BRANCH).unwrap();
+    }
+    assert_eq!(h.sub(one).state, State::Landed);
+    assert_eq!(h.w().observed().len(), ran, "nothing ran again");
+    assert!(!h
+        .events()
+        .iter()
+        .any(|e| matches!(e, Event::Unproven { .. })));
+    assert!(!h
+        .events()
+        .iter()
+        .any(|e| matches!(e, Event::Opened { run: 1, .. })));
+}
+
+/// satisfies: 15, 113, 108, 78; record 0119 (design D11): a head run
+/// signed by a signer the gate does not trust proves no replay, and its
+/// checks run again.
+#[test]
+fn a_head_run_by_an_untrusted_signer_counts_for_nothing() {
+    let h = with_forge_signer("[\"box\"]");
+    let head = h.work("unit/a", "agent-a", &[("a/lib", Some("a2"))]);
+    head_run(&h, &head, "forge");
+    let ran = h.w().observed().len();
+    let one = h.submit("unit/a");
+    for _ in 0..8 {
+        on(&h, "a").step(BRANCH).unwrap();
+    }
+    assert_eq!(h.sub(one).state, State::Landed);
+    assert!(h
+        .events()
+        .iter()
+        .any(|e| matches!(e, Event::Unproven { .. })));
+    assert!(h.w().observed().len() > ran, "its checks ran again");
 }

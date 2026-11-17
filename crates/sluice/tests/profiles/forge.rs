@@ -903,7 +903,9 @@ impl OnGitHub {
 
 /// `sluice status` on a branch whose `remote` is GitHub's: with no
 /// `[forge]`, it says sluice has no identity of its own; with one, it
-/// names the app, whose token the fetch was made with.
+/// names the app. Neither fetches: a status reads the branch as the host
+/// holds it since the host process last asked the remote, and asks GitHub
+/// for no token of its own (129; design D16).
 #[cfg(feature = "tools")]
 #[test]
 fn status_says_who_pushes_the_branch() {
@@ -926,11 +928,7 @@ fn status_says_who_pushes_the_branch() {
         with.contains(&format!("pushed to origin as GitHub app {APP}")),
         "{with}"
     );
-    assert_eq!(
-        minted(&s.fake),
-        1,
-        "the fetch was made with the app's token"
-    );
+    assert_eq!(minted(&s.fake), 0, "a status fetches nothing of its own");
 }
 
 /// `sluice forge check main` exits 1 without `[forge]` or with a second
@@ -1229,9 +1227,13 @@ fn live_pull_request_calls() {
 
 /// 88, 107, 111: GitHub Actions as a pool, against the fake API: a run is
 /// one dispatch of the pool's workflow on the signer's branch, with the
-/// runner of its system and its claim; a job is alive while a queued or
-/// running run of the workflow bears its claim in its title; a wake is a
-/// dispatch to advance the branch.
+/// runner of its system and its claim; a job is read from the run of the
+/// workflow that bears its claim in its title, queued, running since its
+/// run job's start, or ended, recorded where its sign job succeeded, or
+/// none (record 0122; design D12). GitHub refuses a dispatch carrying an
+/// input the workflow does not declare, so the fake refuses one carrying
+/// any input `sluice.yml` does not; a wake dispatches nothing, the
+/// workflow running no round (design D11).
 #[test]
 fn the_pools_calls() {
     use sluice::profiles::checks::Launcher;
@@ -1257,16 +1259,61 @@ fn the_pools_calls() {
             };
         }
         if path == "/repos/o/r/actions/workflows/sluice.yml/dispatches" && r.method == "POST" {
+            const DECLARED: [&str; 5] = ["claim", "branch", "combination", "system", "runner"];
+            let body: serde_json::Value = serde_json::from_str(&r.body).unwrap_or_default();
+            let unexpected: Vec<&String> = body["inputs"]
+                .as_object()
+                .map(|o| {
+                    o.keys()
+                        .filter(|k| !DECLARED.contains(&k.as_str()))
+                        .collect()
+                })
+                .unwrap_or_default();
+            if !unexpected.is_empty() {
+                return json(
+                    422,
+                    json!({ "message": format!("Unexpected inputs provided: {unexpected:?}") }),
+                );
+            }
             return (204, vec![], String::new());
         }
-        if path.starts_with("/repos/o/r/actions/workflows/sluice.yml/runs?status=in_progress") {
+        if path.starts_with("/repos/o/r/actions/workflows/sluice.yml/runs") {
             return json(
                 200,
-                json!({ "workflow_runs": [{ "display_title": "sluice pool/forge/7" }] }),
+                json!({ "workflow_runs": [
+                    { "id": 1, "display_title": "sluice pool/forge/7", "status": "queued" },
+                    { "id": 2, "display_title": "sluice pool/forge/9", "status": "in_progress" },
+                    { "id": 3, "display_title": "sluice pool/forge/10", "status": "completed" },
+                    { "id": 4, "display_title": "sluice pool/forge/11", "status": "completed" },
+                ] }),
             );
         }
-        if path.starts_with("/repos/o/r/actions/workflows/sluice.yml/runs") {
-            return json(200, json!({ "workflow_runs": [] }));
+        if path.starts_with("/repos/o/r/actions/runs/2/jobs") {
+            return json(
+                200,
+                json!({ "jobs": [
+                    { "name": "run", "status": "in_progress", "started_at": "2026-11-16T09:00:00Z" },
+                    { "name": "sign", "status": "queued" },
+                ] }),
+            );
+        }
+        if path.starts_with("/repos/o/r/actions/runs/3/jobs") {
+            return json(
+                200,
+                json!({ "jobs": [
+                    { "name": "run", "status": "completed", "conclusion": "success", "started_at": "2026-11-16T09:00:00Z" },
+                    { "name": "sign", "status": "completed", "conclusion": "success" },
+                ] }),
+            );
+        }
+        if path.starts_with("/repos/o/r/actions/runs/4/jobs") {
+            return json(
+                200,
+                json!({ "jobs": [
+                    { "name": "run", "status": "completed", "conclusion": "cancelled" },
+                    { "name": "sign", "status": "completed", "conclusion": "skipped" },
+                ] }),
+            );
         }
         json(404, json!({ "message": "Not Found" }))
     });
@@ -1314,25 +1361,41 @@ fn the_pools_calls() {
         .unwrap();
     let body: serde_json::Value = serde_json::from_str(&sent.body).unwrap();
     assert_eq!(body["ref"], "main");
-    assert_eq!(body["inputs"]["mode"], "run");
+    assert_eq!(body["inputs"]["mode"], serde_json::Value::Null);
+    assert_eq!(body["inputs"]["branch"], "main");
+    assert_eq!(body["inputs"]["system"], "macos-arm64");
     assert_eq!(body["inputs"]["runner"], "macos-15");
     assert_eq!(body["inputs"]["claim"], "pool/forge/7");
     assert_eq!(body["inputs"]["combination"], "c0ffee");
-    assert!(pool
-        .job_alive(&kind, "pool/forge/7", Some("origin"))
-        .unwrap());
-    assert!(!pool
-        .job_alive(&kind, "pool/forge/8", Some("origin"))
-        .unwrap());
+    // Record 0122 (design D12): where each claim's job stands.
+    use sluice_seams::Job;
+    let runners = std::collections::BTreeMap::new();
+    let job = |claim: &str| pool.job(&kind, &runners, claim, Some("origin")).unwrap();
+    assert_eq!(job("pool/forge/7"), Job::Queued);
+    assert_eq!(
+        job("pool/forge/9"),
+        Job::Running {
+            since: "2026-11-16T09:00:00Z".into()
+        }
+    );
+    assert_eq!(
+        job("pool/forge/10"),
+        Job::Ended {
+            recorded: true,
+            why: None
+        }
+    );
+    assert_eq!(
+        job("pool/forge/11"),
+        Job::Ended {
+            recorded: false,
+            why: None
+        }
+    );
+    assert_eq!(job("pool/forge/8"), Job::None);
+    let sent = fake.requests().len();
     pool.wake(&kind, "main", Some("origin")).unwrap();
-    let wake = fake
-        .requests()
-        .into_iter()
-        .rfind(|r| r.path.ends_with("/dispatches"))
-        .unwrap();
-    let body: serde_json::Value = serde_json::from_str(&wake.body).unwrap();
-    assert_eq!(body["inputs"]["mode"], "round");
-    assert_eq!(body["inputs"]["branch"], "main");
+    assert_eq!(fake.requests().len(), sent, "a wake calls nothing");
 }
 
 // 134; rule core.29: every call to GitHub's API under the retry policy.
@@ -2295,4 +2358,268 @@ fn the_list_says_whether_it_changed() {
     let moved = app.listed(&repo(), "main").unwrap();
     assert!(moved.changed);
     assert_eq!(moved.pulls.len(), 2);
+}
+
+// 78, 79, 141; record 0119 (design D13): keyless bundles verified against
+// the roots sluice carries, from the records alone.
+
+/// A recorded bundle under `tests/profiles/forge/`: `public-good`, a
+/// GitHub Actions workflow's signature on the public-good instance, from
+/// sigstore-rust's tests (prefix-dev/sigstore-example's `action.yaml`);
+/// `github`, a signature of GitHub's own instance, timestamped with no log
+/// entry; `staging`, one of Sigstore's staging instance, which sluice
+/// carries no root of.
+fn recorded_bundle(name: &str) -> String {
+    let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("tests/profiles/forge")
+        .join(format!("{name}.sigstore.json"));
+    std::fs::read_to_string(&path).unwrap()
+}
+
+/// The identity of the workflow the public-good bundle was signed by, run
+/// from `git_ref`.
+fn signers_workflow(git_ref: &str) -> sluice::profiles::github::keyless::Identity {
+    sluice::profiles::github::keyless::Identity::workflow(
+        "prefix-dev",
+        "sigstore-example",
+        ".github/workflows/action.yaml",
+        git_ref,
+    )
+}
+
+/// 78, record 0119 (design D13): a bundle the signer's workflow signed on
+/// its ref, logged on the public-good instance, verifies against the root
+/// sluice carries, and holds its statement.
+#[test]
+fn a_bundle_from_the_signers_workflow_counts() {
+    use sluice::profiles::github::keyless::verify;
+    let statement = verify(
+        &recorded_bundle("public-good"),
+        &signers_workflow("refs/heads/main"),
+    )
+    .unwrap();
+    assert_eq!(
+        statement["predicateType"],
+        "https://schemas.conda.org/attestations-publish-1.schema.json"
+    );
+    assert_eq!(
+        statement["subject"][0]["name"],
+        "signed-package-2.1.0-hb0f4dca_0.conda"
+    );
+}
+
+/// 78, record 0119 (design D13): a bundle of GitHub's own instance, with an
+/// RFC 3161 timestamp and no transparency log entry, verifies against
+/// GitHub's root, which sluice carries, by the identity it was issued.
+#[test]
+fn a_bundle_of_githubs_own_instance_counts() {
+    use sluice::profiles::github::keyless::{verify, Identity};
+    let identity = Identity {
+        uri: "https://dotcom.releases.github.com".into(),
+        issuer: None,
+    };
+    let statement = verify(&recorded_bundle("github"), &identity).unwrap();
+    assert_eq!(
+        statement["predicateType"],
+        "https://in-toto.io/attestation/release/v0.2"
+    );
+    let other = Identity {
+        uri: "https://github.com/o/r/.github/workflows/sluice.yml@refs/heads/main".into(),
+        issuer: Some(sluice::profiles::github::keyless::GITHUB_ISSUER.into()),
+    };
+    assert!(verify(&recorded_bundle("github"), &other).is_err());
+}
+
+/// 78, 79, rule core.22, record 0119 (design D13): a bundle signed by the
+/// workflow on any ref but the signer's, a pull request's among them,
+/// counts for nothing, naming the identity it carried.
+#[test]
+fn a_bundle_from_a_pull_requests_ref_counts_for_nothing() {
+    use sluice::profiles::github::keyless::verify;
+    let err = verify(
+        &recorded_bundle("public-good"),
+        &signers_workflow("refs/pull/7/merge"),
+    )
+    .unwrap_err();
+    let said = format!("{err:#}");
+    assert!(said.contains("does not verify"), "{said}");
+    assert!(said.contains("refs/pull/7/merge"), "{said}");
+    assert!(
+        said.contains("prefix-dev/sigstore-example/.github/workflows/action.yaml@refs/heads/main"),
+        "the identity it carried: {said}"
+    );
+}
+
+/// 78, record 0119 (design D13): a bundle no root sluice carries verifies,
+/// one of Sigstore's staging instance, counts for nothing, with why.
+#[test]
+fn a_bundle_no_carried_root_verifies_counts_for_nothing() {
+    use sluice::profiles::github::keyless::{statement_of, verify, Identity};
+    let bundle = recorded_bundle("staging");
+    assert!(statement_of(&bundle).is_ok(), "a statement it holds");
+    let identity = Identity {
+        uri: "https://github.com/sigstore-conformance/extremely-dangerous-public-oidc-beacon/.github/workflows/extremely-dangerous-oidc-beacon.yml@refs/heads/main".into(),
+        issuer: None,
+    };
+    let said = format!("{:#}", verify(&bundle, &identity).unwrap_err());
+    assert!(said.contains("does not verify"), "{said}");
+}
+
+/// Record 0119 (design D14): `main`'s pool on GitHub Actions and its
+/// signer, as `sluice init actions` appends them.
+fn actions_pool() -> (sluice_core::policy::Pool, (String, sluice_seams::Setting)) {
+    let p = sluice_core::policy::Policy::parse(
+        "[tests]\nrunner = \"moon\"\n\n[branches.main]\nrequired = [\"#gate\"]\nremote = \"origin\"\n\
+         \n[systems]\nlinux-x64 = { os = \"linux\", arch = \"x86_64\" }\n\
+         \n[signers.forge]\ngithub = { workflow = \".github/workflows/sluice.yml\", ref = \"refs/heads/main\" }\n\
+         \n[pools.forge]\ngithub = { workflow = \".github/workflows/sluice.yml\" }\nsigner = \"forge\"\n\
+         runners = { linux-x64 = \"ubuntu-24.04\" }\n",
+    )
+    .expect("the policy parses");
+    (p.pools[0].clone(), p.signers["forge"].identity.clone())
+}
+
+/// The fake API answering for the pool's workflow on `main` with
+/// `workflow`, `None` for none, and for the `sluice` environment with
+/// `environment` and its branches `branches`; the app may run workflows.
+fn pool_forge(
+    clock: &Clock,
+    workflow: Option<&str>,
+    environment: serde_json::Value,
+    branches: &[&str],
+) -> Fake {
+    use base64::Engine;
+    let mut forge = Forge::new(clock);
+    forge.permissions["actions"] = json!("write");
+    let workflow = workflow.map(|w| base64::engine::general_purpose::STANDARD.encode(w));
+    let policies: Vec<serde_json::Value> = branches
+        .iter()
+        .map(|b| json!({ "name": b, "type": "branch" }))
+        .collect();
+    let minted = Mutex::new(0);
+    Fake::start(move |r: &Request| match r.path.as_str() {
+        "/repos/o/r/contents/.github/workflows/sluice.yml?ref=main" => match &workflow {
+            Some(w) => json(
+                200,
+                json!({ "type": "file", "encoding": "base64", "content": w }),
+            ),
+            None => json(404, json!({ "message": "Not Found" })),
+        },
+        "/repos/o/r/environments/sluice" => json(200, environment.clone()),
+        "/repos/o/r/environments/sluice/deployment-branch-policies" => json(
+            200,
+            json!({ "total_count": policies.len(), "branch_policies": policies }),
+        ),
+        _ => forge.answer(r, &minted),
+    })
+}
+
+/// The environment GitHub gives with custom branch policies.
+fn custom_environment() -> serde_json::Value {
+    json!({
+        "name": "sluice",
+        "deployment_branch_policy": { "protected_branches": false, "custom_branch_policies": true },
+    })
+}
+
+/// satisfies: record 0119 (design D14); the actions-pool spec's "forge
+/// check names what the pool lacks"
+#[test]
+fn forge_check_names_a_pools_missing_workflow() {
+    let clock = Clock::new();
+    let (pool, signer) = actions_pool();
+    let wants = sluice::profiles::github::workflows::sluice("1.2.3", &pool.runners);
+    let fake = pool_forge(&clock, None, custom_environment(), &["main"]);
+    let found = sluice::profiles::github::check::pool(
+        &app(&fake, &clock),
+        &repo(),
+        &pool,
+        Some(&signer),
+        &wants,
+    );
+    assert_eq!(
+        failures(&found),
+        vec!["main holds no .github/workflows/sluice.yml: sluice init actions writes it, to land on main"],
+        "{found:?}"
+    );
+    assert!(found.iter().any(|f| f.ok
+        && f.what == "the signer forge verifies .github/workflows/sluice.yml at refs/heads/main"));
+    assert!(found
+        .iter()
+        .any(|f| f.ok && f.what == "the app may run o/r's workflows"));
+    assert!(found
+        .iter()
+        .any(|f| f.ok && f.what == "only main may use o/r's sluice environment"));
+
+    // As init writes it: all set. One that differs is named.
+    let fake = pool_forge(&clock, Some(&wants), custom_environment(), &["main"]);
+    let found = sluice::profiles::github::check::pool(
+        &app(&fake, &clock),
+        &repo(),
+        &pool,
+        Some(&signer),
+        &wants,
+    );
+    assert!(failures(&found).is_empty(), "{found:?}");
+    let fake = pool_forge(
+        &clock,
+        Some("name: ours\n"),
+        custom_environment(),
+        &["main"],
+    );
+    let found = sluice::profiles::github::check::pool(
+        &app(&fake, &clock),
+        &repo(),
+        &pool,
+        Some(&signer),
+        &wants,
+    );
+    let f = failures(&found);
+    assert_eq!(f.len(), 1, "{found:?}");
+    assert!(
+        f[0].contains("is not as this sluice's init actions writes it"),
+        "{}",
+        f[0]
+    );
+}
+
+/// satisfies: record 0119 (design D14); the actions-pool spec's "forge
+/// check names an environment any branch may use"
+#[test]
+fn forge_check_names_an_environment_any_branch_may_use() {
+    let clock = Clock::new();
+    let (pool, signer) = actions_pool();
+    let wants = sluice::profiles::github::workflows::sluice("1.2.3", &pool.runners);
+    let check = |environment: serde_json::Value, branches: &[&str]| -> Vec<String> {
+        let fake = pool_forge(&clock, Some(&wants), environment, branches);
+        let found = sluice::profiles::github::check::pool(
+            &app(&fake, &clock),
+            &repo(),
+            &pool,
+            Some(&signer),
+            &wants,
+        );
+        failures(&found).into_iter().map(String::from).collect()
+    };
+    let any =
+        "any branch may use o/r's sluice environment, and so its key: let only main deploy from it";
+    assert_eq!(
+        check(
+            json!({ "name": "sluice", "deployment_branch_policy": null }),
+            &[]
+        ),
+        vec![any]
+    );
+    assert_eq!(
+        check(
+            json!({ "name": "sluice", "deployment_branch_policy": { "protected_branches": true, "custom_branch_policies": false } }),
+            &[]
+        ),
+        vec![any]
+    );
+    assert_eq!(
+        check(custom_environment(), &["dev", "main"]),
+        vec!["o/r's sluice environment may be used from dev, main: let only main deploy from it"]
+    );
+    assert!(check(custom_environment(), &["main"]).is_empty());
 }

@@ -142,10 +142,14 @@ impl Setup {
         }
     }
 
+    /// The binary in `dir`, this setup's host. The host process its
+    /// commands start passes only when asked, so the rounds that run are
+    /// the ones the test's commands ask for (design D14).
     fn command(&self, dir: &Path) -> Command {
         let mut c = Command::new(env!("CARGO_BIN_EXE_sluice"));
         support::isolated(&mut c)
             .current_dir(dir)
+            .env("SLUICE_ROUND_SLEEP", "record")
             .env("XDG_CONFIG_HOME", self.config.path())
             .env("XDG_STATE_HOME", self.state.path())
             .env_remove("SLUICE_AGENT")
@@ -492,29 +496,47 @@ fn landed_is_written_only_once_the_remote_holds_the_landing() {
     assert_eq!(s.repo.rev("main"), landed, "the copy is levelled to it");
 }
 
-/// 22, 122, 124, I4: a push the remote refuses by a rule of its own lands
-/// nothing: the round says the remote's own words, the submission is left
-/// landing and never told landed, and neither the remote nor the host's
-/// copy moves. Once the remote takes the push, the next round lands it,
-/// with no new run.
+/// 22, 122, 124, 152, I4; rule core.5; record 0124: a push the forge
+/// refuses by a rule of its own, with `main` where the landing expected it,
+/// lands nothing and is pushed once: the landing is held with the forge's
+/// words, and a wait on its submission ends at once with exit 6 and them,
+/// its document the submission's record. Neither the remote nor the host's
+/// copy moves.
 #[test]
-fn a_push_the_remote_refuses_leaves_the_submission_unlanded_with_its_words() {
+fn a_wait_on_a_landing_the_forge_refused_exits_6() {
     use std::os::unix::fs::PermissionsExt;
     let s = Setup::new("remote-rule", "origin");
     let words = "main takes no push but the queue's identity";
     let hook = s.origin.path().join("hooks/pre-receive");
+    let pushes = s.origin.path().join("pushes");
     std::fs::create_dir_all(hook.parent().unwrap()).unwrap();
-    std::fs::write(&hook, format!("#!/bin/sh\necho \"{words}\" >&2\nexit 1\n")).unwrap();
+    std::fs::write(
+        &hook,
+        format!(
+            "#!/bin/sh\necho push >> \"{}\"\necho \"{words}\" >&2\nexit 1\n",
+            pushes.display()
+        ),
+    )
+    .unwrap();
     std::fs::set_permissions(&hook, std::fs::Permissions::from_mode(0o755)).unwrap();
     let before = s.remote_main();
     s.submit("a");
-    let failed = s.step_until_failed();
-    assert!(failed.contains("pushing main to origin failed"), "{failed}");
-    assert!(failed.contains(words), "{failed}");
-    assert!(failed.contains("pre-receive hook declined"), "{failed}");
-    assert_eq!(s.states(), ["landing"]);
+    let deadline = Instant::now() + Duration::from_secs(60);
+    while s.states() != ["refused"] {
+        let out = s.sluice(&["step", "main"]);
+        assert!(out.status.success(), "{}", text(&out));
+        assert!(Instant::now() < deadline, "{}", s.status());
+        std::thread::sleep(Duration::from_millis(200));
+    }
+    for _ in 0..3 {
+        let out = s.sluice(&["step", "main"]);
+        assert!(out.status.success(), "{}", text(&out));
+    }
+    let pushed = std::fs::read_to_string(&pushes).unwrap_or_default();
+    assert_eq!(pushed.lines().count(), 1, "the landing is pushed once");
     assert!(s.status()["submissions"][0]["landed_as"].is_null());
     assert!(!s.logged("\"event\":\"landed\""));
+    assert!(s.logged("\"event\":\"forge_refused\""));
     assert_eq!(s.remote_main(), before);
     assert_eq!(
         s.repo.rev("main"),
@@ -522,20 +544,108 @@ fn a_push_the_remote_refuses_leaves_the_submission_unlanded_with_its_words() {
         "the copy is written at no other time"
     );
 
-    // A waiter is told the words, and not that it landed.
+    // A waiter is told the forge's words at once, with exit 6.
     let id = s.status()["submissions"][0]["id"].to_string();
-    let out = s.sluice(&["wait", &id, "--timeout", "30s", "--json"]);
-    assert!(!out.status.success(), "{}", text(&out));
+    let out = s.sluice(&["wait", &id, "--timeout", "30s"]);
+    assert_eq!(out.status.code(), Some(6), "{}", text(&out));
+    assert!(
+        text(&out).contains("the forge refused its landing:"),
+        "{}",
+        text(&out)
+    );
     assert!(text(&out).contains(words), "{}", text(&out));
-    assert_eq!(s.states(), ["landing"]);
+    let out = s.sluice(&["wait", &id, "--timeout", "30s", "--json"]);
+    assert_eq!(out.status.code(), Some(6), "{}", text(&out));
+    let doc: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert_eq!(doc["state"], "refused", "{doc}");
+    assert!(
+        doc["refused"]["words"]
+            .as_str()
+            .is_some_and(|w| w.contains(words)),
+        "{doc}"
+    );
+    assert_eq!(s.states(), ["refused"]);
+}
 
-    std::fs::remove_file(&hook).unwrap();
-    s.step_until_out();
+/// A pre-receive hook at `s`'s remote that refuses every push saying
+/// `words`, each push counted in the file it returns.
+fn refusing(s: &Setup, words: &str) -> std::path::PathBuf {
+    use std::os::unix::fs::PermissionsExt;
+    let hook = s.origin.path().join("hooks/pre-receive");
+    let pushes = s.origin.path().join("pushes");
+    std::fs::create_dir_all(hook.parent().unwrap()).unwrap();
+    std::fs::write(
+        &hook,
+        format!(
+            "#!/bin/sh\necho push >> \"{}\"\necho \"{words}\" >&2\nexit 1\n",
+            pushes.display()
+        ),
+    )
+    .unwrap();
+    std::fs::set_permissions(&hook, std::fs::Permissions::from_mode(0o755)).unwrap();
+    pushes
+}
+
+/// Step `main` until its one submission is refused.
+fn step_until_refused(s: &Setup) {
+    let deadline = Instant::now() + Duration::from_secs(60);
+    while s.states() != ["refused"] {
+        let out = s.sluice(&["step", "main"]);
+        assert!(out.status.success(), "{}", text(&out));
+        assert!(Instant::now() < deadline, "{}", s.status());
+        std::thread::sleep(Duration::from_millis(200));
+    }
+}
+
+/// 152, 24, rule core.5; record 0124: `sluice push main` pushes a held
+/// landing again once the forge takes it, and its submission lands as the
+/// same landing, with no new run.
+#[test]
+fn push_lands_a_held_landing_once_the_forge_takes_it() {
+    let s = Setup::new("push-taken", "origin");
+    refusing(&s, "main takes no push but the queue's identity");
+    let before = s.remote_main();
+    s.submit("a");
+    step_until_refused(&s);
+    std::fs::remove_file(s.origin.path().join("hooks/pre-receive")).unwrap();
+    let out = s.sluice(&["push", "main"]);
+    assert!(out.status.success(), "{}", text(&out));
+    assert!(text(&out).contains("landed on main"), "{}", text(&out));
     assert_eq!(s.states(), ["landed"]);
     assert_eq!(s.runs(), 1, "no new run");
     let landed = s.remote_main();
     assert_eq!(s.repo.rev(&format!("{landed}^1")), before);
-    assert_eq!(s.repo.rev("main"), landed);
+    let out = s.sluice(&["push", "main"]);
+    assert!(out.status.success(), "{}", text(&out));
+    assert!(
+        text(&out).contains("holds no landing the forge refused"),
+        "{}",
+        text(&out)
+    );
+    assert_eq!(s.remote_main(), landed, "nothing pushed");
+}
+
+/// 152, rule core.5; record 0124: `sluice push main` refused again leaves
+/// the landing held with the forge's new words, and exits non-zero with
+/// them.
+#[test]
+fn push_refused_again_leaves_the_landing_held() {
+    let s = Setup::new("push-refused", "origin");
+    let pushes = refusing(&s, "main takes no push but the queue's identity");
+    let before = s.remote_main();
+    s.submit("a");
+    step_until_refused(&s);
+    let again = "push declined due to repository rule violations";
+    refusing(&s, again);
+    let out = s.sluice(&["push", "main"]);
+    assert_eq!(out.status.code(), Some(6), "{}", text(&out));
+    assert!(text(&out).contains(again), "{}", text(&out));
+    assert_eq!(s.states(), ["refused"]);
+    assert_eq!(s.remote_main(), before);
+    let pushed = std::fs::read_to_string(&pushes).unwrap_or_default();
+    assert_eq!(pushed.lines().count(), 2, "pushed once more");
+    let status = s.sluice(&["status", "main"]);
+    assert!(text(&status).contains(again), "{}", text(&status));
 }
 
 /// 124, 6, rule core.6: after a landing, this host's copy of `main`
@@ -628,10 +738,11 @@ fn events(log: &str, event: &str) -> Vec<serde_json::Value> {
         .collect()
 }
 
-/// 133: with the remote moved away, a waiting submit's round says why its
-/// fetch failed as before, and `main`'s log holds one `read-refused` line
-/// however many rounds are refused; once the remote is back, one round
-/// logs `read-again` with the rounds it counted.
+/// 133: with the remote moved away, a waiting submit says once on stderr
+/// why the host process's round could not fetch, and goes on following,
+/// so it is ended once it has (135; design D9); `main`'s log holds one
+/// `read-refused` line however many rounds are refused; once the remote
+/// is back, one round logs `read-again` with the rounds it counted.
 #[test]
 fn a_refused_fetch_is_logged_once_and_its_end_with_the_rounds() {
     let s = Setup::new("remote-refused", "origin");
@@ -650,13 +761,22 @@ fn a_refused_fetch_is_logged_once_and_its_end_with_the_rounds() {
     s.repo.git(&["-C", dir.to_str().unwrap(), "add", "-A"]);
     s.repo
         .git(&["-C", dir.to_str().unwrap(), "commit", "-q", "-m", "a"]);
-    let waiting = s
+    let mut waiting = s
         .command(&dir)
         .args(["submit", "main"])
-        .stdout(Stdio::piped())
+        .stdout(Stdio::null())
         .stderr(Stdio::piped())
         .spawn()
         .unwrap();
+    let stderr = std::io::BufReader::new(waiting.stderr.take().unwrap());
+    let (send, said) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        for line in std::io::BufRead::lines(stderr).map_while(Result::ok) {
+            if send.send(line).is_err() {
+                break;
+            }
+        }
+    });
     let deadline = Instant::now() + Duration::from_secs(60);
     while s.runs() == 0 {
         assert!(Instant::now() < deadline, "the check never started");
@@ -664,13 +784,20 @@ fn a_refused_fetch_is_logged_once_and_its_end_with_the_rounds() {
     }
     let aside = s.origin.path().with_extension("aside");
     std::fs::rename(s.origin.path(), &aside).unwrap();
-    let out = waiting.wait_with_output().unwrap();
-    assert!(!out.status.success());
-    assert!(
-        text(&out).contains("fetching main from origin failed"),
-        "{}",
-        text(&out)
-    );
+    let deadline = Instant::now() + Duration::from_secs(60);
+    let mut seen: Vec<String> = Vec::new();
+    while !seen
+        .iter()
+        .any(|l| l.contains("fetching main from origin failed"))
+    {
+        let left = deadline.saturating_duration_since(Instant::now());
+        match said.recv_timeout(left) {
+            Ok(line) => seen.push(line),
+            Err(_) => panic!("the waiting submit never said the round's failure: {seen:?}"),
+        }
+    }
+    let _ = waiting.kill();
+    let _ = waiting.wait();
     for _ in 0..3 {
         let out = s.sluice(&["step", "main"]);
         assert!(!out.status.success());
@@ -1764,6 +1891,9 @@ fn a_forecast_beside_a_current_reader_asks_the_remote_nothing() {
         "{doc}"
     );
     let repository = doc["repository"].as_str().unwrap().to_string();
+    // D7: the host process the steps reached drives the repository and
+    // keeps its reader's place; ended, the test's own reader takes it.
+    support::kill_host_process(&mut s.command(s.repo.dir()));
     let readers = s.state.path().join("sluice/readers");
     let mut reader =
         match sluice::reader::Reader::take(&readers, &repository, sluice::VERSION).unwrap() {
@@ -1795,11 +1925,42 @@ fn a_forecast_beside_a_current_reader_asks_the_remote_nothing() {
     assert_eq!(remote_calls(&trace), Vec::<String>::new());
 }
 
-/// 64, 124: with no reader on this host, a forecast reads `main` as a
-/// round does: the work another host submitted to it, which this host
-/// does not hold, is fetched, and the forecast is formed against it.
+/// 64, 129 (design D16): with no host process running and `main` on
+/// origin moved past what this host holds, a forecast starts the host
+/// process, forms on `main` as that process's first reading fetched it,
+/// and asks origin nothing itself.
 #[test]
-fn a_forecast_with_no_reader_fetches_another_hosts_work() {
+fn a_forecast_with_no_host_process_starts_it_and_fetches_nothing() {
+    let s = Setup::signed("forecast-no-host");
+    let other = Repo::clone_of(s.origin.path(), "forecast-no-host-b");
+    let moved = other.push_change("theirs.txt", "theirs\n");
+    assert_ne!(
+        s.repo.rev("origin/main"),
+        moved,
+        "this host holds it already"
+    );
+    support::kill_host_process(&mut s.command(s.repo.dir()));
+
+    let mine = worktree(&s, "a", "main", &[("mine.txt", "mine\n")]);
+    let trace = s.seen.path().join("trace");
+    let out = s
+        .command(&mine)
+        .args(["submit", "main", "--check", "--json"])
+        .env("GIT_TRACE", &trace)
+        .output()
+        .unwrap();
+    assert_eq!(out.status.code(), Some(sluice::LANDED), "{}", text(&out));
+    let v: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert_eq!(v["onto"], moved.as_str(), "{v}");
+    assert_eq!(remote_calls(&trace), Vec::<String>::new());
+}
+
+/// 64, 124, 129 (design D16): with no reader on this host, a forecast has
+/// the host process read `main`: the work another host submitted to it,
+/// which this host did not hold, is fetched by that reading, and the
+/// forecast, asking the remote nothing itself, is formed against it.
+#[test]
+fn a_forecast_with_no_reader_has_the_host_process_fetch_another_hosts_work() {
     let s = Setup::signed("forecast-other-host");
     let other = Repo::clone_of(s.origin.path(), "forecast-other-host-b");
     let config = Scratch::new("forecast-other-host-b-config");
@@ -1848,9 +2009,11 @@ fn a_forecast_with_no_reader_fetches_another_hosts_work() {
     );
 
     let mine = worktree(&s, "a", "main", &[("shared.txt", "a's\n")]);
+    let trace = s.seen.path().join("trace");
     let out = s
         .command(&mine)
         .args(["submit", "main", "--check", "--json"])
+        .env("GIT_TRACE", &trace)
         .output()
         .unwrap();
     assert_eq!(out.status.code(), Some(sluice::CONFLICT), "{}", text(&out));
@@ -1862,6 +2025,7 @@ fn a_forecast_with_no_reader_fetches_another_hosts_work() {
         serde_json::json!(["shared.txt"]),
         "{v}"
     );
+    assert_eq!(remote_calls(&trace), Vec::<String>::new());
 }
 
 /// A branch whose policy this sluice refuses is refused alone (26, S64).

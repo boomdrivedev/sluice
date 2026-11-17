@@ -62,14 +62,15 @@ use std::path::{Path, PathBuf};
 use anyhow::{anyhow, bail, Context as _, Result};
 use serde::{Deserialize, Serialize};
 use sluice_seams::{
-    log_tail, AtBound, Enforced, Equip, EquipStep, Equipped, HostRun, KeptOutTask, Limits, Network,
-    NotRun, Outcome, Place, Progress, Proof, Reading, Reads, Refusals, Rev, RunHandle, RunReport,
-    RunRequest, Running, Setting, Settings, Source, TaskLog, TaskProgress, TaskResult, Tests,
-    Through,
+    log_tail, AtBound, Enforced, Equip, EquipStep, Equipped, Found, HostRun, KeptOutTask, Limits,
+    Network, NotRun, Outcome, Part, Place, Progress, Proof, Reading, Reads, Refusals, Rev,
+    RunHandle, RunKind, RunReport, RunRequest, Running, Setting, Settings, Source, TaskLog,
+    TaskProgress, TaskResult, Tests, Through,
 };
 
 use super::moon::{self, Moon};
-use crate::host_count::{self, HostCount};
+use crate::host_count::HostCount;
+use crate::host_process::room::{self, Room, Shared};
 use crate::instance::{HostCache, Instance};
 use crate::runs::{Ended, Request, RunState, Runs};
 use crate::sessions::Sessions;
@@ -215,12 +216,13 @@ struct Meta {
 /// A pool the binding hands this profile, to start runs on (88; ADR 0034).
 pub trait Launcher {
     fn launch(&self, launch: &sluice_seams::Launch) -> Result<()>;
-    fn job_alive(
+    fn job(
         &self,
         kind: &(String, Setting),
+        runners: &BTreeMap<String, String>,
         claim: &str,
         remote: Option<&str>,
-    ) -> Result<bool>;
+    ) -> Result<sluice_seams::Job>;
     fn wake(&self, kind: &(String, Setting), branch: &str, remote: Option<&str>) -> Result<()>;
 }
 
@@ -231,12 +233,17 @@ pub struct Checks {
     common: PathBuf,
     runs: Runs,
     instance: Instance,
-    /// The pool this host can start runs on, where the binding gave one.
-    pool: Option<Box<dyn Launcher>>,
+    /// The pools this host can start runs on, by their kind, as the binding
+    /// gave them (88; rule core.2; design D5 of the change
+    /// `a-codebuild-fleet-runs-a-queues-checks`).
+    pools: BTreeMap<String, Box<dyn Launcher>>,
     /// The host's session runs, when not the host's own directory.
     sessions: Option<Sessions>,
     /// The host's running checks, when not the host's own directory.
     running: Option<HostCount>,
+    /// How its runs hold their parts of the host's bound (71, 150; rule
+    /// core.49; design D12), once reached.
+    room: std::cell::OnceCell<RoomHandle>,
     /// Where the container engine is looked for, when not where the
     /// sandbox lets a run reach it.
     engines: Option<Vec<Endpoint>>,
@@ -256,16 +263,17 @@ impl Checks {
             instance,
             sessions: None,
             running: None,
-            pool: None,
+            room: std::cell::OnceCell::new(),
+            pools: BTreeMap::new(),
             engines: None,
             system_link: None,
             log: None,
         }
     }
 
-    /// The same profile, starting runs on `pool` (88).
-    pub fn with_pool(mut self, pool: Box<dyn Launcher>) -> Self {
-        self.pool = Some(pool);
+    /// The same profile, starting runs of pools of `kind` on `pool` (88).
+    pub fn with_pool(mut self, kind: &str, pool: Box<dyn Launcher>) -> Self {
+        self.pools.insert(kind.into(), pool);
         self
     }
 
@@ -275,10 +283,33 @@ impl Checks {
         self
     }
 
-    /// The same profile, counting the host's running checks under `dir`.
+    /// The same profile, counting the host's running checks under `dir`,
+    /// and, where it was bound with no room, holding its runs' parts of a
+    /// room over that count, as the host process holds its own: how a test
+    /// that starts runs in its own process stands for the host process
+    /// (design D12, D14).
     pub fn with_running(mut self, dir: PathBuf) -> Self {
-        self.running = Some(HostCount::new(dir));
+        let count = HostCount::new(dir);
+        if self.room.get().is_none() {
+            let room = Room::over(count.clone(), self.instance.bound, self.instance.reserved);
+            let _ = self.room.set(RoomHandle::Here(Shared::new(room)));
+        }
+        self.running = Some(count);
         self
+    }
+
+    /// The same profile, holding its runs' parts through `room`: the host
+    /// process's own room, in the process that holds it (design D12).
+    pub fn with_room(mut self, room: RoomHandle) -> Self {
+        self.room = std::cell::OnceCell::from(room);
+        self
+    }
+
+    /// How its runs hold their parts: the handle it was bound with, else
+    /// the host process's room over its socket, so no process but the host
+    /// process decides a part by itself (design D12; task 4.2).
+    fn room(&self) -> Result<&RoomHandle> {
+        Ok(self.room.get_or_init(|| RoomHandle::Socket(None)))
     }
 
     /// The same profile, looking for the container engine at the unix
@@ -359,34 +390,91 @@ impl Checks {
     pub fn instance(&self) -> &Instance {
         &self.instance
     }
+}
 
-    /// 71: admit the run `name` of `request` against the host's count:
-    /// a session's or a preview's under the bound less the reserve, any
-    /// other under the bound. `None` at the bound.
-    fn admit(
-        &self,
-        request: &RunRequest,
-        name: &str,
-        session: bool,
-    ) -> Result<Option<host_count::Admission>> {
-        let kind = if session || request.place.name.starts_with(super::places::PREVIEW) {
-            host_count::Kind::Session
-        } else {
-            host_count::Kind::Queue
-        };
-        let limit = match kind {
-            host_count::Kind::Queue => self.instance.bound,
-            host_count::Kind::Session => self.instance.bound.saturating_sub(self.instance.reserved),
-        };
-        let entry = host_count::Entry {
-            kind,
-            repository: self.common.clone(),
-            place: request.place.name.clone(),
-            run_dir: self.runs.dir(name),
-            pid: std::process::id(),
-            admitted: chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
-        };
-        self.host_count()?.admit(&entry, limit)
+/// How a profile reaches the host's room (design D12): the room itself, in
+/// the process that holds it, and the host process's socket in any other.
+#[derive(Clone)]
+pub enum RoomHandle {
+    Here(Shared),
+    /// The host process's room, asked over its socket through the client
+    /// given, else the host's own, the process started where none answers
+    /// (task 4.2).
+    Socket(Option<std::sync::Arc<crate::host_process::client::Client>>),
+}
+
+impl RoomHandle {
+    /// A part of `kind` for a run of `repository`; `None` where the room
+    /// refuses it. Over the socket, the room's first answer decides: held,
+    /// the part is the connection, given back as it closes; waiting, the
+    /// room refuses it now and the ask is let go (71).
+    fn hold(&self, kind: RunKind, repository: &Path) -> Result<Option<Part>> {
+        use crate::host_process::protocol::Answer;
+        match self {
+            RoomHandle::Here(shared) => shared.hold(kind, repository),
+            RoomHandle::Socket(client) => {
+                let mut c = match client {
+                    Some(client) => client.hold(kind, repository, "")?,
+                    None => {
+                        crate::host_process::client::Client::host()?.hold(kind, repository, "")?
+                    }
+                };
+                match c.next(Some(crate::host_process::read_for()))? {
+                    Some(Answer::Held) => {
+                        Ok(Some(Part::new(kind, crate::host_process::ask::Lent(c))))
+                    }
+                    Some(Answer::Waiting(_)) | None => Ok(None),
+                    Some(Answer::Error(e)) => Err(anyhow::anyhow!("{e}")),
+                    Some(other) => Err(anyhow::anyhow!(
+                        "sluice's host process answered {other:?} to a hold"
+                    )),
+                }
+            }
+        }
+    }
+}
+
+/// A part a start takes, as the room it was held of carries it: the room
+/// itself, or the host process's over the connection `sluice exec` or
+/// `sluice preview` held it on (design D12).
+enum Begun {
+    Here(room::Holding),
+    Host(crate::host_process::ask::Lent, Option<(String, PathBuf)>),
+}
+
+impl Begun {
+    fn of(part: Part) -> Option<Begun> {
+        match part.take::<room::Holding>() {
+            Ok(h) => Some(Begun::Here(h)),
+            Err(part) => part
+                .take::<crate::host_process::ask::Lent>()
+                .ok()
+                .map(|l| Begun::Host(l, None)),
+        }
+    }
+
+    /// The run begins in `run_dir`, in the place `place`.
+    fn begin(&mut self, place: &str, run_dir: &Path) -> Result<()> {
+        match self {
+            Begun::Here(h) => h.begin(place, run_dir),
+            Begun::Host(_, at) => {
+                *at = Some((place.to_string(), run_dir.to_path_buf()));
+                Ok(())
+            }
+        }
+    }
+
+    /// The run's supervisor holds its run directory.
+    fn started(self) {
+        match self {
+            Begun::Here(h) => h.started(),
+            Begun::Host(lent, Some((place, run_dir))) => {
+                // A host process that ended meanwhile counts the run by its
+                // supervisor when the next one starts.
+                let _ = lent.started(&place, &run_dir);
+            }
+            Begun::Host(_, None) => {}
+        }
     }
 }
 
@@ -917,6 +1005,19 @@ const KEEP: [&str; 10] = [
     "PROTO_HOME",
     "MOON_HOME",
 ];
+
+/// 135 (design D3): whether a run keeps `name` of the environment it is
+/// started from, `KEEP` and the locale's `LC_*`: what sluice's host
+/// process keeps of its starter's, beside the host's own settings.
+pub fn run_keeps(name: &str) -> bool {
+    KEEP.contains(&name) || name.starts_with("LC_")
+}
+
+/// 135 (design D3): what a development shell sets that the host process
+/// keeps none of, by prefix, whatever else would keep it: the shell's own
+/// settings name the shell's working copy, which no repository the host
+/// process holds is (rule core.1 keeps their names here).
+pub const SHELL_ONLY: [&str; 5] = ["DEVENV_", "DIRENV_", "IN_NIX_SHELL", "NIX_", "MOON_"];
 
 /// Whether sluice sets `name` for every run itself: what it keeps of its
 /// own environment, the locale's `LC_*` and its own `SLUICE_*`. A host's
@@ -1737,7 +1838,11 @@ pub fn hostname() -> String {
 }
 
 impl Tests for Checks {
-    fn start(&self, request: &RunRequest) -> Result<RunHandle> {
+    fn start(&self, request: &RunRequest, part: Part) -> Result<RunHandle> {
+        // 71 (rule core.49): the room its part holds, or none it honours.
+        let Some(mut begun) = Begun::of(part) else {
+            return Err(AtBound.into());
+        };
         let runner = text(&request.tests, "runner")?
             .ok_or_else(|| anyhow!("[tests] names no runner: \"moon\" or \"command\""))?
             .to_string();
@@ -1767,19 +1872,10 @@ impl Tests for Checks {
         } else {
             request.place.name.clone()
         };
-        // 71: admitted against the host's count before anything runs; a
-        // session's or a preview's run never into the reserve (91, 102).
-        let admission = match self.admit(request, name, session)? {
-            Some(a) => a,
-            None => {
-                if session {
-                    // The run's number goes unused; nothing is in it.
-                    let _ = std::fs::remove_dir(self.runs.dir(name));
-                }
-                return Err(AtBound.into());
-            }
-        };
         let dir = self.runs.prepare(name)?;
+        // 71: its part's entry names the run from now, its hold keeping it
+        // counted until the run's supervisor holds the run directory.
+        begun.begin(&request.place.name, &dir)?;
         // 84, record 0097 (design D2): the host's system as the run
         // begins, before its checkout is equipped, so a switch while it is
         // equipped is one during the run.
@@ -1964,7 +2060,7 @@ impl Tests for Checks {
             },
         )?;
         // Its supervisor holds the run directory, which keeps it counted.
-        admission.started();
+        begun.started();
         Ok(RunHandle(name.clone()))
     }
 
@@ -2028,6 +2124,19 @@ impl Tests for Checks {
             true => Refusals::None,
             false => Refusals::Refused(super::refusals::words(&refusals)),
         })
+    }
+
+    /// Record 0122 (design D3): the supervisor's run for the checkout, by
+    /// its own files ([`crate::runs::Runs::found`]); a session's place,
+    /// whose runs are each their own, has none to find.
+    fn found(&self, place: &str) -> Result<Option<Found>> {
+        if crate::runs::is_session(place) {
+            return Ok(None);
+        }
+        Ok(self.runs.found(place)?.map(|since| Found {
+            run: RunHandle(place.to_string()),
+            since,
+        }))
     }
 
     fn progress(&self, run: &RunHandle) -> Result<Progress> {
@@ -2121,37 +2230,49 @@ impl Tests for Checks {
         }))
     }
 
+    fn hold(&self, kind: RunKind) -> Result<Option<Part>> {
+        self.room()?.hold(kind, &self.common)
+    }
+
     fn bound(&self) -> Result<usize> {
         Ok(self.instance.bound)
     }
 
+    /// 88 (design D5): to the launcher of the pool's kind; a kind no
+    /// launcher is bound for starts nothing, naming the kind.
     fn launch(&self, launch: &sluice_seams::Launch) -> Result<()> {
-        match &self.pool {
+        match self.pools.get(&launch.kind.0) {
             Some(p) => p.launch(launch),
+            None if launch.kind.0 == "github" => anyhow::bail!(
+                "this host has no pool of kind github for {}: name the app it reaches GitHub as \
+                 under [forge]",
+                launch.pool
+            ),
             None => anyhow::bail!(
-                "this host has no pool of kind {} for {}: name the app it reaches GitHub as under [forge]",
+                "this host has no pool of kind {} for {}",
                 launch.kind.0,
                 launch.pool
             ),
         }
     }
 
-    fn job_alive(
+    fn job(
         &self,
         kind: &(String, Setting),
+        runners: &BTreeMap<String, String>,
         claim: &str,
         remote: Option<&str>,
-    ) -> Result<bool> {
-        match &self.pool {
-            Some(p) => p.job_alive(kind, claim, remote),
-            // A host that cannot ask the pool reads its jobs as running:
-            // a claim lapses only by what is known of it (77).
-            None => Ok(true),
+    ) -> Result<sluice_seams::Job> {
+        match self.pools.get(&kind.0) {
+            Some(p) => p.job(kind, runners, claim, remote),
+            // A host that cannot ask the pool reads its jobs as waiting: a
+            // claim lapses only by what is known of it (77).
+            None => Ok(sluice_seams::Job::Queued),
         }
     }
 
     fn wake(&self, kind: &(String, Setting), branch: &str, remote: Option<&str>) -> Result<()> {
-        match &self.pool {
+        match self.pools.get(&kind.0) {
             Some(p) => p.wake(kind, branch, remote),
             None => Ok(()),
         }
@@ -2269,6 +2390,116 @@ impl Tests for Checks {
                     why: format!("{e:#}"),
                 });
             }
+            tracing::warn!(
+                sluice.task = %t.task,
+                sluice.hash = %t.hash,
+                "a key the combination's tree does not bear out is not signed: {e:#}"
+            );
+        }
+        Ok(proof)
+    }
+
+    /// Record 0119 (design D11; 109): for a moon run, each manifest its
+    /// keys' walk reads, the key's own and each dependency's, from the
+    /// stores [`proven`] reads, under `blobs/` as moon's store keeps them,
+    /// so the sign job holds each key to the same proof by its content with
+    /// nothing run.
+    ///
+    /// [`proven`]: Tests::proven
+    fn keep_proof(&self, run: &RunHandle, report: &RunReport, dir: &Path) -> Result<()> {
+        let meta: Meta = serde_json::from_value(self.runs.request(&run.0)?.meta)
+            .with_context(|| format!("reading run {}", run.0))?;
+        std::fs::create_dir_all(dir)?;
+        if meta.runner != "moon" {
+            return Ok(());
+        }
+        let own = meta.place.join(".moon/cache");
+        let store = meta.store.clone().unwrap_or_else(|| own.clone());
+        let read = std::cell::RefCell::new(BTreeMap::new());
+        let blob = |k: &str| {
+            let bytes = super::moon::blob_in(&store, k).or_else(|| {
+                (store != own)
+                    .then(|| super::moon::blob_in(&own, k))
+                    .flatten()
+            })?;
+            read.borrow_mut().insert(k.to_string(), bytes.clone());
+            Some(bytes)
+        };
+        let tree = |p: &str| super::moon::file_at(&meta.place, &meta.revision, p);
+        for t in report.tasks.iter().chain(&report.dependencies) {
+            // What the walk reads is kept whatever it finds; the sign job
+            // judges each key again.
+            let _ = super::moon::check_key(&t.hash, &t.task, &blob, &tree);
+        }
+        for (key, bytes) in read.into_inner() {
+            let at = dir.join("blobs").join(&key[..2]);
+            std::fs::create_dir_all(&at)?;
+            std::fs::write(at.join(&key[2..]), bytes)?;
+        }
+        Ok(())
+    }
+
+    /// Record 0119 (design D11; 78, 109; rule core.9): each key of a run
+    /// job's `report` checked against the tree of `revision`, which this
+    /// repository holds, by the manifests the job kept in `dir`, as
+    /// [`proven`] checks a run's own: a command runner's keys are sluice's
+    /// own; a moon key whose manifest the job kept none of is unkept where
+    /// it is a ran pass, and any other the tree does not bear out is
+    /// refused with why. The runner is the policy's, never the job's.
+    ///
+    /// [`proven`]: Tests::proven
+    fn proven_from(
+        &self,
+        dir: &Path,
+        revision: &sluice_seams::Rev,
+        tests: &sluice_seams::Settings,
+        report: &RunReport,
+    ) -> Result<Proof> {
+        let tasks = report.tasks.iter().chain(&report.dependencies);
+        if text(tests, "runner")? != Some("moon") {
+            return Ok(Proof {
+                proven: tasks.map(|t| t.task.clone()).collect(),
+                ..Proof::default()
+            });
+        }
+        let blob = |k: &str| super::moon::blob_in(dir, k);
+        let tree = |p: &str| super::moon::file_at(&self.common, revision.as_str(), p);
+        let checks = report.tasks.iter().map(|t| (t, true));
+        let dependencies = report.dependencies.iter().map(|t| (t, false));
+        let mut proof = Proof::default();
+        for (t, check) in checks.chain(dependencies) {
+            let e = match super::moon::check_key(&t.hash, &t.task, &blob, &tree) {
+                Ok(()) => {
+                    proof.proven.push(t.task.clone());
+                    continue;
+                }
+                Err(e) => e,
+            };
+            let ran_pass =
+                check && matches!(t.source, Source::Ran { .. }) && t.outcome == Outcome::Pass;
+            if let Some(missing) = e.downcast_ref::<moon::NoManifest>() {
+                if ran_pass {
+                    let whose = if missing.task == t.task {
+                        "it".to_string()
+                    } else {
+                        format!("{}, which it depends on", missing.task)
+                    };
+                    proof.unkept.push(NotRun {
+                        task: t.task.clone(),
+                        reason: format!(
+                            "it passed, but nothing the run job handed over proves it ran: \
+                             moon's manifest of {whose} is not among what it kept"
+                        ),
+                        key: Some(missing.key.clone()),
+                    });
+                }
+                continue;
+            }
+            proof.refused.push(sluice_seams::Refused {
+                task: t.task.clone(),
+                key: t.hash.clone(),
+                why: format!("{e:#}"),
+            });
             tracing::warn!(
                 sluice.task = %t.task,
                 sluice.hash = %t.hash,
@@ -2506,6 +2737,111 @@ fn took_ms(started: &str, ended: &str) -> Option<u64> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A launcher that says which it is in `calls` at each call.
+    struct Named(&'static str, std::rc::Rc<std::cell::RefCell<Vec<String>>>);
+
+    impl Launcher for Named {
+        fn launch(&self, launch: &sluice_seams::Launch) -> Result<()> {
+            self.1
+                .borrow_mut()
+                .push(format!("{} launch {}", self.0, launch.claim));
+            Ok(())
+        }
+
+        fn job(
+            &self,
+            _kind: &(String, Setting),
+            runners: &BTreeMap<String, String>,
+            claim: &str,
+            _remote: Option<&str>,
+        ) -> Result<sluice_seams::Job> {
+            let on: Vec<&String> = runners.values().collect();
+            self.1
+                .borrow_mut()
+                .push(format!("{} job {claim} {on:?}", self.0));
+            Ok(sluice_seams::Job::None)
+        }
+
+        fn wake(
+            &self,
+            _kind: &(String, Setting),
+            branch: &str,
+            _remote: Option<&str>,
+        ) -> Result<()> {
+            self.1
+                .borrow_mut()
+                .push(format!("{} wake {branch}", self.0));
+            Ok(())
+        }
+    }
+
+    /// 88, rule core.2 (design D5 of the change
+    /// `a-codebuild-fleet-runs-a-queues-checks`): a pool's launch, job and
+    /// wake go to the launcher bound for its kind, a job with the pool's
+    /// runners; a kind no launcher is bound for reads its jobs as waiting
+    /// and refuses a launch naming the kind.
+    #[test]
+    fn a_pool_is_reached_by_its_kind() {
+        use sluice_seams::Tests as _;
+        let calls = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
+        let checks = Checks::new(
+            Path::new("/nonexistent/repo.git"),
+            PathBuf::from("sluice"),
+            Instance::from_file(None, 4).unwrap(),
+        )
+        .with_pool("github", Box::new(Named("actions", calls.clone())))
+        .with_pool("codebuild", Box::new(Named("fleet", calls.clone())));
+        let kind = |k: &str| (k.to_string(), Setting::Text(String::new()));
+        let runners =
+            BTreeMap::from([("linux-x64".to_string(), "sluice-run-linux-x64".to_string())]);
+        let launch = |k: &str, claim: &str| sluice_seams::Launch {
+            pool: k.into(),
+            kind: kind(k),
+            signer: kind("kms"),
+            runner: "sluice-run-linux-x64".into(),
+            remote: Some("origin".into()),
+            branch: "main".into(),
+            candidate: "c3".into(),
+            combination: sluice_seams::Rev::new("c0ffee"),
+            system: Some("linux-x64".into()),
+            claim: claim.into(),
+        };
+        checks
+            .launch(&launch("codebuild", "pool/codebuild/4"))
+            .unwrap();
+        checks.launch(&launch("github", "pool/forge/5")).unwrap();
+        checks
+            .job(&kind("codebuild"), &runners, "pool/codebuild/4", None)
+            .unwrap();
+        checks
+            .job(&kind("github"), &runners, "pool/forge/5", None)
+            .unwrap();
+        checks.wake(&kind("codebuild"), "main", None).unwrap();
+        assert_eq!(
+            *calls.borrow(),
+            [
+                "fleet launch pool/codebuild/4",
+                "actions launch pool/forge/5",
+                "fleet job pool/codebuild/4 [\"sluice-run-linux-x64\"]",
+                "actions job pool/forge/5 [\"sluice-run-linux-x64\"]",
+                "fleet wake main",
+            ]
+        );
+        assert_eq!(
+            checks
+                .job(&kind("gitlab"), &runners, "pool/gl/1", None)
+                .unwrap(),
+            sluice_seams::Job::Queued
+        );
+        let e = format!(
+            "{:#}",
+            checks.launch(&launch("gitlab", "pool/gl/1")).unwrap_err()
+        );
+        assert!(e.contains("no pool of kind gitlab"), "{e}");
+        checks.wake(&kind("gitlab"), "main", None).unwrap();
+        assert_eq!(calls.borrow().len(), 5);
+    }
 
     /// 84, record 0097 (design D2, D4), the host-requirements spec's "A
     /// run an older sluice started": a run's request an older sluice wrote

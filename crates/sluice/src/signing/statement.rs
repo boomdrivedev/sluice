@@ -135,6 +135,13 @@ impl Statement {
         let body = e.payload_of(IN_TOTO)?;
         let s: Statement =
             serde_json::from_slice(&body).context("the envelope holds no in-toto statement")?;
+        Statement::checked(s)
+    }
+
+    /// `s`, checked for being a run's statement as [`Statement::from_envelope`]
+    /// checks an envelope's: a keyless bundle's statement is held to the
+    /// same (record 0119; design D13).
+    pub fn checked(s: Statement) -> Result<Statement> {
         if s.type_ != STATEMENT_TYPE {
             bail!("the statement is {}, not {STATEMENT_TYPE}", s.type_);
         }
@@ -152,7 +159,7 @@ impl Statement {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
 
     pub fn run() -> Run {

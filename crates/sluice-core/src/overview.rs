@@ -132,6 +132,73 @@ pub struct BranchView {
     /// fetched.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub stale: Option<String>,
+    /// Record 0122 (design D11): where the branch's queue lives, and its
+    /// move while one is written; `None` for records with no home yet, and
+    /// in a document from before it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub home: Option<HomeView>,
+}
+
+/// Record 0122 (design D11): a branch's home as the overview and a status
+/// give it: `at`, `here` for this host's own files or a remote's name, and
+/// while a move is written, where to, since when, and how many combinations
+/// under test it waits for.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct HomeView {
+    pub at: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub moving: Option<MovingView>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MovingView {
+    pub to: String,
+    pub since: String,
+    /// How many combinations under test the move waits for.
+    pub waiting: usize,
+}
+
+impl HomeView {
+    /// Record 0122 (design D11): `line`'s home, `None` where its records
+    /// hold none.
+    pub fn of(line: &Line) -> Option<HomeView> {
+        let home = line.home.as_ref()?;
+        let moving = home
+            .moving
+            .as_ref()
+            .filter(|_| home.moving_to().is_some())
+            .map(|m| MovingView {
+                to: m.to.clone(),
+                since: m.since.clone(),
+                waiting: line
+                    .doc
+                    .candidates
+                    .iter()
+                    .filter(|c| c.state.under_test())
+                    .count(),
+            });
+        Some(HomeView {
+            at: home.at.clone(),
+            moving,
+        })
+    }
+
+    /// Design D11: the line a status says it in: `on origin`, `in this
+    /// host's own files`, or `moving to origin since <time>, waiting for
+    /// <n> combinations under test`.
+    pub fn line(&self) -> String {
+        match &self.moving {
+            Some(m) => format!(
+                "moving to {} since {}, waiting for {} combination{} under test",
+                crate::home::describe(&m.to),
+                m.since,
+                m.waiting,
+                if m.waiting == 1 { "" } else { "s" }
+            ),
+            None if self.at == crate::records::HERE => "in this host's own files".into(),
+            None => format!("on {}", self.at),
+        }
+    }
 }
 
 impl BranchView {
@@ -159,6 +226,7 @@ impl BranchView {
             refused_writes: Vec::new(),
             unread: Some(format!("{why:#}")),
             stale: None,
+            home: None,
         }
     }
 }
@@ -228,6 +296,132 @@ pub struct CandidateView {
     /// whatever the cause. None in a document from before it.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub lost: Vec<LostRun>,
+    /// Record 0122 (design D1; 26): each of its runs by its state and since
+    /// when. None in a document from before it.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub runs: Vec<RunView>,
+}
+
+/// Record 0122 (design D1; 26): one run of a combination, as a reader is
+/// shown it: its system, its state and since when, open since it opened,
+/// claimed since its claim, running since its own start, ended or closed
+/// since then; the instance or pool's job whose claim holds it; and, ended,
+/// why where it ended with checks undecided or nothing run.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RunView {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub system: Option<String>,
+    pub state: RunState,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub since: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub host: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub why: Option<String>,
+    /// 66, 87 (design D6): it ended with no live executor that may take
+    /// it, its combination not passed.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub untaken: bool,
+    /// 26 (design D6): open, and the lead's last reading found no live
+    /// executor that may take it: it waits for a host of its system, not
+    /// for room.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub no_executor: bool,
+}
+
+impl RunView {
+    /// The view of `r`.
+    pub fn of(r: &crate::records::SystemRun) -> RunView {
+        let since = match r.state {
+            RunState::Open => r.opened.clone(),
+            RunState::Claimed => r.claim.as_ref().map(|c| c.at.clone()),
+            RunState::Running => r.running.clone(),
+            RunState::Ended => r.ended.as_ref().map(|e| e.at.clone()),
+            RunState::Closed => r.closed.clone(),
+        };
+        RunView {
+            system: r.system.clone(),
+            state: r.state,
+            since,
+            host: r.holder().map(str::to_string),
+            why: r.ended.as_ref().and_then(|e| e.why.clone()),
+            untaken: r.ended.as_ref().is_some_and(|e| e.untaken),
+            no_executor: r.state == RunState::Open && r.no_executor,
+        }
+    }
+}
+
+/// Record 0122 (design D6; 26, 66): a combination's time as a person reads
+/// it: its longest running run's time from that run's own start, against
+/// the limit; where none runs, each run's state, in order: `starting on
+/// <host>` for a claimed run, and for an open run `waiting for room since
+/// <time>` where a live executor may take it and `waiting for a host of
+/// <system> since <time>` where none may, by the lead's last reading, the
+/// time it opened. `None` where its runs say none of these, as in a
+/// document from before them.
+pub fn run_time(c: &CandidateView, now: chrono::DateTime<chrono::Utc>) -> Option<String> {
+    let running = c
+        .runs
+        .iter()
+        .filter(|r| r.state == RunState::Running)
+        .filter_map(|r| r.since.as_deref())
+        .min();
+    if let Some(at) = running {
+        let s = seconds(at, now)?;
+        return Some(match c.limit {
+            Some(l) => format!("{} of {}", duration(s), limit(l)),
+            None => duration(s),
+        });
+    }
+    let mut states: Vec<String> = Vec::new();
+    for r in &c.runs {
+        let state = match r.state {
+            RunState::Claimed => {
+                format!("starting on {}", r.host.as_deref().unwrap_or("this host"))
+            }
+            RunState::Open => {
+                let Some(since) = r.since.as_deref() else {
+                    continue;
+                };
+                match (r.no_executor, &r.system) {
+                    (true, Some(system)) => format!("waiting for a host of {system} since {since}"),
+                    (true, None) => format!("waiting for a host since {since}"),
+                    (false, _) => format!("waiting for room since {since}"),
+                }
+            }
+            _ => continue,
+        };
+        if !states.contains(&state) {
+            states.push(state);
+        }
+    }
+    (!states.is_empty()).then(|| states.join(", "))
+}
+
+/// Whole seconds from `at` to `now`; none for a time that cannot be read.
+fn seconds(at: &str, now: chrono::DateTime<chrono::Utc>) -> Option<i64> {
+    let at = chrono::DateTime::parse_from_rfc3339(at).ok()?;
+    Some((now - at.with_timezone(&chrono::Utc)).num_seconds().max(0))
+}
+
+/// `45s`, `2m10s`, `1h03m`, as the board says a time.
+pub fn duration(seconds: i64) -> String {
+    let s = seconds.max(0);
+    match s {
+        0..60 => format!("{s}s"),
+        60..3600 => format!("{}m{:02}s", s / 60, s % 60),
+        _ => format!("{}h{:02}m", s / 3600, (s % 3600) / 60),
+    }
+}
+
+/// `15m` for a limit of whole minutes under an hour, else a [`duration`].
+pub fn limit(seconds: u64) -> String {
+    let s = seconds as i64;
+    if s % 60 == 0 && s < 3600 {
+        format!("{}m", s / 60)
+    } else {
+        duration(s)
+    }
 }
 
 /// One branch's part of the overview, from what was read of it.
@@ -270,16 +464,17 @@ pub fn branch_view(read: BranchRead) -> Result<BranchView> {
             ran: c.ran,
             replayed: c.replayed,
             failed: c.failed.clone(),
-            tasks: matches!(c.state, CandidateState::Starting | CandidateState::Testing)
+            tasks: (c.state == CandidateState::Testing)
                 .then(|| progress.remove(&c.id))
                 .flatten(),
             waiting: c
                 .runs
                 .iter()
-                .filter(|r| r.state == RunState::Open && r.host.is_none())
+                .filter(|r| r.state == RunState::Open && r.claim.is_none())
                 .flat_map(|r| r.declined.clone())
                 .collect(),
             lost: c.runs.iter().filter_map(|r| r.lost.clone()).collect(),
+            runs: c.runs.iter().map(RunView::of).collect(),
         })
         .collect();
     let submissions: Vec<Submission> = in_queue(line.subs.values()).cloned().collect();
@@ -330,6 +525,7 @@ pub fn branch_view(read: BranchRead) -> Result<BranchView> {
         refused_writes: line.doc.refused_writes.clone(),
         unread: None,
         stale: None,
+        home: HomeView::of(&line),
     })
 }
 
@@ -886,6 +1082,7 @@ mod tests {
             refused_writes: Vec::new(),
             unread: None,
             stale: None,
+            home: None,
         }
     }
 

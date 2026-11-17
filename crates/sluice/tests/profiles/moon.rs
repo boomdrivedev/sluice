@@ -91,6 +91,7 @@ fn checks_in(common: &Path, caches: Vec<HostCache>) -> Checks {
             caches,
             expire_after: sluice_core::EXPIRE_AFTER,
             telemetry: None,
+            aws: Default::default(),
         },
     )
     .with_running(common.join("host-running"))
@@ -127,7 +128,7 @@ fn finish(c: &Checks, req: &RunRequest) -> RunReport {
 }
 
 fn finish_run(c: &Checks, req: &RunRequest) -> (RunHandle, RunReport) {
-    let run = c.start(req).unwrap();
+    let run = support::start(c, req).unwrap();
     let until = Instant::now() + Duration::from_secs(120);
     loop {
         match c.progress(&run).unwrap() {
@@ -250,7 +251,7 @@ fn shows_each_task_as_it_ends(name: &str, place: impl Fn(&Repo) -> String) {
     );
     let c = checks(&repo);
     let req = request(&repo, &place(&repo), &["alpha:test", "slow:test"], None);
-    let run = c.start(&req).unwrap();
+    let run = support::start(&c, &req).unwrap();
     let until = Instant::now() + Duration::from_secs(120);
     let seen = loop {
         let tasks = c.tasks(&run).unwrap();
@@ -331,7 +332,7 @@ fn a_project_whose_id_holds_a_slash() {
     let c = checks(&repo);
     let targets = ["group/many:fail", "group/many:pass", "group/many:wait"];
     let req = request(&repo, "p1", &targets, None);
-    let run = c.start(&req).unwrap();
+    let run = support::start(&c, &req).unwrap();
     let until = Instant::now() + Duration::from_secs(120);
     let seen = loop {
         let tasks = c.tasks(&run).unwrap();
@@ -429,7 +430,7 @@ fn a_task_the_time_limit_cut_off_has_no_outcome() {
     let limit = Duration::from_secs(15);
     req.limit = Some(limit);
     let started = Instant::now();
-    let run = c.start(&req).unwrap();
+    let run = support::start(&c, &req).unwrap();
     // The two that end do so well inside the limit, or the test says
     // nothing of a task that ended before it.
     loop {
@@ -861,7 +862,7 @@ fn an_old_moon_is_refused() {
             "toolchain".into(),
             Setting::List(vec![enter.to_string_lossy().into()]),
         );
-        let err = format!("{:#}", checks(&repo).start(&req).unwrap_err());
+        let err = format!("{:#}", support::start(&checks(&repo), &req).unwrap_err());
         assert!(err.starts_with("moon --version: "), "{err}");
         assert!(err.contains(&format!("moon {version}")), "{err}");
         assert!(err.contains("moon 2.6"), "{err}");
@@ -1166,6 +1167,64 @@ fn proven_drops_a_key_the_tree_does_not_bear_out() {
     );
     assert!(
         proof.refused[0].why.starts_with("alpha:test: "),
+        "{proof:?}"
+    );
+}
+
+/// Record 0119 (design D11; 78, 109): what a pool's run job keeps of its
+/// run proves its keys to the sign job, which runs nothing: `keep_proof`
+/// keeps each manifest the keys' walk reads, and `proven_from` holds each
+/// key to the combination's tree by those alone, refusing one whose kept
+/// manifest was changed, and leaving unkept a pass whose manifest the job
+/// did not keep.
+#[test]
+fn a_run_jobs_kept_proof_proves_its_keys_and_no_forged_one() {
+    let repo = workspace("moon-kept-proof");
+    let c = checks(&repo);
+    let req = request(&repo, "p1", &["#check-fast"], None);
+    let (run, report) = finish_run(&c, &req);
+    let kept = repo.dir().join(".git/sluice/.tmp/kept");
+    c.keep_proof(&run, &report, &kept).unwrap();
+    let mut proven = c
+        .proven_from(&kept, &req.revision, &moon(), &report)
+        .unwrap()
+        .proven;
+    proven.sort();
+    assert_eq!(proven, ["alpha:test", "beta:test"]);
+
+    let alpha = report
+        .tasks
+        .iter()
+        .find(|t| t.task == "alpha:test")
+        .unwrap();
+    let blob = kept
+        .join("blobs")
+        .join(&alpha.hash[..2])
+        .join(&alpha.hash[2..]);
+    let manifest = std::fs::read_to_string(&blob).unwrap();
+    std::fs::write(
+        &blob,
+        manifest.replace("alpha/value.txt", "alpha/other.txt"),
+    )
+    .unwrap();
+    let proof = c
+        .proven_from(&kept, &req.revision, &moon(), &report)
+        .unwrap();
+    assert_eq!(proof.proven, ["beta:test"]);
+    assert_eq!(proof.refused.len(), 1, "{proof:?}");
+    assert_eq!(proof.refused[0].task, "alpha:test");
+    assert!(
+        proof.refused[0].why.starts_with("alpha:test: "),
+        "{proof:?}"
+    );
+
+    std::fs::remove_file(&blob).unwrap();
+    let proof = c
+        .proven_from(&kept, &req.revision, &moon(), &report)
+        .unwrap();
+    assert!(!proof.proven.iter().any(|t| t == "alpha:test"), "{proof:?}");
+    assert!(
+        proof.unkept.iter().any(|u| u.task == "alpha:test"),
         "{proof:?}"
     );
 }

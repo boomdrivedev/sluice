@@ -14,28 +14,34 @@ network = "localhost"
 # their own limit (66; ADR 0016).
 docker = true
 
+# The one signer whose runs the gates count (78, 79): deneb, where the
+# sessions run and submit, signing as sessions with its own key. Its runs
+# are sandboxed, never confined. Naming a signer keeps every branch with a
+# remote on it, its state there beside the branch (C.6), so the host that
+# keeps main on origin takes main's pull requests in (137; record 0125).
+[signers.sessions]
+ssh = "deneb ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIHGx/Ip3yodP/Rg3DdMAjJXoYuBmMxTLpPrka3ei69M/ sluice deneb"
+
 [branches."bolt/*"]
 required = ["#check-fast"]
-# A replay counts when a run this gate trusts recorded a pass for its key
-# (108).
-trust = ["open", "sandbox", "container"]
+# A replay counts when a run deneb signed recorded a pass for its key (108).
+trust = ["sessions"]
 # Bolts live on GitHub, as main does: crew pushes each new one there, and
 # sluice lands on it by a leased push, so agents on any host share it.
 remote = "origin"
 
-# On one Mac, until runs are confined, main accepts sandboxed runs too. A
-# replay counts only when a sandboxed or confined run recorded a pass for its
-# key (108): the cache also holds what open shells ran.
+# main counts the runs deneb signs, sandboxed until runs are confined. A
+# replay counts only when such a run recorded a pass for its key (108).
 [branches.main]
 required = ["#check-fast", "#check-tools", "#check-e2e"]
 batch = true
-trust = ["confined", "sandbox"]
+trust = ["sessions"]
 # main lives on GitHub: fetched every round, landed by a leased push.
 remote = "origin"
 
 # main takes its work as pull requests on GitHub (C.7): a submit pushes the
-# agent's branch and opens its pull request, which sluice submits once it
-# meets these, and tests and lands as any other. sluice's gate is the one
-# above, so a pull request waits on nothing more.
+# agent's branch and opens its pull request, which the host that keeps main
+# on origin takes in once it meets these, and tests and lands as any other.
+# sluice's gate is the one above, so a pull request waits on nothing more.
 [branches.main.pull_requests]
 reviews = 0

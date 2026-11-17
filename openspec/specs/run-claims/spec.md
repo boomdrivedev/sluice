@@ -36,11 +36,11 @@ earlier open combination of that chain is unclaimed (76).
 - **THEN** a host with room for one run claims #1
 
 ### Requirement: Each host shows it is alive and how much room it has
-Each host running sluice for a repository SHALL rewrite
-`refs/sluice/hosts/<host>` on its remote at the cadence of its
-sign-of-life bound, with the checks running on the host, every
-repository's, and the room the host's bound has left. Only that host
-SHALL write its ref.
+Each host running sluice for a repository whose branch's records are on
+its remote SHALL rewrite `refs/sluice/hosts/<host>` on that remote at
+the cadence of its sign-of-life bound, with the checks running on the
+host, every repository's, and the room the host's bound has left,
+whether or not it leads any branch. Only that host SHALL write its ref.
 
 #### Scenario: A host's sign of life
 - **WHEN** `sluice run` is running on host A with a bound of 4 and one run under test
@@ -50,23 +50,33 @@ SHALL write its ref.
 - **WHEN** host A's bound is 4, one run of `main` is under test, and one run of another repository on host A is running
 - **THEN** `refs/sluice/hosts/A` says two runs held and room for two
 
+#### Scenario: The lead shows it is alive
+- **WHEN** host A leads `main` and holds a claim on one of its runs
+- **THEN** `refs/sluice/hosts/A` is rewritten at least once per
+  sign-of-life bound, as every other host's is
+  (`a_lead_shows_its_sign_of_life_as_any_claim_holder` in
+  `crates/sluice-conformance/tests/run_life.rs`)
+
 ### Requirement: A claim lapses with its host's sign of life
 A claim SHALL lapse once a reader has seen its host's sign of life
-unchanged for the sign-of-life bound, never for the length of its run.
-A lapsed claim's run SHALL have no outcome, and a result reported under
-a claim its host no longer holds SHALL NOT be written (60, 77).
+unchanged for the sign-of-life bound, by the reader's own observation
+from when it first read that sign of life, never for the length of its
+run, never because the lead changed, and never because the reader took
+the lead. A lapsed claim's run SHALL end with no outcome, its checks
+held by a follow-up run, and a result reported under a claim its host
+no longer holds SHALL NOT be written (60, 73, 77).
 
 #### Scenario: A host stops mid-run
 - **WHEN** host A claimed a run of `main` and is switched off
-- **THEN** after the sign-of-life bound the claim lapses, the run is open again, and another host claims it
+- **THEN** after the sign-of-life bound the claim lapses, the run ends with no outcome, and another host claims its follow-up run
 
 #### Scenario: A long run keeps its claim
 - **WHEN** a run takes 40 minutes and its host keeps rewriting its sign of life
-- **THEN** the claim holds until the run reports, within the branch's `timeout`
+- **THEN** the claim holds until the run reports, within the branch's `timeout` counted from the run's own start
 
 #### Scenario: A late report
 - **WHEN** host A returns after its claim lapsed and tries to report the run's result
-- **THEN** the result is not written to the branch's state, and the run's outcome is the one its new claim reports
+- **THEN** the result is not written to the branch's state, and the combination's outcome is the one its follow-up run reports
 
 ### Requirement: A returning host releases its checkouts before it claims
 A host SHALL claim nothing while a checkout it made belongs to a
@@ -92,15 +102,23 @@ SHALL decide (107).
 - **THEN** the lead starts the run on the first pool the policy lists that runs `linux-x64`
 
 ### Requirement: The policy lists pools in order
-The policy SHALL accept `[pools.<name>]` tables, each with a `github`
-workflow path, the `signer` its jobs sign as, and `runners`, the runner
-label for each system it runs. A pool whose `signer` is not a `github`
-signer, or whose runners name a system its signer may not claim, SHALL
-be refused. The order written SHALL be the order pools are tried (107).
+The policy SHALL accept `[pools.<name>]` tables, each with one kind, a
+`github` workflow path or a `codebuild` table naming the region and the
+sign project, the `signer` its jobs sign as, and `runners`, for each
+system it runs, the runner label of a `github` pool or the run project
+of a `codebuild` pool. A pool whose runners name a system its signer
+may not claim SHALL be refused. The order written SHALL be the order
+pools are tried (107).
 
 #### Scenario: A runner for a system the signer may not claim
 - **WHEN** `[pools.forge] signer = "forge"` has a runner for `macos-arm64` and `[signers.forge] systems` lacks it
 - **THEN** the policy is refused, naming `pools.forge` and `macos-arm64`
+
+#### Scenario: A CodeBuild pool
+- **WHEN** `[pools.codebuild]` has `codebuild = { region = "us-east-1", sign = "sluice-sign" }`, `signer = "codebuild"`, a `kms` signer, and `runners = { linux-x64 = "sluice-run-linux-x64" }`
+- **THEN** the policy reads a pool of kind `codebuild` whose run for `linux-x64` goes to the project `sluice-run-linux-x64`
+  (`a_codebuild_pool_names_its_region_sign_project_and_runners` in
+  `crates/sluice-core/src/policy.rs`)
 
 ### Requirement: A claimed run's checkout is made at its combination
 
@@ -137,3 +155,25 @@ record 0118).
   of its own
   (`a_host_that_holds_the_combination_fetches_nothing_more` in
   `crates/sluice-conformance/tests/could_not_start.rs`)
+
+### Requirement: A live claim's report is written whichever instance leads
+The report of a run whose claim holds SHALL be written as the run's end
+by its claim holder, whichever instance leads the branch when it
+reports (60, 73, 88).
+
+#### Scenario: A new lead and a live claim
+- **WHEN** host B takes the lead of `main` while host A, showing its sign of life, holds a claim on a running run
+- **THEN** A's claim holds, and A's report is written as the run's end
+  (`a_change_of_lead_keeps_a_live_claim` in
+  `crates/sluice-conformance/tests/run_life.rs`)
+
+### Requirement: A pool signs as its kind's signer
+A `github` pool's `signer` SHALL be a `github` signer and a
+`codebuild` pool's a `kms` signer; a pool whose `signer` is of another
+kind SHALL be refused, naming the pool, its kind and its signer's.
+
+#### Scenario: A pool signing as another kind of signer
+- **WHEN** `[pools.codebuild]` signs as a `github` signer, or `[pools.forge]`, a `github` pool, signs as a `kms` signer
+- **THEN** the policy is refused, naming the pool, its kind and its signer's
+  (`a_pool_signs_as_its_kinds_signer` in
+  `crates/sluice-core/src/policy.rs`)

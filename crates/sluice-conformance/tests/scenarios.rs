@@ -290,7 +290,7 @@ fn a_last_result_decides_nothing() {
 /// satisfies: 66, 92, 97, core.7
 #[test]
 fn a_timed_out_lost_or_stopped_run_leaves_its_result_unrecorded() {
-    use sluice_seams::{RunKind, RunOutcome};
+    use sluice_seams::{RunOutcome, SessionRunKind};
     let h = Harness::bolt();
     let head = h.work("unit/a", "agent-a", &[("a/lib", Some("a2"))]);
     let last = |h: &Harness| {
@@ -324,7 +324,7 @@ fn a_timed_out_lost_or_stopped_run_leaves_its_result_unrecorded() {
         let l = last(&h);
         assert_eq!(
             (l.kind, l.outcome, l.recorded),
-            (RunKind::Command, outcome, false)
+            (SessionRunKind::Command, outcome, false)
         );
     }
 }

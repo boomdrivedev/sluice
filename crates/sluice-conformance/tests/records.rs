@@ -72,28 +72,3 @@ fn the_core_gives_the_profiles_a_policy_names_no_meaning_of_its_own() {
     }
     assert_eq!(outcomes[0], outcomes[1]);
 }
-
-/// Design D10: a submission this host had queued in its own records,
-/// left behind when the branch's records moved to its remote, is
-/// submitted again under a new id that names the old one, and lands.
-#[test]
-fn a_submission_left_behind_is_submitted_again_naming_its_old_id() {
-    let h = Harness::bolt();
-    let head = h.work("unit/a", "agent-a", &[("a/lib", Some("a2"))]);
-    let doc = serde_json::json!({
-        "schema": "sluice/submission@1", "id": 41, "branch": BRANCH,
-        "head": head, "from": {"agent": "agent-a", "worktree": "unit/a"},
-        "submitted": "2026-10-18T09:00:00Z", "after": [], "priority": 0,
-        "attempt": 2, "state": "testing"
-    });
-    h.w().leave_behind(BRANCH, &doc.to_string());
-    h.settle();
-    assert_eq!(h.w().left_behind(BRANCH), 0);
-    let s = h.sluice();
-    let new = s.moved_to(41).unwrap().expect("submitted again");
-    assert_ne!(new.id, 41);
-    assert_eq!(new.was, Some(41));
-    assert_eq!(new.state, State::Landed);
-    assert_eq!(new.from.worktree, "unit/a");
-    assert!(s.state(41).unwrap().is_none());
-}

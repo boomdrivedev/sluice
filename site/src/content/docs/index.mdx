@@ -97,11 +97,12 @@ combination passes.
     checked out by hand. [Previews](/sluice/guides/previews/).
   </Card>
   <Card title="No daemon" icon="setting">
-    sluice keeps nothing running itself. A waiting `sluice submit` drives
-    the queue while it waits; `sluice run`, or `sluice step` from cron,
-    does the same for a host. What a preview leaves up, your own tools
-    keep until it is released. Every decision is written to plain files
-    before it is acted on, so a crash at any point resumes from the files.
+    Nothing is installed or kept running for sluice. The first command
+    that needs the host's queues moved starts sluice's own process, which
+    moves every repository's queues and ends once none has work. What a
+    preview leaves up, your own tools keep until it is released. Every
+    decision is written to plain files before it is acted on, so a crash
+    at any point resumes from the files.
   </Card>
 </CardGrid>
 

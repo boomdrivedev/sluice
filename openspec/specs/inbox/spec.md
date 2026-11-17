@@ -107,12 +107,12 @@ leaves it, and `notice`, the one line.
 ### Requirement: The JSON document is a contract that only gains fields
 
 Each element of `outcomes` SHALL hold `id`, `branch`, `state`
-(`landed`, `failed` or `conflict`), `notice`, `delivery` and `from`; a
-landed one `landed_as`; a failed one `result` (`failed`, or `timed out`)
-and `failed`, each with its `task` and, where kept, its `log`; a
-conflicting one `conflict` with its `paths` and its `with`. From this
-change on, a later sluice SHALL keep these names and meanings, and MAY
-add fields; `delivered` and `delivered_to` are gone.
+(`landed`, `failed`, `conflict` or `refused`), `notice`, `delivery` and
+`from`; a landed one `landed_as`; a failed one `result` (`failed`, or
+`timed out`) and `failed`, each with its `task` and, where kept, its
+`log`; a conflicting one `conflict` with its `paths` and its `with`; a
+refused one `refused` (152). A later sluice SHALL keep these names and
+meanings, and MAY add fields; `delivered` and `delivered_to` are gone.
 
 #### Scenario: The JSON document lists the records
 
@@ -130,6 +130,16 @@ add fields; `delivered` and `delivered_to` are gone.
   with submission 11 in `src/lib.rs`
 - **THEN** its element holds `state` `conflict`, `conflict.paths`
   holding `src/lib.rs`, and `conflict.with` holding submission 11
+
+#### Scenario: A landing the forge refused gives its words
+
+- **WHEN** `sluice inbox --json` hands over the refusal of submission
+  1's landing on `main`
+- **THEN** its element holds `state` `refused`, `refused` with the
+  forge's `words` and its `at`, a `notice` naming `#1` and those words,
+  and a `delivery` whose `key` is `1:refused`
+  (`a_landing_the_forge_refused_is_told_with_its_words` in
+  `crates/sluice/tests/cli.rs`)
 
 ### Requirement: The command and the round never both deliver one outcome
 

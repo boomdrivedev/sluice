@@ -212,6 +212,7 @@ Start from how long the gate takes and how often submissions arrive.
 | runs that each start a large stack | `batch = true`, and the host's `max` set by memory | `batch = false` needs a stack for every combination at once |
 | failures are common | `batch = false` | a failed batch costs a second run before anyone is told |
 | a slow gate with few submissions | either | with nothing queued behind it, a submission is tested alone in both modes |
+| every run on a CodeBuild fleet | `batch = false`, `parallel` at the fleet's maximum instances | the fleet runs as many runs at once as it holds instances, so each combination is tested as it forms, and none waits for room ([Running checks on a pool](/sluice/guides/pools/#test-side-by-side)) |
 
 The two diagrams above are the trade in numbers. On a 20-minute gate
 with four submissions a minute apart, `batch = false` runs four at once

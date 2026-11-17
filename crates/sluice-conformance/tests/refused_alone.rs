@@ -10,8 +10,8 @@
 use sluice_conformance::{policy, previewed, shared, Harness, Rig, BRANCH};
 use sluice_core::records::State;
 use sluice_core::{
-    AmendRefusal, Lookup, Requester, Serves, Step, SubmitHead, SubmitRequest, Unread,
-    WithdrawRefusal, Withdrew,
+    AmendRefusal, Lookup, Requester, Step, SubmitHead, SubmitRequest, Unread, WithdrawRefusal,
+    Withdrew,
 };
 use sluice_seams::Settings;
 
@@ -135,10 +135,10 @@ fn a_number_on_no_branch_when_every_branch_reads_names_none() {
 
 /// satisfies: 26, 71, rule core.14
 #[test]
-fn a_round_serving_every_branch_runs_past_a_branch_that_cannot_be_read() {
+fn a_round_runs_past_a_branch_that_cannot_be_read() {
     let (h, x, _) = two_queued();
     h.w().fail_state_reads(REFUSED, Some(WORDS));
-    let s = h.sluice().serving(Serves::Every);
+    let s = h.sluice();
     assert_eq!(s.step(BRANCH).expect("the round runs"), Step::Stepped);
     assert_eq!(h.started().len(), 1, "its run started");
     for _ in 0..16 {
@@ -197,7 +197,8 @@ fn an_unusable_preview_on_a_branch_that_cannot_be_read_waits_for_it() {
     h.w().preview_fails(true);
     let plan = s.preview_plan(REFUSED, &rev).unwrap().unwrap();
     let (place, made) = s.make_preview(&plan).unwrap();
-    s.start_preview(&plan, place).unwrap();
+    s.start_preview(&plan, place, sluice_conformance::shared::session_part(&s))
+        .unwrap();
     h.w().fail_state_reads(REFUSED, Some(WORDS));
 
     // The rounds of bolt/x run, and keep the preview on bolt/b.

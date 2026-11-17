@@ -3,7 +3,7 @@
 use std::collections::BTreeSet;
 use std::time::Duration;
 
-use sluice_conformance::{policy, shared, Harness, Rig, BRANCH};
+use sluice_conformance::{policy, shared, Crash, Harness, Rig, BRANCH};
 use sluice_core::records::{Event, State};
 use sluice_core::release::Releasing;
 use sluice_core::{Peer, Sluice};
@@ -94,45 +94,100 @@ fn places_of_two_lines_on_one_host_never_collide() {
     assert!(h.w().released_places().is_empty());
 }
 
-/// The checks each run that left checks not run named, with why, in
-/// order.
-fn not_run(h: &Harness) -> Vec<Vec<(String, String)>> {
-    h.events()
-        .into_iter()
-        .filter_map(|e| match e {
-            Event::Lost { not_run, .. } if !not_run.is_empty() => {
-                Some(not_run.into_iter().map(|n| (n.task, n.reason)).collect())
-            }
-            _ => None,
-        })
-        .collect()
-}
-
-/// satisfies: 59, 25, 34, 114: a place made for a run whose start failed
-/// is released by the step, which records the run with no result
+/// satisfies: 59, 25, 34; record 0122; rule core.16: a checkout made by a
+/// step that stopped before its run started is the run's: the next round
+/// finds it made at the combination, starts the run in it once, and makes
+/// no second checkout; it is released once, after the run ends
 #[test]
-fn a_place_made_by_a_step_that_stopped_before_its_run_started_is_released() {
+fn a_checkout_made_by_a_step_that_stopped_before_its_run_started_is_used() {
     let h = Harness::bolt();
     h.work("unit/a", "agent-a", &[("a/lib", Some("a2"))]);
     let one = h.submit("unit/a");
-    h.w().crash_next_start();
-    h.step();
+    h.w().crash(Crash::AfterCheckout);
+    assert!(h.sluice().step(BRANCH).is_err(), "the step stopped");
     let made = h.w().made_places();
     assert_eq!(made.len(), 1);
-    let crashed = format!(
-        "could not start: crashed before starting a run in {}",
-        made[0]
-    );
-    assert_eq!(
-        not_run(&h),
-        [vec![("#gate".to_string(), crashed)]],
-        "recorded with no result, its gate's entry not run"
-    );
-    assert!(h.w().live_places().is_empty());
+    assert!(h.w().started().is_empty());
+    assert_eq!(h.w().live_places(), made, "held for its run");
     h.settle();
     assert_eq!(h.sub(one).state, State::Landed);
-    assert_eq!(h.w().made_places().len(), 2);
+    assert_eq!(h.w().made_places(), made, "no second checkout");
+    assert_eq!(h.w().started().len(), 1);
+    assert_eq!(h.releases_of(&made[0]), 1);
     assert!(h.w().live_places().is_empty());
+}
+
+/// satisfies: 71, 150, S75; rule core.49; record 0087
+///
+/// A round holds the room for the run it decides to start from its count
+/// to its start: through the landing the same round makes of work the
+/// branch already holds (122), whose outcome it pushes before it starts
+/// the run, an agent's ask for a session's room finds the host's one run
+/// held, and the run starts in it.
+#[test]
+fn a_run_decided_holds_its_room_until_it_starts() {
+    let h = Harness::bolt();
+    h.w().host_limit(1);
+    h.w().hold_runs(true);
+    let landed = h.work("unit/a", "agent-a", &[("a/one", Some("1"))]);
+    let one = h.submit("unit/a");
+    h.work("unit/b", "agent-b", &[("a/two", Some("2"))]);
+    let two = h.submit("unit/b");
+    // #1's work reaches the branch by hand before any round.
+    h.w().set_branch(BRANCH, &landed);
+    h.w().probe_holds(true);
+    h.step();
+    assert_eq!(h.sub(one).state, State::Landed);
+    assert!(h.sub(one).landed_elsewhere);
+    assert_eq!(
+        h.w().probed(),
+        [false],
+        "the agent's ask during the landing's outcome found no room"
+    );
+    assert_eq!(
+        h.w().started().len(),
+        1,
+        "#2's run started in the room held"
+    );
+    assert_eq!(h.w().holds(), [sluice_seams::RunKind::Queue]);
+    assert_eq!(h.w().parts_held(), 0, "the part went to the run");
+    assert_eq!(h.sub(two).state, State::Testing);
+}
+
+/// satisfies: 71; rule core.49; record 0087
+///
+/// A run the host holds no room for is not marked starting: the round
+/// that counts the host full makes no place and writes no start, and the
+/// run starts once a later round holds its room.
+#[test]
+fn a_run_no_room_was_held_for_is_not_marked_starting() {
+    let h = Harness::bolt();
+    h.w().host_limit(1);
+    h.w().other_runs(1);
+    h.work("unit/a", "agent-a", &[("a/lib", Some("a2"))]);
+    let one = h.submit("unit/a");
+    h.step();
+    let starting = |h: &Harness| {
+        h.events()
+            .into_iter()
+            .any(|e| matches!(e, Event::Testing { .. }))
+            || h.sluice().status(BRANCH).unwrap().testing > 0
+    };
+    assert!(!starting(&h), "no run marked starting");
+    assert!(h.w().made_places().is_empty());
+    assert!(h.w().started().is_empty());
+    assert_eq!(h.sub(one).state, State::Queued);
+    // Another repository's run took the last room between the count and
+    // the hold: still none.
+    h.w().other_runs(0);
+    h.w().refuse_next_hold();
+    h.step();
+    assert!(!starting(&h));
+    assert!(h.w().started().is_empty());
+    h.step();
+    assert_eq!(h.w().started().len(), 1);
+    h.settle();
+    assert_eq!(h.sub(one).state, State::Landed);
 }
 
 /// The bolt policy with `release_retries = 1`.
@@ -215,6 +270,14 @@ fn peers() -> Harness {
     h
 }
 
+/// Design D8: the instance that keeps the branch, `lead`, signing as
+/// `box`, which the branch accepts, with no room of its own, so other
+/// hosts and pools take the runs.
+fn keeper<'a>(h: &'a Harness) -> Sluice<'a> {
+    let s = on(h, "lead", Some("box"));
+    h.w().no_room();
+    s
+}
 /// Host `name`, signing as `signer`.
 fn on<'a>(h: &'a Harness, name: &str, signer: Option<&str>) -> Sluice<'a> {
     h.w().be_host(name);
@@ -248,19 +311,19 @@ fn a_host_whose_leftover_checkout_will_not_release_claims_all_the_same() {
     h.w().hold_runs(true);
     h.work("unit/a", "agent-a", &[("a/lib", Some("a2"))]);
     let one = h.submit("unit/a");
-    on(&h, "lead", None).step(BRANCH).unwrap();
+    keeper(&h).step(BRANCH).unwrap();
     on(&h, "b", Some("box")).step(BRANCH).unwrap();
     let left = h.w().live_places()[0].clone();
     // b stops; its claim lapses, and c takes the run.
-    on(&h, "lead", None).step(BRANCH).unwrap();
+    keeper(&h).step(BRANCH).unwrap();
     h.w().advance(chrono::Duration::minutes(3));
-    on(&h, "lead", None).step(BRANCH).unwrap();
+    keeper(&h).step(BRANCH).unwrap();
     h.w().hold_runs(false);
     on(&h, "c", Some("box")).step(BRANCH).unwrap();
     assert_eq!(claims(&h), ["b", "c"]);
     for _ in 0..3 {
         on(&h, "c", Some("box")).step(BRANCH).unwrap();
-        on(&h, "lead", None).step(BRANCH).unwrap();
+        keeper(&h).step(BRANCH).unwrap();
     }
     assert_eq!(h.sub(one).state, State::Landed);
 
@@ -269,7 +332,7 @@ fn a_host_whose_leftover_checkout_will_not_release_claims_all_the_same() {
         .place_release_fails(&left, Some(shared::RELEASE_FAILS));
     h.work("unit/b", "agent-b", &[("b/lib", Some("b2"))]);
     let two = h.submit("unit/b");
-    on(&h, "lead", None).step(BRANCH).unwrap();
+    keeper(&h).step(BRANCH).unwrap();
     on(&h, "b", Some("box")).step(BRANCH).unwrap();
     let held = h.sluice().status(BRANCH).unwrap().failed_releases;
     assert_eq!(held.len(), 1, "{held:?}");
@@ -281,7 +344,7 @@ fn a_host_whose_leftover_checkout_will_not_release_claims_all_the_same() {
     assert!(claimed.len() == 2 && claimed.contains(&left), "{claimed:?}");
 
     for _ in 0..6 {
-        on(&h, "lead", None).step(BRANCH).unwrap();
+        keeper(&h).step(BRANCH).unwrap();
         on(&h, "b", Some("box")).step(BRANCH).unwrap();
     }
     assert_eq!(h.sub(two).state, State::Landed);

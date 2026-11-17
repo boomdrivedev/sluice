@@ -168,7 +168,7 @@ share as [`[[caches]]`](#caches). The caches an earlier sluice saved in
 | key | values | meaning |
 |---|---|---|
 | `ports` | e.g. `["web", "db"]` | A port for each name, held for the checkout on this host and checked free, given to the tests as `SLUICE_PORT_WEB`, `SLUICE_PORT_DB` ([ADR 0016](/sluice/decisions/0016/)). An agent's worktree gets its ports on its first `sluice exec` and keeps them until `sluice release`. A preview gets a name for each as well, `SLUICE_NAME_WEB`. |
-| `ports_from` | a port, default `20000` | Where the blocks of ports begin. |
+| `ports_from` | a port, default `20000` | Where a checkout's ports are taken from: the lowest run of as many ports as `ports` names from here in which no port is held by another checkout on the host and each is free. A checkout keeps the ports it was given; a change here counts for checkouts made after it. |
 
 ## `[executor]`: what the tests may touch
 
@@ -290,10 +290,12 @@ ssh = ".config/sluice.sessions"
 | key | meaning |
 |---|---|
 | `ssh` | An SSH public key in `allowed_signers` form, or the path in the repository of a file of them, one per host. A host signs with the private half its own [`[signing]`](#signing) names. |
+| `github` | A workflow's own identity on GitHub Actions: `{ workflow = ".github/workflows/sluice.yml", ref = "refs/heads/main" }`, the workflow and the branch it runs from, in the repository the branch's remote is. A result counts only when that workflow on that branch signed it, checked against the roots sluice carries ([Running checks on a pool](/sluice/guides/pools/#github-actions)). |
+| `kms` | A key in AWS KMS: `{ key = "arn:aws:kms:us-east-1:111122223333:key/1234abcd-...", public = "MFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAE..." }`, the key by its ARN, never an alias, and its public half, the base64 of its DER public key as KMS gives it, an `ECC_NIST_P256` key. A result counts only when that key signed it, which every host verifies with the public half, asking AWS nothing. A CodeBuild pool's sign build signs with it ([Running checks on a pool](/sluice/guides/pools/#a-codebuild-fleet)). |
 | `confined` | Whether results it signs may count as confined: no agent could reach the checkout or what the test wrote. Say it only of a host that runs no agents; sluice never works it out. The default is `false`. |
-| `systems` | The systems its results may say they ran on. The default is every system. |
+| `systems` | The systems its results may say they ran on. The default is every system. An empty list, `systems = []`, claims no run and counts for no result, whatever the run's system. A branch trusts such a signer so that its hosts lead the branch and run none of its checks, as a branch on a CodeBuild fleet trusts its leading hosts ([Running checks on a pool](/sluice/guides/pools/#test-side-by-side)). |
 
-A signer has exactly one `ssh`.
+A signer has exactly one `ssh`, one `github` or one `kms`.
 
 ### `ssh`: one key, or a file of them
 
@@ -323,6 +325,33 @@ lines are skipped. Options between the label and the key, such as
 remove a key's line to stop trusting it. Any key on the list signs as
 the signer. A host prints its own line with
 `echo "$(hostname -s) $(cat ~/.config/sluice/signing.pub)"`.
+
+## `[pools."<name>"]`: machines for a run no host takes
+
+A pool starts a machine for a run no host could take now, none of its
+system having room or being there at all. Its results are signed as its
+signer, which a branch's `trust` names like any other.
+
+```toml
+[pools.forge]
+github = { workflow = ".github/workflows/sluice.yml" }
+signer = "forge"
+runners = { linux-x64 = "ubuntu-24.04", macos-arm64 = "macos-15" }
+
+[pools.codebuild]
+codebuild = { region = "us-east-1", sign = "sluice-sign" }
+signer = "codebuild"
+runners = { linux-x64 = "sluice-run-linux-x64" }
+```
+
+| key | meaning |
+|---|---|
+| `github` | A pool on GitHub Actions: the workflow sluice starts for each run, which `sluice init actions` writes. Its signer is a `github` signer. |
+| `codebuild` | A pool on CodeBuild fleets: `region`, where its projects are, and `sign`, the project of the build that signs each run, which `sluice init codebuild` writes. Its signer is a `kms` signer. |
+| `signer` | The signer its results are signed as, one `[signers]` names, of the pool's kind. |
+| `runners` | For each system it takes runs of, by `[systems]`'s names, the runner a GitHub pool asks for, or the run project of a CodeBuild pool's. A run of a system it names no runner for waits for a host. |
+
+[Running checks on a pool](/sluice/guides/pools/) sets one up.
 
 ## `[branches."<pattern>"]`: rules per target branch
 
@@ -518,8 +547,12 @@ on its `remote`. A pull request joins the queue only once it is out of
 draft and meets these conditions on its latest commit.
 
 ```toml
+[signers.box]
+ssh = ".config/sluice.boxes" # one line per host's key
+
 [branches.main]
 remote = "origin"
+trust = ["box"]
 
 [branches.main.pull_requests]
 reviews = 1                  # approving reviews on the current head
@@ -537,8 +570,20 @@ The conditions are read from the branch itself, so a pull request that
 changes `.config/sluice.toml` can't loosen its own. They decide when
 sluice takes a pull request, never what it tests: that is `required`.
 The table needs `remote`, and sluice refuses a policy that has it
-without one. Without the table, `sluice submit` puts work straight into
-the queue. The guide [Pull requests](/sluice/guides/pull-requests/) sets
+without one. It needs
+[`[signers]`](#signersname-who-may-sign-results) too: then the branch's
+state is on its remote, and the host that keeps the branch there takes
+its pull requests in. In a policy with no `[signers]`, each host keeps
+its own state, so sluice refuses the branch alone, and reads every other
+branch as before:
+
+```text
+main takes pull requests, which only the host that keeps it on origin takes in, and its state is each host's own: name [signers] in .config/sluice.toml so its state is kept on origin, as `sluice init actions` names a pool's signer (137)
+```
+
+A submit to it exits 2 before anything is pushed or opened, and status,
+a step and the overview show it. Without the table, `sluice submit` puts
+work straight into the queue. The guide [Pull requests](/sluice/guides/pull-requests/) sets
 it up.
 
 No key covers operator approval: that is the caller's business, and
@@ -555,24 +600,27 @@ every repository on the host reads the same file. sluice never writes
 it. A command reads it as it starts, so a change counts from the next
 command. Without the file, every setting has its default.
 
-A `sluice run` you keep running looks at the file between its passes.
-It takes a change up before its next pass, and says on stderr which
-tables it took up. A run already testing keeps what it started with:
-its cores, its caches and what its executor lets it touch. A new bound
-holds the runs that start after it. A file that is gone, doesn't read,
-or names a key that doesn't read leaves the `sluice run` on the
-settings it holds. It says so once, with the file and the reason, and
-reads the file again once it changes again. To go back to the
-defaults, write an empty file. A key changed in place, at the path the
-file names, counts once the file next changes or sluice next starts.
+sluice's host process looks at the file between its passes, and takes a
+change up before each repository's next pass, with nothing to restart.
+Its log says which tables it took up. A run already testing keeps what
+it started with: its cores, its caches and what its executor lets it
+touch. A new bound holds the runs that start after it. A file that is
+gone, doesn't read, or names a key that doesn't read leaves the host
+process on the settings it holds. It says so once in its log, with the
+file and the reason, and reads the file again once it changes again. To
+go back to the defaults, write an empty file. A key changed in place, at
+the path the file names, counts once the file next changes or the host
+process next starts.
 
-A `sluice run` can't swap its telemetry in place, so it takes a change
-of `[telemetry]` up by starting itself afresh, in the same process,
-with nothing to restart. Whatever runs it, a terminal, a pane or a
-service manager, keeps following it, and runs already testing keep
-what they started with. Its stderr says the tables it took up, as for
-any change. A change it couldn't start afresh for leaves it on the
-settings it holds, and it says so once, with the file and the reason.
+The host process can't swap its telemetry in place, so it takes a change
+of `[telemetry]` up by handing its repositories to a fresh host process
+it starts itself, with nothing to restart. Runs already testing keep
+what they started with. Its log says the file and the tables as it
+hands over, and the fresh host process reads the file itself. A change whose settings don't bind, or whose fresh host process
+doesn't start, leaves it on the settings it holds, and it says so once,
+with the file and the reason. A `sluice run` still kept running follows
+the host process, and starts itself afresh for a change of `[telemetry]`
+alone.
 
 ```toml
 [runs]
@@ -589,6 +637,9 @@ discovery = "60s"                # default: 60s; how often it asks for pull requ
 [signing]
 signer = "box"                   # the policy's name for this host's key
 key = "~/.config/sluice/signing" # an SSH private key on this host
+
+[aws]
+profile = "sluice-lead"          # the AWS profile a CodeBuild pool is reached as
 
 [peers]
 lease = "5m"   # how long a quiet host keeps a branch
@@ -614,6 +665,7 @@ collector = "http://localhost:4318"  # a receiver on the host; needed where send
 | [`[runs] systems`](#runs-systems) | The systems the host runs. | It runs only some of the systems a policy names. |
 | [`[forge]`](#forge) | The GitHub App sluice pushes as, its key or a command that gives its token, and how often sluice asks GitHub for a branch's pull requests. | It lands on a branch whose remote is on GitHub. |
 | [`[signing]`](#signing) | The signer the host signs its results as, and its key. | It runs checks for a branch whose state is on its remote. |
+| [`[aws]`](#aws) | The AWS profile sluice reaches a CodeBuild pool as. | It leads a branch whose runs go to a CodeBuild pool. |
 | [`[peers]`](#peers) | How long a quiet host keeps a branch, how often this host shows it is alive, and its name among the hosts. | It shares a branch's remote with other hosts. |
 | [`[deliveries]`](#deliveries) | How long an outcome is owed to its worktree before it shows as expired. | Its agents confirm their outcomes sooner or later than in a week. |
 | [`[[caches]]`](#caches) | The caches every run on the host shares. | Its builds share a cache, a compile server's or the task runner's. |
@@ -642,8 +694,8 @@ It is read-only, or a link into the tool's own store, or the tool writes
 it again each time it applies the configuration. Change it where the
 host's configuration is managed, and apply it from there: an edit on the
 host is refused, or lost at the next apply. Nothing need restart sluice
-when the managed file changes: a `sluice run` kept running takes the
-change up before its next pass. A `->` in the listing marks
+when the managed file changes: sluice's host process takes the change up
+before its next pass. A `->` in the listing marks
 a link, and a mode with no `w` marks a read-only file:
 
 ```sh
@@ -829,8 +881,9 @@ installed on shares. Between two askings, sluice asks GitHub nothing.
 
 The systems this host runs, by the policy's
 [`[systems]`](#systems-what-a-test-runs-on) names. Without it, the host
-runs the one system it is. `sluice run` refuses a system whose operating
-system and architecture the host isn't.
+runs the one system it is. sluice's host process claims no run of a
+repository whose policy names, for a system this lists, an operating
+system and architecture the host isn't, and says so in its log.
 
 ### `[signing]`
 
@@ -841,6 +894,17 @@ sluice refuses a key file anyone but its owner may read, as it does
 `[forge] key`. A host with no `[signing]` records no result on a branch
 whose state is on its remote, and says so on every run. Make the key
 with `ssh-keygen -t ed25519 -f ~/.config/sluice/signing -N ""`.
+
+### `[aws]`
+
+The AWS profile, `profile`, every call sluice makes to a CodeBuild pool
+on this host uses, as the AWS tools read it: its credentials, and its
+SSO session or credential command, from your AWS config. sluice uses it
+whatever profile the command that started sluice names, so a host that
+leads a branch on a fleet always reaches AWS as the role you gave it,
+the stack's lead role. Without `[aws]`, sluice finds credentials as the
+AWS tools do, from the environment or the profile it names. sluice keeps
+no credential between calls.
 
 ### `[peers]`
 
@@ -877,8 +941,8 @@ Whether sluice sends its telemetry, where, as what, which signals and
 how much of a failure. sluice sends OTLP over HTTP, protobuf, to a
 collector, as the [telemetry reference](/sluice/reference/telemetry/)
 describes. A host with no `[telemetry]` sends nothing unless a command
-asks. A `sluice run` you keep running takes a change of the table up
-by starting itself afresh, in the same process, as
+asks. sluice's host process takes a change of the table up by handing
+its repositories to a fresh host process it starts itself, as
 [the host's config](#the-hosts-config-configsluiceconfigtoml) says.
 
 ```toml

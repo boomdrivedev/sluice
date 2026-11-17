@@ -161,26 +161,33 @@ fn a_number_one_branch_holds_is_found_as_before() {
     assert_eq!(on(&h, OTHER, N).state, State::Queued);
 }
 
-/// satisfies: 26, record 0114, design D10
+/// satisfies: 26, record 0114, record 0122 (design D5): #41 carried on
+/// each of two branches under another number, each record naming `was` 41
+/// and the home it came from, is followed on neither alone: the lookup by
+/// it is refused naming both, as for any number two branches hold.
 #[test]
-fn a_number_two_branches_left_behind_is_refused() {
+fn a_number_two_branches_carried_elsewhere_is_refused() {
+    use sluice_seams::Changes;
     let h = Harness::bolt();
     branch(&h, OTHER);
     // Each branch holds a submission already, so each lists its records.
     submit_to(&h, BRANCH, "unit/x", "a/x");
     submit_to(&h, OTHER, "unit/a", "a/a");
     for (b, worktree) in [(BRANCH, "unit/y"), (OTHER, "unit/z")] {
-        let head = h.w().work(&h.w().tip(b), &[("a/left", Some(worktree))]);
-        h.w().session(worktree, &format!("agent-{worktree}"), &head);
-        let doc = serde_json::json!({
-            "schema": "sluice/submission@1", "id": 41, "branch": b,
-            "head": head, "from": {"agent": format!("agent-{worktree}"), "worktree": worktree},
-            "submitted": "2026-10-18T09:00:00Z", "after": [], "priority": 0,
-            "attempt": 2, "state": "queued"
-        });
-        h.w().leave_behind(b, &doc.to_string());
-        h.sluice().step(b).expect("a round runs");
-        assert_eq!(h.w().left_behind(b), 0, "{b} took its own back");
+        let id = submit_to(&h, b, worktree, "a/carried");
+        // As a carry wrote it, #41 having been taken where it went.
+        let s = h.sluice();
+        let _lock = s.seams().state.lock(b).unwrap().unwrap();
+        let read = s.seams().state.read(b).unwrap();
+        let file = format!("submissions/{id}.json");
+        let mut doc: serde_json::Value = serde_json::from_slice(&read.files[&file]).unwrap();
+        doc["was"] = 41.into();
+        doc["carried_from"] = "here".into();
+        let changes = Changes {
+            put: [(file, serde_json::to_vec(&doc).unwrap())].into(),
+            ..Changes::default()
+        };
+        s.seams().state.write(b, read.version, changes).unwrap();
     }
     let s = h.sluice();
 

@@ -180,15 +180,23 @@ struct RecordedChecks {
 }
 
 impl Tests for RecordedChecks {
-    fn start(&self, request: &RunRequest) -> Result<RunHandle> {
+    fn start(&self, request: &RunRequest, part: sluice_seams::Part) -> Result<RunHandle> {
         self.requests.borrow_mut().push(request.clone());
-        let run = self.inner.start(request)?;
+        let run = self.inner.start(request, part)?;
         self.started.borrow_mut().push(request.revision.clone());
         Ok(run)
     }
 
+    fn hold(&self, kind: sluice_seams::RunKind) -> Result<Option<sluice_seams::Part>> {
+        self.inner.hold(kind)
+    }
+
     fn progress(&self, run: &RunHandle) -> Result<Progress> {
         self.inner.progress(run)
+    }
+
+    fn found(&self, place: &str) -> Result<Option<sluice_seams::Found>> {
+        self.inner.found(place)
     }
 
     fn unmet(&self, limits: &sluice_seams::Limits) -> Result<Option<String>> {
@@ -493,6 +501,7 @@ impl Real {
                 caches: vec![moon_cache],
                 expire_after: sluice_core::EXPIRE_AFTER,
                 telemetry: None,
+                aws: Default::default(),
             },
             std::rc::Rc::new(sluice::retry::Policy::command().recording()),
         )
@@ -515,7 +524,7 @@ impl Real {
             release_ok,
             checkout: RecordedPlaces {
                 inner: checkout
-                    .with_blocks(blocks.path().to_path_buf())
+                    .with_ports(blocks.path().to_path_buf())
                     .with_scratch_root(support::test_user_scratch()),
                 log: RefCell::default(),
             },
@@ -1056,7 +1065,7 @@ fn peers_a_finished_try_is_released_while_another_run_tests() {
     assert!(r.live_places().contains(&second));
     let doc = r.doc();
     let still = doc.candidates.iter().find(|c| c.id == both).unwrap();
-    assert_eq!(still.runs[0].state, RunState::Testing);
+    assert_eq!(still.runs[0].state, RunState::Running);
     let kept = sluice_seams::State::progress(&r.state, BRANCH).unwrap();
     assert!(
         kept.get(&both).is_some_and(|t| !t.is_empty()),

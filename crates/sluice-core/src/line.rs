@@ -8,8 +8,8 @@ use sluice_seams::{Changes, Rev, Snapshot};
 
 use crate::records::{
     finished_file, parse_lines, submission_file, to_document, to_line, BranchDoc, Candidate, Event,
-    FinishedLine, LogLine, OutboxItem, RefusedWrite, State, Submission, BRANCH_FILE,
-    DELIVERIES_FILE, FINISHED_INDEX, LOG_FILE,
+    FinishedLine, HomeDoc, LogLine, OutboxItem, RefusedWrite, State, Submission, BRANCH_FILE,
+    DELIVERIES_FILE, FINISHED_INDEX, HOME_FILE, LOG_FILE,
 };
 use crate::refused_writes::{command_of, ends, stands, STANDING};
 
@@ -18,6 +18,9 @@ pub struct Line {
     pub branch: String,
     pub version: u64,
     pub doc: BranchDoc,
+    /// Record 0122 (design D1): the home document, `None` where the
+    /// records hold none; written back with the rest where it changed.
+    pub home: Option<HomeDoc>,
     /// The submissions in the live records: every one not yet moved to
     /// the finished records.
     pub subs: BTreeMap<u64, Submission>,
@@ -39,6 +42,13 @@ impl Line {
             Some(bytes) => serde_json::from_slice(bytes)
                 .with_context(|| format!("reading {branch}'s {BRANCH_FILE}"))?,
             None => BranchDoc::new(branch),
+        };
+        let home = match snapshot.files.get(HOME_FILE) {
+            Some(bytes) => Some(
+                serde_json::from_slice(bytes)
+                    .with_context(|| format!("reading {branch}'s {HOME_FILE}"))?,
+            ),
+            None => None,
         };
         let mut subs = BTreeMap::new();
         for (path, bytes) in &snapshot.files {
@@ -65,6 +75,7 @@ impl Line {
             branch: branch.into(),
             version: snapshot.version,
             doc,
+            home,
             subs,
             finished,
             deliveries_read: deliveries.len(),
@@ -323,6 +334,47 @@ impl Line {
             .ok_or_else(|| anyhow!("no submission {id} to {}", self.branch))
     }
 
+    /// 152, record 0124 (design D10): the forge's refusal of the branch's
+    /// held landing, where that landing carries submission `id`.
+    pub fn refusal_of(&self, id: u64) -> Option<&crate::records::LandingRefused> {
+        self.doc
+            .landing
+            .as_ref()
+            .filter(|l| l.ids.contains(&id))?
+            .refused
+            .as_ref()
+    }
+
+    /// 152, 24, record 0124 (design D10; rule core.48): a landing the forge
+    /// refused is its submitters' to take out: once any of its submissions
+    /// has left the queue, withdrawn by its submitter, its planner, the
+    /// operator or a submission from its place, the landing is dropped and
+    /// the rest go back to the queue, to be formed again. The submissions
+    /// that left, where it was dropped; `None` where no held landing has
+    /// lost one, and nothing changes.
+    pub fn drop_left_landing(&mut self) -> Option<Vec<u64>> {
+        let landing = self.doc.landing.clone().filter(|l| l.refused.is_some())?;
+        let left: Vec<u64> = landing
+            .ids
+            .iter()
+            .copied()
+            .filter(|id| self.subs.get(id).is_none_or(|s| s.state.is_out()))
+            .collect();
+        if left.is_empty() {
+            return None;
+        }
+        self.doc.landing = None;
+        for id in &landing.ids {
+            if let Some(s) = self.subs.get_mut(id).filter(|s| s.state == State::Refused) {
+                s.state = State::Queued;
+                s.tested = None;
+                s.result = None;
+                s.covered_by = None;
+            }
+        }
+        Some(left)
+    }
+
     pub fn sub_mut(&mut self, id: u64) -> &mut Submission {
         let branch = &self.branch;
         self.subs
@@ -451,6 +503,9 @@ impl Line {
                 }
             };
             put(BRANCH_FILE.into(), to_document(&self.doc));
+            if let Some(home) = &self.home {
+                put(HOME_FILE.into(), to_document(home));
+            }
             for s in self.subs.values() {
                 if !self.done_with(s) {
                     put(submission_file(s.id), to_document(s));

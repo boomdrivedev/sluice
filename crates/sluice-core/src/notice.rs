@@ -58,6 +58,12 @@ pub fn notice(id: u64, branch: &str, decided: &Decided) -> String {
             text.push_str(&format!(". sluice wait {id} shows it."));
             text
         }
+        // 152, record 0124 (design D10).
+        Decided::Refused { words } => format!(
+            "[sluice] #{id}'s landing on {branch} was refused by the forge and is held: {words}. \
+             Withdraw it or submit again from its place, or the operator pushes it again once \
+             the forge takes it."
+        ),
     }
 }
 

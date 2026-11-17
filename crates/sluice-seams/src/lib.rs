@@ -50,6 +50,26 @@ pub fn unanswered(e: &anyhow::Error) -> bool {
     e.chain().any(|c| c.is::<Unanswered>())
 }
 
+/// Record 0122 (design D3): the process stopped part way through an act,
+/// as a host that stops does: whatever the core does with a seam's error,
+/// it reads nothing of this one, and the round ends with what came after
+/// the act unwritten. A fake raises it, standing for a host that stopped.
+#[derive(Debug)]
+pub struct Stopped(pub String);
+
+impl fmt::Display for Stopped {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
+impl std::error::Error for Stopped {}
+
+/// Whether `e`, or anything that caused it, is a [`Stopped`].
+pub fn stopped(e: &anyhow::Error) -> bool {
+    e.chain().any(|c| c.is::<Stopped>())
+}
+
 /// 133: a read of a branch's remote that could not be made: a fetch that
 /// failed for any reason but the remote having no such ref.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -90,6 +110,109 @@ impl std::error::Error for ReadRefused {}
 /// The [`ReadRefused`] `e` is, or that caused it.
 pub fn read_refused(e: &anyhow::Error) -> Option<&ReadRefused> {
     e.chain().find_map(|c| c.downcast_ref::<ReadRefused>())
+}
+
+/// 69 (design D17): what a reader of the results log asks for: keys, a
+/// check's task and the hash it ran at, combinations and tasks. A line
+/// matching any of them is answered: its task and hash one of the keys,
+/// its combination one of the combinations, or its task one of the tasks.
+/// Every caller asks for what it reads: a candidate's verdict its checks'
+/// keys and its combination, a session run its plan's keys, a verdict view
+/// its submission's combination, a landing's second reading the
+/// combinations it lands and their keys, a set-aside the task it names.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ResultAsk {
+    #[serde(default, skip_serializing_if = "BTreeSet::is_empty")]
+    pub keys: BTreeSet<(String, String)>,
+    #[serde(default, skip_serializing_if = "BTreeSet::is_empty")]
+    pub combinations: BTreeSet<Rev>,
+    #[serde(default, skip_serializing_if = "BTreeSet::is_empty")]
+    pub tasks: BTreeSet<String>,
+    /// Every line: what a test that inspects the whole log asks. No step,
+    /// gate or command asks it.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    every: bool,
+}
+
+/// What a line of the results log is matched by: its task, hash and
+/// combination, read alone.
+#[derive(Deserialize)]
+struct Matched {
+    #[serde(default)]
+    task: String,
+    #[serde(default)]
+    hash: String,
+    #[serde(default)]
+    combination: String,
+}
+
+impl ResultAsk {
+    /// Every line of the log: a test's inspection of it, never a step's,
+    /// a gate's or a command's (design D17).
+    pub fn every() -> ResultAsk {
+        ResultAsk {
+            every: true,
+            ..ResultAsk::default()
+        }
+    }
+
+    /// Whether it asks for every line.
+    pub fn is_every(&self) -> bool {
+        self.every
+    }
+
+    /// Whether it asks for nothing: a read of it answers no line.
+    pub fn is_empty(&self) -> bool {
+        !self.every && self.keys.is_empty() && self.combinations.is_empty() && self.tasks.is_empty()
+    }
+
+    /// The same, asking for the key `task` ran at `hash` too.
+    pub fn key(mut self, task: &str, hash: &str) -> ResultAsk {
+        self.keys.insert((task.to_string(), hash.to_string()));
+        self
+    }
+
+    /// The same, asking for the results of `combination` too.
+    pub fn combination(mut self, combination: &Rev) -> ResultAsk {
+        self.combinations.insert(combination.clone());
+        self
+    }
+
+    /// The same, asking for every result of `task` too.
+    pub fn task(mut self, task: &str) -> ResultAsk {
+        self.tasks.insert(task.to_string());
+        self
+    }
+
+    /// Whether a line of `task` at `hash` on `combination` is asked for.
+    pub fn matches(&self, task: &str, hash: &str, combination: &str) -> bool {
+        self.every
+            || self.tasks.contains(task)
+            || self.combinations.iter().any(|c| c.0 == combination)
+            || self.keys.iter().any(|(t, h)| t == task && h == hash)
+    }
+
+    /// The lines of `log`, one JSON document per line, it asks for, each
+    /// whole with its newline. A line that names no task, hash or
+    /// combination it reads is answered only where it asks for every line.
+    pub fn answer(&self, log: &[u8]) -> Vec<u8> {
+        if self.every {
+            return log.to_vec();
+        }
+        let mut out = Vec::new();
+        for line in log.split_inclusive(|b| *b == b'\n') {
+            let Ok(m) = serde_json::from_slice::<Matched>(line) else {
+                continue;
+            };
+            if self.matches(&m.task, &m.hash, &m.combination) {
+                out.extend_from_slice(line);
+                if !line.ends_with(b"\n") {
+                    out.push(b'\n');
+                }
+            }
+        }
+        out
+    }
 }
 
 /// A git revision, as the branch seam names it.
@@ -198,7 +321,7 @@ pub struct LastResult {
     pub at: String,
     /// The head the run was given.
     pub head: Rev,
-    pub kind: RunKind,
+    pub kind: SessionRunKind,
     pub outcome: RunOutcome,
     /// Its results are under their keys (92): only a run of the checks in
     /// a place holding exactly its head that did not hit its time limit.
@@ -218,7 +341,7 @@ pub struct LastResult {
 /// What a session run ran (89).
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
-pub enum RunKind {
+pub enum SessionRunKind {
     Checks,
     Command,
 }
@@ -636,7 +759,8 @@ pub enum Outcome {
 
 /// Whether an outcome was observed in this run or answered from an
 /// earlier one (37, 38).
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum Source {
     /// Observed by an executor on `host`.
     Ran { host: String },
@@ -646,7 +770,7 @@ pub enum Source {
 
 /// One check's result in a run: its key is `(task, hash)` (glossary
 /// "key").
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TaskResult {
     pub task: String,
     pub hash: String,
@@ -742,7 +866,9 @@ pub struct FailedBy {
     pub by: Vec<String>,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+/// Record 0119 (design D11): what a pool's run job hands its sign job is
+/// this, as JSON.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RunReport {
     pub tasks: Vec<TaskResult>,
     /// 84: what the executor held the run to.
@@ -827,6 +953,31 @@ pub enum Progress {
     Lost,
 }
 
+/// 88, record 0122 (design D12): where a pool's job of a claim stands.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Job {
+    /// No run of the pool bears the claim.
+    None,
+    /// Its run waits for a runner, or its run job has not started.
+    Queued,
+    /// Its run job runs, since its own start.
+    Running { since: String },
+    /// Its run is over: `recorded` where its sign job recorded the run's
+    /// end, and otherwise not, a lapsed claim, with why where the pool
+    /// says, which the lapse writes in place of its own words (77, 88;
+    /// record 0122; design D5 of the change
+    /// `a-codebuild-fleet-runs-a-queues-checks`).
+    Ended { recorded: bool, why: Option<String> },
+}
+
+/// Record 0122 (design D3): a run found started in a checkout, by the
+/// supervisor's own files: its handle, and its own start.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Found {
+    pub run: RunHandle,
+    pub since: String,
+}
+
 /// Where one task of a run still going has got, as its runner tells it.
 /// No run and no result (16, 38): no verdict, gate, blame or result reads
 /// it (rules core.7, core.9; ADR 0028).
@@ -870,17 +1021,35 @@ pub trait Tests {
     /// limit and the request's limits (32, 66; rule core.10). 84: a limit
     /// the executor cannot hold is an error naming it, and nothing runs.
     ///
-    /// 71: before it runs anything, the toolchain or the runner's setup
-    /// among it, it admits the run against the host's count of running
-    /// checks, every repository's, in one step under the host's lock; at
-    /// the host's bound it fails with [`AtBound`] and nothing runs. A
-    /// session's or a preview's run is admitted only under the bound less
-    /// the part kept for submissions' runs (91, 102).
-    fn start(&self, request: &RunRequest) -> Result<RunHandle>;
+    /// 71 (rule core.49; record 0087): the run takes `part`, its room in
+    /// the host's bound that [`Tests::hold`] gave, and keeps it until it
+    /// ends; a start that fails gives it back as the part is dropped. A
+    /// part the host's room no longer honours is refused with [`AtBound`]
+    /// and nothing runs.
+    fn start(&self, request: &RunRequest, part: Part) -> Result<RunHandle>;
+
+    /// 71, 150 (rule core.49; records 0087, 0123): a run's room in the
+    /// host's bound, counted and held in one step against every
+    /// repository's runs, before the decision to start the run is written:
+    /// a combination's where a run of the bound is free, owed to no waiting
+    /// session and to no repository with fewer runs under test; a
+    /// session's or a preview's where a run of the bound less the part kept
+    /// for combinations is free and owed to no one. `None` where there is
+    /// none: the run's wait is recorded for the host, and nothing is held.
+    /// The part is held until [`Tests::start`] takes it, or is dropped,
+    /// which gives it back at once. The profile names its own repository
+    /// to the host's room, so the core names none.
+    fn hold(&self, kind: RunKind) -> Result<Option<Part>>;
 
     /// 37: a started run's progress; once finished, every check's key,
     /// outcome, executor and whether it was replayed.
     fn progress(&self, run: &RunHandle) -> Result<Progress>;
+
+    /// Record 0122 (design D3): whether a run was started in the checkout
+    /// `place`, and its own start, read from the supervisor's own files,
+    /// running nothing: the proof a reader checks before it starts one, so
+    /// a start found done is not done again. `None` where none was.
+    fn found(&self, place: &str) -> Result<Option<Found>>;
 
     /// 84, 87, record 0074: what of `limits` this host cannot meet, in
     /// words. First what its executor cannot hold, the executor kind,
@@ -944,16 +1113,20 @@ pub trait Tests {
         anyhow::bail!("no pool is bound for {}", launch.pool)
     }
 
-    /// 77, 88: whether the job under `claim` that pool `kind` was given
-    /// still runs or waits to; one its pool finished, cancelled or lost
-    /// without a report is a lapsed claim.
-    fn job_alive(
+    /// 77, 88, record 0122 (design D12): where the job under `claim` that
+    /// pool `kind`, running each system on `runners`, was given stands,
+    /// read from the pool: none of its title, queued, its run job running
+    /// since its own start, or ended, with whether its run was recorded.
+    /// One that ended with no record is a lapsed claim, and so is none past
+    /// the sign-of-life bound since the claim.
+    fn job(
         &self,
         _kind: &(String, Setting),
+        _runners: &BTreeMap<String, String>,
         _claim: &str,
         _remote: Option<&str>,
-    ) -> Result<bool> {
-        Ok(false)
+    ) -> Result<Job> {
+        Ok(Job::None)
     }
 
     /// 111: ask a pool to advance `branch`, when work is written that no
@@ -979,6 +1152,32 @@ pub trait Tests {
     /// a task a check was failed by and a replay are never unkept, and a
     /// task in neither list is no pass.
     fn proven(&self, run: &RunHandle, report: &RunReport) -> Result<Proof>;
+
+    /// Record 0119 (design D11; 109): keep in `dir` what proves the keys
+    /// of `report`, run `run`'s, in the profile's own form, as a pool's run
+    /// job hands it to its sign job, which holds the run's place nowhere;
+    /// nothing is recorded. A profile whose keys need no proof keeps
+    /// nothing.
+    fn keep_proof(&self, _run: &RunHandle, _report: &RunReport, _dir: &Path) -> Result<()> {
+        Ok(())
+    }
+
+    /// Record 0119 (design D11; 78, 109): which keys of `report`, a pool's
+    /// run job's, the tree of `revision` bears out by what the run job
+    /// kept in `dir` ([`Tests::keep_proof`]), read as [`Tests::proven`]
+    /// reads a run's own, the runner taken from `tests`, the policy's
+    /// `[tests]` at the branch's revision, never from the run job: nothing
+    /// of the combination runs. A profile that proves nothing so handed
+    /// over proves none.
+    fn proven_from(
+        &self,
+        _dir: &Path,
+        _revision: &Rev,
+        _tests: &Settings,
+        _report: &RunReport,
+    ) -> Result<Proof> {
+        Ok(Proof::default())
+    }
 
     /// ADR 0035: the session runs running on this host, as `running`
     /// counts them, each with what its `sluice exec` kept of it: for a
@@ -1131,6 +1330,59 @@ impl Running {
     }
 }
 
+/// What a part of the host's bound is held for (71, 150; record 0087).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum RunKind {
+    /// A submission's combination.
+    Queue,
+    /// A session's run (`sluice exec`) or a preview's command.
+    Session,
+}
+
+/// 71 (rule core.49; record 0087): a run's room in the host's bound, held
+/// from the count that chose it to its start. It is opaque to the core:
+/// the check profile that held it reads what it holds back when the run
+/// starts. Dropped unstarted, by a start that failed, a decision whose
+/// write was refused or a round that stopped, it gives its room back at
+/// once, whatever it holds doing so as it drops.
+pub struct Part {
+    kind: RunKind,
+    held: Box<dyn std::any::Any>,
+}
+
+impl Part {
+    /// A part of `kind`, holding `held`, whose drop gives the room back.
+    pub fn new(kind: RunKind, held: impl std::any::Any) -> Part {
+        Part {
+            kind,
+            held: Box::new(held),
+        }
+    }
+
+    pub fn kind(&self) -> RunKind {
+        self.kind
+    }
+
+    /// What the part holds, as the profile that held it made it; the part
+    /// back where it holds something else.
+    pub fn take<T: 'static>(self) -> std::result::Result<T, Part> {
+        match self.held.downcast::<T>() {
+            Ok(held) => Ok(*held),
+            Err(held) => Err(Part {
+                kind: self.kind,
+                held,
+            }),
+        }
+    }
+}
+
+impl fmt::Debug for Part {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("Part").field("kind", &self.kind).finish()
+    }
+}
+
 /// 71: a start refused because the host's count of running checks has
 /// reached its bound; nothing of the run ran. The core finds it by
 /// downcasting `start`'s error, and the run waits for a later round.
@@ -1215,6 +1467,10 @@ pub enum Moved {
     Moved,
     /// 45: refused, the branch was elsewhere.
     Elsewhere(Option<Rev>),
+    /// 152, rule core.5, record 0124 (design D10): the forge refused the
+    /// move with the branch where it was expected, in the forge's words,
+    /// whole: a refusal of the move itself, never pushed again by itself.
+    Refused(String),
 }
 
 /// What this host holds of a branch apart from the branch itself (124).
@@ -1395,6 +1651,10 @@ pub enum Decided {
         paths: Vec<String>,
         with: Vec<Contested>,
     },
+    /// 152, record 0124 (design D10): the forge refused its landing, with
+    /// the branch where the landing expected it, in the forge's words: no
+    /// outcome, a hold its submitter is owed word of.
+    Refused { words: String },
 }
 
 impl Decided {
@@ -1403,6 +1663,7 @@ impl Decided {
             Decided::Landed { .. } => "landed",
             Decided::Failed { .. } => "failed",
             Decided::Conflict { .. } => "conflict",
+            Decided::Refused { .. } => "refused",
         }
     }
 }
@@ -1459,6 +1720,12 @@ pub enum Standing {
     /// Its combination passed; the combinations ahead have yet to (18).
     Passed,
     Landing,
+    /// 152, record 0124 (design D10): its combination passed and the forge
+    /// refused its landing, with the branch where the landing expected it:
+    /// held, with the forge's words.
+    Refused {
+        words: String,
+    },
     Landed {
         landed_as: Rev,
         /// 140: landed beside the chain, with no check run.
@@ -1668,6 +1935,16 @@ pub enum Written {
 /// The branch's lock, held until dropped (ADR 0005; rule core.14).
 pub trait Guard {}
 
+/// Record 0122 (design D3, D4): what a carry of a branch's queue moved: the
+/// home it carried to, `here` for the host's own files or a remote's name,
+/// and each live submission by the number it had and the number it has
+/// there; no home where it owed nothing and wrote nothing.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct Carried {
+    pub to: Option<String>,
+    pub numbers: BTreeMap<u64, u64>,
+}
+
 pub trait State {
     /// The branch's lock, or `None` when another step holds it.
     fn lock<'a>(&'a self, branch: &str) -> Result<Option<Box<dyn Guard + 'a>>>;
@@ -1696,6 +1973,15 @@ pub trait State {
     /// that decides nothing reads. A round reads with [`State::read`].
     fn read_held(&self, branch: &str) -> Result<Snapshot>;
 
+    /// 129 (design D16): from now on, read every remote that keeps
+    /// branches' records as the host process's last ask fetched it, as
+    /// though this binding had made that ask, and ask none itself: the
+    /// branches with records and the hosts' signs of life listed from what
+    /// was fetched. A one-shot read's, once the host process's reading is
+    /// current; a round never runs under it. Records in the host's own
+    /// files need nothing.
+    fn hold(&self) {}
+
     /// 80: why the branch's last read could not reach the records it keeps
     /// elsewhere and read what was last fetched; `None` when the read was
     /// current.
@@ -1713,6 +1999,35 @@ pub trait State {
     /// Keep `doc` as this host's document of a refusal of `branch`'s
     /// remote, in place of the one kept before, or, with `None`, remove it.
     fn keep_refusal(&self, _branch: &str, _doc: Option<&[u8]>) -> Result<()> {
+        Ok(())
+    }
+
+    /// 133, rule core.28 (design D27): this host's document of a standing
+    /// refusal of `branch`'s intake, its pull requests on the forge, beside
+    /// its refusal of the remote and in the same form; kept on this host
+    /// alone, so it decides nothing.
+    fn intake_refusal(&self, _branch: &str) -> Result<Option<Vec<u8>>> {
+        Ok(None)
+    }
+
+    /// Keep `doc` as this host's document of a refusal of `branch`'s
+    /// intake, or, with `None`, remove it.
+    fn keep_intake_refusal(&self, _branch: &str, _doc: Option<&[u8]>) -> Result<()> {
+        Ok(())
+    }
+
+    /// 77, 133, rule core.28 (design D5 of the change
+    /// `a-codebuild-fleet-runs-a-queues-checks`): this host's document of a
+    /// standing refusal of the reads of `branch`'s pools' jobs, beside its
+    /// refusal of the remote and in the same form; kept on this host alone,
+    /// so it decides nothing.
+    fn pool_refusal(&self, _branch: &str) -> Result<Option<Vec<u8>>> {
+        Ok(None)
+    }
+
+    /// Keep `doc` as this host's document of a refusal of `branch`'s pools'
+    /// reads, or, with `None`, remove it.
+    fn keep_pool_refusal(&self, _branch: &str, _doc: Option<&[u8]>) -> Result<()> {
         Ok(())
     }
 
@@ -1793,18 +2108,42 @@ pub trait State {
         Ok(())
     }
 
-    /// The submissions this host had queued on the branch in its own
-    /// records, when the branch's records moved to the remote and another
-    /// host's queue was there first (design D10): each a submission's
-    /// document, to be submitted again under a new id.
-    fn left_behind(&self, _branch: &str) -> Result<Vec<Vec<u8>>> {
+    /// Record 0122 (design D3, D4; C.6): carry what of `branch`'s queue
+    /// this host owes a move, the caller holding the branch's lock. Where
+    /// the home the branch is routed to is moving, which only the round
+    /// that keeps it asks, every live submission goes to the home the move
+    /// names, with its number and state and the owed deliveries, the new
+    /// home is opened naming where it came from, and the old one is closed
+    /// with its pointer; a branch coming home from a remote carries only
+    /// the submissions this host made into its own files. Where the home is
+    /// not moving, the submissions this host made left in a remote home
+    /// closed toward the hosts' own files are carried into its own. Each
+    /// write reads its target first and writes only what is not there, so a
+    /// carry already made writes nothing more, and one stopped between its
+    /// writes is finished by the next.
+    fn carry(&self, _branch: &str) -> Result<Carried> {
+        Ok(Carried::default())
+    }
+
+    /// Record 0122 (design D6, D7): each closed home of `branch` this host
+    /// reaches it through, by name, `here` for its own files or a remote's:
+    /// where a submission carried away, finished before the move, or left
+    /// for its host is read. None for a branch never moved.
+    fn closed_homes(&self, _branch: &str) -> Result<Vec<String>> {
         Ok(Vec::new())
     }
 
-    /// The submissions of [`State::left_behind`] by their old ids, once
-    /// submitted again.
-    fn forget_left_behind(&self, _branch: &str, _ids: &[u64]) -> Result<()> {
-        Ok(())
+    /// Record 0122 (design D6, D7): the branch's live records in its home
+    /// `home`, as [`State::closed_homes`] names it, as last read there with
+    /// no fetch: nothing under [`FINISHED`].
+    fn read_in(&self, _branch: &str, _home: &str) -> Result<Snapshot> {
+        Ok(Snapshot::default())
+    }
+
+    /// Record 0122 (design D7): one file of the branch's finished records
+    /// in its home `home`, by its name under [`FINISHED`].
+    fn read_finished_in(&self, _branch: &str, _home: &str, _name: &str) -> Result<Option<Vec<u8>>> {
+        Ok(None)
     }
 
     /// 61, 131: one file of the branch's finished records, by its name
@@ -1826,17 +2165,19 @@ pub trait State {
     /// holds (26; record 0114; rule core.41).
     fn allocate_id(&self, branch: &str) -> Result<u64>;
 
-    /// 69: the repository's results log, one JSON document per line, as
-    /// `branch`'s gate reads it: the branch is the one whose gate, session
-    /// run or verdict reads the log, and a profile that reads signed runs
-    /// verifies them with the signers and keys that branch's own policy
-    /// names, never another branch's (78; rule core.22).
-    fn results(&self, branch: &str) -> Result<Vec<u8>>;
+    /// 69 (design D17): the lines of the repository's results log that
+    /// `ask` names, one JSON document per line, as `branch`'s gate reads
+    /// them: the branch is the one whose gate, session run or verdict
+    /// reads them, and a profile that reads signed runs verifies them with
+    /// the signers and keys that branch's own policy names, never another
+    /// branch's (78; rule core.22). A line matching any of what `ask`
+    /// names is answered; nothing else is.
+    fn results_for(&self, branch: &str, ask: &ResultAsk) -> Result<Vec<u8>>;
 
     /// 78, 87: whether `branch`'s gate at `at`, the revision a round read
     /// it at, would count a run this host signs: the host signs as a signer
     /// the branch's own policy there names, with a key that policy lists
-    /// for it, as [`State::results`] verifies the branch's runs. The
+    /// for it, as [`State::results_for`] verifies the branch's runs. The
     /// signer's name alone, which another branch may give another key, is
     /// not enough (rule core.22). A profile that verifies no signed run
     /// leaves the name to the gate.
@@ -1846,6 +2187,14 @@ pub trait State {
 
     /// 69: append to the repository's results log.
     fn record_results(&self, lines: &[u8]) -> Result<()>;
+
+    /// Record 0119 (design D11; 78, 109): add `record`, signed elsewhere, at
+    /// `path` among `signer`'s runs where `branch`'s records are, as a
+    /// pool's sign job adds its keyless bundle; only added to (109).
+    /// Records in one host's own files hold no signer's runs (78).
+    fn add_signed(&self, branch: &str, _signer: &str, _path: &str, _record: &[u8]) -> Result<()> {
+        anyhow::bail!("{branch}'s records hold no signer's runs, since its policy names no signer")
+    }
 
     /// Could-not-run-1 116: the results set aside, one JSON document per
     /// line, beside the results log and never in it.
@@ -2003,5 +2352,29 @@ mod tests {
         assert!(!from("bolt/x", None).by_name());
         assert!(!from("pull/7", Some("bolt/x")).by_name());
         assert!(!from("unit/a", Some("bolt/x")).by_name());
+    }
+
+    /// 69 (design D17): a line matching any of what is asked is answered
+    /// whole, and nothing else; an ask for every line answers the log.
+    #[test]
+    fn a_result_ask_answers_the_lines_it_names() {
+        let log = b"{\"task\":\"a:test\",\"hash\":\"h1\",\"combination\":\"c1\"}\n\
+                    {\"task\":\"b:test\",\"hash\":\"h2\",\"combination\":\"c2\"}\n\
+                    {\"task\":\"c:test\",\"hash\":\"h3\",\"combination\":\"c3\"}\n\
+                    not a line\n";
+        let lines = |ask: &ResultAsk| String::from_utf8(ask.answer(log)).unwrap();
+        assert_eq!(lines(&ResultAsk::default()), "");
+        let by_key = lines(&ResultAsk::default().key("a:test", "h1"));
+        assert!(
+            by_key.contains("a:test") && by_key.lines().count() == 1,
+            "{by_key}"
+        );
+        assert_eq!(lines(&ResultAsk::default().key("a:test", "h2")), "");
+        let any = ResultAsk::default()
+            .combination(&Rev("c2".into()))
+            .task("c:test");
+        assert_eq!(lines(&any).lines().count(), 2, "{}", lines(&any));
+        assert_eq!(ResultAsk::every().answer(log), log.to_vec());
+        assert!(ResultAsk::default().is_empty() && !ResultAsk::every().is_empty());
     }
 }

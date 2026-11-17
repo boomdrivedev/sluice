@@ -15,6 +15,7 @@ use std::collections::BTreeMap;
 use std::time::Duration;
 
 use anyhow::{anyhow, bail, Context, Result};
+use base64::Engine as _;
 use serde::Deserialize;
 use sluice_seams::{Limits, Network, Setting, Settings};
 
@@ -165,7 +166,34 @@ pub struct Rules {
     /// its remote, submitted once these conditions hold. `None` for a
     /// branch whose work is submitted straight from a session's place.
     pub pull_requests: Option<PullRequests>,
+    /// 137 (design D22): the branch takes pull requests and the policy
+    /// names no `[signers]`, so its records are each host's own and no
+    /// host keeps it on its remote to take them in: [`Policy::rules_for`]
+    /// refuses this branch alone.
+    pub unkept: bool,
 }
+
+/// 137 (design D22): a branch that takes pull requests on records each
+/// host keeps, refused alone, naming the branch and its remote.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct NoIntake {
+    pub branch: String,
+    pub remote: String,
+}
+
+impl std::fmt::Display for NoIntake {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let (branch, remote) = (&self.branch, &self.remote);
+        write!(
+            f,
+            "{branch} takes pull requests, which only the host that keeps it on {remote} takes \
+             in, and its state is each host's own: name [signers] in .config/sluice.toml so its \
+             state is kept on {remote}, as `sluice init actions` names a pool's signer (137)"
+        )
+    }
+}
+
+impl std::error::Error for NoIntake {}
 
 /// C.7 `pull_requests`: what a pull request into the branch meets before
 /// its driver submits it (27). Read from the branch's revision (56), so a
@@ -182,6 +210,11 @@ pub struct PullRequests {
     pub log_lines: Option<usize>,
 }
 
+/// C.5, ADR 0044: the name of the check sluice posts on a request's head,
+/// and the prefix of its checks of each task, `sluice / <task>`, which the
+/// pull request driver posts under.
+pub const OWN_CHECK: &str = "sluice";
+
 /// What `trust` may list on a branch whose records are this host's.
 const TRUSTS: [&str; 4] = ["confined", "open", "sandbox", "container"];
 
@@ -196,15 +229,28 @@ impl Rules {
     /// the branch trusts the signer, and every claim it relies on is one
     /// the signer may make.
     pub fn trusts_signed(&self, signer: &str, confined: bool, system: Option<&str>) -> bool {
-        let Some((may_confine, systems)) = self.claims.get(signer) else {
+        let Some((may_confine, _)) = self.claims.get(signer) else {
             return false;
         };
         if self.confined && !(confined && *may_confine) {
             return false;
         }
-        match (system, systems) {
-            (Some(s), Some(list)) => list.iter().any(|x| x == s),
-            _ => true,
+        self.may_claim(signer, system)
+    }
+
+    /// 79 (boomdrive-design's ruling of 2026-11-16 on the change
+    /// `a-codebuild-fleet-runs-a-queues-checks`): whether `signer`, one the
+    /// gate trusts, may claim a run of `system`, `None` for a run naming
+    /// none: every system where it names none, those it names otherwise,
+    /// and none at all where it names an empty list, whatever the run's
+    /// system. Such a signer's hosts lead a branch held on its remote and
+    /// claim, and count for, nothing of it.
+    pub fn may_claim(&self, signer: &str, system: Option<&str>) -> bool {
+        match (self.claims.get(signer), system) {
+            (None, _) => false,
+            (Some((_, None)), _) => true,
+            (Some((_, Some(list))), Some(s)) => list.iter().any(|x| x == s),
+            (Some((_, Some(list))), None) => !list.is_empty(),
         }
     }
 
@@ -250,6 +296,7 @@ impl Default for Rules {
             claims: BTreeMap::new(),
             remote: None,
             pull_requests: None,
+            unkept: false,
         }
     }
 }
@@ -416,6 +463,9 @@ impl Policy {
                 known(&at, s)?;
             }
             let identity = one(table, &at, "identity")?;
+            if identity.0 == "kms" {
+                kms_identity(&identity.1, &format!("[signers.{name}] kms"))?;
+            }
             signers.insert(
                 name,
                 Signer {
@@ -451,12 +501,23 @@ impl Policy {
             let Some(s) = signers.get(&signer) else {
                 bail!("{at} signs as {signer:?}, which [signers] does not name");
             };
-            if s.identity.0 != kind.0 {
+            // 88, 107; record 0119 (design D1 of the change
+            // `a-codebuild-fleet-runs-a-queues-checks`): a pool's kind
+            // decides the kind of signer its jobs sign as.
+            if !POOL_SIGNERS.contains(&(kind.0.as_str(), s.identity.0.as_str())) {
                 bail!(
-                    "{at} is a {} pool and its signer {signer} signs by {}; a pool's jobs sign as a signer of its own kind",
+                    "{at} is a {} pool and its signer {signer} is a {} signer; {}",
                     kind.0,
-                    s.identity.0
+                    s.identity.0,
+                    POOL_SIGNERS
+                        .iter()
+                        .map(|(p, s)| format!("a {p} pool's jobs sign as a {s} signer"))
+                        .collect::<Vec<_>>()
+                        .join(" and ")
                 );
+            }
+            if kind.0 == "codebuild" {
+                codebuild_pool(&kind.1, &format!("{at} codebuild"))?;
             }
             let names: Vec<String> = runners.keys().cloned().collect();
             known(&format!("{at} runners"), &names)?;
@@ -581,7 +642,24 @@ impl Policy {
                             "[branches.\"{pattern}\".pull_requests] reviews must be at least 0, not {n}"
                         ),
                     },
-                    checks: p.checks,
+                    checks: {
+                        // 113, record 0119 (design D11): a head's runs count
+                        // by key through sluice; its own check is no other
+                        // system's.
+                        let own = format!("{OWN_CHECK} / ");
+                        if let Some(c) = p
+                            .checks
+                            .iter()
+                            .find(|c| *c == OWN_CHECK || c.starts_with(&own))
+                        {
+                            bail!(
+                                "[branches.\"{pattern}\".pull_requests] checks names {c:?}, a \
+                                 check sluice posts on a request's head itself: its runs count by \
+                                 key, so name only checks other systems post"
+                            );
+                        }
+                        p.checks
+                    },
                     log_lines: match p.log_lines {
                         None => None,
                         Some(n) if n >= 1 => Some(n as usize),
@@ -626,6 +704,7 @@ impl Policy {
                     systems_for,
                     claims,
                     remote: r.remote,
+                    unkept: pull_requests.is_some() && signers.is_empty(),
                     pull_requests,
                 },
             ));
@@ -730,8 +809,30 @@ impl Policy {
     /// The gate for `branch`: an exact name before any pattern, then the
     /// pattern with the most literal characters. `None` when no table
     /// names the branch, which is then not sluice's to land on.
+    /// A branch that takes pull requests on records each host keeps is
+    /// refused alone, with [`NoIntake`]'s words (137; design D22).
     pub fn rules_for(&self, branch: &str) -> Result<Option<&Rules>> {
-        Ok(self.table_for(branch)?.map(|i| &self.branches[i].1))
+        let Some(i) = self.table_for(branch)? else {
+            return Ok(None);
+        };
+        let rules = &self.branches[i].1;
+        if rules.unkept {
+            return Err(NoIntake {
+                branch: branch.to_string(),
+                remote: rules.remote.clone().unwrap_or_default(),
+            }
+            .into());
+        }
+        Ok(Some(rules))
+    }
+
+    /// The remote the table that gives `branch` its gate names, whatever
+    /// [`Policy::rules_for`] refuses of the table: what routing reads
+    /// (core.27; design D22).
+    pub fn remote_of(&self, branch: &str) -> Result<Option<String>> {
+        Ok(self
+            .table_for(branch)?
+            .and_then(|i| self.branches[i].1.remote.clone()))
     }
 
     /// Which of the `[branches]` tables, in the order written, gives
@@ -870,6 +971,131 @@ fn strings(v: toml::Value, at: &str) -> Result<Vec<String>> {
     }
 }
 
+/// Each kind of pool and the kind of signer its jobs sign as (88, 107;
+/// record 0119): a forge's job keylessly as its workflow, a CodeBuild
+/// fleet's sign build with its key in KMS.
+pub const POOL_SIGNERS: &[(&str, &str)] = &[("github", "github"), ("codebuild", "kms")];
+
+/// `[signers.<name>] kms = { key, public }` (78; record 0119, design D1 of
+/// the change `a-codebuild-fleet-runs-a-queues-checks`): `key` a key's ARN,
+/// which timber's key-service signer takes as the signer's one name (timber
+/// record 0017), and `public` its public half as KMS's `GetPublicKey`
+/// answers it, read here by its form alone; the records profile reads the
+/// key itself.
+fn kms_identity(setting: &Setting, at: &str) -> Result<()> {
+    let Setting::Tables(tables) = setting else {
+        bail!("{at} must be a table: kms = {{ key = \"arn:aws:kms:…:key/…\", public = \"…\" }}");
+    };
+    let table = &tables[0];
+    if let Some(k) = table
+        .keys()
+        .find(|k| !["key", "public"].contains(&k.as_str()))
+    {
+        bail!("{at} names {k}; a kms signer names its key and public half");
+    }
+    let text = |field: &str| -> Result<&str> {
+        match table.get(field) {
+            Some(Setting::Text(t)) => Ok(t),
+            Some(_) => bail!("{at}.{field} must be a string"),
+            None => bail!(
+                "{at}.{field} is missing; a kms signer names its key by its ARN and lists its \
+                 public half"
+            ),
+        }
+    };
+    let key = text("key")?;
+    if !is_key_arn(key) {
+        bail!(
+            "{at}.key is {key:?}, which is no key's ARN; a kms signer names its key as \
+             arn:<partition>:kms:<region>:<account>:key/<id>, never an alias or a bare id"
+        );
+    }
+    let public = text("public")?;
+    let der = base64::engine::general_purpose::STANDARD
+        .decode(public)
+        .map_err(|e| anyhow::anyhow!("{at}.public is not base64: {e}"))?;
+    if !is_p256_spki(&der) {
+        bail!(
+            "{at}.public is no P-256 public key: it is the base64 of a DER \
+             SubjectPublicKeyInfo on prime256v1, as KMS's GetPublicKey answers an \
+             ECC_NIST_P256 key"
+        );
+    }
+    Ok(())
+}
+
+/// `arn:<partition>:kms:<region>:<account>:key/<id>`.
+fn is_key_arn(arn: &str) -> bool {
+    let parts: Vec<&str> = arn.splitn(6, ':').collect();
+    let [scheme, partition, service, region, account, resource] = parts[..] else {
+        return false;
+    };
+    scheme == "arn"
+        && !partition.is_empty()
+        && service == "kms"
+        && !region.is_empty()
+        && account.len() == 12
+        && account.bytes().all(|b| b.is_ascii_digit())
+        && resource
+            .strip_prefix("key/")
+            .is_some_and(|id| !id.is_empty() && !id.contains('/'))
+}
+
+/// A DER SubjectPublicKeyInfo whose algorithm is `id-ecPublicKey` with the
+/// parameters `prime256v1`: a sequence of that algorithm identifier and a
+/// bit string, read by its form alone.
+fn is_p256_spki(der: &[u8]) -> bool {
+    // SEQUENCE { OID 1.2.840.10045.2.1, OID 1.2.840.10045.3.1.7 }
+    const ALGORITHM: &[u8] = &[
+        0x30, 0x13, 0x06, 0x07, 0x2a, 0x86, 0x48, 0xce, 0x3d, 0x02, 0x01, 0x06, 0x08, 0x2a, 0x86,
+        0x48, 0xce, 0x3d, 0x03, 0x01, 0x07,
+    ];
+    let [0x30, len, rest @ ..] = der else {
+        return false;
+    };
+    if *len as usize != rest.len() || *len >= 0x80 {
+        return false;
+    }
+    let Some(rest) = rest.strip_prefix(ALGORITHM) else {
+        return false;
+    };
+    // BIT STRING, no unused bits, an uncompressed (65) or compressed (33) point.
+    match rest {
+        [0x03, n, 0x00, point @ ..] if *n as usize == point.len() + 1 => {
+            matches!(
+                (point.first(), point.len()),
+                (Some(0x04), 65) | (Some(0x02 | 0x03), 33)
+            )
+        }
+        _ => false,
+    }
+}
+
+/// `[pools.<name>] codebuild = { region, sign }` (88; record 0119, design D1
+/// of the change `a-codebuild-fleet-runs-a-queues-checks`): where the
+/// projects are and the sign project; `runners` names each system's run
+/// project.
+fn codebuild_pool(setting: &Setting, at: &str) -> Result<()> {
+    let Setting::Tables(tables) = setting else {
+        bail!("{at} must be a table: codebuild = {{ region = \"…\", sign = \"…\" }}");
+    };
+    let table = &tables[0];
+    if let Some(k) = table
+        .keys()
+        .find(|k| !["region", "sign"].contains(&k.as_str()))
+    {
+        bail!("{at} names {k}; a codebuild pool names its region and sign project");
+    }
+    for field in ["region", "sign"] {
+        match table.get(field) {
+            Some(Setting::Text(t)) if !t.is_empty() => {}
+            Some(_) => bail!("{at}.{field} must be a string"),
+            None => bail!("{at}.{field} is missing; a codebuild pool names its region and the project that signs its runs"),
+        }
+    }
+    Ok(())
+}
+
 /// The one key left in a signer's or a pool's table, for its profile: a
 /// string, a list of strings or a table of them.
 fn one(table: BTreeMap<String, toml::Value>, at: &str, what: &str) -> Result<(String, Setting)> {
@@ -1001,6 +1227,23 @@ parallel = 2
 batch = true
 hold = "5m"
 "##;
+
+    /// 137, record 0093 as amended 2026-11-08 (design D10 of
+    /// `a-queues-home-is-written-in-its-records`): no key of a branch's
+    /// policy chooses how its queue runs or which host leads it: a branch's
+    /// `runs` and `lead` are each refused naming the key, as any key sluice
+    /// does not know is.
+    #[test]
+    fn no_policy_key_chooses_how_a_queue_runs() {
+        for (key, value) in [("runs", "\"daemon\""), ("lead", "\"box\"")] {
+            let text = format!("[branches.main]\nrequired = [\"#gate\"]\n{key} = {value}\n");
+            let refused = match Policy::parse(&text) {
+                Ok(p) => format!("{:#}", p.rules_for("main").unwrap_err()),
+                Err(e) => format!("{e:#}"),
+            };
+            assert!(refused.contains(key), "{key}: {refused}");
+        }
+    }
 
     #[test]
     fn reads_the_walkthrough_shape() {
@@ -1138,34 +1381,128 @@ hold = "5m"
         let main = full.rules_for("main").unwrap().unwrap();
         assert_eq!(main.remote.as_deref(), Some("origin"));
         assert!(main.pull_requests.is_some());
+        // 137 (design D22): kept on origin, so the host that keeps it
+        // takes its pull requests in.
+        assert!(main.signed && !main.unkept);
         let peers = Policy::parse(examples[3].1).unwrap();
         let main = peers.rules_for("main").unwrap().unwrap();
         assert!(main.signed && main.confined);
         assert_eq!(main.systems_of("cli:build").len(), 3);
     }
 
-    /// sluice's own policy reads, and gates as section 9 says: bolt
-    /// branches on the fast tier from any run or the cache, `main` on
-    /// every tier from sandboxed or confined runs only, deepest first,
-    /// landed on `origin`, taking its work as pull requests that wait on
-    /// nothing beyond the gate.
+    /// sluice's own policy reads, and gates as section 9 says: its one
+    /// signer deneb's key, signing as `sessions`, never confined; bolt
+    /// branches on the fast tier and `main` on every tier from runs that
+    /// signer signed, both kept on `origin`; `main` deepest first, taking
+    /// its work as pull requests that wait on nothing beyond the gate,
+    /// which the host that keeps it takes in (137).
     #[test]
     fn sluices_own_policy_reads() {
         let p = Policy::parse(include_str!("../../../.config/sluice.toml")).unwrap();
         assert_eq!(p.limits.executor.as_deref(), Some("sandbox"));
         assert_eq!(p.limits.network, Some(Network::Localhost));
         assert!(p.checkout.is_empty(), "{:?}", p.checkout);
+        assert_eq!(p.signers.keys().collect::<Vec<_>>(), ["sessions"]);
+        let sessions = &p.signers["sessions"];
+        assert_eq!(sessions.identity.0, "ssh");
+        assert!(
+            matches!(&sessions.identity.1, Setting::Text(line) if line.starts_with("deneb ssh-ed25519 ")),
+            "{:?}",
+            sessions.identity
+        );
+        assert!(!sessions.confined && sessions.systems.is_none());
         let bolt = p.rules_for("bolt/x").unwrap().unwrap();
         assert_eq!(bolt.required, ["#check-fast"]);
-        assert!(bolt.satisfiable_by("sandbox") && !bolt.trusts("cache"));
+        assert!(bolt.signed && !bolt.confined);
+        assert_eq!(bolt.trust, ["sessions"]);
+        assert!(bolt.trusts_signed("sessions", false, None));
+        assert_eq!(bolt.remote.as_deref(), Some("origin"));
+        assert_eq!(bolt.pull_requests, None);
         let main = p.rules_for("main").unwrap().unwrap();
         assert_eq!(main.required, ["#check-fast", "#check-tools", "#check-e2e"]);
-        assert!(main.batch && main.satisfiable_by("sandbox") && !main.trusts("cache"));
+        assert!(main.batch && main.signed && !main.confined && !main.unkept);
+        assert_eq!(main.trust, ["sessions"]);
+        assert!(main.trusts_signed("sessions", false, None));
+        assert!(!main.trusts_signed("box", true, None));
         assert_eq!(main.remote.as_deref(), Some("origin"));
-        assert_eq!(bolt.remote.as_deref(), Some("origin"));
         assert_eq!(main.pull_requests, Some(PullRequests::default()));
-        assert_eq!(bolt.pull_requests, None);
+        assert_eq!(p.remote_of("main").unwrap().as_deref(), Some("origin"));
         assert!(p.rules_for("unit/x").unwrap().is_none());
+    }
+
+    /// 113, record 0119 (design D11): a `pull_requests.checks` entry naming
+    /// sluice's own check, or one of its checks of a task, is refused,
+    /// naming it; another system's check reads.
+    #[test]
+    fn a_pull_request_table_naming_sluices_own_check_is_refused() {
+        let with = |checks: &str| {
+            Policy::parse(&format!(
+                "[signers.a]\nssh = \".config/sluice.signers\"\n\
+                 [branches.main]\nremote = \"origin\"\ntrust = [\"a\"]\n\
+                 [branches.main.pull_requests]\nchecks = {checks}\n"
+            ))
+        };
+        for (checks, named) in [
+            ("[\"ci/lint\", \"sluice\"]", "\"sluice\""),
+            (
+                "[\"sluice / root:test (linux-x64)\"]",
+                "\"sluice / root:test (linux-x64)\"",
+            ),
+        ] {
+            let e = format!("{:#}", with(checks).unwrap_err());
+            assert!(
+                e.contains(&format!(
+                    "[branches.\"main\".pull_requests] checks names {named}, a check sluice \
+                     posts on a request's head itself"
+                )),
+                "{e}"
+            );
+        }
+        let p = with("[\"ci/lint\", \"sluicey\"]").unwrap();
+        let main = p.rules_for("main").unwrap().unwrap();
+        assert_eq!(
+            main.pull_requests.as_ref().unwrap().checks,
+            vec!["ci/lint".to_string(), "sluicey".to_string()]
+        );
+    }
+
+    /// 137, 56, S64 (design D22): a branch that takes pull requests on
+    /// records each host keeps is refused alone, naming the branch, its
+    /// remote and `[signers]`; every other branch reads, and the refused
+    /// branch's remote still reads for routing. Once the policy names
+    /// signers, it reads.
+    #[test]
+    fn a_pull_request_table_on_records_each_host_keeps_refuses_its_branch_alone() {
+        let unkept = Policy::parse(
+            "[branches.main]\nremote = \"origin\"\n[branches.main.pull_requests]\n\
+             [branches.\"bolt/*\"]\nremote = \"origin\"\n",
+        )
+        .unwrap();
+        let e = unkept.rules_for("main").unwrap_err();
+        assert_eq!(
+            e.downcast_ref::<NoIntake>(),
+            Some(&NoIntake {
+                branch: "main".into(),
+                remote: "origin".into(),
+            })
+        );
+        assert_eq!(
+            format!("{e:#}"),
+            "main takes pull requests, which only the host that keeps it on origin takes in, \
+             and its state is each host's own: name [signers] in .config/sluice.toml so its \
+             state is kept on origin, as `sluice init actions` names a pool's signer (137)"
+        );
+        assert!(unkept.rules_for("bolt/x").unwrap().is_some());
+        assert_eq!(unkept.remote_of("main").unwrap().as_deref(), Some("origin"));
+        assert_eq!(unkept.remote_of("unit/x").unwrap(), None);
+        let kept = Policy::parse(
+            "[signers.a]\nssh = \".config/sluice.signers\"\n\
+             [branches.main]\nremote = \"origin\"\ntrust = [\"a\"]\n\
+             [branches.main.pull_requests]\n",
+        )
+        .unwrap();
+        let main = kept.rules_for("main").unwrap().unwrap();
+        assert!(main.signed && !main.unkept && main.pull_requests.is_some());
     }
 
     /// 23: a landing commit's subject is the policy's, conventional by
@@ -1260,7 +1597,8 @@ hold = "5m"
     #[test]
     fn reads_a_branchs_pull_requests() {
         let p = Policy::parse(
-            "[branches.main]\nremote = \"origin\"\n\
+            "[signers.a]\nssh = \".config/sluice.signers\"\n\
+             [branches.main]\nremote = \"origin\"\ntrust = [\"a\"]\n\
              [branches.main.pull_requests]\nreviews = 1\nchecks = [\"qa/approved\"]\n\
              [branches.\"bolt/*\"]\n",
         )
@@ -1275,7 +1613,9 @@ hold = "5m"
         );
         // ADR 0044: a failed check's output posted only as asked.
         let asked = Policy::parse(
-            "[branches.main]\nremote = \"origin\"\n[branches.main.pull_requests]\nlog_lines = 40\n",
+            "[signers.a]\nssh = \".config/sluice.signers\"\n\
+             [branches.main]\nremote = \"origin\"\ntrust = [\"a\"]\n\
+             [branches.main.pull_requests]\nlog_lines = 40\n",
         )
         .unwrap();
         assert_eq!(
@@ -1298,9 +1638,12 @@ hold = "5m"
         // Absent: work is submitted straight from a session's place.
         assert_eq!(p.rules_for("bolt/x").unwrap().unwrap().pull_requests, None);
         // An empty table takes every pull request out of draft.
-        let p =
-            Policy::parse("[branches.main]\nremote = \"origin\"\n[branches.main.pull_requests]\n")
-                .unwrap();
+        let p = Policy::parse(
+            "[signers.a]\nssh = \".config/sluice.signers\"\n\
+             [branches.main]\nremote = \"origin\"\ntrust = [\"a\"]\n\
+             [branches.main.pull_requests]\n",
+        )
+        .unwrap();
         assert_eq!(
             p.rules_for("main").unwrap().unwrap().pull_requests,
             Some(PullRequests::default())
@@ -1648,10 +1991,176 @@ checks = ["codeql"]
         );
     }
 
+    /// A P-256 key's SubjectPublicKeyInfo, as KMS's `GetPublicKey` answers it.
+    const P256: &str = "MFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAEg44RRacS1htcK8s6X92E7lTYn8f6s5LC4GIxCQv+9fg1UWxDvETlpCR7yLWZ337t0Q/nT0nGEvEP5rLDBHhtTg==";
+    /// The same of a P-384 key.
+    const P384: &str = "MHYwEAYHKoZIzj0CAQYFK4EEACIDYgAEPTyTx8dQ8U/5GmCq156JtNYFjdGXQOegWmbS/BjaQw5/sMksjG5C1m0o8c0HeeZSn0SqMDOyeTahr3mYeaWvgGozr9JvJsPHC54Y7VTuIEK+vb23eVh3O2cuDbl4dJTB";
+    const KEY_ARN: &str =
+        "arn:aws:kms:us-east-1:111122223333:key/1234abcd-12ab-34cd-56ef-1234567890ab";
+
+    fn with_kms(kms: &str) -> String {
+        format!("{PEERS}\n[signers.codebuild]\nkms = {kms}\nsystems = [\"linux-x64\"]\n")
+    }
+
+    fn kms(key: &str, public: &str) -> String {
+        format!("{{ key = \"{key}\", public = \"{public}\" }}")
+    }
+
     #[test]
-    fn a_pool_signs_as_a_signer_of_its_kind() {
+    fn a_kms_signer_names_its_key_and_public_half() {
+        let p = Policy::parse(&with_kms(&kms(KEY_ARN, P256))).unwrap();
+        let s = &p.signers["codebuild"];
+        assert_eq!(s.identity.0, "kms");
+        let Setting::Tables(t) = &s.identity.1 else {
+            panic!("{:?}", s.identity.1)
+        };
+        assert_eq!(t[0]["key"], Setting::Text(KEY_ARN.into()));
+        assert_eq!(t[0]["public"], Setting::Text(P256.into()));
+        assert!(s.may_claim("linux-x64") && !s.may_claim("macos-arm64"));
+        // Another partition's key is a key all the same.
+        Policy::parse(&with_kms(&kms(
+            "arn:aws-us-gov:kms:us-gov-west-1:111122223333:key/mrk-1234abcd",
+            P256,
+        )))
+        .unwrap();
+    }
+
+    #[test]
+    fn a_kms_signer_needs_a_key_arn_and_a_p256_public_half() {
+        for (kms_table, field) in [
+            (
+                kms("arn:aws:kms:us-east-1:111122223333:alias/sluice-sign", P256),
+                "kms.key",
+            ),
+            (kms("1234abcd-12ab-34cd-56ef-1234567890ab", P256), "kms.key"),
+            (kms("alias/sluice-sign", P256), "kms.key"),
+            (format!("{{ key = \"{KEY_ARN}\" }}"), "kms.public"),
+            (format!("{{ public = \"{P256}\" }}"), "kms.key"),
+            (kms(KEY_ARN, P384), "kms.public"),
+            (kms(KEY_ARN, "not base64!"), "kms.public"),
+            (kms(KEY_ARN, "AAAA"), "kms.public"),
+            (format!("\"{KEY_ARN}\""), "kms"),
+        ] {
+            let e = refused(&with_kms(&kms_table));
+            assert!(
+                e.contains("[signers.codebuild]") && e.contains(field),
+                "{kms_table}: {e}"
+            );
+        }
+    }
+
+    const CODEBUILD: &str = "\n[pools.codebuild]\ncodebuild = { region = \"us-east-1\", sign = \"sluice-sign\" }\nsigner = \"codebuild\"\nrunners = { linux-x64 = \"sluice-run-linux-x64\" }\n";
+
+    #[test]
+    fn a_codebuild_pool_names_its_region_sign_project_and_runners() {
+        let p = Policy::parse(&format!("{}{CODEBUILD}", with_kms(&kms(KEY_ARN, P256)))).unwrap();
+        let pool = p.pools.iter().find(|p| p.name == "codebuild").unwrap();
+        assert_eq!(pool.kind.0, "codebuild");
+        let Setting::Tables(t) = &pool.kind.1 else {
+            panic!("{:?}", pool.kind.1)
+        };
+        assert_eq!(t[0]["region"], Setting::Text("us-east-1".into()));
+        assert_eq!(t[0]["sign"], Setting::Text("sluice-sign".into()));
+        assert_eq!(pool.signer, "codebuild");
+        assert_eq!(pool.runners["linux-x64"], "sluice-run-linux-x64");
+        for (from, to, field) in [
+            (", sign = \"sluice-sign\"", "", "codebuild.sign"),
+            ("region = \"us-east-1\", ", "", "codebuild.region"),
+            (
+                "sign = \"sluice-sign\"",
+                "sign = \"s\", fleet = \"f\"",
+                "fleet",
+            ),
+        ] {
+            let e = refused(&format!(
+                "{}{}",
+                with_kms(&kms(KEY_ARN, P256)),
+                CODEBUILD.replace(from, to)
+            ));
+            assert!(e.contains("[pools.codebuild]") && e.contains(field), "{e}");
+        }
+        // A run project for a system the signer may not claim.
+        let e = refused(&format!(
+            "{}{}",
+            with_kms(&kms(KEY_ARN, P256)),
+            CODEBUILD.replace("linux-x64 = ", "linux-arm64 = ")
+        ));
+        assert!(
+            e.contains("[pools.codebuild]") && e.contains("linux-arm64"),
+            "{e}"
+        );
+    }
+
+    /// 79 (boomdrive-design's ruling of 2026-11-16 on task 4.6): a signer
+    /// the gate trusts with `systems = []` may claim no run and counts for
+    /// no result, whatever the run's system, one naming none included; one
+    /// naming systems claims those, and one naming none every system.
+    #[test]
+    fn a_signer_that_may_claim_no_system_claims_nothing() {
+        let p = Policy::parse(
+            &format!(
+                "{}\n[signers.lead]\nssh = \"lead ssh-ed25519 AAAA\"\nsystems = []\n",
+                with_kms(&kms(KEY_ARN, P256))
+            )
+            .replace(
+                "trust = [\"box\", \"forge\"]\nconfined = true\n",
+                "trust = [\"lead\", \"codebuild\", \"sessions\"]\n",
+            ),
+        )
+        .unwrap();
+        let main = p.rules_for("main").unwrap().unwrap();
+        assert_eq!(main.claims["lead"].1, Some(Vec::new()));
+        for system in [None, Some("linux-x64"), Some("macos-arm64")] {
+            assert!(!main.may_claim("lead", system), "{system:?}");
+            assert!(!main.trusts_signed("lead", false, system), "{system:?}");
+        }
+        assert!(main.may_claim("codebuild", Some("linux-x64")));
+        assert!(main.may_claim("codebuild", None));
+        assert!(!main.may_claim("codebuild", Some("macos-arm64")));
+        assert!(
+            main.may_claim("sessions", None) && main.may_claim("sessions", Some("macos-arm64"))
+        );
+        assert!(!main.may_claim("box", Some("linux-x64")), "untrusted");
+    }
+
+    #[test]
+    fn a_pool_signs_as_its_kinds_signer() {
+        // A github pool signing as an SSH signer.
         let e = refused(&PEERS.replace("signer = \"forge\"", "signer = \"box\""));
-        assert!(e.contains("[pools.forge]") && e.contains("own kind"), "{e}");
+        assert!(
+            e.contains("[pools.forge] is a github pool")
+                && e.contains("its signer box is a ssh signer")
+                && e.contains("a github pool's jobs sign as a github signer"),
+            "{e}"
+        );
+        // A github pool signing as a kms signer.
+        let e = refused(
+            &with_kms(&kms(KEY_ARN, P256)).replace("signer = \"forge\"", "signer = \"codebuild\""),
+        );
+        assert!(
+            e.contains("[pools.forge] is a github pool") && e.contains("is a kms signer"),
+            "{e}"
+        );
+        // A codebuild pool signing as a github signer.
+        let e = refused(&format!(
+            "{}{}",
+            with_kms(&kms(KEY_ARN, P256)),
+            CODEBUILD
+                .replace("signer = \"codebuild\"", "signer = \"forge\"")
+                .replace("linux-x64 = ", "linux-arm64 = ")
+        ));
+        assert!(
+            e.contains("[pools.codebuild] is a codebuild pool")
+                && e.contains("its signer forge is a github signer")
+                && e.contains("a codebuild pool's jobs sign as a kms signer"),
+            "{e}"
+        );
+        // A kind sluice does not know.
+        let e = refused(&PEERS.replace(
+            "github = { workflow = \".github/workflows/sluice.yml\" }\nsigner",
+            "gitlab = { pipeline = \"x\" }\nsigner",
+        ));
+        assert!(e.contains("[pools.forge] is a gitlab pool"), "{e}");
         let e = refused(&PEERS.replace("signer = \"forge\"", "signer = \"nobody\""));
         assert!(e.contains("nobody"), "{e}");
     }
