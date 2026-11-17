@@ -26,6 +26,15 @@ const POLICY: &str = "[tests]\nrunner = \"command\"\ncommand = \"sh check.sh\"\n
 /// seconds, and takes five seconds more while one named `slow` does.
 const CHECK: &str = "sleep ${SLOW:-0}\nif test -e slow; then sleep 5; fi\ntest ! -e broken\n";
 
+/// The limit of a run again that follows its submission to an outcome
+/// its check's real seconds decide. A test's wait moves its clock three
+/// seconds a pass, with no pause between (design D14), so nine minutes of
+/// it run out in some 180 passes, about eight seconds here, which a slow
+/// check started late on a busy host outlasts (main's #171, 2026-11-17:
+/// `a_commit_while_followed_keeps_the_worktree` exiting 5 while its run
+/// went on); a day's passes outlast the branch's one-minute limit.
+const FOLLOWS: &str = "24h";
+
 struct Scratch {
     repo: Repo,
     config: PathBuf,
@@ -943,7 +952,7 @@ fn a_first_submit_under_a_time_limit_submits_then_follows() {
     );
     assert!(a.join("slow").exists(), "{}", text(&out));
 
-    let out = s.wt_submit(&a, &["--timeout", "9m", "--json"]);
+    let out = s.wt_submit(&a, &["--timeout", FOLLOWS, "--json"]);
     assert_eq!(out.status.code(), Some(sluice::LANDED), "{}", text(&out));
     let record: serde_json::Value =
         serde_json::from_slice(&out.stdout).unwrap_or_else(|_| panic!("no JSON: {}", text(&out)));
@@ -960,7 +969,7 @@ fn run_again_blamed_keeps_the_worktree() {
     let s = Scratch::new("wt-again-blamed");
     let b = s.session("b", &[("broken", "x\n")]);
     let one = id(&s.wt_submit(&b, &["--no-wait", "--json"]));
-    let out = s.wt_submit(&b, &["--timeout", "9m"]);
+    let out = s.wt_submit(&b, &["--timeout", FOLLOWS]);
     assert_eq!(out.status.code(), Some(sluice::FAILED), "{}", text(&out));
     assert!(
         text(&out).contains(&format!("following submission {one}")),
@@ -1098,7 +1107,7 @@ fn a_commit_while_followed_keeps_the_worktree() {
     let one = id(&s.wt_submit(&a, &["--no-wait", "--json"]));
     let child = s
         .command("wt", &a)
-        .args(["submit", "bolt/x", "--timeout", "9m"])
+        .args(["submit", "bolt/x", "--timeout", FOLLOWS])
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .spawn()
