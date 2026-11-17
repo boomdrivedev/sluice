@@ -1008,6 +1008,50 @@ fn an_unheld_worktrees_release_runs_its_release_command() {
     );
 }
 
+/// Every path kept under `dir`, walked whole, relative to it.
+fn kept(dir: &Path) -> Vec<String> {
+    let mut out = Vec::new();
+    let mut todo = vec![dir.to_path_buf()];
+    while let Some(d) = todo.pop() {
+        let Ok(entries) = std::fs::read_dir(&d) else {
+            continue;
+        };
+        for e in entries {
+            let path = e.unwrap().path();
+            out.push(path.strip_prefix(dir).unwrap().display().to_string());
+            if path.is_dir() {
+                todo.push(path);
+            }
+        }
+    }
+    out.sort();
+    out
+}
+
+/// Session-runs-1 clause 95, rule core.10, record 0120 as amended
+/// 2026-11-17: `sluice release` in a worktree sluice holds nothing for,
+/// under a policy that names no release command, reads only: it says
+/// `nothing to release`, exits 0, and makes nothing, neither the user's
+/// scratch directory nor a record, a lock or a folder under the
+/// repository's `sluice/`, so a caller whose sandbox lets it write only
+/// its place, that place's scratch and its caches is not refused (deneb,
+/// 2026-11-17: flume's s107 teardown answered `creating
+/// /private/tmp/sluice-501/<key>: Operation not permitted`).
+#[test]
+fn an_unheld_release_with_nothing_to_free_makes_nothing() {
+    let s = Setup::new("exec-unheld-nothing");
+    let user = Scratch::new("exec-unheld-nothing-user");
+    let scratch = user.path().join("sluice-user");
+    let sluice = s.repo.dir().join(".git/sluice");
+    let before = kept(&sluice);
+
+    let out = s.sluice_with(&[("SLUICE_USER_SCRATCH", &scratch)], &["release"]);
+    assert_eq!(out.status.code(), Some(0), "{}", text(&out));
+    assert_eq!(String::from_utf8_lossy(&out.stdout), "nothing to release\n");
+    assert!(!scratch.exists(), "{:?}", kept(&scratch));
+    assert_eq!(kept(&sluice), before);
+}
+
 /// Session-runs-1 clauses 92, 97, rule core.18: each run leaves on the
 /// worktree's entry in `sluice status --json` and `sluice overview --json`
 /// the head and outcome of the last run there, recorded only for a clean
