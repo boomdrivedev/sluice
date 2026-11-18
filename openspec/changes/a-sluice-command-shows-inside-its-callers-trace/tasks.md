@@ -11,7 +11,7 @@ it.
 
 ## 1. The decision recorded
 
-- [ ] 1.1 Amend record 0014 with 153's build, dated the day it is written: a command reads its caller's W3C trace context and nests one span in it, making none of its own without one; a round stays a trace of its own; a submission keeps its caller's `TRACEPARENT` as `trace`; a combination's `sluice.start` and `sluice.verdict` link to it through a hook the binary sets, the core still depending only on `tracing`; an exec's span holds a span per check it ran, timed by its runner; a context turns nothing on. Name the change and design D1 to D9 as the construct stage's own choices, with the paths not taken. True when `sluice exec bolt/sluice-reports-its-work-plainly -- moon run site:build` passes, which makes the decision pages from `docs/adr`.
+- [x] 1.1 Amend record 0014 with 153's build, dated the day it is written: a command reads its caller's W3C trace context and nests one span in it, making none of its own without one; a round stays a trace of its own; a submission keeps its caller's `TRACEPARENT` as `trace`; a combination's `sluice.start` and `sluice.verdict` link to it through a hook the binary sets, the core still depending only on `tracing`; an exec's span holds a span per check it ran, timed by its runner; a context turns nothing on. Name the change and design D1 to D9 as the construct stage's own choices, with the paths not taken. True when `sluice exec bolt/sluice-reports-its-work-plainly -- moon run site:build` passes, which makes the decision pages from `docs/adr`.
 
 ## 2. A command reads its caller's context
 
