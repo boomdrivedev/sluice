@@ -749,6 +749,44 @@ fn an_exec_s_span_holds_each_check_it_ran() {
     telemetry.finish();
 }
 
+/// 153 (design D6): a command `sluice exec` runs after `--` is its run's
+/// one check, its span named by the command's words with what reads as a
+/// secret `[redacted]`, as a log's body is.
+#[test]
+fn an_exec_s_command_is_one_check_named_scrubbed() {
+    if !alone("an_exec_s_command_is_one_check_named_scrubbed") {
+        return;
+    }
+    let (telemetry, spans, _) = start(Logs::Off);
+    let f = three_checks();
+    let token = "ghp_0123456789abcdefghijABCDEFGHIJ012345";
+    let command = ["env", &format!("API_TOKEN={token}"), "true"].map(String::from);
+    f.world.times(
+        &sluice::exec::shell_line(&command),
+        "2026-11-18T12:00:01Z",
+        "2026-11-18T12:00:02Z",
+    );
+    let args = [
+        &["exec", BRANCH, "--worktree", "unit/a", "--"][..],
+        &command.each_ref().map(String::as_str),
+    ]
+    .concat();
+    assert_eq!(under(&f, &(), &args, Some(caller())), LANDED);
+    telemetry.flush();
+
+    let checks: Vec<SpanData> = spans
+        .get_finished_spans()
+        .unwrap()
+        .into_iter()
+        .filter(|s| s.name == "sluice.check")
+        .collect();
+    assert_eq!(checks.len(), 1, "{checks:?}");
+    let task = named(&checks[0].attributes, "sluice.task").unwrap_or_default();
+    assert!(task.contains("[redacted]"), "{task}");
+    assert!(!task.contains(token), "{task}");
+    telemetry.finish();
+}
+
 /// A command run's environment, the run started under a `sluice.start`
 /// span at a place named `p 1`, and the revision it ran at.
 fn a_run_s_environment() -> (String, String) {

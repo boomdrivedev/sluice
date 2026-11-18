@@ -401,25 +401,29 @@ pub struct Check {
 
 /// 153 (design D6): beneath `parent`, an exec's span, a `sluice.check`
 /// span for each of `checks`, from its start to its end, with
-/// `sluice.task` and `sluice.outcome`. They carry times sluice did not
-/// see, so they are built with the tracer telemetry started, under
-/// `parent`'s context; nothing is sent while traces do not go, or where
-/// `parent` is no span of a trace.
+/// `sluice.task` and `sluice.outcome`. A check's name is scrubbed as a
+/// log's body is, over the environment the settings were chosen from, so
+/// a command after `--` that carries a secret names its span with
+/// `[redacted]` in its place, and a task's name goes as it is. They carry
+/// times sluice did not see, so they are built with the tracer telemetry
+/// started, under `parent`'s context; nothing is sent while traces do not
+/// go, or where `parent` is no span of a trace.
 pub fn checks(parent: &tracing::Span, checks: &[Check]) {
     use opentelemetry::trace::{Span as _, Tracer as _};
-    let Some(tracer) = TRACER.get() else {
+    let (Some(tracer), Some(settings)) = (TRACER.get(), SENT.get()) else {
         return;
     };
     let cx = parent.context();
     if !cx.span().span_context().is_valid() {
         return;
     }
+    let secrets = crate::scrub::Scrub::new(settings.env.iter().cloned());
     for check in checks {
         let mut span = tracer
             .span_builder("sluice.check")
             .with_start_time(check.started)
             .with_attributes(vec![
-                opentelemetry::KeyValue::new("sluice.task", check.task.clone()),
+                opentelemetry::KeyValue::new("sluice.task", secrets.scrub(&check.task)),
                 opentelemetry::KeyValue::new("sluice.outcome", check.outcome),
             ])
             .start_with_context(tracer, &cx);
