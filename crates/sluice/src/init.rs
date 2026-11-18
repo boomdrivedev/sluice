@@ -146,24 +146,6 @@ fn signer_ref(dir: &Path) -> String {
     }
 }
 
-/// How `had` differs from `wants`: its first line that differs, by number.
-fn differs(had: &str, wants: &str) -> String {
-    let (a, b): (Vec<&str>, Vec<&str>) = (had.lines().collect(), wants.lines().collect());
-    let n = (0..a.len().max(b.len()))
-        .find(|i| a.get(*i) != b.get(*i))
-        .unwrap_or(0);
-    let line = |l: Option<&&str>| match l {
-        Some(l) => format!("{:?}", l.trim()),
-        None => "nothing".into(),
-    };
-    format!(
-        "line {} holds {}, where sluice writes {}",
-        n + 1,
-        line(a.get(n)),
-        line(b.get(n))
-    )
-}
-
 /// `sluice init actions` in the working copy at `dir`.
 pub fn actions(dir: &Path, force: bool, out: &mut dyn Write) -> Result<i32> {
     let policy_path = dir.join(POLICY_PATH);
@@ -403,24 +385,61 @@ pub fn codebuild(dir: &Path, systems: &[String], force: bool, out: &mut dyn Writ
     }
     let shown = template::PATH;
     let mut differing = false;
-    match std::fs::read_to_string(&path) {
-        Ok(had) if had == wants => writeln!(out, "{shown}: as sluice writes it")?,
-        Ok(had) if !force => {
+    let names: Vec<&str> = systems.iter().map(|s| s.name.as_str()).collect();
+    // Record 0119 as amended 2026-11-18 (design D3, D5): each run
+    // project's own commands are the repository's, carried by its system;
+    // a line of them that leaves its buildspec's commands is left, `--force`
+    // or not, since carrying them would carry it.
+    let written = match std::fs::read_to_string(&path) {
+        Err(_) => Some(Carry::Carried {
+            text: wants.clone(),
+            dropped: Vec::new(),
+        }),
+        Ok(had) => match template::read(&had, &wants)? {
+            reading @ Reading::AsWritten { .. } => {
+                writeln!(
+                    out,
+                    "{shown}: as sluice writes it{}",
+                    template::holds(&reading)
+                )?;
+                None
+            }
+            Reading::Leaves(l) => Some(Carry::Leaves(l)),
+            Reading::Differs(d) if !force => {
+                writeln!(out, "{shown}: left as it is; {d}; --force writes it")?;
+                differing = true;
+                None
+            }
+            Reading::Differs(_) => Some(template::carry(&had, &wants)?),
+        },
+    };
+    match written {
+        None => {}
+        Some(Carry::Leaves(l)) => {
             writeln!(
                 out,
-                "{shown}: left as it is; {}; --force writes it",
-                differs(&had, &wants)
+                "{shown}: left as it is; {l} leaves the post_build commands of the run project \
+                 for {}, where the repository's own commands go; move it between that \
+                 buildspec's `# sluice:` lines",
+                l.key
             )?;
             differing = true;
         }
-        _ => {
-            std::fs::write(&path, &wants).with_context(|| format!("writing {shown}"))?;
-            let names: Vec<&str> = systems.iter().map(|s| s.name.as_str()).collect();
+        Some(Carry::Carried { text, dropped }) => {
+            std::fs::write(&path, &text).with_context(|| format!("writing {shown}"))?;
             writeln!(
                 out,
-                "{shown}: written, a fleet and a run project for {}",
-                names.join(", ")
+                "{shown}: written, a fleet and a run project for {}{}",
+                names.join(", "),
+                template::holds(&template::read(&text, &wants)?)
             )?;
+            for system in dropped {
+                writeln!(
+                    out,
+                    "{shown}: the repository's own commands of the run project for {system}, \
+                     which it no longer writes, are not carried"
+                )?;
+            }
         }
     }
     for system in left {
@@ -435,7 +454,9 @@ pub fn codebuild(dir: &Path, systems: &[String], force: bool, out: &mut dyn Writ
         "  - deploy it, as `sluice` or a name of your own:\n    aws cloudformation deploy \
          --template-file {shown} --stack-name sluice --capabilities CAPABILITY_IAM \
          --parameter-overrides LeadPrincipal=<the ARN the hosts that lead the branch reach AWS \
-         as> AppId=<sluice's app id> MaxCapacity=<the branch's parallel>"
+         as> AppId=<sluice's app id> MaxCapacity=<the branch's parallel> \
+         RunPolicies=<the ARNs of the managed policies your own commands after the checks \
+         need, comma-separated, or nothing>"
     )?;
     writeln!(
         out,

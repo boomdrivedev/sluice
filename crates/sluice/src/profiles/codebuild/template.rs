@@ -8,8 +8,19 @@
 //! The template's one system's resources stand between `# system` and
 //! `# end system`, written again for each system given.
 
+use anyhow::Result;
+
+use crate::own_steps::{self, Carry, Layout, Reading, Seg};
+
 /// Where the template lives in a repository.
 pub const PATH: &str = ".config/sluice-codebuild.yml";
+
+/// The lines that open and close a run buildspec's room for the
+/// repository's own commands, among its `post_build` phase's commands
+/// (record 0119 as amended 2026-11-18; design D1 of the change
+/// `a-pools-run-job-runs-the-repositorys-own-steps`).
+pub const ROOM_OPEN: &str = "# sluice: your own commands, after the checks, in $SLUICE_CHECKOUT";
+pub const ROOM_CLOSE: &str = "# sluice: end of your own commands";
 
 const TEMPLATE: &str = include_str!("templates/stack.yml");
 
@@ -50,16 +61,7 @@ impl System {
     /// Its name as a CloudFormation logical id's part: `linux-x64` is
     /// `LinuxX64`.
     fn logical(&self) -> String {
-        self.name
-            .split(|c: char| !c.is_ascii_alphanumeric())
-            .filter(|w| !w.is_empty())
-            .map(|w| {
-                let mut c = w.chars();
-                c.next()
-                    .map(|f| f.to_ascii_uppercase().to_string() + c.as_str())
-                    .unwrap_or_default()
-            })
-            .collect()
+        logical(&self.name)
     }
 
     /// The template's one system's resources, written for this one.
@@ -75,6 +77,109 @@ impl System {
             .replace("LINUX_EC2", environment)
             .replace("x86_64-linux", release)
             .replace("amazonlinux-x86_64-base", image)
+    }
+}
+
+/// A system's name as a CloudFormation logical id's part: `linux-x64` is
+/// `LinuxX64`.
+fn logical(name: &str) -> String {
+    name.split(|c: char| !c.is_ascii_alphanumeric())
+        .filter(|w| !w.is_empty())
+        .map(|w| {
+            let mut c = w.chars();
+            c.next()
+                .map(|f| f.to_ascii_uppercase().to_string() + c.as_str())
+                .unwrap_or_default()
+        })
+        .collect()
+}
+
+/// The system a template's line at `at` is of: the nearest `# system`
+/// line above it.
+fn system_of(lines: &[&str], at: usize) -> String {
+    lines[..at]
+        .iter()
+        .rev()
+        .find_map(|l| {
+            l.trim()
+                .strip_prefix("# system ")
+                .map(|n| n.trim().to_string())
+        })
+        .unwrap_or_default()
+}
+
+/// The commands of `system`'s run project's `post_build` phase, which its
+/// room's entries join: in its buildspec, read as YAML of its own.
+fn post_build_of(system: &str) -> Vec<Seg> {
+    let mut path = own_steps::keys(&[
+        "Resources",
+        &format!("Run{}", logical(system)),
+        "Properties",
+        "Source",
+        "BuildSpec",
+    ]);
+    path.push(Seg::Text);
+    path.extend(own_steps::keys(&["phases", "post_build", "commands"]));
+    path
+}
+
+/// The commands of a buildspec's `post_build` phase.
+fn post_build(_: &str) -> Vec<Seg> {
+    own_steps::keys(&["phases", "post_build", "commands"])
+}
+
+/// What a template's rooms are: one in each run project's buildspec, by
+/// its system.
+fn layout() -> Layout<'static> {
+    Layout {
+        open: ROOM_OPEN,
+        close: ROOM_CLOSE,
+        key: &system_of,
+        list: &post_build_of,
+        own_line: None,
+    }
+}
+
+/// `had`, a template, read against `wants`, what this sluice writes it as
+/// (design D3): as sluice writes it, with or without the repository's own
+/// commands; differing; or a run project's own commands leaving its
+/// buildspec's `post_build` commands, by its system.
+pub fn read(had: &str, wants: &str) -> Result<Reading> {
+    own_steps::read(had, wants, &layout())
+}
+
+/// `wants` with each run project's own commands in `had` carried into the
+/// room of the run project of its system; a system `wants` writes none for
+/// said in `dropped` (design D3).
+pub fn carry(had: &str, wants: &str) -> Result<Carry> {
+    own_steps::carry(had, wants, &layout())
+}
+
+/// `had`, the buildspec of `system`'s run project as CodeBuild holds it,
+/// read against `wants`, as this sluice writes it (design D3).
+pub fn read_buildspec(had: &str, wants: &str, system: &str) -> Result<Reading> {
+    let key = |_: &[&str], _: usize| system.to_string();
+    own_steps::read(
+        had,
+        wants,
+        &Layout {
+            open: ROOM_OPEN,
+            close: ROOM_CLOSE,
+            key: &key,
+            list: &post_build,
+            own_line: None,
+        },
+    )
+}
+
+/// What a template or a buildspec as sluice writes it holds of the
+/// repository's own, as said after "as sluice writes it" or "written".
+pub fn holds(reading: &Reading) -> &'static str {
+    match reading {
+        Reading::AsWritten { rooms, .. } if !rooms.is_empty() => {
+            ", with the repository's own commands"
+        }
+        _ => "",
     }
 }
 

@@ -11412,6 +11412,75 @@ fn init_codebuild_leaves_a_differing_template_unless_forced() {
     );
 }
 
+/// satisfies: record 0119 as amended 2026-11-18 (design D3, D5); the
+/// repository-steps spec's "A template with the repository's own
+/// commands": a template whose linux-x64 run project holds commands of
+/// the repository's between its `# sluice:` lines reads as sluice writes
+/// it; forced for linux-x64 and linux-arm64, linux-x64's run project holds
+/// them and linux-arm64's none; forced for linux-arm64 alone, linux-x64's
+/// are said and not carried; and the deploy command names RunPolicies
+#[test]
+fn init_codebuild_keeps_the_repositorys_own_commands() {
+    use sluice::profiles::codebuild::template::{self, System};
+    let f = setup();
+    let dir = codebuild_copy(INIT_POLICY);
+    let at = dir.path().join(".config/sluice-codebuild.yml");
+    let (code, said) = init_codebuild(&f, dir.path(), &["--systems", "linux-x64"]);
+    assert_eq!(code, 0, "{said}");
+    assert!(
+        said.contains("RunPolicies=<the ARNs of the managed policies your own commands"),
+        "{said}"
+    );
+    let open = format!("                {}\n", template::ROOM_OPEN);
+    let own = "                - ./push \"$SLUICE_CHECKOUT\"\n";
+    let written = std::fs::read_to_string(&at).unwrap();
+    assert_eq!(written.matches(&open).count(), 1, "{written}");
+    let ours = written.replacen(&open, &format!("{open}{own}"), 1);
+    std::fs::write(&at, &ours).unwrap();
+    let (code, said) = init_codebuild(&f, dir.path(), &["--systems", "linux-x64"]);
+    assert_eq!(code, 0, "{said}");
+    assert!(
+        said.contains(
+            "sluice-codebuild.yml: as sluice writes it, with the repository's own commands"
+        ),
+        "{said}"
+    );
+    assert_eq!(std::fs::read_to_string(&at).unwrap(), ours, "left");
+
+    let (code, said) = init_codebuild(
+        &f,
+        dir.path(),
+        &["--systems", "linux-x64", "linux-arm64", "--force"],
+    );
+    assert_eq!(code, 0, "{said}");
+    assert!(
+        said.contains("written, a fleet and a run project for linux-x64, linux-arm64, with the repository's own commands"),
+        "{said}"
+    );
+    let both = std::fs::read_to_string(&at).unwrap();
+    let x64 = System::linux("linux-x64", "linux", "x86_64").unwrap();
+    let arm = System::linux("linux-arm64", "linux", "aarch64").unwrap();
+    let rendered = template::render(sluice::VERSION, "acme/widgets", &[x64, arm]);
+    assert_eq!(both, rendered.replacen(&open, &format!("{open}{own}"), 1));
+    let arm_at = both.find("  # system linux-arm64\n").unwrap();
+    assert!(
+        both[..arm_at].contains(&format!("{open}{own}")),
+        "linux-x64's commands in its own room"
+    );
+    assert!(
+        !both[arm_at..].contains(own),
+        "linux-arm64's room holds none"
+    );
+
+    let (code, said) = init_codebuild(&f, dir.path(), &["--systems", "linux-arm64", "--force"]);
+    assert_eq!(code, 0, "{said}");
+    assert!(
+        said.contains("the repository's own commands of the run project for linux-x64, which it no longer writes, are not carried"),
+        "{said}"
+    );
+    assert!(!std::fs::read_to_string(&at).unwrap().contains(own));
+}
+
 /// satisfies: record 0119 (design D10); the codebuild-pool spec's "A
 /// deployed stack": the stack's key read by its alias, and the signer, its
 /// ARN and public half, and the pool, its region, sign project and run
