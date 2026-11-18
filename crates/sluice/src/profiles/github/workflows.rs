@@ -10,6 +10,10 @@
 
 use std::collections::BTreeMap;
 
+use anyhow::Result;
+
+use crate::own_steps::{self, Carry, Layout, OwnLine, Reading};
+
 /// Where the workflows live in a repository.
 pub const DIR: &str = ".github/workflows";
 
@@ -30,6 +34,62 @@ const RUNNERS_LINE: &str =
 /// The line of `sluice.yml`'s template that stands for the pool's systems,
 /// whose head runs its `sign-head` job signs one each.
 const SYSTEMS_LINE: &str = "        system: [linux-x64] # the pool's systems";
+
+/// The lines that open and close a run job's room for the repository's
+/// own steps (record 0119 as amended 2026-11-18; design D1 of the change
+/// `a-pools-run-job-runs-the-repositorys-own-steps`).
+pub const ROOM_OPEN: &str = "# sluice: your own steps, after the checks, in $SLUICE_CHECKOUT";
+pub const ROOM_CLOSE: &str = "# sluice: end of your own steps";
+
+/// The job a workflow's line at `at` is in: the nearest job's line above
+/// it, a key of `jobs:`.
+fn job_of(lines: &[&str], at: usize) -> String {
+    lines[..at]
+        .iter()
+        .rev()
+        .find_map(|l| {
+            let name = l.strip_prefix("  ")?.trim_end().strip_suffix(':')?;
+            (!name.starts_with([' ', '#']) && !name.contains(' ')).then(|| name.to_string())
+        })
+        .unwrap_or_default()
+}
+
+/// The steps of the job `job`, which its room's entries join.
+fn steps_of(job: &str) -> Vec<own_steps::Seg> {
+    own_steps::keys(&["jobs", job, "steps"])
+}
+
+/// What a workflow's rooms are, and its run job's `packages: write`, the
+/// line the repository may add directly after `contents: read` in the run
+/// job's `permissions` for a store on GitHub's registry (design D4; timber
+/// C.1; rule core.62).
+fn layout() -> Layout<'static> {
+    Layout {
+        open: ROOM_OPEN,
+        close: ROOM_CLOSE,
+        key: &job_of,
+        list: &steps_of,
+        own_line: Some(OwnLine {
+            line: "packages: write",
+            after: "contents: read",
+            key: "run",
+            at: own_steps::keys(&["jobs", "run", "permissions"]),
+        }),
+    }
+}
+
+/// `had`, a workflow, read against `wants`, what this sluice writes it as
+/// (design D3): as sluice writes it, with or without the repository's own
+/// steps; differing; or the repository's own steps leaving the run job's.
+pub fn read(had: &str, wants: &str) -> Result<Reading> {
+    own_steps::read(had, wants, &layout())
+}
+
+/// `wants` with the repository's own steps in `had` carried into its run
+/// job's room, by the job, and its run job's `packages: write` (design D3).
+pub fn carry(had: &str, wants: &str) -> Result<Carry> {
+    own_steps::carry(had, wants, &layout())
+}
 
 /// `sluice.yml` as sluice `version` writes it, its `sign-head` job signing
 /// a pull request's head run on each system of the pool's `runners`.

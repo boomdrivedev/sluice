@@ -11081,10 +11081,11 @@ fn init_actions_leaves_a_differing_workflow_unless_forced() {
     let edited =
         workflows::sluice(sluice::VERSION, &runners).replace("name: sluice\n", "name: ours\n");
     std::fs::write(at.join("sluice.yml"), &edited).unwrap();
+    let line = edited.lines().position(|l| l == "name: ours").unwrap() + 1;
     let (code, said) = init_actions(&f, dir.path(), false);
     assert_eq!(code, FAILED, "{said}");
     assert!(
-        said.contains("sluice.yml: left as it is; line 8 holds \"name: ours\", where sluice writes \"name: sluice\"; --force writes it"),
+        said.contains(&format!("sluice.yml: left as it is; line {line} holds \"name: ours\", where sluice writes \"name: sluice\"; --force writes it")),
         "{said}"
     );
     assert_eq!(
@@ -11099,6 +11100,164 @@ fn init_actions_leaves_a_differing_workflow_unless_forced() {
         std::fs::read_to_string(at.join("sluice.yml")).unwrap(),
         workflows::sluice(sluice::VERSION, &runners)
     );
+}
+
+/// `sluice.yml` as this sluice writes it for `linux-x64` on
+/// `ubuntu-24.04`, with `lines` between its run job's `# sluice:` lines.
+fn with_own_steps(lines: &str) -> String {
+    use sluice::profiles::github::workflows;
+    let runners =
+        std::collections::BTreeMap::from([("linux-x64".to_string(), "ubuntu-24.04".to_string())]);
+    let open = format!("      {}\n", workflows::ROOM_OPEN);
+    workflows::sluice(sluice::VERSION, &runners).replacen(&open, &format!("{open}{lines}"), 1)
+}
+
+/// Two steps of the repository's, after the checks, in their checkout.
+const OWN_STEPS: &str = "      - name: Push what the checks built\n\
+    \x20       working-directory: ${{ env.SLUICE_CHECKOUT }}\n\
+    \x20       run: ./push \"$STORE\"\n\
+    \x20       env:\n\
+    \x20         STORE: ${{ secrets.STORE_KEY }}\n\
+    \x20     - run: echo pushed\n";
+
+/// satisfies: record 0119 as amended 2026-11-18 (design D3); the
+/// repository-steps spec's "A workflow with the repository's own steps"
+/// and "A workflow an earlier release wrote": a workflow as sluice writes
+/// it but for steps between its run job's `# sluice:` lines is said so and
+/// left; one an earlier release wrote, `--force` writes as this release
+/// writes it with those steps carried into its run job's room
+#[test]
+fn init_actions_keeps_the_repositorys_own_steps() {
+    let f = setup();
+    let dir = copy_with(INIT_POLICY);
+    let (code, said) = init_actions(&f, dir.path(), false);
+    assert_eq!(code, 0, "{said}");
+    let at = dir.path().join(".github/workflows/sluice.yml");
+    let ours = with_own_steps(OWN_STEPS);
+    std::fs::write(&at, &ours).unwrap();
+    let (code, said) = init_actions(&f, dir.path(), false);
+    assert_eq!(code, 0, "{said}");
+    assert!(
+        said.contains("sluice.yml: as sluice writes it, with the repository's own steps"),
+        "{said}"
+    );
+    assert_eq!(std::fs::read_to_string(&at).unwrap(), ours, "left");
+
+    // An earlier release's workflow, with the same steps: left unless
+    // forced, and forced, this release's with the steps carried.
+    let earlier = ours.replace(
+        &format!("sluice {}", sluice::VERSION),
+        "sluice 0.0.1-earlier",
+    );
+    assert_ne!(earlier, ours);
+    std::fs::write(&at, &earlier).unwrap();
+    let (code, said) = init_actions(&f, dir.path(), false);
+    assert_eq!(code, FAILED, "{said}");
+    assert!(
+        said.contains("sluice.yml: left as it is; line 1 holds"),
+        "{said}"
+    );
+    let (code, said) = init_actions(&f, dir.path(), true);
+    assert_eq!(code, 0, "{said}");
+    assert!(
+        said.contains("sluice.yml: written, with the repository's own steps"),
+        "{said}"
+    );
+    assert_eq!(std::fs::read_to_string(&at).unwrap(), ours);
+}
+
+/// satisfies: record 0119 as amended 2026-11-18 (design D3; rule core.62);
+/// the repository-steps spec's "A line that gives the run job an
+/// environment": a line between the run job's `# sluice:` lines that
+/// makes a key of the run job leaves the workflow as it is, named, exit 1,
+/// `--force` or not
+#[test]
+fn init_actions_refuses_own_steps_that_leave_the_run_job() {
+    let f = setup();
+    let dir = copy_with(INIT_POLICY);
+    let (code, said) = init_actions(&f, dir.path(), false);
+    assert_eq!(code, 0, "{said}");
+    let at = dir.path().join(".github/workflows/sluice.yml");
+    let leaving = with_own_steps(&format!("{OWN_STEPS}    environment: sluice\n"));
+    let line = leaving
+        .lines()
+        .position(|l| l == "    environment: sluice")
+        .unwrap()
+        + 1;
+    std::fs::write(&at, &leaving).unwrap();
+    for force in [false, true] {
+        let (code, said) = init_actions(&f, dir.path(), force);
+        assert_eq!(code, FAILED, "{said}");
+        assert!(
+            said.contains(&format!(
+                "sluice.yml: left as it is; line {line}, \"environment: sluice\" leaves the run job's steps"
+            )),
+            "{said}"
+        );
+        assert_eq!(std::fs::read_to_string(&at).unwrap(), leaving, "left");
+    }
+    // An earlier release's, forced: left all the same.
+    let earlier = leaving.replace(
+        &format!("sluice {}", sluice::VERSION),
+        "sluice 0.0.1-earlier",
+    );
+    std::fs::write(&at, &earlier).unwrap();
+    let (code, said) = init_actions(&f, dir.path(), true);
+    assert_eq!(code, FAILED, "{said}");
+    assert!(
+        said.contains(&format!("line {line}, \"environment: sluice\" leaves")),
+        "{said}"
+    );
+    assert_eq!(std::fs::read_to_string(&at).unwrap(), earlier, "left");
+}
+
+/// satisfies: record 0119 as amended 2026-11-18 (design D4; timber C.1;
+/// rule core.62); the actions-pool spec's "A run job whose token writes
+/// the repository's packages": `packages: write` after `contents: read` in
+/// the run job reads as sluice writes it and `--force` keeps it; in the
+/// sign job, or `id-token: write` in its place, the workflow differs
+#[test]
+fn init_actions_takes_the_run_jobs_packages_write_alone() {
+    let f = setup();
+    let dir = copy_with(INIT_POLICY);
+    let (code, said) = init_actions(&f, dir.path(), false);
+    assert_eq!(code, 0, "{said}");
+    let at = dir.path().join(".github/workflows/sluice.yml");
+    let written = std::fs::read_to_string(&at).unwrap();
+    let run = "  run:\n    if: github.event_name == 'workflow_dispatch'\n    runs-on: ${{ inputs.runner }}\n    permissions:\n      contents: read\n";
+    assert_eq!(written.matches(run).count(), 1, "{written}");
+    let packages = written.replacen(run, &format!("{run}      packages: write\n"), 1);
+    std::fs::write(&at, &packages).unwrap();
+    let (code, said) = init_actions(&f, dir.path(), false);
+    assert_eq!(code, 0, "{said}");
+    assert!(
+        said.contains("sluice.yml: as sluice writes it, with the run job's packages: write"),
+        "{said}"
+    );
+    // Forced over an earlier release's, the line is kept.
+    let earlier = packages.replace(
+        &format!("sluice {}", sluice::VERSION),
+        "sluice 0.0.1-earlier",
+    );
+    std::fs::write(&at, &earlier).unwrap();
+    let (code, said) = init_actions(&f, dir.path(), true);
+    assert_eq!(code, 0, "{said}");
+    assert_eq!(std::fs::read_to_string(&at).unwrap(), packages);
+
+    // `id-token: write` there instead differs.
+    let identity = written.replacen(run, &format!("{run}      id-token: write\n"), 1);
+    std::fs::write(&at, &identity).unwrap();
+    let (code, said) = init_actions(&f, dir.path(), false);
+    assert_eq!(code, FAILED, "{said}");
+    assert!(said.contains("holds \"id-token: write\""), "{said}");
+    // In the sign job, `packages: write` differs too.
+    let sign = "    environment: sluice\n    permissions:\n      contents: read\n";
+    assert_eq!(written.matches(sign).count(), 2, "the sign jobs");
+    let signs = written.replacen(sign, &format!("{sign}      packages: write\n"), 1);
+    std::fs::write(&at, &signs).unwrap();
+    let (code, said) = init_actions(&f, dir.path(), false);
+    assert_eq!(code, FAILED, "{said}");
+    assert!(said.contains("holds \"packages: write\""), "{said}");
 }
 
 /// A working copy holding `policy`, its origin `acme/widgets` on GitHub,

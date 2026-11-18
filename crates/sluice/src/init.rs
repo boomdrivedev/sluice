@@ -18,6 +18,7 @@ use std::path::Path;
 use anyhow::{bail, Context, Result};
 use sluice_core::policy::POLICY_PATH;
 
+use crate::own_steps::{Carry, Reading};
 use crate::profiles::codebuild::template;
 use crate::profiles::github::workflows;
 use crate::FAILED;
@@ -163,6 +164,20 @@ fn differs(had: &str, wants: &str) -> String {
     )
 }
 
+/// What a file sluice writes holds of the repository's own, as said after
+/// "as sluice writes it" or "written" (design D3).
+fn own(reading: &Reading) -> &'static str {
+    match reading {
+        Reading::AsWritten { rooms, own_line } => match (rooms.is_empty(), *own_line) {
+            (true, false) => "",
+            (false, false) => ", with the repository's own steps",
+            (true, true) => ", with the run job's packages: write",
+            (false, true) => ", with the repository's own steps and the run job's packages: write",
+        },
+        _ => "",
+    }
+}
+
 /// `sluice init actions` in the working copy at `dir`.
 pub fn actions(dir: &Path, force: bool, out: &mut dyn Write) -> Result<i32> {
     let policy_path = dir.join(POLICY_PATH);
@@ -191,19 +206,54 @@ pub fn actions(dir: &Path, force: bool, out: &mut dyn Write) -> Result<i32> {
     for (name, wants) in &files {
         let path = at.join(name);
         let shown = format!("{}/{name}", workflows::DIR);
-        match std::fs::read_to_string(&path) {
-            Ok(had) if had == *wants => writeln!(out, "{shown}: as sluice writes it")?,
-            Ok(had) if !force => {
+        // Record 0119 as amended 2026-11-18 (design D3, D4): the
+        // repository's own steps, and its run job's `packages: write`, are
+        // its own; a line of them that leaves the run job's steps is left,
+        // `--force` or not, since carrying them would carry it.
+        let had = match std::fs::read_to_string(&path) {
+            Ok(had) => had,
+            Err(_) => {
+                std::fs::write(&path, wants).with_context(|| format!("writing {shown}"))?;
+                writeln!(out, "{shown}: written")?;
+                continue;
+            }
+        };
+        let written = match workflows::read(&had, wants)? {
+            reading @ Reading::AsWritten { .. } => {
+                writeln!(out, "{shown}: as sluice writes it{}", own(&reading))?;
+                continue;
+            }
+            Reading::Leaves(l) => Carry::Leaves(l),
+            Reading::Differs(d) if !force => {
+                writeln!(out, "{shown}: left as it is; {d}; --force writes it")?;
+                left = true;
+                continue;
+            }
+            Reading::Differs(_) => workflows::carry(&had, wants)?,
+        };
+        match written {
+            Carry::Leaves(l) => {
                 writeln!(
                     out,
-                    "{shown}: left as it is; {}; --force writes it",
-                    differs(&had, wants)
+                    "{shown}: left as it is; {l} leaves the run job's steps, where the \
+                     repository's own steps go; move it between the run job's `# sluice:` lines"
                 )?;
                 left = true;
             }
-            _ => {
-                std::fs::write(&path, wants).with_context(|| format!("writing {shown}"))?;
-                writeln!(out, "{shown}: written")?;
+            Carry::Carried { text, dropped } => {
+                std::fs::write(&path, &text).with_context(|| format!("writing {shown}"))?;
+                writeln!(
+                    out,
+                    "{shown}: written{}",
+                    own(&workflows::read(&text, wants)?)
+                )?;
+                for job in dropped {
+                    writeln!(
+                        out,
+                        "{shown}: the repository's own steps of the job {job}, which sluice \
+                         no longer writes, are not carried"
+                    )?;
+                }
             }
         }
     }
