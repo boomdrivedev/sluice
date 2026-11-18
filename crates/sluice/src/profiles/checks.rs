@@ -2678,17 +2678,14 @@ impl Tests for Checks {
         }
         let meta: Meta = serde_json::from_value(self.runs.request(&run.0)?.meta)
             .with_context(|| format!("reading run {}", run.0))?;
-        let (Some(started), "moon") = (meta.started_ms, meta.runner.as_str()) else {
-            return Ok(Vec::new());
-        };
-        let out = std::fs::read(self.runs.dir(&run.0).join("out.log")).unwrap_or_default();
-        let times = self.runs.times(&run.0).unwrap_or_default();
-        Ok(Moon.progress(&meta.place, &out, &times, &meta.targets, started))
+        Ok(self.moon_tasks(run, &meta))
     }
 
     /// 153 (design D6): a finished run's checks as its runner timed them:
-    /// the `command` runner's one check from the run's own start and end;
-    /// nothing for a run still going or lost.
+    /// moon's from moon's records in the place, as [`Tests::tasks`] reads
+    /// them while the run goes (ADR 0028), and the `command` runner's one
+    /// check from the run's own start and end; nothing for a run still
+    /// going or lost.
     fn timed(&self, run: &RunHandle) -> Result<Vec<TaskProgress>> {
         let RunState::Finished(ended) = self.runs.state(&run.0)? else {
             return Ok(Vec::new());
@@ -2696,9 +2693,24 @@ impl Tests for Checks {
         let meta: Meta = serde_json::from_value(self.runs.request(&run.0)?.meta)
             .with_context(|| format!("reading run {}", run.0))?;
         Ok(match meta.runner.as_str() {
-            "moon" => Vec::new(),
+            "moon" => self.moon_tasks(run, &meta),
             _ => command_timed(&meta, &ended),
         })
+    }
+}
+
+impl Checks {
+    /// ADR 0028: where each check of a moon run has got, from moon's
+    /// records in the place and the run's output, as it goes or once it
+    /// has ended; nothing for another runner's run, or one moon never
+    /// started.
+    fn moon_tasks(&self, run: &RunHandle, meta: &Meta) -> Vec<TaskProgress> {
+        let (Some(started), "moon") = (meta.started_ms, meta.runner.as_str()) else {
+            return Vec::new();
+        };
+        let out = std::fs::read(self.runs.dir(&run.0).join("out.log")).unwrap_or_default();
+        let times = self.runs.times(&run.0).unwrap_or_default();
+        Moon.progress(&meta.place, &out, &times, &meta.targets, started)
     }
 }
 

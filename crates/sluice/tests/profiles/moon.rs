@@ -522,6 +522,31 @@ fn a_second_run_replays_under_the_same_keys() {
     assert_eq!(first.executor.processors, Some(4));
 }
 
+/// 153 (design D6): once a moon run has ended, the check seam's times
+/// for it hold each of its checks as moon timed it, its start no later
+/// than its end; its tasks, which answer only a run that goes, say
+/// nothing.
+#[test]
+fn a_finished_moon_run_s_checks_are_timed() {
+    let repo = workspace("moon-timed");
+    let c = checks(&repo);
+    let (run, report) = finish_run(&c, &request(&repo, "p1", &["#check-fast"], None));
+    assert_eq!(names(&report), ["alpha:test", "beta:test"]);
+    assert!(c.tasks(&run).unwrap().is_empty());
+    let timed = c.timed(&run).unwrap();
+    let at = |s: &Option<String>| {
+        chrono::DateTime::parse_from_rfc3339(s.as_deref().expect("a time")).unwrap()
+    };
+    for name in ["alpha:test", "beta:test"] {
+        let t = timed
+            .iter()
+            .find(|t| t.target == name)
+            .unwrap_or_else(|| panic!("no {name} in {timed:?}"));
+        assert_eq!(t.state, TaskState::Passed, "{t:?}");
+        assert!(at(&t.started) <= at(&t.ended), "{t:?}");
+    }
+}
+
 /// 28: a request that may not replay runs every task again, under the
 /// same keys, though each key holds a pass.
 #[test]
