@@ -55,8 +55,10 @@ impl Clock {
 
 /// What the fake's GitHub holds for the app: its installation's
 /// permissions, the repositories a token it gives reaches, each ruleset's
-/// bypass actors on `main`, the id it gives the app `sluice-test`, and
-/// what it answers git's push to `o/r`.
+/// bypass actors on `main`, the id it gives the app `sluice-test`, what it
+/// answers git's push to `o/r`, the status it answers the app's bot's
+/// user with, and whom it names a token's `viewer`; the last two told
+/// while it answers.
 #[derive(Clone)]
 struct Forge {
     permissions: serde_json::Value,
@@ -64,6 +66,8 @@ struct Forge {
     rulesets: Vec<(u64, serde_json::Value)>,
     app: u64,
     push: u16,
+    user: Arc<Mutex<u16>>,
+    viewer: Arc<Mutex<String>>,
     clock: Clock,
 }
 
@@ -81,8 +85,20 @@ impl Forge {
             )],
             app: APP,
             push: 200,
+            user: Arc::new(Mutex::new(200)),
+            viewer: Arc::new(Mutex::new("sluice-test[bot]".into())),
             clock: clock.clone(),
         }
+    }
+
+    /// Answer `GET /users/sluice-test%5Bbot%5D` with `status` from now on.
+    fn user_answers(&self, status: u16) {
+        *self.user.lock().unwrap() = status;
+    }
+
+    /// Name `login` as GraphQL's `viewer` from now on.
+    fn viewer_is(&self, login: &str) {
+        *self.viewer.lock().unwrap() = login.into();
     }
 
     /// The fake API; each token it gives is `token-<n>`, good for an hour.
@@ -122,10 +138,14 @@ impl Forge {
         }
         // The app's bot, as GitHub answers a token of the app's.
         if path == "/users/sluice-test%5Bbot%5D" && r.method == "GET" {
-            return json(
-                200,
-                json!({ "login": "sluice-test[bot]", "id": BOT, "type": "Bot" }),
-            );
+            return match *self.user.lock().unwrap() {
+                200 => json(
+                    200,
+                    json!({ "login": "sluice-test[bot]", "id": BOT, "type": "Bot" }),
+                ),
+                404 => json(404, json!({ "message": "Not Found" })),
+                status => json(status, json!({ "message": "Server Error" })),
+            };
         }
         // git's first ask of a push: its answer to any token sent as git
         // sends one.
@@ -146,10 +166,8 @@ impl Forge {
         }
         // Who a token is, as GitHub answers its holder.
         if path == "/graphql" && r.method == "POST" && r.body.contains("viewer") {
-            return json(
-                200,
-                json!({ "data": { "viewer": { "login": "sluice-test[bot]" } } }),
-            );
+            let login = self.viewer.lock().unwrap().clone();
+            return json(200, json!({ "data": { "viewer": { "login": login } } }));
         }
         // What a token reaches, as GitHub answers its holder.
         if path.starts_with("/installation/repositories") && r.method == "GET" {
@@ -367,6 +385,109 @@ fn the_apps_author_is_its_bot_kept_on_the_host() {
     assert_eq!(third.author(&repo()).unwrap().to_string(), AUTHOR);
     assert_eq!(took(&fake, "GET", "/app"), 2);
     assert_eq!(took(&fake, "GET", user), 2);
+}
+
+/// The forge-identity spec's "The bot under a command": under a credential
+/// command the app's author is the bot GraphQL's `viewer` names the
+/// command's token, its user read with that token, and the app's own
+/// record, which takes its key, is never asked (record 0019 as amended
+/// 2026-11-18; record 0108).
+#[test]
+fn the_apps_author_under_a_command_is_the_viewers_bot() {
+    let clock = Clock::new();
+    let fake = Forge::new(&clock).start();
+    let scratch = support::Scratch::new("author-command");
+    let command = credential_script(&scratch, &counting(""));
+    let app = commanded(fake.url(), command, ticking(&clock));
+    assert_eq!(app.author(&repo()).unwrap().to_string(), AUTHOR);
+    let asked: Vec<String> = fake
+        .requests()
+        .into_iter()
+        .filter(|r| r.method == "GET" && r.path == "/users/sluice-test%5Bbot%5D")
+        .map(|r| r.header("Authorization").unwrap_or_default().to_string())
+        .collect();
+    assert_eq!(asked, ["Bearer token-1"]);
+    assert_eq!(took(&fake, "GET", "/app"), 0, "{:?}", fake.requests());
+}
+
+/// The forge-identity spec's "GitHub does not give the bot's user" and "A
+/// command whose token is a person's": where nothing is kept and the bot
+/// cannot be read, asking for the author fails in GitHub's words, or
+/// naming the login that is no app's bot, and nothing is kept of it, so
+/// the next asking reads GitHub again (record 0019 as amended 2026-11-18).
+#[test]
+fn an_author_github_did_not_give_is_kept_nowhere() {
+    let clock = Clock::new();
+    let forge = Forge::new(&clock);
+    let fake = forge.clone().start();
+    let state = support::Scratch::new("author-not-given");
+    let user = "/users/sluice-test%5Bbot%5D";
+    forge.user_answers(404);
+    let app = kept_on(&fake, &clock, state.path());
+    let e = format!("{:#}", app.author(&repo()).unwrap_err());
+    assert!(e.contains(&format!("GET {user}: 404 Not Found")), "{e}");
+    assert!(!state.path().join("forge/authors/4242.json").exists());
+    assert!(app.author(&repo()).is_err());
+    assert_eq!(took(&fake, "GET", user), 2);
+    forge.user_answers(200);
+    assert_eq!(app.author(&repo()).unwrap().to_string(), AUTHOR);
+    assert_eq!(took(&fake, "GET", user), 3);
+    assert!(state.path().join("forge/authors/4242.json").is_file());
+
+    let clock = Clock::new();
+    let forge = Forge::new(&clock);
+    let fake = forge.clone().start();
+    forge.viewer_is("octocat");
+    let scratch = support::Scratch::new("author-a-persons");
+    let command = credential_script(&scratch, &counting(""));
+    let app = commanded(fake.url(), command, ticking(&clock));
+    let e = format!("{:#}", app.author(&repo()).unwrap_err());
+    assert!(e.contains("octocat, who is no app's bot"), "{e}");
+    assert!(
+        fake.requests()
+            .iter()
+            .all(|r| !r.path.starts_with("/users/")),
+        "{:?}",
+        fake.requests()
+    );
+}
+
+/// The forge-identity spec's "A kept bot stands while GitHub cannot be
+/// read": a day after the author was kept, GitHub answering 500 until the
+/// retry policy gives up, the kept author is given and nothing kept
+/// changes; once GitHub answers, the next asking reads it and keeps it
+/// with its new time (record 0019 as amended 2026-11-18).
+#[test]
+fn a_kept_author_stands_while_github_cannot_be_read() {
+    let clock = Clock::new();
+    let forge = Forge::new(&clock);
+    let fake = forge.clone().start();
+    let state = support::Scratch::new("author-stands");
+    let user = "/users/sluice-test%5Bbot%5D";
+    let file = state.path().join("forge/authors/4242.json");
+    assert_eq!(
+        kept_on(&fake, &clock, state.path())
+            .author(&repo())
+            .unwrap()
+            .to_string(),
+        AUTHOR
+    );
+    let kept = std::fs::read(&file).unwrap();
+
+    clock.set(clock.now() + TimeDelta::days(1) + TimeDelta::minutes(1));
+    forge.user_answers(500);
+    let app = kept_on(&fake, &clock, state.path());
+    assert_eq!(app.author(&repo()).unwrap().to_string(), AUTHOR);
+    assert!(took(&fake, "GET", user) > 2, "{:?}", fake.requests());
+    assert_eq!(std::fs::read(&file).unwrap(), kept);
+
+    forge.user_answers(200);
+    let read = took(&fake, "GET", user);
+    assert_eq!(app.author(&repo()).unwrap().to_string(), AUTHOR);
+    assert_eq!(took(&fake, "GET", user), read + 1);
+    let now: serde_json::Value = serde_json::from_slice(&std::fs::read(&file).unwrap()).unwrap();
+    let read_at = DateTime::parse_from_rfc3339(now["read_at"].as_str().unwrap()).unwrap();
+    assert_eq!(read_at, clock.now());
 }
 
 /// A token is bought once and kept until five minutes before its hour
