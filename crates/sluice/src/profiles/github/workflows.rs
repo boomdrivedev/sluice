@@ -85,6 +85,20 @@ pub fn read(had: &str, wants: &str) -> Result<Reading> {
     own_steps::read(had, wants, &layout())
 }
 
+/// What a workflow as sluice writes it holds of the repository's own, as
+/// said after "as sluice writes it" or "written" (design D3).
+pub fn holds(reading: &Reading) -> &'static str {
+    match reading {
+        Reading::AsWritten { rooms, own_line } => match (rooms.is_empty(), *own_line) {
+            (true, false) => "",
+            (false, false) => ", with the repository's own steps",
+            (true, true) => ", with the run job's packages: write",
+            (false, true) => ", with the repository's own steps and the run job's packages: write",
+        },
+        _ => "",
+    }
+}
+
 /// `wants` with the repository's own steps in `had` carried into its run
 /// job's room, by the job, and its run job's `packages: write` (design D3).
 pub fn carry(had: &str, wants: &str) -> Result<Carry> {

@@ -164,20 +164,6 @@ fn differs(had: &str, wants: &str) -> String {
     )
 }
 
-/// What a file sluice writes holds of the repository's own, as said after
-/// "as sluice writes it" or "written" (design D3).
-fn own(reading: &Reading) -> &'static str {
-    match reading {
-        Reading::AsWritten { rooms, own_line } => match (rooms.is_empty(), *own_line) {
-            (true, false) => "",
-            (false, false) => ", with the repository's own steps",
-            (true, true) => ", with the run job's packages: write",
-            (false, true) => ", with the repository's own steps and the run job's packages: write",
-        },
-        _ => "",
-    }
-}
-
 /// `sluice init actions` in the working copy at `dir`.
 pub fn actions(dir: &Path, force: bool, out: &mut dyn Write) -> Result<i32> {
     let policy_path = dir.join(POLICY_PATH);
@@ -220,7 +206,11 @@ pub fn actions(dir: &Path, force: bool, out: &mut dyn Write) -> Result<i32> {
         };
         let written = match workflows::read(&had, wants)? {
             reading @ Reading::AsWritten { .. } => {
-                writeln!(out, "{shown}: as sluice writes it{}", own(&reading))?;
+                writeln!(
+                    out,
+                    "{shown}: as sluice writes it{}",
+                    workflows::holds(&reading)
+                )?;
                 continue;
             }
             Reading::Leaves(l) => Carry::Leaves(l),
@@ -245,7 +235,7 @@ pub fn actions(dir: &Path, force: bool, out: &mut dyn Write) -> Result<i32> {
                 writeln!(
                     out,
                     "{shown}: written{}",
-                    own(&workflows::read(&text, wants)?)
+                    workflows::holds(&workflows::read(&text, wants)?)
                 )?;
                 for job in dropped {
                     writeln!(
