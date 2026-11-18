@@ -179,7 +179,7 @@ trace.
 
 #### Scenario: An exec's checks get its span through the binary
 
-- **WHEN** the `sluice` binary runs `sluice --otel exec <branch> -- sh
+- **WHEN** the `sluice` binary runs `sluice exec --otel <branch> -- sh
   -c 'env > seen'` with `TRACEPARENT` `00-<t>-<s>-01` and a collector
 - **THEN** `seen`'s `TRACEPARENT` names trace `<t>` and a span other
   than `<s>`, and the traces sent hold a `sluice exec` span whose
