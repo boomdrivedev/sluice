@@ -14,11 +14,14 @@
 //! alone; they never turn on a signal the table turns off. A signal
 //! turned off is never built.
 //!
-//! A run's checks get what sluice sends: its collector and the signals it
-//! sends, its resource attributes and, in `OTEL_RESOURCE_ATTRIBUTES`, the
-//! trace and span of the round that started them, so what they export is
-//! found beside the round; and the W3C `TRACEPARENT`, for a tool that
-//! reads it to nest its spans under the start.
+//! A run's checks get what sluice sends: its collector and the traces and
+//! logs it sends, its resource attributes and, in
+//! `OTEL_RESOURCE_ATTRIBUTES`, the trace and span of the round that
+//! started them, so what they export is found beside the round; and the
+//! W3C `TRACEPARENT`, for a tool that reads it to nest its spans under the
+//! start. They never get metrics: `OTEL_METRICS_EXPORTER=none`, with a
+//! table or without, so the run's ids on their resource ride on no metric
+//! (151 as amended 2026-11-18; rule core.66).
 //!
 //! Logs (ADR 0022): a failed check's output, which the core emits once
 //! where it keeps it, and sluice's own warnings and errors, sent as OTLP
@@ -610,9 +613,12 @@ pub fn run_env(attributes: &[(&str, &str)]) -> BTreeMap<String, String> {
 /// `host.name` and the table's `attributes`, never `service.name`, so a
 /// tool reports as itself; no other `OTEL_*`. With none: the caller's
 /// `OTEL_*` as they were when chosen, `host.name` added where sluice
-/// named the host itself. Either way, while traces go, the trace and span
-/// ids and `TRACEPARENT`, and then the run's own attributes, each value
-/// encoded.
+/// named the host itself. Either way `OTEL_METRICS_EXPORTER=none`, over
+/// the caller's, so a run's tools send their spans and logs and no
+/// metrics, and no metric carries the run's ids (151 as amended
+/// 2026-11-18; rule core.66; design D1); while traces go, the trace and
+/// span ids and `TRACEPARENT`; and then the run's own attributes, each
+/// value encoded.
 fn variables(
     settings: &Settings,
     ids: &opentelemetry::trace::SpanContext,
@@ -651,7 +657,6 @@ fn variables(
             let on = settings.signals;
             for (sent, variable) in [
                 (on.traces, "OTEL_TRACES_EXPORTER"),
-                (on.metrics, "OTEL_METRICS_EXPORTER"),
                 (on.logs, "OTEL_LOGS_EXPORTER"),
             ] {
                 if !sent {
@@ -661,6 +666,7 @@ fn variables(
             (env, named.collect())
         }
     };
+    env.insert("OTEL_METRICS_EXPORTER".into(), "none".into());
     if ids.is_valid() {
         let (trace, span) = (ids.trace_id().to_string(), ids.span_id().to_string());
         pairs.push(format!("sluice.trace_id={trace}"));
@@ -1090,6 +1096,64 @@ mod tests {
                 reads_environment: true,
             }
         );
+    }
+
+    /// 151 as amended 2026-11-18, rule core.66 (design D1): a run's tools
+    /// send no metrics, with a table sending metrics or not, with none,
+    /// and whatever the caller's environment says, while the run's ids
+    /// stay on its resource for its spans and logs.
+    #[test]
+    fn a_run_s_tools_send_no_metrics() {
+        use opentelemetry::trace::{SpanContext, SpanId, TraceFlags, TraceId, TraceState};
+        let ids = SpanContext::new(
+            TraceId::from_bytes([1; 16]),
+            SpanId::from_bytes([2; 8]),
+            TraceFlags::SAMPLED,
+            false,
+            TraceState::default(),
+        );
+        let table = |metrics| HostTelemetry {
+            send: Some(true),
+            collector: Some("http://localhost:4318".into()),
+            metrics,
+            ..HostTelemetry::default()
+        };
+        let on = Choices {
+            otel: Some(true),
+            ..Choices::default()
+        };
+        let endpoint = ("OTEL_EXPORTER_OTLP_ENDPOINT", "http://collector:4318");
+        let ways = [
+            choose(Choices::default(), Some(&table(None)), &[]),
+            choose(Choices::default(), Some(&table(Some(false))), &[]),
+            choose(on.clone(), None, &[endpoint]),
+            choose(on, None, &[endpoint, ("OTEL_METRICS_EXPORTER", "otlp")]),
+        ];
+        for (n, settings) in ways.iter().enumerate() {
+            let env = variables(
+                settings,
+                &ids,
+                &[("sluice.place", "p"), ("sluice.revision", "r")],
+            );
+            assert_eq!(
+                env.get("OTEL_METRICS_EXPORTER").map(String::as_str),
+                Some("none"),
+                "way {n}: {env:?}"
+            );
+            let attributes = &env["OTEL_RESOURCE_ATTRIBUTES"];
+            for pair in [
+                format!("sluice.trace_id={}", ids.trace_id()),
+                format!("sluice.span_id={}", ids.span_id()),
+                "sluice.place=p".to_string(),
+                "sluice.revision=r".to_string(),
+            ] {
+                assert!(
+                    attributes.split(',').any(|a| a == pair),
+                    "way {n}: no {pair} in {attributes}"
+                );
+            }
+        }
+        assert!(ways[0].signals.metrics && !ways[1].signals.metrics);
     }
 
     #[test]
