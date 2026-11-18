@@ -69,22 +69,24 @@ Status: accepted on 2026-11-17 as the code stage's choice within D1 and D5 above
 
 Deciders: the brief of the fix `main--a-release-with-nothing-to-free-creates-nothing` ("A release that finds nothing to free reads only, makes no folder, and succeeds."), and its code stage, which chose the form below.
 
-Sources: session-runs-1 clause 95; clause 35 as amended; rules core.2, core.10 and core.30; deneb, 2026-11-17: flume's tool test s107 kept a place because its teardown's `sluice release`, sluice 0.95.1, answered `creating /private/tmp/sluice-501/<key>: Operation not permitted` under a sandbox that lets it write only the place, its scratch and its declared caches, where 0.93.2's release made nothing there; `crates/sluice/src/profiles/places.rs` (`release_unheld`, `ReleaseNamed`), `crates/sluice/src/profiles/checks.rs` (`names_release`) and `crates/sluice/src/profiles/mod.rs`.
+Sources: session-runs-1 clause 95; clause 35 as amended; rules core.2, core.10 and core.30; deneb, 2026-11-17: flume's tool test s107 kept a place because its teardown's `sluice release`, sluice 0.95.1, answered `creating /private/tmp/sluice-501/<key>: Operation not permitted` under a sandbox that lets it write only the place, its scratch and its declared caches, where 0.93.2's release made nothing there; clause 135 and rule core.31; record 0093's design D15 (`one-sluice-process-runs-each-hosts-queues`, which lists a checkout's or a preview's release among the commands that tell the host process); `crates/sluice/src/profiles/places.rs` (`release_unheld`, `ReleaseNamed`), `crates/sluice/src/profiles/checks.rs` (`names_release`), `crates/sluice/src/profiles/mod.rs` and `crates/sluice/src/lib.rs` (the worktree's `Command::Release`).
 
 ### Context
 
-D1 wrote the unheld release's record and made its scratch before the check seam's builder said whether the policy names a release command, and let both go when it named none. Making the scratch makes the user's directory and the repository's under it (35 as amended; rule core.30), so every `sluice release` in a worktree sluice holds nothing for, under a policy with no release command, wrote outside the worktree: it took the records lock, wrote and removed a record under `<common>/sluice/`, and left the repository's directory under `/tmp/sluice-<uid>/`. A caller whose sandbox allows only its place was refused, and its release failed where it had nothing to free.
+D1 wrote the unheld release's record and made its scratch before the check seam's builder said whether the policy names a release command, and let both go when it named none. Making the scratch makes the user's directory and the repository's under it (35 as amended; rule core.30), so every `sluice release` in a worktree sluice holds nothing for, under a policy with no release command, wrote outside the worktree: it took the records lock, wrote and removed a record under `<common>/sluice/`, and left the repository's directory under `/tmp/sluice-<uid>/`. A caller whose sandbox allows only its place was refused, and its release failed where it had nothing to free. Sluice's host process (record 0093) added a second write: the command told the host process after every worktree's release, starting it where none answered, which makes the user's directory for its socket and the host's folder under sluice's state folder, so a release that the place profile answered with nothing made still wrote both.
 
 ### Decisions
 
 - **D8. Nothing to free reads only.** The place profile asks whether the policy names a release command before it takes the records lock, writes a record or makes a scratch, and where it names none answers `Released::Nothing` with nothing made: no record, lock, scratch or folder, under the repository's git directory or the user's. `exec::release` then says `nothing to release`, exit 0, as D5 says.
 - **D9. The check seam answers it, through the binding.** Whether `[tests]` name a release command is the check profile's reading, `checks::names_release`, the same reading its builder makes first. The binding hands it to the place profile beside the builder, `Places::with_release(named, builder)` (rule core.2), so the two cannot disagree on which policies name one.
+- **D10. A release that freed nothing tells no host process.** `sluice release` in a worktree tells sluice's host process, starting it where none answers, only where the release freed something. A release with nothing to free, or one that failed and freed nothing, moves no queue (135; rule core.31), so it reaches no host process and starts none, and makes nothing under the user's directory or sluice's state folder.
 
 Not taken:
 
 - **The place profile reading `[tests] release` itself,** a second copy of the check profile's reading in another profile (rule core.2).
 - **Building the release request before the record and scratch,** which would enter the toolchain before the scratch it is given exists and before a record names it (rule core.30).
 - **Deciding in `exec::release`,** which would read a check profile's key outside a profile (rule core.1).
+- **Never telling the host process of a worktree's release,** as D15's list reads, which would leave a release that freed a place unseen until the host process's next look; taken only as far as a release that freed nothing.
 
 ### Consequences
 
