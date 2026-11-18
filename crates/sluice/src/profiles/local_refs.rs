@@ -135,16 +135,30 @@ impl LocalRefs {
     /// `insteadOf`: the forge it names is the one an identity is for. Read
     /// with no process (129).
     pub fn remote_url(&self, remote: &str) -> Result<String> {
+        match self.configured_url(remote)? {
+            Some(url) => Ok(url),
+            None => bail!("the remote {remote:?} has no url"),
+        }
+    }
+
+    /// The fetch address of `remote` as configured, `None` where it has
+    /// none or is no remote.
+    fn configured_url(&self, remote: &str) -> Result<Option<String>> {
         let repo = self.configured()?;
         let url = repo
             .try_find_remote_without_url_rewrite(remote)
             .transpose()
             .map_err(|e| anyhow!("reading the remote {remote:?}: {e}"))?
             .and_then(|r| r.url(gix::remote::Direction::Fetch).map(|u| u.to_bstring()));
-        match url {
-            Some(url) => Ok(url.to_string()),
-            None => bail!("the remote {remote:?} has no url"),
-        }
+        Ok(url.map(|u| u.to_string()))
+    }
+
+    /// The repository as its metrics name it, by the URL of `origin` as
+    /// configured and its common directory, [`repository_named`]; read with
+    /// no process and no fetch (129; rule core.66; design D3).
+    pub fn repository_name(&self) -> Result<String> {
+        let origin = self.configured_url("origin")?;
+        Ok(repository_named(origin.as_deref(), &self.common_dir()?))
     }
 
     /// The repository's default branch: the branch its common directory's

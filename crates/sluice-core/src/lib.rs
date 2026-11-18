@@ -190,6 +190,11 @@ impl std::ops::Deref for Keeping<'_> {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Peer {
     pub name: String,
+    /// The repository this sluice acts in, as its metrics name it,
+    /// `sluice.repository`: one host process holds every repository of
+    /// its user (135), so a branch alone tells none apart (rule core.66;
+    /// record 0014 as amended 2026-11-18).
+    pub repository: String,
     pub lease: std::time::Duration,
     /// 77: how long a host's sign of life may stand before its claims
     /// lapse.
@@ -214,6 +219,7 @@ impl Default for Peer {
     fn default() -> Self {
         Peer {
             name: "this-host".into(),
+            repository: "this-repository".into(),
             lease: std::time::Duration::from_secs(300),
             alive: std::time::Duration::from_secs(120),
             signer: None,
