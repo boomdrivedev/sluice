@@ -169,4 +169,82 @@ mod tests {
         }
         assert!(run.contains("sluice job run --head"));
     }
+
+    /// Record 0119 as amended 2026-11-18 (design D1, D2 and D6 of the
+    /// change `a-pools-run-job-runs-the-repositorys-own-steps`; timber
+    /// 135; rule core.63): each run job, `sluice.yml`'s and
+    /// `sluice-pr.yml`'s, runs `sluice job run` naming its checkout, then
+    /// names it as `SLUICE_CHECKOUT` unless cancelled, then leaves its room,
+    /// the two `# sluice:` lines with nothing between, at the steps'
+    /// indentation, then releases the checkout and uploads the hand-over,
+    /// each whatever came before.
+    #[test]
+    fn each_run_job_leaves_room_for_the_repositorys_own_steps() {
+        let runners = BTreeMap::from([("linux-x64".to_string(), "ubuntu-24.04".to_string())]);
+        for (name, w) in [
+            ("sluice.yml", sluice("1.2.3", &runners)),
+            ("sluice-pr.yml", sluice_pr("1.2.3", &runners)),
+        ] {
+            let run = &jobs(&w)["run"];
+            let lines: Vec<&str> = run.lines().collect();
+            let at = |what: &dyn Fn(&str) -> bool, said: &str| {
+                lines
+                    .iter()
+                    .position(|l| what(l))
+                    .unwrap_or_else(|| panic!("{name}'s run job has no {said}: {run}"))
+            };
+            let job_run = at(
+                &|l| {
+                    l.contains("sluice job run")
+                        && l.contains("--checkout \"$RUNNER_TEMP/sluice-checkout\"")
+                },
+                "sluice job run --checkout",
+            );
+            let named = at(
+                &|l| l.contains("echo \"SLUICE_CHECKOUT="),
+                "step naming SLUICE_CHECKOUT",
+            );
+            let step = lines[..named]
+                .iter()
+                .rposition(|l| l.starts_with("      - "))
+                .unwrap_or_else(|| panic!("{name}: no step names SLUICE_CHECKOUT: {run}"));
+            assert!(
+                lines[step..named]
+                    .iter()
+                    .any(|l| l.trim() == "if: ${{ !cancelled() }}"),
+                "{name}: SLUICE_CHECKOUT is named unless cancelled: {run}"
+            );
+            let open = at(
+                &|l| l == "      # sluice: your own steps, after the checks, in $SLUICE_CHECKOUT",
+                "room's opening line",
+            );
+            assert_eq!(
+                lines[open + 1],
+                "      # sluice: end of your own steps",
+                "{name}: nothing between the room's lines"
+            );
+            let release = at(
+                &|l| {
+                    l.contains("sluice job release --checkout \"$RUNNER_TEMP/sluice-checkout\"")
+                        && l.contains("--out \"$RUNNER_TEMP/sluice-run\"")
+                },
+                "sluice job release",
+            );
+            assert_eq!(
+                lines[release - 1].trim(),
+                "if: always()",
+                "{name}: the release runs whatever came before"
+            );
+            let upload = at(&|l| l.contains("actions/upload-artifact@"), "upload");
+            assert_eq!(lines[upload + 1].trim(), "if: always()", "{name}");
+            assert!(
+                job_run < named && named < open && open < release && release < upload,
+                "{name}: in order: {run}"
+            );
+            assert!(
+                run.contains("    permissions:\n      contents: read\n    steps:"),
+                "{name}"
+            );
+        }
+    }
 }

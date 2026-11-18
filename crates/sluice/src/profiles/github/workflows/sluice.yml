@@ -1,10 +1,13 @@
 # Written by `sluice init actions`, sluice {{version}} (record 0119): one
 # run of a combination that no standing host takes, on the runner its
 # system names, then its signature. The run job holds no key, no identity
-# token and no secret; the sign job runs none of the combination's code,
-# signs only the keys its tree bears out with the job's own identity, and
-# records the run's end. A run of `sluice-pr` on a pull request's head is
-# signed here too. `sluice init actions --force` writes it again.
+# token and no secret of sluice's; after the checks it leaves room, between
+# its two `# sluice:` lines, for your own steps, which run in the checkout
+# the checks ran in, $SLUICE_CHECKOUT, before it is released. The sign job
+# runs none of the combination's code, signs only the keys its tree bears
+# out with the job's own identity, and records the run's end. A run of
+# `sluice-pr` on a pull request's head is signed here too. `sluice init
+# actions --force` writes it again, keeping your own steps.
 name: sluice
 run-name: sluice ${{ inputs.claim || github.event.workflow_run.head_sha }}
 on:
@@ -54,10 +57,21 @@ jobs:
         env:
           SLUICE_VERSION: "{{version}}"
       - name: Run the claimed run
-        run: sluice job run --claim "$CLAIM" --branch "$BRANCH" --out "$RUNNER_TEMP/sluice-run"
+        run: sluice job run --claim "$CLAIM" --branch "$BRANCH" --out "$RUNNER_TEMP/sluice-run" --checkout "$RUNNER_TEMP/sluice-checkout"
         env:
           CLAIM: ${{ inputs.claim }}
           BRANCH: ${{ inputs.branch }}
+      - name: Name the checkout the checks ran in
+        if: ${{ !cancelled() }}
+        run: |
+          if [ -s "$RUNNER_TEMP/sluice-checkout" ]; then
+            echo "SLUICE_CHECKOUT=$(head -n 1 "$RUNNER_TEMP/sluice-checkout")" >> "$GITHUB_ENV"
+          fi
+      # sluice: your own steps, after the checks, in $SLUICE_CHECKOUT
+      # sluice: end of your own steps
+      - name: Release the checkout
+        if: always()
+        run: sluice job release --checkout "$RUNNER_TEMP/sluice-checkout" --out "$RUNNER_TEMP/sluice-run"
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         if: always()
         with:
