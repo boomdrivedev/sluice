@@ -18,6 +18,7 @@ pub mod init;
 pub mod instance;
 pub mod job;
 pub mod overview;
+pub mod own_steps;
 pub mod pool;
 pub mod preview;
 pub mod profiles;
