@@ -2827,6 +2827,12 @@ impl Sluice<'_> {
             sluice.repository = self.peer.repository.as_str(),
             sluice.branch = branch.as_str(),
         );
+        // Rule core.66, design D5: what the replays saved, in seconds.
+        info!(
+            monotonic_counter.sluice.tasks.time_saved = v.saved_ms as f64 / 1000.0,
+            sluice.repository = self.peer.repository.as_str(),
+            sluice.branch = branch.as_str(),
+        );
         let ended = Ended {
             at: now.to_string(),
             outcomes: outcomes_of(checks, &v, &report, &none),

@@ -30,7 +30,7 @@ decisions by D-number.
 ## 4. What a replay saved is counted
 
 - [x] 4.1 In `crates/sluice-core/src/verdict.rs`, give `Verdict` `saved_ms: u64`, summing for each proven replay the `took_ms` of the newest pass by `at` among those it counted for the key, nothing for an unproven replay or a pass with no time (D5); and a unit test `a_replay_saves_the_time_its_key_last_took` with the spec's three keys. True when `cargo test -p sluice-core a_replay_saves_the_time_its_key_last_took` passes.
-- [ ] 4.2 In `crates/sluice-core/src/step.rs`, beside `sluice.tasks.replayed`, emit `monotonic_counter.sluice.tasks.time_saved` with the verdict's `saved_ms` in seconds as an `f64`, with the repository and the branch; add it to both telemetry pages' table, counter, `s`, the time each replayed task's key last took. Add `a_replay_counts_the_time_it_saved` to `crates/sluice/tests/telemetry.rs`, as `a_replay_is_counted` with `f.world.takes("lib:test", 4000, 1)`. True when `sluice exec bolt/sluice-reports-its-work-plainly -- cargo test -p sluice --test telemetry a_replay_counts_the_time_it_saved` passes.
+- [x] 4.2 In `crates/sluice-core/src/step.rs`, beside `sluice.tasks.replayed`, emit `monotonic_counter.sluice.tasks.time_saved` with the verdict's `saved_ms` in seconds as an `f64`, with the repository and the branch; add it to both telemetry pages' table, counter, `s`, the time each replayed task's key last took. Add `a_replay_counts_the_time_it_saved` to `crates/sluice/tests/telemetry.rs`, as `a_replay_is_counted` with `f.world.takes("lib:test", 4000, 1)`. True when `sluice exec bolt/sluice-reports-its-work-plainly -- cargo test -p sluice --test telemetry a_replay_counts_the_time_it_saved` passes.
 
 ## 5. A run's tools send no metrics
 

@@ -67,6 +67,7 @@ back: the queue never depends on it
   | `sluice.window` | gauge | combinations the branch tests at once |
   | `sluice.verdicts` | counter | results read, by `sluice.outcome` |
   | `sluice.tasks.ran`, `sluice.tasks.replayed` | counter | tasks run, and answered from the cache |
+  | `sluice.tasks.time_saved` | counter, seconds, declared in `s` | the time each replayed task's key last took when it ran |
   | `sluice.culprits` | counter | submissions blamed for a failure |
   | `sluice.conflicts` | counter | submissions removed for a conflict |
   | `sluice.landed`, `sluice.refused` | counter | submissions landed; landings refused because the branch moved |

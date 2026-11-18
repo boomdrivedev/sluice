@@ -290,6 +290,31 @@ fn a_replay_is_counted() {
     );
 }
 
+/// Rule core.66, design D5: a replay counts the time its key took when it
+/// last ran, in seconds, with the repository and the branch.
+#[test]
+fn a_replay_counts_the_time_it_saved() {
+    let f = setup();
+    f.world.takes("lib:test", 4000, 1);
+    for (unit, agent, text) in [("unit/a", "agent-a", "one"), ("unit/b", "agent-b", "two")] {
+        let seen = submit(&f, unit, agent, &[("lib/a.py", Some(text))]);
+        assert!(has(&seen, &format!("exit {LANDED}")), "{seen:?}");
+    }
+    let seen = submit(&f, "unit/c", "agent-c", &[("lib/a.py", Some("one"))]);
+    assert!(has(&seen, &format!("exit {LANDED}")), "{seen:?}");
+    metrics_carry_only_their_keys(&seen);
+    assert_eq!(
+        metric(&seen, "monotonic_counter.sluice.tasks.replayed"),
+        [format!("1 {}", named())],
+        "{seen:?}"
+    );
+    assert_eq!(
+        metric(&seen, "monotonic_counter.sluice.tasks.time_saved"),
+        [format!("4.0 {}", named())],
+        "{seen:?}"
+    );
+}
+
 /// A submission whose work conflicts with the branch is counted.
 #[test]
 fn a_conflict_is_counted() {
