@@ -133,5 +133,5 @@ nix run nixpkgs#otel-desktop-viewer   # in a browser
 
 Any OpenTelemetry collector, or an agent with an OTLP receiver on
 localhost, forwards to a backend over TLS itself. The repository's
-[docs/telemetry.md](https://github.com/agentplot/sluice/blob/main/docs/telemetry.md)
+[docs/telemetry.md](https://github.com/boomdrivedev/sluice/blob/main/docs/telemetry.md)
 has the receiver configurations.

@@ -13,7 +13,7 @@ hero:
       icon: right-arrow
       variant: secondary
     - text: GitHub
-      link: https://github.com/agentplot/sluice
+      link: https://github.com/boomdrivedev/sluice
       icon: external
       variant: minimal
 ---
@@ -30,7 +30,7 @@ to set sluice up in your repository. It installs the `sluice` binary too,
 asking first.
 
 ```
-/plugin marketplace add agentplot/sluice
+/plugin marketplace add boomdrivedev/sluice
 /plugin install sluice@sluice
 ```
 
@@ -118,17 +118,17 @@ tool stands alone, and sluice is the one in use today.
 ## Install by hand
 
 ```sh
-nix profile install github:agentplot/sluice
+nix profile install github:boomdrivedev/sluice
 ```
 
 Other ways: a release binary for macOS on Apple silicon and Linux on
-x86-64 and ARM, `cargo install --locked --git https://github.com/agentplot/sluice sluice`
+x86-64 and ARM, `cargo install --locked --git https://github.com/boomdrivedev/sluice sluice`
 with Rust 1.98 or later, or the flake as an input. Each installs two
 executables: `sluice`, and `wt-submit`, which
 [worktrunk](https://github.com/max-sixty/worktrunk) runs as `wt submit`.
 
 ```sh
-curl -fsSL https://github.com/agentplot/sluice/releases/latest/download/sluice-aarch64-darwin.tar.gz \
+curl -fsSL https://github.com/boomdrivedev/sluice/releases/latest/download/sluice-aarch64-darwin.tar.gz \
   | tar -xz -C ~/.local/bin sluice wt-submit
 ```
 

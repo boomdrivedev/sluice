@@ -959,7 +959,7 @@ release that failed is kept on its record in `.places/` or `.previews/`
 as `release_failed`, since those are the host's alone.
 
 Full example files are in the repository under
-[docs/examples/state](https://github.com/agentplot/sluice/tree/main/docs/examples/state).
+[docs/examples/state](https://github.com/boomdrivedev/sluice/tree/main/docs/examples/state).
 
 ## The version
 

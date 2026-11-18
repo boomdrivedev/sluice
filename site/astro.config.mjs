@@ -1,5 +1,5 @@
 // The developer documentation, built by Astro with Starlight and published
-// to GitHub Pages at https://agentplot.github.io/sluice by
+// to GitHub Pages at https://boomdrivedev.github.io/sluice by
 // .github/workflows/pages.yml. The decisions section is generated from
 // docs/adr by scripts/adrs.mjs before every build.
 
@@ -25,7 +25,7 @@ const dark = {
 };
 
 export default defineConfig({
-  site: "https://agentplot.github.io",
+  site: "https://boomdrivedev.github.io",
   base: "/sluice",
   // A page that moved, from where links to it still point.
   redirects: {
@@ -62,13 +62,13 @@ export default defineConfig({
       head: [
         {
           tag: "meta",
-          attrs: { property: "og:image", content: "https://agentplot.github.io/sluice/og.png" },
+          attrs: { property: "og:image", content: "https://boomdrivedev.github.io/sluice/og.png" },
         },
         { tag: "meta", attrs: { name: "twitter:card", content: "summary_large_image" } },
       ],
-      social: [{ icon: "github", label: "GitHub", href: "https://github.com/agentplot/sluice" }],
+      social: [{ icon: "github", label: "GitHub", href: "https://github.com/boomdrivedev/sluice" }],
       editLink: {
-        baseUrl: "https://github.com/agentplot/sluice/edit/main/site/",
+        baseUrl: "https://github.com/boomdrivedev/sluice/edit/main/site/",
       },
       plugins: [starlightLinksValidator()],
       sidebar: [

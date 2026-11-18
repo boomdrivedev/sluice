@@ -17,7 +17,7 @@ withdraws or lands anything.
 ## Install
 
 ```sh
-herdr plugin install agentplot/sluice/plugins/herdr
+herdr plugin install boomdrivedev/sluice/plugins/herdr
 ```
 
 It needs herdr 0.9.3 or later, sluice 0.12 or later and `jq` on `PATH`, on
@@ -261,6 +261,6 @@ repository a pane of any herdr server is in, and stops it once no pane is
 there. Any other command that prints the same documents,
 one per line, can be added in `sources.toml` in the plugin's config
 directory (`herdr plugin config-dir agentplot.sluice`); the
-[plugin's README](https://github.com/agentplot/sluice/tree/main/plugins/herdr)
+[plugin's README](https://github.com/boomdrivedev/sluice/tree/main/plugins/herdr)
 gives its form. `ahead_check = false` there shows the ahead count without
 asking sluice, for a branch whose remote is slow to fetch from.
