@@ -60,3 +60,37 @@ Not taken:
 - Bad: where `gh release create` fails after the tag is pushed, running the job again fails at the push, since the tag exists; the cure is `gh release create "$TAG" --verify-tag` by hand with the run's artifacts, as for Flume and crew.
 - Boomdrive's set keeps its override in `nix/packages/sluice.nix` until it pins a sluice release made this way; dropping it is agentplot/boomdrive's.
 - Rule core.55 says it.
+
+## Amendment, 2026-11-18: a release's binaries run on a host with no Nix
+
+Status: accepted on 2026-11-18 as the code stage's choice, on the brief of the fix `main--release-binaries-run-on-a-plain-runner`, in Flume's form, cheap to change.
+
+Deciders: the brief of the fix `main--release-binaries-run-on-a-plain-runner` ("A release binary the run job installs runs on a plain runner with nothing from /nix/store."), and its code stage, which chose the form below.
+
+Sources: the trial boomdrivedev/sluice-actions-trial, 2026-11-18, sluice v0.97.1; boomdrivedev/flume at e9b23ef9, its `.github/workflows/ci.yml` `binaries` job; boomdrivedev/timber at 010d83d8, its `binaries` job; record 0119 and the pool's workflows, `crates/sluice/src/profiles/github/workflows/sluice.yml` and `sluice-pr.yml`; CodeBuild's images in `crates/sluice/src/profiles/codebuild/templates/stack.yml`; `rust-toolchain.toml` and `check-toolchain.sh` (rule core.24).
+
+### Context
+
+The binaries job built each platform's binaries by `nix build .#default`, the flake's package, which nixpkgs links against the Nix store: Linux's names `/nix/store/h4wfwic161kxrr74jlzla5lsm28hgary-glibc-2.44-25/lib/ld-linux-x86-64.so.2` as its interpreter, and macOS's loads `libiconv.2.dylib` from `/nix/store/fgrxz4hr8f71hkhsddbvk8nxadpg67bv-libiconv-115.100.1/lib/`. A host with no Nix holds neither, nor does one whose store lacks those paths. The Actions pool's run and sign jobs (record 0119) install a release's tarball on GitHub's hosted runners, and in the trial on 2026-11-18 sluice v0.97.1 failed there before it ran. On ubuntu-24.04, `sluice job run` answered `/home/runner/work/_temp/bin/sluice: cannot execute: required file not found`, exit 127; on macos-15, `dyld[1735]: Library not loaded: /nix/store/fgrxz4hr8f71hkhsddbvk8nxadpg67bv-libiconv-115.100.1/lib/libiconv.2.dylib`, exit 134; and every sign job failed the same way at `sluice job sign`. CodeBuild's run and sign builds install the same Linux tarball on Amazon Linux. The job that built the binaries ran them with Nix and its store at hand, so nothing ran them where they would be used.
+
+### Decisions
+
+- **D1. The binaries are cargo's, in Flume's form.** The binaries job runs `cargo build --release --locked -p sluice --target <target>` under the toolchain `rust-toolchain.toml` names, which rustup installs, the runner's own or one the job installs with no default toolchain: `x86_64-unknown-linux-musl` on ubuntu-latest, `aarch64-unknown-linux-musl` on ubuntu-24.04-arm and `aarch64-apple-darwin` on macos-latest. Linux's are static against musl, musl-tools' compiler building the C that aws-lc-sys and ring carry; macOS's link only the system's libraries. The tree is the one the tag names, `set-version.sh`'s writes on the pushed commit, and the build is given nothing, as before. `rust-toolchain.toml` names `.prototools`' version (`check-toolchain.sh`), so the compiler is the one the checks ran with.
+- **D2. The job installs no Nix, so its run of the binary is the proof.** It fails unless the built `sluice --version` says `sluice <x.y.z>` on the runner that built it, which holds nothing in `/nix/store`. A binary that loaded anything from the store fails there, as v0.97.1's failed on the pool's runners.
+- **D3. `root:release` holds the job to D1 and D2.** `check-release.sh` reads the binaries job's cargo build for its target after `set-version.sh`, its run of `target/$TARGET/release/sluice --version`, no `install-nix-action` and no `nix` command in it, and no Linux target but `-linux-musl`.
+- **D4. The flake's package stays the Nix host's.** `nix build`, `nix profile install` and a flake that takes sluice's package build it linked against their own store, which holds what it links; CI's `build` job builds it on macOS and Linux as before. A release's binaries and the flake's package are built from one tree by one Rust, and linked differently.
+
+Not taken:
+
+- **The flake's package built static by Nix**, `pkgsStatic` on Linux, with macOS's `libiconv` load path rewritten by `install_name_tool`: one build for both, but `pkgsStatic`'s musl toolchain is built from source wherever the cache lacks it, at each release on each platform, and a rewritten load path is a step of sluice's own that no other tool of the family takes.
+- **A glibc build by cargo on ubuntu-24.04**: it runs only where the host's glibc is at least the runner's 2.39, which Amazon Linux 2023's 2.34 under CodeBuild is not.
+- **A reading of the binary's links, `ldd` or `otool -L`, in the job**: the job's run on a runner with no Nix is the reading the brief asks for, and a list of the paths a binary may load is one more thing to keep.
+
+### Consequences (2026-11-18)
+
+- Good: a release's tarballs run on GitHub's hosted runners, on CodeBuild's Amazon Linux and on any Linux, static, and on macOS with nothing but the system, so the pool's run and sign jobs start sluice.
+- Good: sluice's release binaries are built as Flume's are, one form in the family. timber's binaries job builds by `nix build` as sluice's did, and its binaries load the same store paths; taking Flume's form there is timber's.
+- Neutral: a release's binaries are no longer the flake's derivation. "The build is the one any builder of the tag makes" above holds of the tree and the version, not of how the binary links.
+- Bad: the job fetches the toolchain and the crates from the network at each release, where Nix took them from its cache, and the build takes minutes more.
+- Bad: musl's allocator is slower than glibc's; sluice's commands spend little of their time allocating.
+- Rule core.55 says it.
