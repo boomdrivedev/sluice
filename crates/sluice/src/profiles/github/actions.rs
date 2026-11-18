@@ -156,10 +156,14 @@ impl Launcher for Actions {
         };
         if status == "completed" {
             let recorded = job(SIGN_JOB).is_some_and(|j| j["conclusion"] == "success");
-            return Ok(Job::Ended {
-                recorded,
-                why: None,
+            // 115 (as amended 2026-11-18; record 0031 as amended
+            // 2026-11-18): a job lost names the workflow run whose log
+            // GitHub keeps, which the culprit's session is told past the
+            // bound.
+            let why = run["html_url"].as_str().filter(|_| !recorded).map(|at| {
+                format!("{claim}'s job ended with no record of its run; its log is at {at}")
             });
+            return Ok(Job::Ended { recorded, why });
         }
         Ok(
             match job(RUN_JOB).and_then(|j| j["started_at"].as_str().map(String::from)) {

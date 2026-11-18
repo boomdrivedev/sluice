@@ -1290,8 +1290,10 @@ fn the_pools_calls() {
                 json!({ "workflow_runs": [
                     { "id": 1, "display_title": "sluice pool/forge/7", "status": "queued" },
                     { "id": 2, "display_title": "sluice pool/forge/9", "status": "in_progress" },
-                    { "id": 3, "display_title": "sluice pool/forge/10", "status": "completed" },
-                    { "id": 4, "display_title": "sluice pool/forge/11", "status": "completed" },
+                    { "id": 3, "display_title": "sluice pool/forge/10", "status": "completed",
+                      "html_url": "https://github.com/o/r/actions/runs/3" },
+                    { "id": 4, "display_title": "sluice pool/forge/11", "status": "completed",
+                      "html_url": "https://github.com/o/r/actions/runs/4" },
                 ] }),
             );
         }
@@ -1392,11 +1394,17 @@ fn the_pools_calls() {
             why: None
         }
     );
+    // 115 as amended 2026-11-18 (record 0031 as amended 2026-11-18): a job
+    // lost names its workflow run, where GitHub keeps its log.
     assert_eq!(
         job("pool/forge/11"),
         Job::Ended {
             recorded: false,
-            why: None
+            why: Some(
+                "pool/forge/11's job ended with no record of its run; its log is at \
+                 https://github.com/o/r/actions/runs/4"
+                    .into()
+            )
         }
     );
     assert_eq!(job("pool/forge/8"), Job::None);
