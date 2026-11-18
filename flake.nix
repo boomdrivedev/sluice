@@ -3,12 +3,14 @@
 # modules that write the host's own settings and install the package
 # (record 0098, core.51). The development shell is devenv's (devenv.nix);
 # everything else of the flake's is under nix/, the moon project `nix`.
-# Rust is the version .prototools names, so the release is built by the
-# compiler the checks ran with. The version is the tree's, Cargo.toml's
-# workspace version: 0.0.0 on main, and the release's in the release commit
-# its tag names (set-version.sh). A build is given nothing: `nix build
-# github:agentplot/sluice/v<x.y.z>` says that release's version (record
-# 0111, core.55).
+# Rust is the version .prototools names, so the package is built by the
+# compiler the checks ran with. The release's binaries are cargo's, built
+# by CI's binaries job to run on a host with no Nix, and not this package,
+# which links against the store (record 0111 as amended 2026-11-18). The
+# version is the tree's, Cargo.toml's workspace version: 0.0.0 on main, and
+# the release's in the release commit its tag names (set-version.sh). A
+# build is given nothing: `nix build github:agentplot/sluice/v<x.y.z>` says
+# that release's version (record 0111, core.55).
 {
   description = "sluice: a merge queue for agents in worktrees";
 
