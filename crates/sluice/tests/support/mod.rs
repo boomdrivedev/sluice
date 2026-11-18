@@ -43,10 +43,15 @@ pub fn test_user_scratch() -> PathBuf {
 /// credentials or ask anyone anything. A sluice run under `c` skips the
 /// retry policy's pauses, which the fakes count tries through (134), and
 /// is in no herdr pane, so it records none and pushes into none (51).
+/// It is started under no caller's trace context, so a suite run under
+/// `sluice exec` while it sends traces nests none of its sluices in its
+/// own trace or keeps it on their records (153; design D9 of
+/// `a-sluice-command-shows-inside-its-callers-trace`).
 pub fn isolated(c: &mut Command) -> &mut Command {
     for v in HERDR {
         c.env_remove(v);
     }
+    c.env_remove("TRACEPARENT").env_remove("TRACESTATE");
     c.env("SLUICE_RETRY_SLEEP", "record")
         .env(
             sluice::profiles::places::USER_SCRATCH_VAR,
