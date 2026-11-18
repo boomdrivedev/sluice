@@ -936,7 +936,6 @@ impl FakeIdentity {
     }
 
     /// The identity that cannot give its author, saying `why`.
-    #[allow(dead_code)]
     fn unnamed(self, why: &str) -> FakeIdentity {
         FakeIdentity {
             unnamed: Some(why.into()),
@@ -1045,6 +1044,95 @@ fn a_landing_names_whoever_pushes_it() {
     let landed = landing(&open(&repo), &onto, &head);
     let sluice = "sluice <sluice@localhost>".to_string();
     assert_eq!(signed_by(&repo, &landed), (sluice.clone(), sluice));
+}
+
+/// The forge-identity spec's "A landing whose author cannot be read": a
+/// landing pushed as an identity that cannot give its author is not
+/// written, under its name or sluice's, the branch on the remote stays
+/// where it was, and the failure carries the identity's words (record
+/// 0019 as amended 2026-11-18; rule core.43).
+#[test]
+fn a_landing_whose_author_cannot_be_read_is_not_written() {
+    let repo = Repo::new("landing-unnamed");
+    let bare = repo.bare_origin();
+    let on_remote = || {
+        let out = support::git_command()
+            .arg("--git-dir")
+            .arg(bare.path())
+            .args(["rev-parse", "refs/heads/main"])
+            .output()
+            .unwrap();
+        String::from_utf8(out.stdout).unwrap()
+    };
+    let before = on_remote();
+    let onto = rev(repo.rev("main"));
+    let head = rev(repo.branch("unit/u", "main", &[("u", Some("1"))]));
+    let identity = Rc::new(FakeIdentity::following("tok").unnamed("the fake cannot say who it is"));
+    let p = as_identity(&repo, &identity);
+    let Ok(sluice_seams::Formed::Revision(c)) = p.form(&onto, &head) else {
+        panic!("formed no candidate");
+    };
+    let e = p
+        .commit(&LandingCommit {
+            parent: onto.clone(),
+            head: head.clone(),
+            tree_of: c.clone(),
+            message: "land\n".into(),
+        })
+        .unwrap_err();
+    assert!(
+        format!("{e:#}").contains("the fake cannot say who it is"),
+        "{e:#}"
+    );
+    assert_eq!(on_remote(), before);
+    // Every commit the repository holds, reachable or not: none but the
+    // combination has the landing's parents.
+    let parents = format!("parent {onto}\nparent {head}\n");
+    let objects = repo.git(&[
+        "cat-file",
+        "--batch-all-objects",
+        "--batch-check=%(objectname) %(objecttype)",
+    ]);
+    let landings: Vec<&str> = objects
+        .lines()
+        .filter_map(|l| l.strip_suffix(" commit"))
+        .filter(|id| *id != c.as_str())
+        .filter(|id| repo.git(&["cat-file", "-p", id]).contains(&parents))
+        .collect();
+    assert!(landings.is_empty(), "{landings:?}");
+}
+
+/// The forge-identity spec's "Two hosts form one combination": a host that
+/// pushes as an identity and one with the host's own credentials form one
+/// combination as one commit, sluice's at the time 0 (record 0019 as
+/// amended 2026-11-18; rules core.6, core.17, core.58).
+#[test]
+fn a_combination_is_one_commit_whatever_the_identity() {
+    let repo = Repo::new("combination-one");
+    let onto = rev(repo.rev("main"));
+    let head = rev(repo.branch("unit/u", "main", &[("u", Some("1"))]));
+    let bare = repo.bare_origin();
+    let pushing_as = Repo::clone_of(bare.path(), "combination-as-identity");
+    let pushing_own = Repo::clone_of(bare.path(), "combination-own");
+    let formed = |p: &PushedRefs| {
+        let Ok(sluice_seams::Formed::Revision(c)) = p.form(&onto, &head) else {
+            panic!("formed no candidate");
+        };
+        c
+    };
+    let identity = Rc::new(FakeIdentity::following("tok"));
+    let as_identity = formed(&as_identity(&pushing_as, &identity));
+    let own = formed(&open(&pushing_own));
+    assert_eq!(as_identity, own);
+    let raw = pushing_as.git(&["cat-file", "-p", as_identity.as_str()]);
+    assert!(
+        raw.contains("\nauthor sluice <sluice@localhost> 0 +0000\n"),
+        "{raw}"
+    );
+    assert!(
+        raw.contains("\ncommitter sluice <sluice@localhost> 0 +0000\n"),
+        "{raw}"
+    );
 }
 
 /// The `Authorization` header git sends with the fake's `token`.
