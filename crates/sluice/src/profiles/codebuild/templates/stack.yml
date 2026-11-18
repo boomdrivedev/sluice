@@ -1,0 +1,556 @@
+# Written by `sluice init codebuild`, sluice {{version}} (record 0119): a
+# CodeBuild pool for {{repository}}. Each system's run project runs a
+# claimed run's checks on a reserved-capacity fleet of that system and
+# holds no key; a run build's end starts the sign project, which runs none
+# of the combination's code, signs the keys its tree bears out with the
+# KMS key only its role may use, and records the run's end. The lead role
+# may start the run projects with a claim and nothing else.
+# `sluice init codebuild --force` writes it again.
+AWSTemplateFormatVersion: "2010-09-09"
+Description: sluice's CodeBuild pool for {{repository}}, written by sluice {{version}}
+Parameters:
+  LeadPrincipal:
+    Type: String
+    Description: The ARN of the principal the hosts that lead a branch on the pool reach AWS as, which may assume the lead role
+  AppId:
+    Type: String
+    Description: The id of sluice's GitHub App, whose key the sign build records the run's end with
+  BaseCapacity:
+    Type: Number
+    Default: 1
+    MinValue: 1
+    Description: The instances each fleet keeps warm, sized from the trial's run times and waiting
+  MaxCapacity:
+    Type: Number
+    Default: 4
+    MinValue: 1
+    Description: The most instances each fleet grows to, the branch's parallel
+  ComputeType:
+    Type: String
+    Default: BUILD_GENERAL1_MEDIUM
+    Description: Each fleet's instances' compute type
+  RunTimeout:
+    Type: Number
+    Default: 90
+    MinValue: 5
+    Description: The minutes a run build may take, longer than the branch's timeout
+  HandOverDays:
+    Type: Number
+    Default: 14
+    MinValue: 1
+    Description: The days a run build's hand-over is kept
+Resources:
+  HandOver:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault:
+              SSEAlgorithm: AES256
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+      LifecycleConfiguration:
+        Rules:
+          - Id: expire-hand-overs
+            Status: Enabled
+            ExpirationInDays:
+              Ref: HandOverDays
+  SignKey:
+    Type: AWS::KMS::Key
+    Properties:
+      Description: The key sluice's sign build signs a CodeBuild pool's runs with
+      KeySpec: ECC_NIST_P256
+      KeyUsage: SIGN_VERIFY
+      KeyPolicy:
+        Version: "2012-10-17"
+        Statement:
+          - Sid: TheAccountKeepsTheKey
+            Effect: Allow
+            Principal:
+              AWS:
+                Fn::Sub: arn:${AWS::Partition}:iam::${AWS::AccountId}:root
+            Action:
+              - kms:Create*
+              - kms:Describe*
+              - kms:Enable*
+              - kms:List*
+              - kms:Put*
+              - kms:Update*
+              - kms:Revoke*
+              - kms:Disable*
+              - kms:Get*
+              - kms:Delete*
+              - kms:TagResource
+              - kms:UntagResource
+              - kms:ScheduleKeyDeletion
+              - kms:CancelKeyDeletion
+            Resource: "*"
+          - Sid: OnlyTheSignBuildSigns
+            Effect: Allow
+            Principal:
+              AWS:
+                Fn::GetAtt: [SignRole, Arn]
+            Action: kms:Sign
+            Resource: "*"
+            Condition:
+              StringEquals:
+                kms:SigningAlgorithm: ECDSA_SHA_256
+                kms:MessageType: DIGEST
+  SignKeyAlias:
+    Type: AWS::KMS::Alias
+    Properties:
+      AliasName:
+        Fn::Sub: alias/${AWS::StackName}-sign
+      TargetKeyId:
+        Ref: SignKey
+  AppKey:
+    Type: AWS::SecretsManager::Secret
+    Properties:
+      Name:
+        Fn::Sub: ${AWS::StackName}-app-key
+      Description: The private key of sluice's GitHub App, which only the sign build reads; fill it after the stack is deployed
+  RunRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: codebuild.amazonaws.com
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: hand-over
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action:
+                  - logs:CreateLogGroup
+                  - logs:CreateLogStream
+                  - logs:PutLogEvents
+                Resource:
+                  Fn::Sub: arn:${AWS::Partition}:logs:${AWS::Region}:${AWS::AccountId}:log-group:/aws/codebuild/${AWS::StackName}-run-*
+              - Effect: Allow
+                Action: s3:PutObject
+                Resource:
+                  Fn::Sub: ${HandOver.Arn}/*
+  SignRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: codebuild.amazonaws.com
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: sign
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action:
+                  - logs:CreateLogGroup
+                  - logs:CreateLogStream
+                  - logs:PutLogEvents
+                Resource:
+                  Fn::Sub: arn:${AWS::Partition}:logs:${AWS::Region}:${AWS::AccountId}:log-group:/aws/codebuild/${AWS::StackName}-sign*
+              - Effect: Allow
+                Action: codebuild:BatchGetBuilds
+                Resource:
+                  Fn::Sub: arn:${AWS::Partition}:codebuild:${AWS::Region}:${AWS::AccountId}:project/${AWS::StackName}-run-*
+              - Effect: Allow
+                Action: s3:GetObject
+                Resource:
+                  Fn::Sub: ${HandOver.Arn}/*
+              - Effect: Allow
+                Action: secretsmanager:GetSecretValue
+                Resource:
+                  Ref: AppKey
+  # Apart from the role, which the key's policy names.
+  SignWithTheKey:
+    Type: AWS::IAM::RolePolicy
+    Properties:
+      RoleName:
+        Ref: SignRole
+      PolicyName: sign-with-the-key
+      PolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Action: kms:Sign
+            Resource:
+              Fn::GetAtt: [SignKey, Arn]
+            Condition:
+              StringEquals:
+                kms:SigningAlgorithm: ECDSA_SHA_256
+                kms:MessageType: DIGEST
+  EventsRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: events.amazonaws.com
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: start-the-sign-build
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action: codebuild:StartBuild
+                Resource:
+                  Fn::GetAtt: [Sign, Arn]
+  LeadRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              AWS:
+                Ref: LeadPrincipal
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: lead
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Sid: StartARunBuild
+                Effect: Allow
+                Action: codebuild:StartBuild
+                Resource:
+                  Fn::Sub: arn:${AWS::Partition}:codebuild:${AWS::Region}:${AWS::AccountId}:project/${AWS::StackName}-run-*
+              - Sid: WithNoVariableButTheClaims
+                Effect: Deny
+                Action: codebuild:StartBuild
+                Resource: "*"
+                Condition:
+                  ForAnyValue:StringNotEquals:
+                    codebuild:environment.environmentVariables.name:
+                      - SLUICE_CLAIM
+                      - SLUICE_BRANCH
+                      - SLUICE_COMBINATION
+                      - SLUICE_SYSTEM
+                      - SLUICE_READ_TOKEN
+              # One statement for each override CodeBuild gives a condition
+              # key for: a start that carries any of them is refused.
+              - Sid: NoBuildspec
+                Effect: Deny
+                Action: codebuild:StartBuild
+                Resource: "*"
+                Condition:
+                  "Null":
+                    codebuild:source.buildspec: "false"
+              - Sid: NoSourceLocation
+                Effect: Deny
+                Action: codebuild:StartBuild
+                Resource: "*"
+                Condition:
+                  "Null":
+                    codebuild:source.location: "false"
+              - Sid: NoImage
+                Effect: Deny
+                Action: codebuild:StartBuild
+                Resource: "*"
+                Condition:
+                  "Null":
+                    codebuild:environment.image: "false"
+              - Sid: NoImagePullCredentials
+                Effect: Deny
+                Action: codebuild:StartBuild
+                Resource: "*"
+                Condition:
+                  "Null":
+                    codebuild:environment.imagePullCredentialsType: "false"
+              - Sid: NoEnvironmentType
+                Effect: Deny
+                Action: codebuild:StartBuild
+                Resource: "*"
+                Condition:
+                  "Null":
+                    codebuild:environment.type: "false"
+              - Sid: NoComputeType
+                Effect: Deny
+                Action: codebuild:StartBuild
+                Resource: "*"
+                Condition:
+                  "Null":
+                    codebuild:environment.computeType: "false"
+              - Sid: NoFleet
+                Effect: Deny
+                Action: codebuild:StartBuild
+                Resource: "*"
+                Condition:
+                  "Null":
+                    codebuild:environment.fleet.fleetArn: "false"
+              - Sid: NoPrivilegedMode
+                Effect: Deny
+                Action: codebuild:StartBuild
+                Resource: "*"
+                Condition:
+                  "Null":
+                    codebuild:environment.privilegedMode: "false"
+              - Sid: NoServiceRole
+                Effect: Deny
+                Action: codebuild:StartBuild
+                Resource: "*"
+                Condition:
+                  "Null":
+                    codebuild:serviceRole: "false"
+              - Sid: NoArtifacts
+                Effect: Deny
+                Action: codebuild:StartBuild
+                Resource: "*"
+                Condition:
+                  "Null":
+                    codebuild:artifacts.location: "false"
+              - Sid: NoArtifactsType
+                Effect: Deny
+                Action: codebuild:StartBuild
+                Resource: "*"
+                Condition:
+                  "Null":
+                    codebuild:artifacts.type: "false"
+              - Sid: NoCache
+                Effect: Deny
+                Action: codebuild:StartBuild
+                Resource: "*"
+                Condition:
+                  "Null":
+                    codebuild:cache.type: "false"
+              - Sid: NoCacheLocation
+                Effect: Deny
+                Action: codebuild:StartBuild
+                Resource: "*"
+                Condition:
+                  "Null":
+                    codebuild:cache.location: "false"
+              - Sid: NoLogs
+                Effect: Deny
+                Action: codebuild:StartBuild
+                Resource: "*"
+                Condition:
+                  "Null":
+                    codebuild:logsConfig.cloudWatchLogs.status: "false"
+              - Sid: NoS3Logs
+                Effect: Deny
+                Action: codebuild:StartBuild
+                Resource: "*"
+                Condition:
+                  "Null":
+                    codebuild:logsConfig.s3Logs.location: "false"
+              - Sid: NoSecondarySources
+                Effect: Deny
+                Action: codebuild:StartBuild
+                Resource: "*"
+                Condition:
+                  "Null":
+                    codebuild:secondarySources.location: "false"
+              - Sid: ReadTheBuilds
+                Effect: Allow
+                Action:
+                  - codebuild:BatchGetBuilds
+                  - codebuild:ListBuildsForProject
+                Resource:
+                  - Fn::Sub: arn:${AWS::Partition}:codebuild:${AWS::Region}:${AWS::AccountId}:project/${AWS::StackName}-run-*
+                  - Fn::GetAtt: [Sign, Arn]
+              - Sid: ReadThePool
+                Effect: Allow
+                Action:
+                  - codebuild:BatchGetProjects
+                  - codebuild:BatchGetFleets
+                Resource:
+                  - Fn::Sub: arn:${AWS::Partition}:codebuild:${AWS::Region}:${AWS::AccountId}:project/${AWS::StackName}-*
+                  - Fn::Sub: arn:${AWS::Partition}:codebuild:${AWS::Region}:${AWS::AccountId}:fleet/${AWS::StackName}-*
+  # system linux-x64
+  FleetLinuxX64:
+    Type: AWS::CodeBuild::Fleet
+    Properties:
+      Name:
+        Fn::Sub: ${AWS::StackName}-linux-x64
+      EnvironmentType: LINUX_EC2
+      ComputeType:
+        Ref: ComputeType
+      BaseCapacity:
+        Ref: BaseCapacity
+      OverflowBehavior: QUEUE
+      ScalingConfiguration:
+        ScalingType: TARGET_TRACKING_SCALING
+        MaxCapacity:
+          Ref: MaxCapacity
+        TargetTrackingScalingConfigs:
+          - MetricType: FLEET_UTILIZATION_RATE
+            TargetValue: 80
+  RunLinuxX64:
+    Type: AWS::CodeBuild::Project
+    Properties:
+      Name:
+        Fn::Sub: ${AWS::StackName}-run-linux-x64
+      Description: A claimed run's checks on linux-x64, holding no key
+      ServiceRole:
+        Fn::GetAtt: [RunRole, Arn]
+      TimeoutInMinutes:
+        Ref: RunTimeout
+      Environment:
+        Type: LINUX_EC2
+        ComputeType:
+          Ref: ComputeType
+        Image: aws/codebuild/ami/amazonlinux-x86_64-base:latest
+        Fleet:
+          FleetArn:
+            Fn::GetAtt: [FleetLinuxX64, Arn]
+      Cache:
+        Type: LOCAL
+        Modes:
+          - LOCAL_DOCKER_LAYER_CACHE
+          - LOCAL_CUSTOM_CACHE
+      Artifacts:
+        Type: S3
+        Location:
+          Ref: HandOver
+        Packaging: ZIP
+        NamespaceType: BUILD_ID
+        Name: sluice-run.zip
+      Source:
+        Type: NO_SOURCE
+        BuildSpec: |
+          version: 0.2
+          env:
+            shell: bash
+            variables:
+              SLUICE_VERSION: "{{version}}"
+              SLUICE_REPOSITORY: "{{repository}}"
+          phases:
+            build:
+              commands:
+                - |
+                  set -euo pipefail
+                  # An instance runs one build at a time: whatever an
+                  # earlier build left running ends, its containers first,
+                  # and its sluice scratch and state go; images stay.
+                  if command -v docker >/dev/null; then
+                    docker ps --all --quiet | xargs --no-run-if-empty docker rm --force
+                  fi
+                  rm -rf "/tmp/sluice-$(id -u)" "${XDG_STATE_HOME:-$HOME/.local/state}/sluice" "$CODEBUILD_SRC_DIR/sluice-run"
+                - |
+                  set -eo pipefail
+                  if ! command -v nix >/dev/null; then
+                    sh <(curl --proto '=https' --tlsv1.2 -fsSL https://nixos.org/nix/install) --daemon --yes
+                  fi
+                  . /nix/var/nix/profiles/default/etc/profile.d/nix-daemon.sh
+                  if [ "$(sluice --version 2>/dev/null)" != "sluice $SLUICE_VERSION" ]; then
+                    mkdir -p "$HOME/.local/bin"
+                    curl -fsSL "https://github.com/agentplot/sluice/releases/download/v$SLUICE_VERSION/sluice-x86_64-linux.tar.gz" \
+                      | tar -xz -C "$HOME/.local/bin"
+                  fi
+                  export PATH="$HOME/.local/bin:$PATH"
+                  git clone --quiet --filter=blob:none \
+                    "https://x-access-token:$SLUICE_READ_TOKEN@github.com/$SLUICE_REPOSITORY.git" repository
+                  cd repository
+                  sluice job run --claim "$SLUICE_CLAIM" --branch "$SLUICE_BRANCH" --out "$CODEBUILD_SRC_DIR/sluice-run"
+          artifacts:
+            base-directory: sluice-run
+            files:
+              - "**/*"
+  # end system
+  Sign:
+    Type: AWS::CodeBuild::Project
+    Properties:
+      Name:
+        Fn::Sub: ${AWS::StackName}-sign
+      Description: A run build's signature and its run's end, running none of the combination's code
+      ServiceRole:
+        Fn::GetAtt: [SignRole, Arn]
+      TimeoutInMinutes: 20
+      Environment:
+        Type: LINUX_CONTAINER
+        ComputeType: BUILD_GENERAL1_SMALL
+        Image: aws/codebuild/amazonlinux-x86_64-standard:5.0
+        EnvironmentVariables:
+          - Name: SLUICE_APP_ID
+            Type: PLAINTEXT
+            Value:
+              Ref: AppId
+          - Name: SLUICE_APP_KEY
+            Type: SECRETS_MANAGER
+            Value:
+              Ref: AppKey
+      Artifacts:
+        Type: NO_ARTIFACTS
+      Source:
+        Type: NO_SOURCE
+        BuildSpec: |
+          version: 0.2
+          env:
+            shell: bash
+            variables:
+              SLUICE_VERSION: "{{version}}"
+              SLUICE_REPOSITORY: "{{repository}}"
+          phases:
+            build:
+              commands:
+                - |
+                  set -euo pipefail
+                  mkdir -p "$HOME/.local/bin"
+                  curl -fsSL "https://github.com/agentplot/sluice/releases/download/v$SLUICE_VERSION/sluice-x86_64-linux.tar.gz" \
+                    | tar -xz -C "$HOME/.local/bin"
+                  export PATH="$HOME/.local/bin:$PATH"
+                  git init --quiet repository
+                  git -C repository remote add origin "https://github.com/$SLUICE_REPOSITORY.git"
+                  cd repository
+                  sluice job sign --build "$SLUICE_RUN_BUILD" --out "$CODEBUILD_SRC_DIR/sign"
+                  sluice job record --build "$SLUICE_RUN_BUILD" --from "$CODEBUILD_SRC_DIR/sign"
+  RunEnded:
+    Type: AWS::Events::Rule
+    Properties:
+      Description: A run build's end, but a stop, starts the sign build of it
+      EventPattern:
+        source:
+          - aws.codebuild
+        detail-type:
+          - CodeBuild Build State Change
+        detail:
+          build-status:
+            - SUCCEEDED
+            - FAILED
+            - FAULT
+            - TIMED_OUT
+          project-name:
+            - prefix:
+                Fn::Sub: ${AWS::StackName}-run-
+      Targets:
+        - Id: sign
+          Arn:
+            Fn::GetAtt: [Sign, Arn]
+          RoleArn:
+            Fn::GetAtt: [EventsRole, Arn]
+          InputTransformer:
+            InputPathsMap:
+              build: $.detail.build-id
+            InputTemplate: '{"environmentVariablesOverride": [{"name": "SLUICE_RUN_BUILD", "value": <build>, "type": "PLAINTEXT"}]}'
+Outputs:
+  SignKey:
+    Description: The key's ARN, which `sluice init codebuild --stack` names in the policy
+    Value:
+      Fn::GetAtt: [SignKey, Arn]
+  SignProject:
+    Value:
+      Ref: Sign
+  LeadRole:
+    Description: The role the hosts that lead a branch on the pool assume, as their [aws] profile names it
+    Value:
+      Fn::GetAtt: [LeadRole, Arn]
+  AppKeySecret:
+    Description: The secret to fill with the app's private key
+    Value:
+      Ref: AppKey

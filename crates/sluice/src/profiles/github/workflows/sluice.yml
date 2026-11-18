@@ -1,0 +1,184 @@
+# Written by `sluice init actions`, sluice {{version}} (record 0119): one
+# run of a combination that no standing host takes, on the runner its
+# system names, then its signature. The run job holds no key, no identity
+# token and no secret; the sign job runs none of the combination's code,
+# signs only the keys its tree bears out with the job's own identity, and
+# records the run's end. A run of `sluice-pr` on a pull request's head is
+# signed here too. `sluice init actions --force` writes it again.
+name: sluice
+run-name: sluice ${{ inputs.claim || github.event.workflow_run.head_sha }}
+on:
+  workflow_dispatch:
+    inputs:
+      claim:
+        description: The run's claim, pool/<pool>/<n>
+        required: true
+      branch:
+        description: The branch the combination is of
+        required: true
+      combination:
+        description: The combination's revision
+        required: true
+      system:
+        description: The run's system, as the policy names it
+        required: false
+        default: ""
+      runner:
+        description: The runner the pool names for the system
+        required: true
+  workflow_run:
+    workflows: [sluice-pr]
+    types: [completed]
+permissions: {}
+jobs:
+  run:
+    if: github.event_name == 'workflow_dispatch'
+    runs-on: ${{ inputs.runner }}
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
+      - uses: cachix/install-nix-action@3dc140bfc76c49fbd4dd958429132e3746bcb086 # v31
+      - name: Install sluice
+        run: |
+          case "$(uname -sm)" in
+            "Linux x86_64") system=x86_64-linux ;;
+            "Linux aarch64") system=aarch64-linux ;;
+            "Darwin arm64") system=aarch64-darwin ;;
+            *) echo "no release of sluice runs on $(uname -sm)" >&2; exit 1 ;;
+          esac
+          mkdir -p "$RUNNER_TEMP/bin"
+          curl -fsSL "https://github.com/agentplot/sluice/releases/download/v${SLUICE_VERSION}/sluice-${system}.tar.gz" \
+            | tar -xz -C "$RUNNER_TEMP/bin"
+          echo "$RUNNER_TEMP/bin" >> "$GITHUB_PATH"
+        env:
+          SLUICE_VERSION: "{{version}}"
+      - name: Run the claimed run
+        run: sluice job run --claim "$CLAIM" --branch "$BRANCH" --out "$RUNNER_TEMP/sluice-run"
+        env:
+          CLAIM: ${{ inputs.claim }}
+          BRANCH: ${{ inputs.branch }}
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        if: always()
+        with:
+          name: sluice-run
+          path: ${{ runner.temp }}/sluice-run
+          if-no-files-found: ignore
+  sign:
+    needs: run
+    if: ${{ !cancelled() && github.event_name == 'workflow_dispatch' }}
+    runs-on: ubuntu-latest
+    environment: sluice
+    permissions:
+      contents: read
+      actions: read
+      id-token: write
+      attestations: write
+    steps:
+      - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
+      - name: Install sluice
+        run: |
+          mkdir -p "$RUNNER_TEMP/bin"
+          curl -fsSL "https://github.com/agentplot/sluice/releases/download/v${SLUICE_VERSION}/sluice-x86_64-linux.tar.gz" \
+            | tar -xz -C "$RUNNER_TEMP/bin"
+          echo "$RUNNER_TEMP/bin" >> "$GITHUB_PATH"
+        env:
+          SLUICE_VERSION: "{{version}}"
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        continue-on-error: true
+        with:
+          name: sluice-run
+          path: ${{ runner.temp }}/sluice-run
+      - name: Keep the keys the combination's tree bears out
+        id: sign
+        run: |
+          sluice job sign --claim "$CLAIM" --branch "$BRANCH" \
+            --from "$RUNNER_TEMP/sluice-run" --out "$RUNNER_TEMP/sluice-sign"
+          if [ -s "$RUNNER_TEMP/sluice-sign/subjects" ]; then
+            echo "subjects=true" >> "$GITHUB_OUTPUT"
+            echo "predicate-type=$(cat "$RUNNER_TEMP/sluice-sign/predicate-type")" >> "$GITHUB_OUTPUT"
+          fi
+        env:
+          CLAIM: ${{ inputs.claim }}
+          BRANCH: ${{ inputs.branch }}
+      - uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4.2.2
+        id: attest
+        if: steps.sign.outputs.subjects == 'true'
+        with:
+          subject-checksums: ${{ runner.temp }}/sluice-sign/subjects
+          predicate-type: ${{ steps.sign.outputs.predicate-type }}
+          predicate-path: ${{ runner.temp }}/sluice-sign/predicate.json
+          show-summary: false
+      - name: Record the run's end
+        run: |
+          if [ -n "$BUNDLE" ]; then
+            set -- --bundle "$BUNDLE"
+          fi
+          sluice job record --claim "$CLAIM" --branch "$BRANCH" "$@" --from "$RUNNER_TEMP/sluice-run"
+        env:
+          CLAIM: ${{ inputs.claim }}
+          BRANCH: ${{ inputs.branch }}
+          BUNDLE: ${{ steps.attest.outputs.bundle-path }}
+          SLUICE_APP_ID: ${{ vars.SLUICE_APP_ID }}
+          SLUICE_APP_KEY: ${{ secrets.SLUICE_APP_KEY }}
+  sign-head:
+    if: github.event_name == 'workflow_run'
+    strategy:
+      fail-fast: false
+      matrix:
+        system: [linux-x64] # the pool's systems
+    runs-on: ubuntu-latest
+    environment: sluice
+    permissions:
+      contents: read
+      actions: read
+      id-token: write
+      attestations: write
+    steps:
+      - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
+      - name: Install sluice
+        run: |
+          mkdir -p "$RUNNER_TEMP/bin"
+          curl -fsSL "https://github.com/agentplot/sluice/releases/download/v${SLUICE_VERSION}/sluice-x86_64-linux.tar.gz" \
+            | tar -xz -C "$RUNNER_TEMP/bin"
+          echo "$RUNNER_TEMP/bin" >> "$GITHUB_PATH"
+        env:
+          SLUICE_VERSION: "{{version}}"
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        continue-on-error: true
+        with:
+          name: sluice-run-${{ matrix.system }}
+          path: ${{ runner.temp }}/sluice-run
+          run-id: ${{ github.event.workflow_run.id }}
+          github-token: ${{ github.token }}
+      - name: Keep the keys the head's tree bears out
+        id: sign
+        run: |
+          git fetch --no-tags --depth=1 origin "$HEAD"
+          sluice job sign --head "$HEAD" --branch "$BASE" --system "$SYSTEM" \
+            --from "$RUNNER_TEMP/sluice-run" --out "$RUNNER_TEMP/sluice-sign"
+          if [ -s "$RUNNER_TEMP/sluice-sign/subjects" ]; then
+            echo "subjects=true" >> "$GITHUB_OUTPUT"
+            echo "predicate-type=$(cat "$RUNNER_TEMP/sluice-sign/predicate-type")" >> "$GITHUB_OUTPUT"
+          fi
+        env:
+          HEAD: ${{ github.event.workflow_run.head_sha }}
+          BASE: ${{ github.event.workflow_run.pull_requests[0].base.ref }}
+          SYSTEM: ${{ matrix.system }}
+      - uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4.2.2
+        id: attest
+        if: steps.sign.outputs.subjects == 'true'
+        with:
+          subject-checksums: ${{ runner.temp }}/sluice-sign/subjects
+          predicate-type: ${{ steps.sign.outputs.predicate-type }}
+          predicate-path: ${{ runner.temp }}/sluice-sign/predicate.json
+          show-summary: false
+      - name: Record the head's signed results
+        if: steps.sign.outputs.subjects == 'true'
+        run: sluice job record --head "$HEAD" --branch "$BASE" --bundle "$BUNDLE"
+        env:
+          HEAD: ${{ github.event.workflow_run.head_sha }}
+          BASE: ${{ github.event.workflow_run.pull_requests[0].base.ref }}
+          BUNDLE: ${{ steps.attest.outputs.bundle-path }}
+          SLUICE_APP_ID: ${{ vars.SLUICE_APP_ID }}
+          SLUICE_APP_KEY: ${{ secrets.SLUICE_APP_KEY }}

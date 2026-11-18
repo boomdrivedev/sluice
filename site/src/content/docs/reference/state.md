@@ -17,6 +17,8 @@ readable with plain tools whether or not sluice is running.
   feature/concurrent-units/
     version            57: bumped on every write, so two rounds never both write
     branch.json        the queue's own state, one document
+    home.json          where the queue lives: open here, moving, or closed
+                       with where it went
     submissions/14.json
                        a submission still in the queue, or blamed or conflicting
     .finished/12.json  a submission landed or withdrawn, moved here unchanged
@@ -33,10 +35,14 @@ readable with plain tools whether or not sluice is running.
                        while this host's rounds can't read the branch's remote:
                        what they couldn't read, since when, for how many rounds,
                        and which of it the log holds yet
+  .intake/main.json    while this host can't take in a branch's pull requests:
+                       what its intake asked of GitHub and the words it was
+                       refused with, since when, for how many intakes, and
+                       which of it the log holds yet
   .places/<checkout>.json
-                       a checkout's record: its kind, path, branch, ports, the
-                       block of ports it holds on the host and, for a
-                       worktree, when its last run started and how it ended
+                       a checkout's record: its kind, path, branch, the ports
+                       it holds on the host, each name and its port, and, for
+                       a worktree, when its last run started and how it ended
   .places/<checkout>/  a candidate's checkout, made for its run and removed after
   .previews/<preview>.json
                        a preview's record: its branch, revision, ports, names,
@@ -129,39 +135,41 @@ every repository on the host and never pushed:
                        ready a pull request into the branch, so the next
                        round asks at once
   forge/follows/<owner>/<repository>/<branch>.json
-                       on a host that doesn't take the branch's pull
-                       requests in, each one it follows: one a submit on
-                       the host opened, updated or marked ready, one it
-                       handed over, or one a wait or status asked about,
-                       with what GitHub last said of it and of sluice's
-                       check on its head, and when
+                       on a host that doesn't keep the branch, which
+                       takes its pull requests in, each one it follows:
+                       one a submit on the host opened, updated or marked
+                       ready, or one a wait or status asked about, with
+                       what GitHub last said of it and of sluice's check
+                       on its head, and when
   forge/follows/<owner>/<repository>/<branch>.lock
                        held while that file is written
-  forge/intake/<owner>/<repository>/<branch>.json
-                       the branch's intake mark as this host last saw it on
-                       the remote, when it first saw it there, and when it
-                       last pushed it
-  forge/intake/<owner>/<repository>/<branch>.waits/<process>.hold
-                       held by each wait on the host that reads the
-                       branch's pull requests, for as long as it runs: the
-                       last of them to end removes the mark
-  forge/intake/<owner>/<repository>/<branch>.waits/.lock
-                       held while a wait's hold is made or let go
-  ports/<n>            a block of ports, naming the checkout that holds it
+  host/lock            held by sluice's host process for as long as it runs
+  host/start.lock      held by a command starting the host process, and by
+                       the process as it decides to end or hands over
+  host/version         the host process's version, pid and when it started
+  host/log             what the host process says: its passes, the branches
+                       it passed by, its warnings; the process before's kept
+                       as host/log.1
+  host/repositories    the repositories the host process finds again when it
+                       starts: each repository's git directory, listed by the
+                       first command of sluice's that found it has sluice
+  ports/.lock          held while a port is held or let go
+  ports/held/<port>    a port a checkout holds, naming the checkout's record
   readers/<repository>.lock
-                       held by the repository's `sluice run`, or else by the
-                       first watch or wait of it, for as long as it runs
+                       held by sluice's host process while it holds the
+                       repository, or by a watch or wait of a sluice from
+                       before it
   readers/<repository>.json
                        the overview it last read, as `sluice overview --json`
-                       prints it, for every other watch and wait to follow
+                       prints it, for every watch and wait to follow
   readers/<repository>.driver
-                       held by the repository's `sluice run` for as long as
-                       it runs
+                       held by sluice's host process while it holds the
+                       repository
   readers/<repository>.version
                        the version of sluice that holds the lock
   readers/<repository>.lease
-                       held by a watch of a newer sluice until it takes over
-                       the reading
+                       held by sluice's host process while it takes the
+                       reading over from an older sluice's watch or wait
   running/.lock        held while a run is counted against the bound
   running/<run>.json   each run going on the host, every repository's:
                        a submission's or an agent's, its repository, its
@@ -176,6 +184,16 @@ every repository on the host and never pushed:
                        where its output is, the command it runs and how far
                        its tasks have got
 ```
+
+sluice's host process answers commands on a socket in the user's own
+short directory beside the checkouts' scratch, `/tmp/sluice-<uid>/` as
+macOS resolves it, named `host-` and ten hex digits of the SHA-1 of the
+state folder's resolved path, so each state folder has its own process
+and the socket's path stays within the 104 bytes macOS allows. The
+process removes a socket a process before it left, and its own as it
+ends. One process runs for each user: a second one started while the
+first holds `host/lock` ends at once. Removing `host/`, or the whole
+state folder, ends the process at its next look.
 
 A checkout's name is written as one file name, each `/` of it as `%2F`
 (or `+2F` for a directory a test works in), so a worktree's whole path
@@ -204,50 +222,58 @@ this host takes it in. Nothing in `forge/` holds a token,
 and any file in it may be removed at any time: sluice then asks GitHub
 as if it had kept nothing.
 
-A block of ports is free again when the checkout named in it is gone.
+A port is free again when the checkout whose record its file names is
+gone, and a release lets go of each port its checkout's record names. A
+checkout's ports are taken when it is made, or a worktree's at its first
+run, and read from its record ever after, whatever its policy lists
+later. Files `ports/<n>`, which an earlier sluice held, are read by
+nothing and may be removed once no earlier sluice runs on the host.
 A file in `running/` counts against the bound while its `.hold` is held
-or its run is going. One whose run has ended, or whose starter stopped
-before the run began, holds nothing: the next run that starts removes
-it. A file in `sessions/` is there while its agent's run is going, and
+or its run is going. sluice's host process writes one for each run's
+room from the count that chose the run to its start, and holds its
+`.hold` until the run is under way; a file of a sluice from before the
+host process counts the same, so the two count each other. One whose
+run has ended, or whose starter stopped before the run began, holds
+nothing: the next run that starts removes it. A file in `sessions/` is there while its agent's run is going, and
 its `sluice exec` rewrites it as each task ends, for `sluice overview`
 to show; nothing that decides a result reads it.
 
 One process on the host reads a repository's queues for every watch and
-wait of it. Where `sluice run` is running in the repository, it is that
-process. It holds the `.driver` file's lock and the `readers/` lock, and
-writes the overview file beside them after each of its passes, whether
-or not anything is queued. Every wait then follows it and runs no rounds
-of its own, and a watch or wait that held the lock when `sluice run`
-started lets it go within its next look. A second `sluice run` of the
-repository holds neither lock and runs nothing until the first stops.
-Where no `sluice run` is running, the first `sluice overview --json
---watch`, `sluice wait` or waiting `sluice submit` of the repository
-holds the `readers/` lock. The reader keeps the overview in the file
-beside it, rewritten whole each time it changes, so nothing reads half
-of one. A read of the queues it couldn't make goes in the file in its
-place, as the error document `sluice overview --json` prints when it
-fails. It holds the words the read was refused with, and the reader
-reads again at its next look. Where the repository has no sluice, the
-file holds the watch's last document, the overview with `"set_up":
-false`, and the watch ends. The next watch or wait to hold the lock
-removes that file before it reads, so nothing that starts once sluice is
-set up ends on it. Every other watch of the repository on the host
-follows that file and reads no state of its own. Every other wait takes
-its submission's progress from that file and, where no `sluice run` is
-running, still runs sluice's rounds, which read the branch's state as
-they always do. It reads its submission's own file once, when the
-submission leaves the queue, to say how it ended. When the one holding
-the lock stops, however it stops, the lock goes with it: the next watch
-or wait takes over within its next look, a second for a watch, three for
-a wait. A watch of a newer sluice than the watch or wait holding the
-lock takes over from it within a few seconds. It holds the lease, and
-the older one lets go at its next look and follows it from then on; the
-newer one reads from its own next look. A sluice from before the lease
-takes no part: it names no version and never looks at the lease, so it
-reads until its watch or wait ends, and newer watches follow it
-meanwhile. The file names take the repository's git directory, which all
-its worktrees share, written as one file name as a checkout's is.
-`sluice overview` alone always reads the state itself.
+wait of it: sluice's host process, for every repository it holds. It
+holds the repository's `.driver` file's lock and its `readers/` lock,
+and writes the overview file beside them after each of its passes,
+whether or not anything is queued. A watch or wait that finds no host
+process answering starts it, and follows the file; none takes a lock or
+a lease, and none reads the queues itself. The host process keeps the
+overview in the file, rewritten whole each time it changes, so nothing
+reads half of one. A read of the queues it couldn't make goes in the
+file in its place, as the error document `sluice overview --json`
+prints when it fails. It holds the words the read was refused with, and
+the host process reads again at its next pass. Where the repository has
+no sluice, the file holds the overview with `"set_up": false`, every
+watch ends on it, and the host process holds the repository no longer.
+A host process that takes the lock removes that file before it reads, so
+nothing that starts once sluice is set up ends on it. A wait takes its
+submission's progress from that file, and reads its submission's own
+file once, when the submission leaves the queue, to say how it ended.
+When the host process stops, however it stops, the lock goes with it,
+and every watch and wait starts it again at its next look, a second for
+a watch, three for a wait, following the last file until the new one
+writes. Where a watch or wait of a sluice from before the host process
+holds the lock, the host process takes its lease; the older one lets go
+at its next look and follows from then on, and the host process reads
+from its own next pass. A sluice from before the lease takes no part:
+it names no version and never looks at the lease, so it reads until its
+watch or wait ends, and the host process follows it meanwhile. Where an
+older `sluice run` holds the `.driver` file's lock, the host process runs
+no round of that repository and follows its file until it ends. The file
+names take the repository's git directory, which all its worktrees
+share, written as one file name as a checkout's is. A status, a
+one-shot `sluice overview`, `sluice` with no command and a forecast
+read none of these files' locks: each asks the host process for a
+reading, starting it where none answers, and reads the state as the
+host holds it since, fetching nothing of its own
+([one-shot reads](/sluice/reference/commands/#one-shot-reads)).
 
 ## A branch whose state is on its remote
 
@@ -259,7 +285,7 @@ rest to go on:
 
 ```
 refs/sluice/state/<branch>       one commit: the branch's files above, branch.json,
-                                 submissions/, .finished/, log.jsonl,
+                                 home.json, submissions/, .finished/, log.jsonl,
                                  deliveries.jsonl and version, replaced on every write
 refs/sluice/runs/<signer>        each signer's signed results, only ever added to:
                                  <combination>/<system>/<n>.json, one run's results
@@ -285,7 +311,9 @@ logs it kept, is in `.git/sluice-remote/<remote>/`. A result moon
 replayed is kept there too: a replay is nobody's observation, so nobody
 signs it. Beside them, `refused/<branch>.json` holds what this host's
 rounds couldn't read of the remote while that lasts, as `.refused/` does
-for a branch whose state is on the host.
+for a branch whose state is on the host, and `intake/<branch>.json` what
+this host couldn't take in of the branch's pull requests on GitHub, as
+`.intake/` does.
 
 Read any of it with git, on any host:
 
@@ -294,6 +322,19 @@ git fetch origin '+refs/sluice/*:refs/sluice-fetched/origin/*'
 git show refs/sluice-fetched/origin/state/main:branch.json
 git ls-tree -r refs/sluice-fetched/origin/runs/box
 ```
+
+sluice's host process reads `results.jsonl` once for its life, each
+time from where it last read it, and the whole file again only where
+it shrank or was replaced. It reads each signer's ref as its last fetch
+brought it, checking each signed record's signature once. A command
+asks it for the results it needs, by a check's key, a combination or a
+task, and reads none of these itself.
+
+No landing, removal of a branch or release of a checkout takes a result
+out of `results.jsonl` or a signed record off a signer's ref. A result
+belongs to its check's key and its system, not to a branch, so a pass a
+removed branch recorded still counts for any branch whose tree gives
+that check the same key.
 
 A signed result is an [in-toto](https://in-toto.io) statement in a
 [DSSE](https://github.com/secure-systems-lab/dsse) envelope. Each test
@@ -308,6 +349,59 @@ run's. A host signs with the SSH key
 its [`[signing]`](/sluice/reference/configuration/#signing) names. sluice counts a result
 only once the signature checks against a signer the branch's policy
 names.
+
+## Where a branch's queue lives
+
+A branch's queue has one home: this host's own files, or its remote's
+refs. `home.json`, beside `branch.json` in each, says which, and every
+sluice process reads the branch where it says, whatever a later policy
+names:
+
+```json
+{
+  "schema": "sluice/home@1",
+  "at": "origin",
+  "chosen_at": "4f6fe55f9e",
+  "state": "open"
+}
+```
+
+`at` is `here` for this host's own files, or the remote's name.
+`chosen_at` is the revision whose policy chose it. A branch with no home
+anywhere gets one with its first write: on its remote where its policy
+names `[signers]` and a `remote` for it, in this host's own files
+otherwise. A host with no state of a branch finds its home on the
+remote, as the host process last fetched it.
+
+When a landing brings a policy naming another home, the next round
+writes the move: `state` becomes `moving`, with `moving` saying where
+to, the revision whose policy named it and since when. From then on no
+combination is formed or started; those under test go on and land. Once
+none is under test, the round carries every live submission to the new
+home, with its number and its state, and the outcomes still owed. The
+new home's `home.json` names where it came from in `came_from`, with
+each number as it was and as it is. The old one is `closed`, its
+`closed` naming the home that took the queue and each submission it
+carried; its finished submissions, its index and its log stay where
+they are. A move stopped between its writes is finished by the next
+round, carrying nothing twice. A landing that names the open home again
+before anything is carried ends the move.
+
+A carried submission keeps its number where the new home's branch holds
+none of that number, and the new home's count goes past it. One whose
+number the new home's branch already holds takes the next number there,
+and its record names the number it had in `was` and the home it came
+from in `carried_from`. `sluice status <n>` and `sluice wait <n>` on the
+host that held it follow it under the number it has now.
+
+When a branch on its remote stops naming `[signers]`, its queue comes
+home to each host's own files. The host that keeps it closes the remote
+home, `closed.to` being `here`, and carries what it submitted; every
+other host carries what it submitted the first time it runs a round of
+the branch, and the remote home's `closed.carried` names each submission
+with the host that took it. A submission whose host has not run sluice
+since stays readable in the closed home, and `sluice status <n>` says it
+waits for that host to take it home.
 
 ## A branch's own record
 
@@ -365,6 +459,12 @@ written as `<revision>`. `from` and `to` are the last refused write's,
 show those refused in the last day; read them there, since this form
 is sluice's own. The field is left out when it is empty.
 
+`kept`, on a branch whose state is on its remote, is when the host that
+keeps it last wrote its state, by that host's own clock. Every write it
+makes sets it, and while a run of the branch is claimed or under test it
+writes `kept` alone every half lease, so no other host takes the branch
+while it is alive. It is left out where no host keeps the branch.
+
 `proof_missing` holds, on a branch whose state is on its remote, each
 reason a host's runs kept no proof of a test that passed, while it
 stands, one for each host and reason: `[{"host": "build-1", "why": "it
@@ -374,6 +474,45 @@ manifests", "since": "2026-11-09T09:16:40Z", "runs": 3}]`. `since` is when the f
 counts that host's runs it touched. A reason leaves the list with its
 `proof-kept` event. No round, gate or landing reads it. The field is
 left out when it is empty, and an older sluice passes over it.
+
+## A combination and its runs
+
+`candidates` in `branch.json` holds each combination under test, with
+its `state`: `formed`, `testing`, `passed`, `failed`, `timed-out`, or
+`not-passed`, a combination one of whose runs no host or pool that
+could take it was there to take before its time limit. A `not-passed`
+combination blames no one and is formed again.
+
+Each combination's `runs` holds one run for each system it needs, and
+a run's state is written before anything acts on it, so a sluice that
+stops at any point leaves the next one what to do:
+
+- `open`, with `opened`, when it was opened. Its time limit counts from
+  `running`, never from here. `no_executor` is `true` while the leading
+  host last found no host or pool that could take it, so a status reads
+  it as waiting for a host of its system rather than for room.
+- `claimed`, with `claim`: `{"by": "build-1", "at":
+  "2026-11-16T09:16:40Z"}`, the host or pool's claim that holds it, and
+  `place`, the checkout it runs in. A pool's claim is `pool/<pool>/<n>`,
+  and it has `dispatched` once its job was asked for.
+- `running`, with `running`, when its tests started, read from the
+  run's own start, or, for a pool's run, from its run job's.
+- `ended`, with `ended`: when, and each check's `outcomes`, `passed`,
+  `failed`, `unproven` or `{"none": {"why": "..."}}`, with `why` where
+  it ended with checks undecided, `timed_out` where its time limit
+  ended it, and `untaken` where nothing could take it.
+- `closed`, with `closed`, once its checkout was released.
+
+A run that ended with checks undecided is followed by a run of those
+checks alone, whose `follows` names the run's number among the
+combination's runs.
+
+A landing the forge refused stays in `landing`, with `refused`:
+`{"words": "remote: error: GH013: Repository rule violations found for
+refs/heads/main.", "at": "2026-11-16T09:16:40Z"}`, the forge's words
+whole. Nothing is pushed or formed on the branch while it stands.
+`sluice push <branch>` pushes it again, and it is dropped once any of
+its submissions is withdrawn.
 
 ## A submission
 
@@ -400,9 +539,10 @@ left out when it is empty, and an older sluice passes over it.
 
 `state` is one of `queued`, `waiting` (behind the submissions in
 `after`), `testing`, `passed`, `landing`, `landed`, `failed`,
-`conflict` and `withdrawn`. These nine are stable: under
-`sluice/submission@1` none of them is renamed or removed, and none is
-added, so a script that reads `state`, such as an agent looping on
+`conflict`, `withdrawn` and `refused`, a submission whose landing the
+forge refused, held until it is pushed again or withdrawn. These ten
+are stable: under `sluice/submission@1` none of them is renamed or
+removed, so a script that reads `state`, such as an agent looping on
 `sluice wait --json`, can match all of them.
 
 `failed` lists each test that failed, with its `hash`, the key its
@@ -420,6 +560,11 @@ since it never ran:
   { "task": "root:integration", "failed_by": ["api:integration"] }
 ]
 ```
+
+A submission a move carried under another number has `was`, the number
+it had, and `carried_from`, the home it came from, `here` or a remote's
+name ([where a branch's queue lives](#where-a-branchs-queue-lives)).
+Both are left out otherwise.
 
 A test with neither `hash` nor `failed_by` was left without a result:
 skipped for another reason, never reached or cut off by the time limit.
@@ -545,14 +690,14 @@ To a branch with pull requests, the submission is the pull request's,
 from `pull/<n>` with `head` the branch.
 
 A withdrawn submission has `"withdrawn": { "by": "operator", "at":
-"2026-10-11T09:30:02Z" }`: who withdrew it, and when. A host that found
-another host taking its branch's pull requests in withdrew its own
-submissions of them. Such a submission's `withdrawn` also has
-`"handed_over_to": "build-2"`, that host. It holds no pull request:
-whichever host takes the pull requests in submits it again, and its log
-line names the host the same way. A submission an older sluice withdrew
-so has no `handed_over_to`, and its `by` reads `build-2 takes main's
-pull requests in`.
+"2026-10-11T09:30:02Z" }`: who withdrew it, and when. An older sluice
+withdrew a host's own submissions of its branch's pull requests when it
+found another host taking them in, a hand-over, and gave such a
+submission's `withdrawn`, and its log line, `"handed_over_to": "build-2"`,
+that host; one older still gave none, and its `by` reads `build-2 takes
+main's pull requests in`. sluice reads `handed_over_to` and no longer
+writes it. Such a submission holds no pull request: the host that keeps
+the branch submits it again at its latest commit.
 
 ## The log
 
@@ -571,7 +716,36 @@ run:
 
 `landing` is written before the branch moves and `landed` after, so a
 round that crashes between the two is finished correctly by the next
-one.
+one. A landing the forge refused is logged once, `forge_refused`, with
+the forge's words:
+
+```json
+{"schema":"sluice/log@1","event":"forge_refused","ids":[12],"words":"remote: error: GH013: Repository rule violations found for refs/heads/main."}
+```
+
+Each state a run is written in is logged with it, naming its
+combination and its system: `claimed` with the claim's holder as
+`host`, and `opened`, `running`, `ended`, with `why` where it ended
+with checks undecided, and `closed`, each with its number among the
+combination's runs:
+
+```json
+{"schema":"sluice/log@1","event":"opened","combination":"9ab3d07c11","system":"macos-arm64","run":1}
+{"schema":"sluice/log@1","event":"running","combination":"9ab3d07c11","system":"macos-arm64","run":1}
+{"schema":"sluice/log@1","event":"ended","combination":"9ab3d07c11","system":"macos-arm64","run":1}
+{"schema":"sluice/log@1","event":"closed","combination":"9ab3d07c11","system":"macos-arm64","run":1}
+```
+
+A move of the queue between its homes is logged as it is written:
+`moving` in the home it leaves, naming where to and the revision whose
+policy chose it; `stayed` there when a later policy names that home
+again; and `carried` in the home that took the queue, each submission's
+number as it was and as it is now:
+
+```json
+{"schema":"sluice/log@1","event":"moving","to":"origin","chosen_at":"4f6fe55f9e"}
+{"schema":"sluice/log@1","event":"carried","to":"origin","numbers":{"52":52,"53":61}}
+```
 
 `handed` is logged each time a submission's outcome is handed over,
 with its key, `by` the way, `notice` (typed into the session's pane),
@@ -640,9 +814,19 @@ this host's branch holds:
 {"schema":"sluice/log@1","event":"copy-levelled","host":"build-2","copy":"c43609b8e1"}
 ```
 
+An earlier sluice kept `forge/intake/` in the host's state, for a mark
+it pushed to the remote, `refs/sluice/intake/<branch>`. Nothing reads
+either now: the folder may be removed, and the mark deleted as the
+[pull requests guide](/sluice/guides/pull-requests/) says.
+
 `read-refused` is logged when a round can't read the branch, or its
-state, from the branch's remote. It names the host, the remote, the ref
-the round asked for and what git said, whole. It's logged once for each
+state, from the branch's remote, or when the host's intake can't ask
+GitHub for the branch's pull requests. It names the host, the remote, the
+ref the round asked for and what git said, whole; an intake's line adds
+`"intake": true`, names what it asked, `<branch>'s pull requests` or
+`pull/<n>`, and says what GitHub said, and its `read-again` is so marked
+too. An intake's lines are kept apart from the rounds', in `.intake/`,
+so a round that reads the remote again ends none of them. It's logged once for each
 ref and words while that host's rounds are refused, never once a round,
 and each host logs its own. The first round on that host that reads the
 remote again logs `read-again`. `since` is when the first round was

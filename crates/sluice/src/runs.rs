@@ -15,6 +15,8 @@
 //! <common>/sluice/.runs/<place, flat>/
 //!   request.json   what to run; written before the supervisor starts
 //!   lock           held by the supervisor for its whole life; its pid
+//!   started        when the supervisor started: the run's own start,
+//!                  written before it holds `lock` (record 0122; design D3)
 //!   pgid           the command's process group, once it is spawned
 //!   out.log        the command's stdout and stderr
 //!   out.times      when out.log grew: `<length> <time>` a line (ADR 0042)
@@ -60,18 +62,15 @@
 //! say what to run, and the place seam's profiles end a place's run
 //! through [`Runs::end`] before they remove the place (34).
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeMap;
 use std::fs::{File, OpenOptions};
 use std::io::ErrorKind;
 use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
-use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
 use anyhow::{bail, Context, Result};
-use nix::errno::Errno;
-use nix::unistd::Pid;
 use serde::{Deserialize, Serialize};
 use weir_bounded::end_group;
 
@@ -336,15 +335,11 @@ impl Runs {
             }
             std::thread::sleep(Duration::from_millis(10));
         }
-        // Reaped by this thread while the process lasts, as `sluice run`
-        // does; after a step exits, by whatever adopts it; after a `sluice
-        // run` starts afresh, by the run started afresh, which is handed
-        // it as not yet reaped (design D7).
-        let pid = child.id();
-        unreaped_set().insert(pid);
+        // Reaped by this thread while the process lasts; after it ends,
+        // by whatever adopts it: the supervisor outlives the host process
+        // that started it, a successor's among them (design D20).
         std::thread::spawn(move || {
             let _ = child.wait();
-            unreaped_set().remove(&pid);
         });
         Ok(())
     }
@@ -383,23 +378,58 @@ impl Runs {
     /// reported: it is lost, as one whose supervisor stopped is (60), and
     /// no one reading it fails for it. [`Runs::start`] writes the request
     /// first, so a run started reads as going until it ends.
+    ///
+    /// 60, 114, record 0122 (design D8): a run is finished only once its
+    /// supervisor has let go of it, its group ended and `result.json`
+    /// written last: while a supervisor holds it, it goes, whatever its
+    /// directory holds, so no report of it is read before its end.
     pub fn state(&self, name: &str) -> Result<RunState> {
         let dir = self.dir(name);
         if !dir.join("request.json").exists() {
             return Ok(RunState::Lost);
         }
-        if let Some(ended) = read_ended(&dir)? {
-            return Ok(RunState::Finished(ended));
-        }
         if self.supervised(&dir)? {
             return Ok(RunState::Running);
         }
-        // The supervisor may have written its result between the two reads.
         if let Some(ended) = read_ended(&dir)? {
             return Ok(RunState::Finished(ended));
         }
         self.end(name)?;
         Ok(RunState::Lost)
+    }
+
+    /// Record 0122 (design D3): whether a run was started for the place
+    /// `name`, and its own start, read from the supervisor's own files and
+    /// running nothing: `None` where none was, its directory holding no
+    /// request. The start is the one the supervisor noted as it started
+    /// the command, or its result's, or when its output first grew; for a
+    /// run whose supervisor never noted one, when its request was written.
+    pub fn found(&self, name: &str) -> Result<Option<String>> {
+        let dir = self.dir(name);
+        let request = dir.join("request.json");
+        let written = match std::fs::metadata(&request) {
+            Ok(m) => m.modified().ok(),
+            Err(e) if e.kind() == ErrorKind::NotFound => return Ok(None),
+            Err(e) => return Err(e).with_context(|| format!("reading {}", request.display())),
+        };
+        match std::fs::read_to_string(dir.join("started")) {
+            Ok(at) if !at.trim().is_empty() => return Ok(Some(at.trim().to_string())),
+            Ok(_) => {}
+            Err(e) if e.kind() == ErrorKind::NotFound => {}
+            Err(e) => return Err(e).with_context(|| format!("reading {}", dir.display())),
+        }
+        if let Some(ended) = read_ended(&dir)? {
+            return Ok(Some(ended.started));
+        }
+        if let Some((_, at)) = self.times(name)?.into_iter().next() {
+            return Ok(Some(at));
+        }
+        Ok(Some(
+            written
+                .map(chrono::DateTime::<chrono::Utc>::from)
+                .unwrap_or_else(chrono::Utc::now)
+                .to_rfc3339_opts(chrono::SecondsFormat::Millis, true),
+        ))
     }
 
     /// ADR 0042: when the output of the run of the place `name` grew,
@@ -639,6 +669,17 @@ pub fn supervised(dir: &Path) -> Result<bool> {
 
 /// `sluice supervise <dir>`: run the request in `dir` to its end.
 pub fn supervise(dir: &Path) -> Result<()> {
+    // Record 0122 (design D3): the run's own start, written before the
+    // supervisor holds the run, so whoever finds the run held, its start
+    // returned among them, finds when it began.
+    let started = match std::fs::read_to_string(dir.join("started")) {
+        Ok(at) if !at.trim().is_empty() => at.trim().to_string(),
+        _ => {
+            let at = now();
+            write_atomic(&dir.join("started"), at.as_bytes())?;
+            at
+        }
+    };
     let lock = OpenOptions::new()
         .create(true)
         .truncate(false)
@@ -654,14 +695,13 @@ pub fn supervise(dir: &Path) -> Result<()> {
         |ended: Ended| write_atomic(&dir.join("result.json"), &serde_json::to_vec(&ended)?);
 
     let Some((program, args)) = request.argv.split_first() else {
-        let at = now();
         return finish(Ended {
             exit: None,
             signal: None,
             timed_out: false,
             error: Some("the run names no command".into()),
-            started: at.clone(),
-            ended: at,
+            started,
+            ended: now(),
         });
     };
     // Design D5: the watch is ready, or said, before the command starts.
@@ -669,7 +709,6 @@ pub fn supervise(dir: &Path) -> Result<()> {
         Some(argv) if !argv.is_empty() => start_watch(dir, &request, argv)?,
         _ => None,
     };
-    let started = now();
     let out = File::create(dir.join("out.log"))?;
     let mut child = match Command::new(program)
         .args(args)
@@ -1076,52 +1115,6 @@ fn now() -> String {
     chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true)
 }
 
-/// The process ids of the run supervisors this process started, or was
-/// handed by the `sluice run` it started afresh from, and has not reaped
-/// (135; design D7 of `a-kept-run-hands-over-what-it-cannot-take-up`).
-static UNREAPED: Mutex<BTreeSet<u32>> = Mutex::new(BTreeSet::new());
-
-fn unreaped_set() -> std::sync::MutexGuard<'static, BTreeSet<u32>> {
-    UNREAPED.lock().unwrap_or_else(|e| e.into_inner())
-}
-
-/// The run supervisors this process started, or was handed, and has not
-/// reaped: what a `sluice run` that starts afresh hands to itself, so the
-/// run started afresh reaps them (135; record 0107; design D7).
-pub fn unreaped() -> Vec<u32> {
-    unreaped_set().iter().copied().collect()
-}
-
-/// Reap `pids`, the run supervisors a `sluice run` started and handed over
-/// as not yet reaped when it started afresh as this process: each on a
-/// thread of its own that waits for that process alone, never for any
-/// child, so no end another part of sluice waits on is taken. Each is
-/// named among [`unreaped`] until it is reaped, so a later hand-over
-/// carries it again; one that ended meanwhile is reaped at once (135;
-/// record 0107; design D7).
-pub fn reap_handed(pids: &[u32]) {
-    for &pid in pids {
-        let Ok(raw) = i32::try_from(pid) else {
-            continue;
-        };
-        unreaped_set().insert(pid);
-        std::thread::spawn(move || {
-            loop {
-                match nix::sys::wait::waitpid(Pid::from_raw(raw), None) {
-                    Err(Errno::EINTR) => continue,
-                    Ok(
-                        nix::sys::wait::WaitStatus::Exited(..)
-                        | nix::sys::wait::WaitStatus::Signaled(..),
-                    )
-                    | Err(_) => break,
-                    Ok(_) => continue,
-                }
-            }
-            unreaped_set().remove(&pid);
-        });
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::{dir_name, flat_name, write_atomic, Request, Runs};
@@ -1312,32 +1305,5 @@ mod tests {
         let unique: std::collections::BTreeSet<&String> = dirs.iter().collect();
         assert_eq!(unique.len(), names.len(), "{dirs:?}");
         assert_eq!(dir_name("sluice/try/main/39"), "sluice+2Ftry+2Fmain+2F39");
-    }
-
-    /// The settings-take-up spec's "A supervisor handed over": a child of
-    /// the process whose id is handed over as not yet reaped is reaped,
-    /// and no longer named among those not yet reaped (135; design D7).
-    #[test]
-    fn a_supervisor_handed_over_is_reaped() {
-        use nix::errno::Errno;
-        use nix::sys::wait::{waitpid, WaitPidFlag};
-        use nix::unistd::Pid;
-        use std::time::{Duration, Instant};
-        let child = std::process::Command::new("sh")
-            .args(["-c", "exit 0"])
-            .spawn()
-            .unwrap();
-        let pid = child.id();
-        std::mem::forget(child);
-        super::reap_handed(&[pid]);
-        let until = Instant::now() + Duration::from_secs(5);
-        while super::unreaped().contains(&pid) {
-            assert!(Instant::now() < until, "{pid} not reaped");
-            std::thread::sleep(Duration::from_millis(10));
-        }
-        assert_eq!(
-            waitpid(Pid::from_raw(pid as i32), Some(WaitPidFlag::WNOHANG)),
-            Err(Errno::ECHILD)
-        );
     }
 }

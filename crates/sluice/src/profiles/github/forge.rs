@@ -9,7 +9,7 @@ use serde::{Deserialize, Serialize};
 use super::app::Repo;
 
 /// The name of the check run sluice posts on a pull request's head.
-pub const SLUICE_CHECK: &str = "sluice";
+pub const SLUICE_CHECK: &str = sluice_core::policy::OWN_CHECK;
 
 /// An open or closed pull request.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]

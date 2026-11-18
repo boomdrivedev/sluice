@@ -128,10 +128,7 @@ fn sluice(f: &Fakes, seen: &Seen, args: &[&str]) -> anyhow::Result<i32> {
         run(
             cli,
             f.seams(),
-            &support::FakeHost {
-                world: f.world.clone(),
-                reserved: 0,
-            },
+            &support::FakeHost::new(f.world.clone(), 0),
             &(),
             &(),
             &f.clock,
@@ -403,6 +400,7 @@ fn telemetry_is_off_unless_asked() {
             caches: Vec::new(),
             expire_after: sluice_core::EXPIRE_AFTER,
             telemetry: None,
+            aws: Default::default(),
         },
     )
     .with_running(repo.dir().join(".git/host-running"));
@@ -431,7 +429,7 @@ fn telemetry_is_off_unless_asked() {
         replay: true,
         system: None,
     };
-    let handle = checks.start(&request).unwrap();
+    let handle = support::start(&checks, &request).unwrap();
     let until = Instant::now() + Duration::from_secs(60);
     let report = loop {
         match checks.progress(&handle).unwrap() {

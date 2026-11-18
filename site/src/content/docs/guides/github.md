@@ -42,8 +42,8 @@ queue is formed on it from then on.
 
 With `remote` set, GitHub's copy of `main` is the real one:
 
-- **Every round fetches it first.** Whoever runs the round (a waiting
-  `wt submit`, `sluice run` or `sluice step`) fetches `main` from
+- **Every round fetches it first.** Each round, whether sluice's own
+  process runs it or `sluice step` asks it of that process, fetches `main` from
   `origin` into `origin/main` before reading the branch, and forms every
   combination on it. Fetching leaves your local `main` where it is.
 - **A landing is a push.** When a combination passes, sluice pushes its

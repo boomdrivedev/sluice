@@ -8,6 +8,7 @@
 
 pub mod branches;
 pub mod checks;
+pub mod codebuild;
 pub mod github;
 pub mod local_files;
 pub mod local_refs;
@@ -31,6 +32,13 @@ use crate::identity::Identity;
 use crate::instance::Instance;
 use crate::retry;
 
+/// The variables a multiplexer's pane names its session by, as the
+/// driver profile reads them (51): what nothing started outside a pane
+/// carries, sluice's host process among it (135; design D3).
+pub fn session_variables() -> [&'static str; 2] {
+    [worktrunk::herdr::PANE, worktrunk::herdr::SOCKET]
+}
+
 /// The profiles the walkthrough's setup names, for the repository holding
 /// a directory.
 pub struct Bound {
@@ -41,6 +49,9 @@ pub struct Bound {
     pub state: records::Records,
     /// The pull request driver, which also takes pull requests in.
     pub pulls: Rc<github::pulls::Pulls>,
+    /// 135: sluice's host process, reached through its socket, or, in its
+    /// own repositories' tasks, read in place.
+    pub host_process: Box<dyn crate::host_process::HostProcess>,
 }
 
 /// The driver seam as an instance binds it: a pull request's place,
@@ -137,8 +148,9 @@ impl Bound {
             .forge
             .as_ref()
             .map_or(crate::instance::DISCOVERY, |f| f.discovery);
-        // 137: this host as its peers name it, and its lease, for the
-        // intake mark.
+        // 72, 137: this host as its peers name it, and its lease, for the
+        // branches it keeps on their remotes, whose pull requests it alone
+        // takes in (design D21).
         let peer = sluice_core::Peer {
             name: instance.peers.name.clone().unwrap_or_else(checks::hostname),
             lease: instance.peers.lease,
@@ -157,19 +169,21 @@ impl Bound {
             discovery,
             peer,
         ));
-        // C.6: a branch's records are on its remote when its policy names
-        // signers, and this host's own files otherwise.
+        // 51: the host a session's submit is recorded on, as its peers
+        // name it.
+        let host = instance.peers.name.clone().unwrap_or_else(checks::hostname);
+        // C.6, record 0122: a branch's records are in the home its records
+        // name, and, where none does, on its remote when its policy names
+        // signers and this host's own files otherwise.
         let state = records::Records::new(
             &common,
             branches::Branches::open_as(dir, identity.clone(), retry.clone())?,
             instance.signing.clone(),
-        );
+        )
+        .as_host(&host);
         let state = if guarding { state.guarding() } else { state };
         let jobs = instance.jobs();
         let caches = instance.caches.clone();
-        // 51: the host a session's submit is recorded on, as its peers
-        // name it.
-        let host = instance.peers.name.clone().unwrap_or_else(checks::hostname);
         Ok(Bound {
             // A session's place's release command is the check seam's to
             // build, and the end of a preview's containers the check seam's
@@ -195,15 +209,50 @@ impl Bound {
                 }
             },
             tests: {
+                let (aws, alive) = (instance.aws.clone(), instance.peers.alive);
                 let checks = checks::Checks::new(&common, program, instance);
-                // 88: with sluice's app, GitHub Actions is the pool this
-                // host can start runs on; the binding hands it over (core.2).
-                match &app_for_pool {
-                    Some(app) => {
-                        checks.with_pool(Box::new(github::actions::Actions::new(app.clone(), dir)))
-                    }
+                // 88: with sluice's app, GitHub Actions is a pool this host
+                // can start runs on; the binding hands it over (core.2).
+                let checks = match &app_for_pool {
+                    Some(app) => checks.with_pool(
+                        "github",
+                        Box::new(github::actions::Actions::new(app.clone(), dir)),
+                    ),
                     None => checks,
-                }
+                };
+                // Record 0119 (design D5 of the change
+                // `a-codebuild-fleet-runs-a-queues-checks`): a CodeBuild
+                // fleet always, its credentials found at each call by the
+                // host's AWS chain; its run builds read the repository with
+                // a token of sluice's app, which a host with none cannot buy.
+                let reader = app_for_pool.clone().map(|app| {
+                    let dir = dir.to_path_buf();
+                    Box::new(move |remote: Option<&str>| {
+                        let remote = remote.unwrap_or("origin");
+                        let url = pushed_refs::remote_url(&dir, remote)?;
+                        let repo = github::Repo::from_url(&url).ok_or_else(|| {
+                            anyhow::anyhow!("{remote} ({url}) is no repository on GitHub")
+                        })?;
+                        Ok(app.reading(&repo)?.secret)
+                    }) as codebuild::Reader
+                });
+                let calls = retry.clone();
+                checks.with_pool(
+                    "codebuild",
+                    Box::new(codebuild::CodeBuild::new(
+                        Box::new(move |region| {
+                            Rc::new(codebuild::sdk::Sdk::new(
+                                codebuild::sdk::Chain::of(&aws),
+                                region,
+                                calls.clone(),
+                            )) as Rc<dyn codebuild::aws::Aws>
+                        }),
+                        reader,
+                        &common,
+                        &crate::instance::state_dir()?,
+                        alive,
+                    )),
+                )
             },
             branch,
             driver: Drivers {
@@ -212,6 +261,7 @@ impl Bound {
             },
             state,
             pulls,
+            host_process: Box::new(crate::host_process::Socketed::default()),
         })
     }
 
@@ -338,6 +388,15 @@ fn forge_findings(
         branch,
         operator.as_deref(),
     ));
+    // Record 0119 (design D14): each pool on GitHub the policy names at
+    // the branch's revision, as `sluice init actions` sets it up.
+    if let Some((_, policy)) = branches.policy_of(branch)? {
+        for pool in policy.pools.iter().filter(|p| p.kind.0 == "github") {
+            let wants = github::workflows::sluice(crate::VERSION, &pool.runners);
+            let signer = policy.signers.get(&pool.signer).map(|s| &s.identity);
+            found.extend(github::check::pool(&app, &repo, pool, signer, &wants));
+        }
+    }
     Ok(found)
 }
 
@@ -433,6 +492,10 @@ fn operator_token() -> Option<String> {
 }
 
 impl crate::exec::Host for Bound {
+    fn host_process(&self) -> &dyn crate::host_process::HostProcess {
+        &*self.host_process
+    }
+
     fn reserved(&self) -> usize {
         self.tests.instance().reserved
     }

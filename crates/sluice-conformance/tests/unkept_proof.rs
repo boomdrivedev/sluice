@@ -170,6 +170,12 @@ fn a_pass_nothing_proves_has_no_outcome_and_runs_again() {
                 .collect(),
         }]
     );
+    // Record 0122 (design D7): a follow-up holds the checks with no
+    // outcome, why its run had none going with it.
+    let follow = doc.candidates[0].runs.last().expect("a follow-up");
+    assert_eq!(follow.follows, Some(0));
+    assert_eq!(follow.checks, ["a:test", "b:test"]);
+    assert!(follow.lost.is_some());
 
     h.w().keeps_no_proof(None);
     settle(&h);
@@ -220,6 +226,16 @@ fn three_runs_whose_passes_nothing_proves_blame_with_why() {
     assert_eq!(h.sub(one).state, State::Failed);
     assert_eq!(h.w().started().len(), 3, "no fourth run");
     assert_eq!(lost(&h).len(), 2);
+    // Record 0122 (design D7): a run and two follow-ups, three in a row.
+    let opened: Vec<usize> = h
+        .events()
+        .into_iter()
+        .filter_map(|e| match e {
+            Event::Opened { run, .. } => Some(run),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(opened, [0, 1, 2]);
     let failed: Vec<(String, Option<String>, bool)> = h
         .sub(one)
         .failed

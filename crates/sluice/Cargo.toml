@@ -42,6 +42,18 @@ rlimit.workspace = true
 base64.workspace = true
 ssh-key.workspace = true
 sha2.workspace = true
+p256.workspace = true
+aws-config.workspace = true
+aws-sdk-codebuild.workspace = true
+aws-sdk-kms.workspace = true
+aws-sdk-s3.workspace = true
+aws-sdk-sts.workspace = true
+aws-runtime.workspace = true
+aws-smithy-http-client.workspace = true
+tokio.workspace = true
+zip.workspace = true
+sigstore-verify.workspace = true
+sigstore-trust-root.workspace = true
 
 # A profile's acceptance tests that name its tool live under a profile
 # directory (rule core.1).
@@ -86,6 +98,14 @@ sluice-conformance = { path = "../sluice-conformance" }
 opentelemetry_sdk = { workspace = true, features = ["testing"] }
 rcgen.workspace = true
 rustls.workspace = true
+# The AWS calls' tests: an environment and files given in place of the
+# host's, and a client that replays what AWS answers.
+aws-config = { workspace = true, features = ["test-util"] }
+aws-types.workspace = true
+aws-smithy-types.workspace = true
+http.workspace = true
+yaml-rust2.workspace = true
+aws-smithy-http-client = { workspace = true, features = ["test-util"] }
 
 [lib]
 doctest = false

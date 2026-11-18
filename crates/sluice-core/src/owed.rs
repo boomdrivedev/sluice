@@ -214,14 +214,28 @@ impl<'a> Sluice<'a> {
                         None => continue,
                     },
                 };
-                if !matches!(s.state, State::Landed | State::Failed | State::Conflict)
-                    || s.from.worktree != reader
+                // 152, record 0124: a held landing's refusal is owed as an
+                // outcome is, and handed over as one, deciding none.
+                if !matches!(
+                    s.state,
+                    State::Landed | State::Failed | State::Conflict | State::Refused
+                ) || s.from.worktree != reader
                     || !self.made(here, &s.from)
                 {
                     continue;
                 }
                 let item = line.doc.outbox.iter().find(|o| o.id == key);
-                let Some(decided) = item.map(|o| o.outcome.to_decided()).or_else(|| s.decided())
+                // A refusal the round has pushed is read from the landing
+                // that holds it, as its outbox item named it.
+                let refused = || {
+                    line.refusal_of(id).map(|r| Decided::Refused {
+                        words: r.words.clone(),
+                    })
+                };
+                let Some(decided) = item
+                    .map(|o| o.outcome.to_decided())
+                    .or_else(|| s.decided())
+                    .or_else(refused)
                 else {
                     continue;
                 };
@@ -568,10 +582,15 @@ impl Sluice<'_> {
     /// at this time: none for a submission by name, a withdrawn one or one
     /// not decided, nor for one decided before deliveries were recorded
     /// that is live still; one finished whose delivery the records no
-    /// longer hold was done and let go of (124; weir 107; design D13).
+    /// longer hold was done and let go of (124; weir 107; design D13). One
+    /// whose landing the forge refused gives the refusal's, which is owed
+    /// though it decides nothing (152, record 0124).
     pub fn delivery_of(&self, sub: &Submission) -> Result<Option<DeliveryView>> {
         if sub.from.by_name()
-            || !matches!(sub.state, State::Landed | State::Failed | State::Conflict)
+            || !matches!(
+                sub.state,
+                State::Landed | State::Failed | State::Conflict | State::Refused
+            )
         {
             return Ok(None);
         }

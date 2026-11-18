@@ -1,10 +1,12 @@
-//! The records seam as an instance binds it (C.6; ADR 0037): a branch
-//! whose policy names a `remote` and signers to `remote refs` on that
-//! remote, every other to `local files`. The results, which name no
-//! branch, go to the remote once a branch has been routed there; a
-//! branch's next number comes from the count of the records that hold
-//! it, so a remote's are numbered once across every host and the host's
-//! own once on the host (record 0114).
+//! The records seam as an instance binds it (C.6; ADR 0037; record 0122):
+//! a branch to the home its records name in `home.json`, `local files` for
+//! the host's own and `remote refs` for a remote's, and only a branch with
+//! no home anywhere by its policy, a `remote` and signers to that remote
+//! and every other to `local files`. The results, which name no branch, go
+//! to the remote once a branch has been routed there; a branch's next
+//! number comes from the count of the records that hold it, so a remote's
+//! are numbered once across every host and the host's own once on the
+//! host (record 0114).
 
 use std::cell::{Cell, RefCell};
 use std::collections::BTreeMap;
@@ -12,11 +14,14 @@ use std::path::{Path, PathBuf};
 use std::rc::Rc;
 
 use anyhow::{Context, Result};
+use sluice_core::home::{HomeStore, Owed};
 use sluice_core::policy::{Policy, POLICY_PATH};
-use sluice_core::records::{parse_lines, to_line, ResultLine, SetAside};
+use sluice_core::records::{
+    parse_lines, to_document, to_line, HomeDoc, HomeState, ResultLine, SetAside, HERE, HOME_FILE,
+};
 use sluice_seams::{
-    read_refused, Branch, Changes, Guard, ReadRefused, Rev, Setting, Snapshot, State, TaskLog,
-    TaskProgress, Written,
+    read_refused, Branch, Carried, Changes, Guard, ReadRefused, ResultAsk, Rev, Setting, Snapshot,
+    State, TaskLog, TaskProgress, Written,
 };
 
 use super::branches::Branches;
@@ -24,34 +29,6 @@ use super::local_files::LocalFiles;
 use super::remote_refs::{RemoteRefs, SignerKey, Signing};
 use crate::instance;
 use crate::signing::ssh;
-
-/// What this host noted when a branch's own records moved to its remote:
-/// the submissions it left behind, each its document.
-#[derive(Default, serde::Serialize, serde::Deserialize)]
-struct Moved {
-    #[serde(with = "docs")]
-    left: Vec<Vec<u8>>,
-}
-
-/// The documents as JSON text.
-mod docs {
-    use serde::{Deserialize, Deserializer, Serialize, Serializer};
-
-    pub fn serialize<S: Serializer>(docs: &[Vec<u8>], s: S) -> Result<S::Ok, S::Error> {
-        let text: Vec<String> = docs
-            .iter()
-            .map(|d| String::from_utf8_lossy(d).into_owned())
-            .collect();
-        text.serialize(s)
-    }
-
-    pub fn deserialize<'de, D: Deserializer<'de>>(d: D) -> Result<Vec<Vec<u8>>, D::Error> {
-        Ok(Vec::<String>::deserialize(d)?
-            .into_iter()
-            .map(String::into_bytes)
-            .collect())
-    }
-}
 
 pub struct Records {
     local: LocalFiles,
@@ -63,13 +40,25 @@ pub struct Records {
     common: PathBuf,
     signing: Option<instance::Signing>,
     remotes: RefCell<BTreeMap<String, Rc<RemoteRefs>>>,
-    routes: RefCell<BTreeMap<String, Option<String>>>,
+    /// Record 0122 (design D2): where each branch was last routed within
+    /// this pass, read again at every lock, read and write and forgotten
+    /// at the next pass.
+    routes: RefCell<BTreeMap<String, Route>>,
+    /// Where each branch was last read from, so a write is refused where
+    /// a move took its records elsewhere since (62).
+    read_from: RefCell<BTreeMap<String, Option<String>>>,
+    /// 51, record 0122 (design D4): this host as its peers name it, which
+    /// a submission it made names as its host.
+    host: String,
     /// The branches whose state is on each remote, as listed once before
     /// a tick asked it.
     listed: RefCell<Option<BTreeMap<String, Vec<String>>>>,
     /// 129: the remotes a tick has asked, whose branches are listed from
     /// what the ask fetched.
     asked: RefCell<std::collections::BTreeSet<String>>,
+    /// 129 (design D16): whether every remote is read as the host
+    /// process's last ask fetched it, and none is asked ([`State::hold`]).
+    held: Cell<bool>,
     /// 124: whether it is bound for branch protection, which verifies and
     /// signs no run.
     guarding: bool,
@@ -82,10 +71,115 @@ pub struct Records {
     lists_read: Cell<u64>,
     /// The public half of the key this host signs with, once read.
     own_key: RefCell<Option<ssh_key::PublicKey>>,
+    /// Where the results log is read from (design D17).
+    results_from: ResultsFrom,
+}
+
+/// Where a binding reads the results log from (69, 129; design D17).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum ResultsFrom {
+    /// The log and each signer's runs, read by the binding itself: a
+    /// binding that no host process serves, a test's or the hook's.
+    #[default]
+    Here,
+    /// The host process's index of each log, in the host process itself:
+    /// a repository's task's binding and a connection's.
+    Indexed,
+    /// The host process, asked with `results` and started where none
+    /// answers: a command's. Where it cannot be asked, the command reads
+    /// them itself, and says so.
+    Asked,
 }
 
 /// A branch's signers and the keys its runs are verified with (78).
 type Signers = Rc<BTreeMap<String, SignerKey>>;
+
+/// Record 0122 (design D2): where a branch's records are.
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct Route {
+    /// The remote whose refs hold them; `None` for the host's own files.
+    remote: Option<String>,
+    /// Where no home holds them anywhere: routed by the policy at this
+    /// revision, which the first write's home names.
+    by_policy: Option<Option<Rev>>,
+}
+
+/// Record 0122 (design D3): the host's own files as one home of a branch,
+/// for the core's carry.
+struct OwnHome<'a> {
+    local: &'a LocalFiles,
+    branch: &'a str,
+}
+
+impl HomeStore for OwnHome<'_> {
+    fn name(&self) -> String {
+        HERE.into()
+    }
+
+    fn read(&self) -> Result<Snapshot> {
+        self.local.read(self.branch)
+    }
+
+    fn read_finished(&self, name: &str) -> Result<Option<Vec<u8>>> {
+        self.local.read_finished(self.branch, name)
+    }
+
+    fn write(&self, read_at: u64, changes: Changes) -> Result<Written> {
+        self.local.write(self.branch, read_at, changes)
+    }
+
+    fn raise_past(&self, number: u64) -> Result<()> {
+        self.local.raise_ids_past(number)
+    }
+
+    fn next_number(&self) -> Result<u64> {
+        self.local.allocate_id(self.branch)
+    }
+}
+
+/// Record 0122 (design D3): a remote's refs as one home of a branch, for
+/// the core's carry, its state written leased on the version read.
+struct RemoteHome {
+    refs: Rc<RemoteRefs>,
+    branch: String,
+}
+
+impl HomeStore for RemoteHome {
+    fn name(&self) -> String {
+        self.refs.remote().to_string()
+    }
+
+    fn read(&self) -> Result<Snapshot> {
+        self.refs.read(&self.branch)
+    }
+
+    fn read_finished(&self, name: &str) -> Result<Option<Vec<u8>>> {
+        self.refs.read_finished(&self.branch, name)
+    }
+
+    fn write(&self, read_at: u64, changes: Changes) -> Result<Written> {
+        self.refs.write(&self.branch, read_at, changes)
+    }
+
+    fn raise_past(&self, number: u64) -> Result<()> {
+        self.refs.raise_ids_past(number)
+    }
+
+    fn next_number(&self) -> Result<u64> {
+        self.refs.allocate_id(&self.branch)
+    }
+}
+
+/// Both of a branch's locks on the host, held together: its own files'
+/// and its remote's, so whichever home a move leaves its records in, the
+/// round that moved them still holds the lock they are written under
+/// (rule core.14).
+struct BothLocks<'a> {
+    _own: Box<dyn Guard + 'a>,
+    _remote: Box<dyn Guard + 'a>,
+}
+
+impl Guard for BothLocks<'_> {}
 
 impl Records {
     pub fn new(common: &Path, branches: Branches, signing: Option<instance::Signing>) -> Self {
@@ -97,13 +191,88 @@ impl Records {
             signing,
             remotes: RefCell::default(),
             routes: RefCell::default(),
+            read_from: RefCell::default(),
+            host: super::checks::hostname(),
             listed: RefCell::default(),
             asked: RefCell::default(),
+            held: Cell::new(false),
             guarding: false,
             lists: RefCell::default(),
             lists_read: Cell::new(0),
             own_key: RefCell::default(),
+            results_from: ResultsFrom::Here,
         }
+    }
+
+    /// The same binding, for the host its peers call `name` (51; record
+    /// 0122, design D4).
+    pub fn as_host(self, name: &str) -> Self {
+        Records {
+            host: name.into(),
+            ..self
+        }
+    }
+
+    /// The same binding, reading the results log from `from` (design D17).
+    pub fn reading_results(self, from: ResultsFrom) -> Self {
+        Records {
+            results_from: from,
+            ..self
+        }
+    }
+
+    /// The results `ask` names, as `branch`'s gate reads them, read by this
+    /// binding itself from the log and each signer's runs (78; rule
+    /// core.22).
+    fn results_here(&self, branch: &str, ask: &ResultAsk) -> Result<Vec<u8>> {
+        let mut bytes = self.local.results_for(branch, ask)?;
+        let routed = self.route(branch)?;
+        let remotes: Vec<Rc<RemoteRefs>> = self.remotes.borrow().values().cloned().collect();
+        if remotes.is_empty() {
+            return Ok(bytes);
+        }
+        let signers = self.signers_of(branch, routed.as_ref().map(|r| r.remote()))?;
+        for r in remotes {
+            bytes.extend(ask.answer(&r.results_with(&signers)?));
+        }
+        Ok(bytes)
+    }
+
+    /// The same, from the host process's index of each log: the host's
+    /// own results, then each remote's replays and the runs each signer
+    /// `branch`'s policy names signed there, as the host last fetched
+    /// them, a statement verified once for each key (design D17). Each
+    /// answer that verified a statement says how many in the host
+    /// process's log.
+    fn results_indexed(&self, branch: &str, ask: &ResultAsk) -> Result<Vec<u8>> {
+        use crate::host_process::results::{self, SignerRef};
+        let own = results::of(&self.local.results_path());
+        let mut bytes = own.answer(ask, &[])?;
+        let routed = self.route(branch)?;
+        let remotes: Vec<Rc<RemoteRefs>> = self.remotes.borrow().values().cloned().collect();
+        if remotes.is_empty() {
+            return Ok(bytes);
+        }
+        let signers = self.signers_of(branch, routed.as_ref().map(|r| r.remote()))?;
+        for r in remotes {
+            let index = results::of(&r.own_results_path());
+            let refs: Vec<_> = signers
+                .iter()
+                .map(|(name, key)| r.signer_ref(name, key))
+                .collect();
+            let dyns: Vec<&dyn SignerRef> = refs.iter().map(|f| f as &dyn SignerRef).collect();
+            let before = index.verifications();
+            bytes.extend(index.answer(ask, &dyns)?);
+            let verified = index.verifications() - before;
+            if verified > 0 {
+                crate::host_process::log(&format!(
+                    "sluice host: {}: verified {verified} signed run record(s) on {}",
+                    self.common.display(),
+                    r.remote()
+                ));
+            }
+        }
+        Ok(bytes)
     }
 
     /// How many times this binding read a branch's policy whole for the
@@ -128,6 +297,7 @@ impl Records {
     /// did not use are forgotten.
     pub fn next_pass(&self) {
         self.branches.next_pass();
+        self.routes.borrow_mut().clear();
     }
 
     /// The host's own records, for what only this host keeps.
@@ -136,31 +306,142 @@ impl Records {
     }
 
     /// The `remote refs` profile `branch` is routed to, or `None` for
-    /// local files: its remote's when the policy the routing reads names
-    /// signers and a remote for it (C.6; 27), each revision's policy read
-    /// only as far as that needs (124; record 0069). The signers its runs
-    /// are verified by are not the routing's: they are the branch's own,
-    /// read from its revision on the remote, never from the host's own
-    /// copy nor from another branch's policy ([`Records::signers_of`]; 56,
-    /// 78, 124; rule core.22).
+    /// local files, read from its records (record 0122; C.6; design D2):
+    /// this host's own `home.json` of it, open or moving to its own files
+    /// and closed to the home its pointer names; where it has none, the
+    /// state's on each remote that may hold it, as last fetched (129), one
+    /// open or moving; and only where neither holds a home, the policy the
+    /// routing reads, its remote's when it names signers and a remote for
+    /// it (27), each revision's policy read only as far as that needs (124;
+    /// record 0069). A remote home closed toward the hosts' own files routes
+    /// to this host's own (design D4). Read afresh at every call and kept
+    /// for nothing past the pass ([`Records::next_pass`]).
+    ///
+    /// The signers its runs are verified by are not the routing's: they
+    /// are the branch's own, read from its revision on the remote, never
+    /// from the host's own copy nor from another branch's policy
+    /// ([`Records::signers_of`]; 56, 78, 124; rule core.22).
     pub fn route(&self, branch: &str) -> Result<Option<Rc<RemoteRefs>>> {
-        if let Some(known) = self.routes.borrow().get(branch) {
-            return Ok(known.as_ref().map(|r| self.remotes.borrow()[r].clone()));
-        }
-        let routed = match self.branches.policy_of(branch)? {
-            Some((_, policy)) if !policy.signers.is_empty() => {
-                match policy.rules_for(branch)?.and_then(|r| r.remote.clone()) {
-                    Some(remote) => Some(self.open(&remote)?),
-                    None => None,
+        let route = self.find_route(branch)?;
+        let remote = match &route.remote {
+            Some(r) => Some(self.open(r)?),
+            None => None,
+        };
+        self.routes.borrow_mut().insert(branch.into(), route);
+        Ok(remote)
+    }
+
+    /// Design D2: where `branch`'s records are, as [`Records::route`]
+    /// reads it.
+    fn find_route(&self, branch: &str) -> Result<Route> {
+        let here = Route {
+            remote: None,
+            by_policy: None,
+        };
+        let on = |remote: &str| Route {
+            remote: Some(remote.to_string()),
+            by_policy: None,
+        };
+        let remotes = self.home_remotes(branch)?;
+        if let Some(own) = self.own_home(branch)? {
+            match own.state {
+                HomeState::Moving => return Ok(here),
+                HomeState::Open => {
+                    // 26: this host's own queue open while a remote's that
+                    // came from it is live: one queue in two homes.
+                    for r in &remotes {
+                        let split = self.held_home(r, branch)?.is_some_and(|h| {
+                            h.is_live()
+                                && h.came_from.as_ref().is_some_and(|c| {
+                                    c.home == HERE && c.host.as_deref() == Some(self.host.as_str())
+                                })
+                        });
+                        if split {
+                            return Err(sluice_core::home::two_homes(branch, HERE, r));
+                        }
+                    }
+                    return Ok(here);
+                }
+                HomeState::Closed => {
+                    let to = own.closed_to().unwrap_or(HERE).to_string();
+                    if to == HERE {
+                        return Ok(here);
+                    }
+                    return Ok(match self.held_home(&to, branch)? {
+                        Some(h) if h.closed_to() == Some(HERE) => here,
+                        _ => on(&to),
+                    });
                 }
             }
-            _ => None,
-        };
-        self.routes.borrow_mut().insert(
-            branch.into(),
-            routed.as_ref().map(|r| r.remote().to_string()),
-        );
-        Ok(routed)
+        }
+        for r in &remotes {
+            match self.held_home(r, branch)? {
+                Some(h) if h.is_live() => return Ok(on(r)),
+                Some(h) if h.closed_to() == Some(HERE) => return Ok(here),
+                _ => {}
+            }
+        }
+        Ok(match self.branches.policy_of(branch)? {
+            Some((at, policy)) if !policy.signers.is_empty() => match policy.remote_of(branch)? {
+                Some(remote) => Route {
+                    remote: Some(remote),
+                    by_policy: Some(Some(at)),
+                },
+                None => Route {
+                    remote: None,
+                    by_policy: Some(Some(at)),
+                },
+            },
+            Some((at, _)) => Route {
+                remote: None,
+                by_policy: Some(Some(at)),
+            },
+            None => Route {
+                remote: None,
+                by_policy: Some(None),
+            },
+        })
+    }
+
+    /// Record 0122 (design D2): the remotes that may hold `branch`'s home:
+    /// its remote as the policy the routing reads names it (27), signers or
+    /// none, and every remote that may hold a branch's state
+    /// ([`Records::signed_remotes`]). A policy that cannot be read names
+    /// none here; its refusal is said where the branch is routed by it.
+    fn home_remotes(&self, branch: &str) -> Result<Vec<String>> {
+        let mut out = Vec::new();
+        if let Ok(Some((_, policy))) = self.branches.policy_of(branch) {
+            if let Ok(Some(remote)) = policy.remote_of(branch) {
+                out.push(remote);
+            }
+        }
+        for r in self.signed_remotes()? {
+            if !out.contains(&r) {
+                out.push(r);
+            }
+        }
+        Ok(out)
+    }
+
+    /// Record 0122 (design D1): `branch`'s home document in this host's own
+    /// files, as they read now.
+    fn own_home(&self, branch: &str) -> Result<Option<HomeDoc>> {
+        let read = self.local.read(branch)?;
+        match read.files.get(HOME_FILE) {
+            Some(bytes) => Ok(Some(serde_json::from_slice(bytes).with_context(|| {
+                format!("reading {branch}'s {HOME_FILE} in this host's own files")
+            })?)),
+            None => Ok(None),
+        }
+    }
+
+    /// Record 0122 (design D2): `branch`'s home document on `remote`, as
+    /// this host last fetched it, with no fetch and with no profile of the
+    /// remote opened: a remote opened is one every pass asks for the hosts'
+    /// signs of life and reads results from, which a branch whose home is
+    /// this host's own files never needs (129; rule core.31).
+    fn held_home(&self, remote: &str, branch: &str) -> Result<Option<HomeDoc>> {
+        super::remote_refs::fetched_home(self.branches.local(), remote, branch)
     }
 
     /// The remotes that may hold a branch's state: those the default
@@ -212,6 +493,9 @@ impl Records {
             RemoteRefs::new(&self.common, self.branches.pushed_refs(remote)?, signing)
                 .sharing_locks(self.locks.clone()),
         );
+        if self.held.get() {
+            r.hold();
+        }
         self.remotes.borrow_mut().insert(remote.into(), r.clone());
         Ok(r)
     }
@@ -328,81 +612,55 @@ impl Records {
                     };
                     SignerKey::ssh(&text).with_context(|| format!("[signers.{name}] ssh"))?
                 }
-                _ => SignerKey::Keyless,
+                // 78, record 0119 (design D13): a forge job's identity, its
+                // workflow at its ref in the repository the branch's remote
+                // names.
+                ("github", table) => SignerKey::Keyless(self.keyless(table, remote)),
+                // 78, record 0119 (design D7 of the change
+                // `a-codebuild-fleet-runs-a-queues-checks`): a key in a key
+                // service, by its ARN and the public half listed beside it.
+                ("kms", Setting::Tables(t)) => {
+                    let text = |field: &str| match t.first().and_then(|t| t.get(field)) {
+                        Some(Setting::Text(v)) => Ok(v.as_str()),
+                        _ => Err(anyhow::anyhow!("[signers.{name}] kms names no {field}")),
+                    };
+                    SignerKey::kms(text("key")?, text("public")?)
+                        .with_context(|| format!("[signers.{name}] kms"))?
+                }
+                _ => SignerKey::Keyless(None),
             };
             signers.insert(name.clone(), key);
         }
         Ok(signers)
     }
 
-    /// Where this host notes that `branch`'s own records moved to its
-    /// remote, and what of them it left behind.
-    fn moved_path(&self, branch: &str) -> PathBuf {
-        self.common
-            .join("sluice-remote")
-            .join("moved")
-            .join(format!("{branch}.json"))
-    }
-
-    fn moved(&self, branch: &str) -> Result<Option<Moved>> {
-        match std::fs::read(self.moved_path(branch)) {
-            Ok(b) => Ok(Some(serde_json::from_slice(&b)?)),
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
-            Err(e) => Err(e.into()),
-        }
-    }
-
-    fn put_moved(&self, branch: &str, m: &Moved) -> Result<()> {
-        let path = self.moved_path(branch);
-        std::fs::create_dir_all(path.parent().expect("a parent"))?;
-        let tmp = path.with_extension("json.tmp");
-        std::fs::write(&tmp, serde_json::to_vec(m)?)?;
-        std::fs::rename(&tmp, &path)?;
-        Ok(())
-    }
-
-    /// Design D10, under the branch's lock: the first time this host routes
-    /// `branch` to its remote, its own records of the branch go there as
-    /// the starting state when the remote has none; when another host's
-    /// already are, its queued submissions are left behind, for the round
-    /// to submit again.
-    fn migrate(&self, branch: &str, r: &RemoteRefs) -> Result<()> {
-        if self.moved(branch)?.is_some() {
-            return Ok(());
-        }
-        let own = self.local.read(branch)?;
-        if own.version == 0 {
-            return self.put_moved(branch, &Moved::default());
-        }
-        let theirs = r.read(branch)?;
-        if theirs.version == 0 {
-            let mut changes = Changes {
-                put: own.files.clone(),
-                ..Changes::default()
-            };
-            for (name, bytes) in self.local.read_all_finished(branch)? {
-                changes
-                    .put
-                    .insert(format!("{}/{name}", sluice_seams::FINISHED), bytes);
-            }
-            if r.write(branch, 0, changes)? != Written::Refused {
-                return self.put_moved(branch, &Moved::default());
-            }
-        }
-        let left = own
-            .files
-            .iter()
-            .filter(|(p, _)| p.starts_with("submissions/"))
-            .filter_map(|(_, b)| {
-                let v: serde_json::Value = serde_json::from_slice(b).ok()?;
-                let out = matches!(
-                    v["state"].as_str(),
-                    Some("landed" | "withdrawn" | "failed" | "conflict")
-                );
-                (!out).then(|| b.clone())
-            })
-            .collect();
-        self.put_moved(branch, &Moved { left })
+    /// 78, record 0119 (design D13): the keyless identity a `github` signer's
+    /// table names, `workflow` at `ref`, in the repository on GitHub the
+    /// branch's `remote` is; `None` where either names none.
+    fn keyless(
+        &self,
+        table: &Setting,
+        remote: Option<&str>,
+    ) -> Option<crate::profiles::github::keyless::Identity> {
+        let Setting::Tables(t) = table else {
+            return None;
+        };
+        let text = |key: &str| match t.first()?.get(key)? {
+            Setting::Text(v) => Some(v.clone()),
+            _ => None,
+        };
+        let workflow = text("workflow")?;
+        let git_ref = text("ref").unwrap_or_else(|| "refs/heads/main".into());
+        let url =
+            crate::profiles::pushed_refs::remote_url(&self.common, remote.unwrap_or("origin"))
+                .ok()?;
+        let repo = crate::profiles::github::Repo::from_url(&url)?;
+        Some(crate::profiles::github::keyless::Identity::workflow(
+            &repo.owner,
+            &repo.name,
+            &workflow,
+            &git_ref,
+        ))
     }
 
     /// The first remote opened, which keeps what this host has observed
@@ -413,28 +671,31 @@ impl Records {
 }
 
 impl State for Records {
+    /// Both of the branch's locks, its own files' first: a move between
+    /// its homes stays under the lock its round took (rule core.14). Its
+    /// route is read, so a branch refused by its homes is refused here.
     fn lock<'a>(&'a self, branch: &str) -> Result<Option<Box<dyn Guard + 'a>>> {
-        match self.route(branch)? {
-            None => self.local.lock(branch),
-            Some(r) => {
-                let g = self.locks.lock(branch)?;
-                if g.is_some() {
-                    self.migrate(branch, &r)?;
-                }
-                Ok(g)
-            }
-        }
+        self.route(branch)?;
+        let Some(own) = self.local.lock(branch)? else {
+            return Ok(None);
+        };
+        let Some(remote) = self.locks.lock(branch)? else {
+            return Ok(None);
+        };
+        Ok(Some(Box::new(BothLocks {
+            _own: own,
+            _remote: remote,
+        })))
     }
 
     fn wait_lock<'a>(&'a self, branch: &str) -> Result<Box<dyn Guard + 'a>> {
-        match self.route(branch)? {
-            None => self.local.wait_lock(branch),
-            Some(r) => {
-                let g = self.locks.wait_lock(branch)?;
-                self.migrate(branch, &r)?;
-                Ok(g)
-            }
-        }
+        self.route(branch)?;
+        let own = self.local.wait_lock(branch)?;
+        let remote = self.locks.wait_lock(branch)?;
+        Ok(Box::new(BothLocks {
+            _own: own,
+            _remote: remote,
+        }))
     }
 
     fn publish_head(&self, branch: &str, head: &Rev) -> Result<()> {
@@ -531,25 +792,125 @@ impl State for Records {
         }
     }
 
-    fn left_behind(&self, branch: &str) -> Result<Vec<Vec<u8>>> {
-        Ok(self.moved(branch)?.map(|m| m.left).unwrap_or_default())
+    /// Record 0122 (design D3, D4; C.6): the core's one carry, between the
+    /// host's own files and a remote's refs. Where the home the branch is
+    /// routed to is moving, which only the round that keeps it asks, its
+    /// queue goes to the home the move names, every live submission of it,
+    /// or, coming home from a remote, those this host made; where it is not,
+    /// what this host made left in a remote home closed toward the hosts'
+    /// own files comes into its own. Each write reads its target first, a
+    /// remote's leased on the version read (62).
+    fn carry(&self, branch: &str) -> Result<Carried> {
+        let routed = self.route(branch)?;
+        let home = match &routed {
+            None => self.own_home(branch)?,
+            Some(r) => r.held_home(branch)?,
+        };
+        let own = || OwnHome {
+            local: &self.local,
+            branch,
+        };
+        let remote = |name: &str| -> Result<RemoteHome> {
+            Ok(RemoteHome {
+                refs: self.open(name)?,
+                branch: branch.to_string(),
+            })
+        };
+        let now = chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
+        let done = || Ok(());
+        match home
+            .as_ref()
+            .and_then(|h| h.moving.as_ref().filter(|_| h.state == HomeState::Moving))
+        {
+            Some(moving) => {
+                let chosen_at = moving.chosen_at.clone();
+                let from: Box<dyn HomeStore + '_> = match &routed {
+                    None => Box::new(own()),
+                    Some(r) => Box::new(remote(r.remote())?),
+                };
+                let (to, owed): (Box<dyn HomeStore + '_>, Owed) = match moving.to.as_str() {
+                    HERE => (Box::new(own()), Owed::Mine),
+                    name => (Box::new(remote(name)?), Owed::All),
+                };
+                sluice_core::home::carry(
+                    branch,
+                    from.as_ref(),
+                    to.as_ref(),
+                    &self.host,
+                    owed,
+                    chosen_at,
+                    &now,
+                    &done,
+                )
+            }
+            None if routed.is_none() => {
+                for r in self.home_remotes(branch)? {
+                    let closed_here = self
+                        .held_home(&r, branch)?
+                        .is_some_and(|h| h.closed_to() == Some(HERE));
+                    if closed_here {
+                        return sluice_core::home::carry(
+                            branch,
+                            &remote(&r)?,
+                            &own(),
+                            &self.host,
+                            Owed::Mine,
+                            None,
+                            &now,
+                            &done,
+                        );
+                    }
+                }
+                Ok(Carried::default())
+            }
+            None => Ok(Carried::default()),
+        }
     }
 
-    fn forget_left_behind(&self, branch: &str, ids: &[u64]) -> Result<()> {
-        let Some(mut m) = self.moved(branch)? else {
-            return Ok(());
-        };
-        m.left.retain(|doc| {
-            let id = serde_json::from_slice::<serde_json::Value>(doc)
-                .ok()
-                .and_then(|v| v["id"].as_u64());
-            !id.is_some_and(|id| ids.contains(&id))
-        });
-        self.put_moved(branch, &m)
+    /// Record 0122 (design D6, D7): this host's own files where their home
+    /// is closed, and each remote that may hold the branch whose home, as
+    /// last fetched, is.
+    fn closed_homes(&self, branch: &str) -> Result<Vec<String>> {
+        let mut out = Vec::new();
+        if self
+            .own_home(branch)?
+            .is_some_and(|h| h.state == HomeState::Closed)
+        {
+            out.push(HERE.to_string());
+        }
+        for r in self.home_remotes(branch)? {
+            if self
+                .held_home(&r, branch)?
+                .is_some_and(|h| h.state == HomeState::Closed)
+            {
+                out.push(r);
+            }
+        }
+        Ok(out)
+    }
+
+    /// A remote's closed home as last fetched, with no fetch.
+    fn read_in(&self, branch: &str, home: &str) -> Result<Snapshot> {
+        match home {
+            HERE => self.local.read(branch),
+            remote => self.open(remote)?.read_held(branch),
+        }
+    }
+
+    fn read_finished_in(&self, branch: &str, home: &str, name: &str) -> Result<Option<Vec<u8>>> {
+        match home {
+            HERE => self.local.read_finished(branch, name),
+            remote => self.open(remote)?.read_finished(branch, name),
+        }
     }
 
     fn read(&self, branch: &str) -> Result<Snapshot> {
-        match self.route(branch)? {
+        let routed = self.route(branch)?;
+        self.read_from.borrow_mut().insert(
+            branch.into(),
+            routed.as_ref().map(|r| r.remote().to_string()),
+        );
+        match routed {
             None => self.local.read(branch),
             Some(r) => r.read(branch),
         }
@@ -588,8 +949,22 @@ impl State for Records {
         }
     }
 
+    /// Every remote that may hold a branch's state is read as asked, from
+    /// what the host process's last ask fetched, and the remotes opened
+    /// now or later fetch no signs of life of their own (129; design D16).
+    fn hold(&self) {
+        self.held.set(true);
+        let Ok(remotes) = self.signed_remotes() else {
+            return;
+        };
+        self.asked.borrow_mut().extend(remotes);
+        for r in self.remotes.borrow().values() {
+            r.hold();
+        }
+    }
+
     fn stale(&self, branch: &str) -> Option<ReadRefused> {
-        let remote = self.routes.borrow().get(branch).cloned().flatten()?;
+        let remote = self.routes.borrow().get(branch)?.remote.clone()?;
         let r = self.remotes.borrow().get(&remote).cloned()?;
         r.stale(branch)
     }
@@ -608,6 +983,34 @@ impl State for Records {
         }
     }
 
+    fn intake_refusal(&self, branch: &str) -> Result<Option<Vec<u8>>> {
+        match self.route(branch)? {
+            None => self.local.intake_refusal(branch),
+            Some(r) => r.intake_refusal(branch),
+        }
+    }
+
+    fn keep_intake_refusal(&self, branch: &str, doc: Option<&[u8]>) -> Result<()> {
+        match self.route(branch)? {
+            None => self.local.keep_intake_refusal(branch, doc),
+            Some(r) => r.keep_intake_refusal(branch, doc),
+        }
+    }
+
+    fn pool_refusal(&self, branch: &str) -> Result<Option<Vec<u8>>> {
+        match self.route(branch)? {
+            None => self.local.pool_refusal(branch),
+            Some(r) => r.pool_refusal(branch),
+        }
+    }
+
+    fn keep_pool_refusal(&self, branch: &str, doc: Option<&[u8]>) -> Result<()> {
+        match self.route(branch)? {
+            None => self.local.keep_pool_refusal(branch, doc),
+            Some(r) => r.keep_pool_refusal(branch, doc),
+        }
+    }
+
     fn read_finished(&self, branch: &str, name: &str) -> Result<Option<Vec<u8>>> {
         match self.route(branch)? {
             None => self.local.read_finished(branch, name),
@@ -622,8 +1025,33 @@ impl State for Records {
         }
     }
 
-    fn write(&self, branch: &str, read_at: u64, changes: Changes) -> Result<Written> {
-        match self.route(branch)? {
+    /// 62, record 0122 (design D2): written where the branch is routed
+    /// now, refused where a move took its records from the home they were
+    /// read in. The first write into a home that holds no `home.json`, a
+    /// branch routed by its policy, writes it, open, naming the home and
+    /// the revision whose policy chose it.
+    fn write(&self, branch: &str, read_at: u64, mut changes: Changes) -> Result<Written> {
+        let routed = self.route(branch)?;
+        let now = routed.as_ref().map(|r| r.remote().to_string());
+        if let Some(read) = self.read_from.borrow().get(branch) {
+            if *read != now {
+                return Ok(Written::Refused);
+            }
+        }
+        let by_policy = self
+            .routes
+            .borrow()
+            .get(branch)
+            .and_then(|r| r.by_policy.clone());
+        if let Some(chosen_at) = by_policy {
+            if !changes.put.contains_key(HOME_FILE) {
+                let at = now.as_deref().unwrap_or(HERE);
+                changes
+                    .put
+                    .insert(HOME_FILE.into(), to_document(&HomeDoc::open(at, chosen_at)));
+            }
+        }
+        match routed {
             None => self.local.write(branch, read_at, changes),
             Some(r) => r.write(branch, read_at, changes),
         }
@@ -694,22 +1122,30 @@ impl State for Records {
         }
     }
 
-    /// This host's own results, and the runs on every remote opened, each
-    /// signer's verified with the key `branch`'s own policy lists for it
-    /// at its revision and read for no signer it does not name
-    /// ([`Records::signers_of`]; 78; rule core.22).
-    fn results(&self, branch: &str) -> Result<Vec<u8>> {
-        let mut bytes = self.local.results(branch)?;
-        let routed = self.route(branch)?;
-        let remotes: Vec<Rc<RemoteRefs>> = self.remotes.borrow().values().cloned().collect();
-        if remotes.is_empty() {
-            return Ok(bytes);
+    /// Of this host's own results, and the runs on every remote opened,
+    /// each signer's verified with the key `branch`'s own policy lists for
+    /// it at its revision and read for no signer it does not name
+    /// ([`Records::signers_of`]; 78; rule core.22), the lines `ask` names:
+    /// from the host process's index in the host process, asked of it from
+    /// a command, and read here otherwise (design D17).
+    fn results_for(&self, branch: &str, ask: &ResultAsk) -> Result<Vec<u8>> {
+        match self.results_from {
+            ResultsFrom::Here => self.results_here(branch, ask),
+            ResultsFrom::Indexed => self.results_indexed(branch, ask),
+            ResultsFrom::Asked => {
+                let asked = crate::host_process::client::Client::host()
+                    .and_then(|c| c.results(&self.common, branch, ask));
+                match asked {
+                    Ok(bytes) => Ok(bytes),
+                    Err(e) => {
+                        crate::telemetry::warn(&format!(
+                            "sluice: warning: sluice's host process could not be asked for {branch}'s results, so this command reads them itself: {e:#}"
+                        ));
+                        self.results_here(branch, ask)
+                    }
+                }
+            }
         }
-        let signers = self.signers_of(branch, routed.as_ref().map(|r| r.remote()))?;
-        for r in remotes {
-            bytes.extend(r.results_with(&signers)?);
-        }
-        Ok(bytes)
     }
 
     /// 78, 87: whether `branch`'s own policy at `at`, the list its runs are
@@ -750,6 +1186,13 @@ impl State for Records {
             }
         }
         Ok(())
+    }
+
+    fn add_signed(&self, branch: &str, signer: &str, path: &str, record: &[u8]) -> Result<()> {
+        match self.route(branch)? {
+            None => self.local.add_signed(branch, signer, path, record),
+            Some(r) => r.add_signed(branch, signer, path, record),
+        }
     }
 
     fn set_asides(&self) -> Result<Vec<u8>> {

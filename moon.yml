@@ -6,9 +6,31 @@ tasks:
   # Every formatter treefmt.nix configures, writing nothing it would change
   # and keeping no cache outside the tree. It reads every tracked file: one
   # that no formatter claims and no exclude names fails it (core.21).
+  # moon walks the root project's globs on disk, not through git, so its
+  # inputs leave out by hand each path .gitignore names, and ruff's cache,
+  # which ignores itself: a key that names a file the tree does not hold
+  # is one no signer bears out, and the bolt's signer refuses it (C.6;
+  # record 0125).
   format:
     command: 'treefmt --ci'
-    inputs: ['/**/*']
+    inputs:
+      - '/**/*'
+      - '!/target/**'
+      - '!/result/**'
+      - '!/**/.devenv/**'
+      - '!/**/.devenv.flake.nix'
+      - '!/**/devenv.local.nix'
+      - '!/**/.pre-commit-config.yaml'
+      - '!/**/.moon/cache/**'
+      - '!/.ruff_cache/**'
+      - '!/site/node_modules/**'
+      - '!/site/dist/**'
+      - '!/site/.astro/**'
+      - '!/site/src/content/docs/decisions/**'
+      - '!/site/src/generated/**'
+      - '!/site/public/screenshots/**'
+      - '!/.mcp.json'
+      - '!/.claude/settings.json'
     tags: [check-fast]
     options: {runFromWorkspaceRoot: true}
   lint:
@@ -70,6 +92,17 @@ tasks:
   changes:
     command: 'sh check-changes.sh'
     inputs: ['/openspec/changes/**/*', '!/openspec/changes/archive/**/*', '/openspec/specs/**/*', '/openspec/config.yaml', '/check-changes.sh', '/devenv.nix', '/devenv.lock']
+    tags: [check-fast]
+    options: {runFromWorkspaceRoot: true}
+  # check-changes.sh does what core.61 asks of each open change: its cases,
+  # each a scratch tree of its own holding the changes a scenario of
+  # repository-gate's requirement names, a requirement past OpenSpec's 500
+  # characters among them, check its exit and its words
+  # (check-changes-cases.sh; record 0128 as amended 2026-11-16, core.61).
+  # It reads no file of the tree but the two scripts.
+  changes-cases:
+    command: 'sh check-changes-cases.sh'
+    inputs: ['/check-changes.sh', '/check-changes-cases.sh', '/devenv.nix', '/devenv.lock']
     tags: [check-fast]
     options: {runFromWorkspaceRoot: true}
   # The scene the plugins' screenshots are taken of, built --fast with the

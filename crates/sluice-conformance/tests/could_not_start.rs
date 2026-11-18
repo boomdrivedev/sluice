@@ -1,6 +1,7 @@
 //! A run whose tests could not be started: recorded with why, its
-//! checkout released, nothing under any key and nobody blamed, open again
-//! for any host, and counted toward the runs in a row after which its
+//! checkout released, nothing under any key and nobody blamed, ended with
+//! no outcome and followed up by a run open to any host (record 0122;
+//! design D7), and counted toward the runs in a row after which its
 //! combination is not passed (16, 114, 115; design D1). A run whose
 //! checkout could not be made never began, and counts toward nothing; a
 //! claimed run's checkout is made at its combination, fetched first where
@@ -59,6 +60,16 @@ fn gate_not_run(why: &str) -> Vec<(String, String)> {
     vec![("#gate".to_string(), why.to_string())]
 }
 
+/// Record 0122 (design D7): whether `r` ended with no outcome for `check`,
+/// for `why`, nothing of it left to do: what a run that never ran comes to.
+fn ended_with_none(r: &SystemRun, check: &str, why: &str) -> bool {
+    use sluice_core::records::CheckOutcome;
+    r.state == RunState::Closed
+        && r.ended
+            .as_ref()
+            .is_some_and(|e| e.outcomes.get(check) == Some(&CheckOutcome::None { why: why.into() }))
+}
+
 /// satisfies: 16, 114; the run-outcome spec's "The toolchain fails to
 /// enter"
 #[test]
@@ -75,11 +86,21 @@ fn a_run_whose_toolchain_fails_to_enter_is_recorded_with_its_words() {
     assert!(h.w().delivered().is_empty(), "nobody is blamed");
     assert_ne!(h.sub(one).state, State::Failed);
     let r = &runs(&h)[0];
-    assert_eq!(
-        (r.state, r.host.clone(), r.place.clone()),
-        (RunState::Open, None, None)
+    assert!(
+        ended_with_none(r, "#gate", &could_not_start(TOOLCHAIN)),
+        "{r:?}"
     );
+    // Record 0122 (design D3): released once its end was written, then closed.
+    assert_eq!(r.state, RunState::Closed);
     assert!(h.doc().release.is_empty(), "nothing left to release");
+    // Its follow-up, open to any host, holds its checks.
+    h.w().start_fails(Some(TOOLCHAIN));
+    h.step();
+    let follow = &runs(&h)[1];
+    assert_eq!(
+        (follow.follows, follow.checks.as_slice()),
+        (Some(0), &["#gate".to_string()][..])
+    );
 
     h.w().start_fails(None);
     h.settle();
@@ -103,10 +124,11 @@ fn a_run_whose_checkout_cannot_be_made_is_recorded_with_why() {
     assert!(h.w().delivered().is_empty(), "nobody is blamed");
     assert_ne!(h.sub(one).state, State::Failed);
     let r = &runs(&h)[0];
-    assert_eq!(
-        (r.state, r.host.clone(), r.place.clone()),
-        (RunState::Open, None, None)
+    assert!(
+        ended_with_none(r, "#gate", &could_not_start(words)),
+        "{r:?}"
     );
+    assert_eq!(r.place, None);
     let lost = r.lost.as_ref().expect("its record says why");
     assert_eq!(lost.not_run[0].reason, could_not_start(words));
     assert_eq!(in_a_row(&h), 0, "it counts toward nothing");
@@ -132,7 +154,11 @@ fn checkouts_that_cannot_be_made_run_after_run_blame_no_one() {
     assert_eq!(in_a_row(&h), 0, "none counts toward the runs in a row");
     assert!(h.w().delivered().is_empty(), "nobody is blamed");
     assert_ne!(h.sub(one).state, State::Failed);
-    assert_eq!(runs(&h)[0].state, RunState::Open);
+    let all = runs(&h);
+    assert_eq!(all.len(), 5, "each a follow-up of the one before");
+    assert!(all
+        .iter()
+        .all(|r| ended_with_none(r, "#gate", &could_not_start(words))));
 
     h.w().checkout_fails(None);
     h.settle();
@@ -168,6 +194,14 @@ fn peers() -> Harness {
     h
 }
 
+/// Design D8: the instance that keeps the branch, `lead`, signing as
+/// `box`, which the branch accepts, with no room of its own, so other
+/// hosts and pools take the runs.
+fn keeper<'a>(h: &'a Harness) -> Sluice<'a> {
+    let s = on(h, "lead", Some("box"));
+    h.w().no_room();
+    s
+}
 /// Instance `name` on its own host, signing as `signer` or as no one.
 fn on<'a>(h: &'a Harness, name: &str, signer: Option<&str>) -> Sluice<'a> {
     h.w().be_host(name);
@@ -205,7 +239,7 @@ fn launched(h: &Harness) -> (String, String, sluice_seams::Rev) {
     h.w().be_host("lead");
     h.work("unit/a", "agent-a", &[("a/lib", Some("a2"))]);
     h.submit("unit/a");
-    on(h, "lead", None).step(BRANCH).unwrap();
+    keeper(h).step(BRANCH).unwrap();
     assert_eq!(h.w().launches().len(), 1);
     let claim = claims(h).pop().expect("the pool's claim");
     assert!(claim.starts_with("pool/forge/"), "{claim}");
@@ -237,8 +271,8 @@ fn a_pools_job_makes_its_place_at_a_combination_only_the_remote_holds() {
     assert_eq!(asked[0].revision, combination, "its place is at it");
     let r = &runs(&h)[0];
     assert_eq!(
-        (r.state, r.host.as_deref()),
-        (RunState::Testing, Some(claim.as_str()))
+        (r.state, r.holder()),
+        (RunState::Running, Some(claim.as_str()))
     );
     assert!(not_run(&h).is_empty());
 }
@@ -267,7 +301,13 @@ fn a_claimed_run_whose_combination_the_remote_no_longer_holds_never_began() {
     assert_eq!(in_a_row(&h), 0, "it counts toward nothing");
     assert!(h.w().delivered().is_empty(), "nobody is blamed");
     let r = &runs(&h)[0];
-    assert_eq!((r.state, r.host.clone()), (RunState::Open, None));
+    assert!(ended_with_none(r, "#gate", &why), "{r:?}");
+    // The lead's next round opens its follow-up, and, no host being live,
+    // gives it a claim of its own on the pool.
+    keeper(&h).step(BRANCH).unwrap();
+    let follow = &runs(&h)[1];
+    assert_eq!(follow.follows, Some(0));
+    assert!(follow.holder().is_some_and(|h| h != claim), "{follow:?}");
 }
 
 /// satisfies: 82; the run-claims spec's "A host that holds the
@@ -278,7 +318,7 @@ fn a_host_that_holds_the_combination_fetches_nothing_more() {
     h.w().hold_runs(true);
     h.work("unit/a", "agent-a", &[("a/lib", Some("a2"))]);
     h.submit("unit/a");
-    on(&h, "lead", None).step(BRANCH).unwrap();
+    keeper(&h).step(BRANCH).unwrap();
     on(&h, "a", Some("box")).step(BRANCH).unwrap();
     assert_eq!(claims(&h), ["a"]);
     assert_eq!(h.w().requests().len(), 1);
@@ -304,25 +344,27 @@ fn a_run_one_signing_host_could_not_start_is_taken_by_another() {
     h.w().hold_runs(true);
     h.work("unit/a", "agent-a", &[("a/lib", Some("a2"))]);
     h.submit("unit/a");
-    // A lead that signs as no one the gate trusts opens the run.
-    on(&h, "lead", None).step(BRANCH).unwrap();
+    // A lead with no room of its own opens the run (design D8).
+    keeper(&h).step(BRANCH).unwrap();
     h.w().start_fails(Some(TOOLCHAIN));
     on(&h, "a", Some("box")).step(BRANCH).unwrap();
     assert_eq!(claims(&h), ["a"]);
     assert_eq!(not_run(&h), [gate_not_run(&could_not_start(TOOLCHAIN))]);
     let r = &runs(&h)[0];
-    assert_eq!(
-        (r.state, r.host.clone()),
-        (RunState::Open, None),
-        "no host holds it"
+    assert!(
+        ended_with_none(r, "#gate", &could_not_start(TOOLCHAIN)),
+        "{r:?}"
     );
     assert!(h.w().live_places().is_empty());
 
+    // The lead opens its follow-up, which another host takes.
+    keeper(&h).step(BRANCH).unwrap();
+    assert_eq!(runs(&h)[1].holder(), None, "no host holds it");
     h.w().start_fails(None);
     on(&h, "b", Some("box")).step(BRANCH).unwrap();
     assert_eq!(claims(&h), ["a", "b"]);
-    let r = &runs(&h)[0];
-    assert_eq!((r.state, r.host.as_deref()), (RunState::Testing, Some("b")));
+    let r = &runs(&h)[1];
+    assert_eq!((r.state, r.holder()), (RunState::Running, Some("b")));
     assert_eq!(h.w().requests().len(), 1);
 }
 
@@ -336,7 +378,10 @@ fn a_run_refused_at_the_bound_is_recorded_as_nothing_and_counts_for_nothing() {
     h.w().refuse_next_start();
     h.step();
     let r = &runs(&h)[0];
-    assert_eq!((r.state, r.host.clone()), (RunState::Open, None));
+    assert!(
+        ended_with_none(r, "#gate", "the host had no room for it"),
+        "{r:?}"
+    );
     assert!(not_run(&h).is_empty(), "no record of a run with no result");
     assert_eq!(in_a_row(&h), 0, "it counts toward nothing");
     h.settle();
@@ -414,9 +459,11 @@ fn starts_that_fail_and_checks_that_could_not_run_count_together() {
         .iter()
         .map(|f| (f.task.clone(), f.not_run.clone()))
         .collect();
+    // Record 0122 (design D7): the follow-up held only the check the run
+    // before left not run.
     assert_eq!(
         named,
-        [("#gate".to_string(), Some(could_not_start(TOOLCHAIN)))],
+        [("a:test".to_string(), Some(could_not_start(TOOLCHAIN)))],
         "named with the reason of the run that ended it"
     );
     assert_eq!(h.w().made_places().len(), 3);

@@ -15,22 +15,29 @@
 //! the caches an earlier sluice saved under `<common>/sluice/.caches/`
 //! are removed when a place is made.
 //!
-//! A place holds a block of ports when `[checkout] ports` names any (31;
-//! ADR 0016): block `n` runs from `ports_from + n × names`, one port per
-//! name in the order written, `ports_from` 20000 by default, above
-//! worktrunk's `hash_port` range. Blocks are held on the host, not per
-//! repository, under `$XDG_STATE_HOME/sluice/ports/<n>` (else
-//! `~/.local/state`), each naming the record of the place that holds it;
-//! a block whose record is gone is free again. A block is taken only
-//! when none of its ports is in use. The place gives its checks
+//! A place holds its ports themselves when `[checkout] ports` names any
+//! (31, 32; record 0016 as amended 2026-11-13; rule core.10): the host
+//! holds each port a live place holds, by the port and across every
+//! repository, under `$XDG_STATE_HOME/sluice/ports/held/<port>` (else
+//! `~/.local/state`), each naming the record of the place that holds it,
+//! under `ports/.lock`; a port whose record is gone is free again. A new
+//! place takes, from `ports_from`, 20000 by default, above worktrunk's
+//! `hash_port` range, the lowest run of as many ports as its policy names
+//! in which no port is held by a live place and each port is free, one
+//! port per name in the order written. Its record is written first, so a
+//! hold names a record that exists, then each port is held, then the
+//! record is written with `ports`, each name and its port, which every
+//! later reading takes and none reckons again from a policy; a release
+//! frees each port its record names. An older sluice's blocks,
+//! `ports/<n>`, are read by nothing. The place gives its checks
 //! `SLUICE_PLACE`, a short name unique to it, and `SLUICE_PORT_<NAME>`
 //! for each name.
 //!
 //! A session's own worktree is adopted, never made (session-runs-1
 //! clauses 90, 94, 95): its record, `kind: "session"`, names the worktree
-//! and its branch and holds its block of ports from its first run
+//! and its branch and holds its ports from its first run
 //! until `sluice release`, which ends its runs, runs the release command
-//! once, removes its scratch directory and lets its block go, and never
+//! once, removes its scratch directory and lets its ports go, and never
 //! removes the worktree. Its record keeps when its last run started, and
 //! `session_places` lists every such record with whether its worktree
 //! still exists, so the core can release one whose worktree is gone:
@@ -163,8 +170,9 @@ struct Made {
     /// A session's place: the branch whose policy its runs are held to.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     branch: Option<String>,
-    /// A session's place: the ports it was given on its first run, kept
-    /// until its release (90).
+    /// The ports it holds, `SLUICE_PORT_<NAME>` and its port, given when
+    /// it was made, or a session's at its first run, and held until its
+    /// release (31, 90; record 0016 as amended 2026-11-13).
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     ports: BTreeMap<String, String>,
     /// The checkout, once it exists.
@@ -175,9 +183,6 @@ struct Made {
     /// place is made (35; ADR 0049).
     #[serde(rename = "caches", default, skip_serializing)]
     _caches: serde::de::IgnoredAny,
-    /// The block of ports it holds on the host (31).
-    #[serde(default, alias = "slot", skip_serializing_if = "Option::is_none")]
-    block: Option<u32>,
     /// A session's place: when its last run started (session-runs-1
     /// clause 97); a preview: when it was made.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -228,7 +233,6 @@ impl Made {
             ports: BTreeMap::new(),
             path: None,
             _caches: serde::de::IgnoredAny,
-            block: None,
             last_run: None,
             revision: None,
             names: BTreeMap::new(),
@@ -338,7 +342,7 @@ fn is_own(dir: &Path, meta: &std::fs::Metadata) -> Result<()> {
 /// where it is there, refused with its path unless it is so (35 as
 /// amended, rule core.30): nothing of one refused is changed or removed.
 /// One another process of the user made first is no error.
-fn make_own(dir: &Path) -> Result<()> {
+pub(crate) fn make_own(dir: &Path) -> Result<()> {
     use std::os::unix::fs::DirBuilderExt as _;
     match std::fs::DirBuilder::new().mode(0o700).create(dir) {
         Err(e) if e.kind() != std::io::ErrorKind::AlreadyExists => {
@@ -437,7 +441,7 @@ struct Ports {
     from: u32,
 }
 
-/// Where a block of ports begins by default: above `hash_port`'s 10000 to
+/// Where a place's ports begin by default: above `hash_port`'s 10000 to
 /// 19999, below every system's ephemeral range.
 const PORTS_FROM: u32 = 20000;
 
@@ -471,12 +475,6 @@ impl Ports {
             Some(_) => bail!("[checkout] ports_from must be a number"),
         };
         Ok(Some(Ports { names, from }))
-    }
-
-    /// The first port of block `n`, if it fits under 65536.
-    fn first(&self, n: u32) -> Option<u16> {
-        let first = self.from as u64 + n as u64 * self.names.len() as u64;
-        (first + self.names.len() as u64 <= 65536).then_some(first as u16)
     }
 }
 
@@ -587,71 +585,97 @@ fn port_free(port: u16) -> bool {
         && TcpStream::connect_timeout(&local, Duration::from_millis(100)).is_err()
 }
 
-/// The host's blocks of ports, shared by every repository.
-fn blocks_dir() -> Result<PathBuf> {
+/// The host's held ports, shared by every repository.
+fn ports_dir() -> Result<PathBuf> {
     Ok(crate::instance::state_dir()?.join("ports"))
 }
 
-/// The host's blocks, locked while held.
-fn lock_blocks(dir: &Path) -> Result<File> {
+/// The host's ports, locked while held.
+fn lock_ports(dir: &Path) -> Result<File> {
     std::fs::create_dir_all(dir).with_context(|| format!("creating {}", dir.display()))?;
     let lock = File::create(dir.join(".lock"))?;
     lock.lock()?;
     Ok(lock)
 }
 
-/// Hold the first block no live place holds and whose every port is free,
-/// for the place whose record is `record`.
-fn hold_block(dir: &Path, ports: &Ports, record: &Path) -> Result<u32> {
-    let _lock = lock_blocks(dir)?;
-    for n in 0u32.. {
-        let Some(first) = ports.first(n) else {
-            bail!(
-                "no block of {} ports from {} is free on this host",
-                ports.names.len(),
-                ports.from
-            );
-        };
-        let path = dir.join(n.to_string());
-        match std::fs::read(&path) {
-            Ok(holder) => {
-                let holder = PathBuf::from(String::from_utf8_lossy(&holder).trim());
-                if holder != record && holder.exists() {
-                    continue;
-                }
+/// Whether `port`, as `held/<port>` in `held` says, is held by a live
+/// place other than the one whose record is `record`: one whose record
+/// exists.
+fn held_by_another(held: &Path, port: u32, record: &Path) -> Result<bool> {
+    match std::fs::read(held.join(port.to_string())) {
+        Ok(holder) => {
+            let holder = PathBuf::from(String::from_utf8_lossy(&holder).trim());
+            Ok(holder != record && holder.exists())
+        }
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(false),
+        Err(e) => Err(e.into()),
+    }
+}
+
+/// 31, 32, record 0016 as amended 2026-11-13: hold, for the place whose
+/// record is `record`, the lowest run of as many ports as `ports` names,
+/// from its `ports_from`, in which no port is held by a live place and
+/// each port is free; each name's `SLUICE_PORT_<NAME>` and its port.
+fn hold_ports(dir: &Path, ports: &Ports, record: &Path) -> Result<BTreeMap<String, String>> {
+    let _lock = lock_ports(dir)?;
+    let held = dir.join("held");
+    std::fs::create_dir_all(&held).with_context(|| format!("creating {}", held.display()))?;
+    let n = ports.names.len() as u32;
+    let mut first = ports.from;
+    while first + n <= 65536 {
+        let mut taken = None;
+        for port in first..first + n {
+            if held_by_another(&held, port, record)? || !port_free(port as u16) {
+                taken = Some(port);
+                break;
             }
+        }
+        if let Some(port) = taken {
+            first = port + 1;
+            continue;
+        }
+        let mut out = BTreeMap::new();
+        for (name, port) in ports.names.iter().zip(first..) {
+            std::fs::write(
+                held.join(port.to_string()),
+                record.to_string_lossy().as_bytes(),
+            )?;
+            out.insert(env_name(name), port.to_string());
+        }
+        return Ok(out);
+    }
+    bail!(
+        "no run of {n} free ports from {} is left on this host",
+        ports.from
+    )
+}
+
+/// Let go of each port of `ports` the place whose record is `record`
+/// holds; a port another place holds now is left to it.
+fn free_ports(dir: &Path, ports: &BTreeMap<String, String>, record: &Path) -> Result<()> {
+    if ports.is_empty() {
+        return Ok(());
+    }
+    let _lock = lock_ports(dir)?;
+    for port in ports.values() {
+        let path = dir.join("held").join(port);
+        match std::fs::read(&path) {
+            Ok(holder) if Path::new(String::from_utf8_lossy(&holder).trim()) == record => {
+                std::fs::remove_file(&path)?;
+            }
+            Ok(_) => {}
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
             Err(e) => return Err(e.into()),
         }
-        if !(0..ports.names.len() as u16).all(|i| port_free(first + i)) {
-            continue;
-        }
-        std::fs::write(&path, record.to_string_lossy().as_bytes())?;
-        return Ok(n);
     }
-    unreachable!("the blocks run out before u32 does")
-}
-
-/// Let go of block `n`, if the place whose record is `record` holds it.
-fn free_block(dir: &Path, n: u32, record: &Path) -> Result<()> {
-    let _lock = lock_blocks(dir)?;
-    let path = dir.join(n.to_string());
-    match std::fs::read(&path) {
-        Ok(holder) if Path::new(String::from_utf8_lossy(&holder).trim()) == record => {
-            std::fs::remove_file(&path)?;
-            Ok(())
-        }
-        Ok(_) => Ok(()),
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
-        Err(e) => Err(e.into()),
-    }
+    Ok(())
 }
 
 pub struct Places {
     common: PathBuf,
     runs: Runs,
-    /// Where the host's blocks of ports are held; the default when `None`.
-    blocks: Option<PathBuf>,
+    /// Where the host's ports are held; the default when `None`.
+    ports: Option<PathBuf>,
     /// The directory standing for the user's, [`user_scratch`] when
     /// `None`.
     scratch_root: Option<PathBuf>,
@@ -673,7 +697,7 @@ impl Places {
         Places {
             common: common.to_path_buf(),
             runs,
-            blocks: None,
+            ports: None,
             scratch_root: None,
             release: None,
             containers: None,
@@ -867,7 +891,7 @@ impl Places {
     }
 
     /// Let go of what a place held beyond its checkout: the scratch
-    /// directory its record `made` names, its block of ports and its
+    /// directory its record `made` names, the ports it names and its
     /// record. With no record, no scratch is removed: one no record names
     /// is [`Checkout::remove_unnamed_scratch`]'s (123, rule core.30).
     fn let_go(&self, name: &str, made: Option<&Made>) -> Result<()> {
@@ -877,8 +901,8 @@ impl Places {
                 std::fs::remove_dir_all(&tmp)?;
             }
         }
-        if let Some(n) = made.and_then(|m| m.block) {
-            free_block(&self.blocks()?, n, &self.record(name))?;
+        if let Some(made) = made.filter(|m| !m.ports.is_empty()) {
+            free_ports(&self.ports()?, &made.ports, &self.record(name))?;
         }
         // A session's record is removed under the lock `ran` writes it
         // under.
@@ -1092,16 +1116,16 @@ impl Places {
         Ok(!path.is_dir() || !self.listed(path)?)
     }
 
-    /// Hold blocks of ports in `dir` rather than the host's own.
-    pub fn with_blocks(mut self, dir: PathBuf) -> Self {
-        self.blocks = Some(dir);
+    /// Hold ports in `dir` rather than the host's own.
+    pub fn with_ports(mut self, dir: PathBuf) -> Self {
+        self.ports = Some(dir);
         self
     }
 
-    fn blocks(&self) -> Result<PathBuf> {
-        match &self.blocks {
+    fn ports(&self) -> Result<PathBuf> {
+        match &self.ports {
             Some(d) => Ok(d.clone()),
-            None => blocks_dir(),
+            None => ports_dir(),
         }
     }
 
@@ -1409,6 +1433,81 @@ impl Places {
             .context("running git")
     }
 
+    /// Record 0122 (design D3): the place `name`, where its record names a
+    /// checkout this host made that git lists, unlocked, holding exactly
+    /// `rev`: the proof a step that stopped before its run started made it.
+    /// Its scratch is made again where the system emptied it. `None`
+    /// otherwise.
+    fn made_at(&self, name: &str, rev: &Rev) -> Result<Option<Place>> {
+        let Some(made) = self.read_record(name)?.filter(|m| m.kind == Kind::Made) else {
+            return Ok(None);
+        };
+        let Some(path) = made.path.clone().filter(|p| p.is_dir()) else {
+            return Ok(None);
+        };
+        let Some(listed) = self.worktree_entry(&path)? else {
+            return Ok(None);
+        };
+        if listed.locked.is_some() || listed.head.as_ref() != Some(rev) {
+            return Ok(None);
+        }
+        // Holding nothing beyond its revision, as git made it: nothing ran
+        // in it.
+        let path_text = path
+            .to_str()
+            .ok_or_else(|| anyhow!("{} is not UTF-8", path.display()))?;
+        let status = self.git(&[
+            "-C",
+            path_text,
+            "status",
+            "--porcelain",
+            "--untracked-files=all",
+            "--ignored",
+        ])?;
+        if !status.status.success() || !status.stdout.is_empty() {
+            return Ok(None);
+        }
+        let tmp = self.scratch(name, &made);
+        if !tmp.exists() {
+            self.make_scratch(&tmp)?;
+        }
+        let record = self.record(name);
+        let mut env = BTreeMap::from([(
+            "SLUICE_PLACE".to_string(),
+            format!("sluice-{}", &self.hash(&record.to_string_lossy())?[..10]),
+        )]);
+        env.extend(made.ports.clone());
+        Ok(Some(Place {
+            name: name.into(),
+            path,
+            tmp,
+            env,
+        }))
+    }
+
+    /// Record 0122 (design D3, D4): what `git worktree list --porcelain`
+    /// says of the folder `path`, matched by what it is on disk
+    /// ([`Folder`]) or, where it is gone, by its spelling: the revision it
+    /// holds and whether, and why, git keeps it locked. `None` where git
+    /// lists no such folder.
+    fn worktree_entry(&self, path: &Path) -> Result<Option<Listed>> {
+        let out = self.git(&["worktree", "list", "--porcelain", "-z"])?;
+        if !out.status.success() {
+            bail!(
+                "git worktree list: {}",
+                String::from_utf8_lossy(&out.stderr).trim()
+            );
+        }
+        let want = Folder::of(path).ok();
+        Ok(parse_worktree_entries(&out.stdout)
+            .into_iter()
+            .find(|(at, _)| match &want {
+                Some(w) => Folder::of(at).is_ok_and(|f| f == *w),
+                None => at == path,
+            })
+            .map(|(_, listed)| listed))
+    }
+
     fn make_worktree(&self, name: &str, rev: &Rev) -> Result<PathBuf> {
         let path = self.worktree_path(name);
         let out = self.git(&[
@@ -1488,19 +1587,49 @@ impl Places {
                 )
             });
         }
-        let out = self.git(&[
-            "worktree",
-            "remove",
-            "--force",
-            path.to_str()
-                .ok_or_else(|| anyhow!("{} is not UTF-8", path.display()))?,
-        ])?;
+        let path_text = path
+            .to_str()
+            .ok_or_else(|| anyhow!("{} is not UTF-8", path.display()))?;
+        // 123, rule core.16, record 0122 (design D4): `git worktree add`
+        // locks the checkout `initializing` until it is done, and an add
+        // stopped part way leaves the lock, which every removal refuses.
+        // A checkout sluice made, locked so, is unlocked, removed and
+        // pruned; one locked for any other reason is a hold sluice keeps,
+        // and its release fails naming the lock and git's words.
+        let locked = self.worktree_entry(path)?.and_then(|l| l.locked);
+        if locked.as_deref() == Some(INITIALIZING) {
+            let out = self.git(&["worktree", "unlock", path_text])?;
+            if !out.status.success() {
+                bail!(
+                    "git worktree unlock {}: {}",
+                    path.display(),
+                    String::from_utf8_lossy(&out.stderr).trim()
+                );
+            }
+        }
+        let out = self.git(&["worktree", "remove", "--force", path_text])?;
         if !out.status.success() {
-            bail!(
-                "git worktree remove {}: {}",
-                path.display(),
-                String::from_utf8_lossy(&out.stderr).trim()
-            );
+            let said = String::from_utf8_lossy(&out.stderr).trim().to_string();
+            match locked.filter(|l| l != INITIALIZING) {
+                Some(why) => bail!(
+                    "{} is locked ({}), a hold sluice keeps: git worktree remove: {said}",
+                    path.display(),
+                    match why.is_empty() {
+                        true => "no reason given".to_string(),
+                        false => format!("reason: {why}"),
+                    }
+                ),
+                None => bail!("git worktree remove {}: {said}", path.display()),
+            }
+        }
+        if locked.is_some() {
+            let out = self.git(&["worktree", "prune"])?;
+            if !out.status.success() {
+                bail!(
+                    "git worktree prune: {}",
+                    String::from_utf8_lossy(&out.stderr).trim()
+                );
+            }
         }
         Ok(())
     }
@@ -1633,6 +1762,48 @@ fn on_branch(repo: &gix::Repository, head: &str, worktree: PathBuf) -> Result<Op
     }))
 }
 
+/// Record 0122 (design D3, D4): what `git worktree list --porcelain -z`
+/// says of one worktree: the revision it holds, and the reason git keeps
+/// it locked, empty for a lock given none.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Listed {
+    pub head: Option<Rev>,
+    pub locked: Option<String>,
+}
+
+/// Every worktree `git worktree list --porcelain -z` names, by its folder,
+/// with what it says of each ([`Listed`]).
+pub fn parse_worktree_entries(out: &[u8]) -> Vec<(PathBuf, Listed)> {
+    let mut found = Vec::new();
+    for entry in out
+        .split(|b| *b == 0)
+        .collect::<Vec<_>>()
+        .split(|f| f.is_empty())
+    {
+        let mut at = None;
+        let mut listed = Listed {
+            head: None,
+            locked: None,
+        };
+        for f in entry {
+            let f = String::from_utf8_lossy(f);
+            if let Some(w) = f.strip_prefix("worktree ") {
+                at = Some(PathBuf::from(w));
+            } else if let Some(h) = f.strip_prefix("HEAD ") {
+                listed.head = Some(Rev(h.to_string()));
+            } else if f == "locked" {
+                listed.locked = Some(String::new());
+            } else if let Some(why) = f.strip_prefix("locked ") {
+                listed.locked = Some(why.to_string());
+            }
+        }
+        if let Some(at) = at {
+            found.push((at, listed));
+        }
+    }
+    found
+}
+
 /// The worktrees `git worktree list --porcelain -z` names with a branch
 /// checked out: a bare entry, a detached one and one whose directory is
 /// gone (`prunable`) are left out. What [`Checkout::checked_out`] reads
@@ -1684,6 +1855,10 @@ pub const PREVIEW: &str = "preview/";
 /// What a place's record says made it.
 const METHOD: &str = "git-worktree";
 
+/// Record 0122 (design D4): the reason `git worktree add` locks a checkout
+/// with until it is done.
+const INITIALIZING: &str = "initializing";
+
 /// `[checkout] method`, which a policy need not name, is the one there is
 /// or is refused with the reason (ADR 0013).
 fn one_method(checkout: &Settings) -> Result<()> {
@@ -1710,6 +1885,11 @@ impl Checkout for Places {
         one_method(checkout)?;
         let ports = Ports::read(checkout)?;
         self.remove_saved_caches();
+        // Record 0122 (design D3): a checkout this host made at `rev`, by a
+        // step that stopped before its run started, is the place.
+        if let Some(place) = self.made_at(name, rev)? {
+            return Ok(place);
+        }
         // A place of this name left by a step that stopped part way.
         if self.read_record(name)?.is_some() {
             self.release(name)?;
@@ -1725,13 +1905,9 @@ impl Checkout for Places {
             format!("sluice-{}", &self.hash(&record.to_string_lossy())?[..10]),
         )]);
         if let Some(ports) = &ports {
-            let n = hold_block(&self.blocks()?, ports, &record)?;
-            made.block = Some(n);
+            made.ports = hold_ports(&self.ports()?, ports, &record)?;
             self.write_record(name, &made)?;
-            let first = ports.first(n).expect("a held block fits");
-            for (i, p) in ports.names.iter().enumerate() {
-                env.insert(env_name(p), (first + i as u16).to_string());
-            }
+            env.extend(made.ports.clone());
         }
         let tmp = self.scratch(name, &made);
         if tmp.exists() {
@@ -2034,18 +2210,12 @@ impl Checkout for Places {
                     scratch: Some(self.new_scratch(&name)?),
                     ..Made::new(Kind::Session, "session")
                 };
-                // Written before the block is held, so a block names a record
-                // that exists, and a stop between leaves a record release
-                // reads.
+                // Written before its ports are held, so a hold names a
+                // record that exists, and a stop between leaves a record
+                // release reads.
                 self.write_record(&name, &made)?;
                 if let Some(ports) = Ports::read(checkout)? {
-                    let n = hold_block(&self.blocks()?, &ports, &record)?;
-                    made.block = Some(n);
-                    let first = ports.first(n).expect("a held block fits");
-                    for (i, p) in ports.names.iter().enumerate() {
-                        made.ports
-                            .insert(env_name(p), (first + i as u16).to_string());
-                    }
+                    made.ports = hold_ports(&self.ports()?, &ports, &record)?;
                     self.write_record(&name, &made)?;
                 }
                 (made, None)
@@ -2119,18 +2289,12 @@ impl Checkout for Places {
             scratch: Some(self.new_scratch(name)?),
             ..Made::new(Kind::Preview, METHOD)
         };
-        // Written before the block is held, so a block names a record that
+        // Written before its ports are held, so a hold names a record that
         // exists, and a stop part way leaves a record release reads.
         self.write_record(name, &made)?;
         if let Some(ports) = &ports {
             made.names = self.preview_names(ports, rev, branch)?;
-            let n = hold_block(&self.blocks()?, ports, &record)?;
-            made.block = Some(n);
-            let first = ports.first(n).expect("a held block fits");
-            for (i, p) in ports.names.iter().enumerate() {
-                made.ports
-                    .insert(env_name(p), (first + i as u16).to_string());
-            }
+            made.ports = hold_ports(&self.ports()?, ports, &record)?;
             self.write_record(name, &made)?;
         }
         for (label, template) in addresses {
@@ -2199,9 +2363,7 @@ impl Checkout for Places {
         if tmp.exists() {
             std::fs::remove_dir_all(&tmp)?;
         }
-        if let Some(n) = made.block {
-            free_block(&self.blocks()?, n, &self.record(name))?;
-        }
+        free_ports(&self.ports()?, &made.ports, &self.record(name))?;
         match failed {
             // 101: kept, holding nothing, with what its command printed.
             Some(output) if made.failed.is_none() => self.write_record(
@@ -2228,11 +2390,11 @@ impl Checkout for Places {
 #[cfg(test)]
 mod tests {
     use super::{
-        fill, label, own_dir, repository, repository_key, scratch_name, slug, user_scratch, Kind,
-        Made, Places,
+        fill, free_ports, hold_ports, label, own_dir, port_free, repository, repository_key,
+        scratch_name, slug, user_scratch, Kind, Made, Places, Ports,
     };
     use crate::runs::{dir_name, Runs};
-    use sluice_seams::{Checkout, LastResult, Rev, RunKind, RunOutcome};
+    use sluice_seams::{Checkout, LastResult, Rev, RunOutcome, SessionRunKind};
     use std::collections::BTreeMap;
     use std::path::Path;
 
@@ -2240,7 +2402,7 @@ mod tests {
         LastResult {
             at: "2026-10-16T09:00:00Z".into(),
             head: Rev("a".into()),
-            kind: RunKind::Checks,
+            kind: SessionRunKind::Checks,
             outcome: RunOutcome::Pass,
             recorded: true,
             tasks: Vec::new(),
@@ -2248,8 +2410,94 @@ mod tests {
         }
     }
 
+    /// A directory of the test's own for held ports and the records that
+    /// hold them, and the first of `n` free ports from `from`, so tests
+    /// beside each other and the host's own listeners keep apart.
+    fn ports_scratch(test: &str, from: u32, n: u32) -> (std::path::PathBuf, u32) {
+        let root = std::env::temp_dir().join(format!("sluice-{test}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+        let from = from + std::process::id() % 500;
+        let base = (from..60000)
+            .find(|b| (*b..*b + n).all(|p| port_free(p as u16)))
+            .expect("a free run of ports");
+        (root, base)
+    }
+
+    fn ports(n: usize, from: u32) -> Ports {
+        Ports {
+            names: (0..n).map(|i| format!("p{i}")).collect(),
+            from,
+        }
+    }
+
+    fn record(root: &Path, name: &str) -> std::path::PathBuf {
+        let r = root.join(format!("{name}.json"));
+        std::fs::write(&r, "{}").unwrap();
+        r
+    }
+
+    fn held(ports: &BTreeMap<String, String>) -> std::collections::BTreeSet<u32> {
+        ports.values().map(|p| p.parse().unwrap()).collect()
+    }
+
+    /// 31, 32, record 0016 as amended 2026-11-13: a place of a policy that
+    /// names 19 ports, made beside one of a policy that names 21, holds no
+    /// port the first holds.
+    #[test]
+    fn policies_of_different_lengths_hold_no_port_twice() {
+        let (root, base) = ports_scratch("ports-lengths", 30000, 60);
+        let dir = root.join("ports");
+        let a = hold_ports(&dir, &ports(21, base), &record(&root, "a")).unwrap();
+        assert_eq!(held(&a), (base..base + 21).collect());
+        let b = hold_ports(&dir, &ports(19, base), &record(&root, "b")).unwrap();
+        assert_eq!(b.len(), 19);
+        assert!(held(&a).is_disjoint(&held(&b)), "{a:?} {b:?}");
+        assert_eq!(held(&b), (base + 21..base + 40).collect());
+        std::fs::remove_dir_all(&root).unwrap();
+    }
+
+    /// 31, record 0016 as amended 2026-11-13: the ports of a place whose
+    /// record is gone are free again, and freed ports too.
+    #[test]
+    fn a_gone_places_ports_are_free_again() {
+        let (root, base) = ports_scratch("ports-gone", 33000, 10);
+        let dir = root.join("ports");
+        let first = record(&root, "first");
+        let a = hold_ports(&dir, &ports(3, base), &first).unwrap();
+        assert_eq!(held(&a), (base..base + 3).collect());
+        std::fs::remove_file(&first).unwrap();
+        let second = record(&root, "second");
+        let b = hold_ports(&dir, &ports(3, base), &second).unwrap();
+        assert_eq!(held(&b), (base..base + 3).collect());
+        // Freed by its release, they go to the next place.
+        free_ports(&dir, &b, &second).unwrap();
+        let c = hold_ports(&dir, &ports(3, base), &record(&root, "third")).unwrap();
+        assert_eq!(held(&c), (base..base + 3).collect());
+        // A release of a place whose ports went to another frees none of
+        // them.
+        free_ports(&dir, &a, &first).unwrap();
+        let d = hold_ports(&dir, &ports(3, base), &record(&root, "fourth")).unwrap();
+        assert!(held(&c).is_disjoint(&held(&d)), "{c:?} {d:?}");
+        std::fs::remove_dir_all(&root).unwrap();
+    }
+
+    /// 31, record 0016 as amended 2026-11-13: a port no place holds that a
+    /// process listens on is passed by, with the run it would begin.
+    #[test]
+    fn a_port_in_use_is_passed_by() {
+        let (root, base) = ports_scratch("ports-in-use", 36000, 10);
+        let dir = root.join("ports");
+        let _listening =
+            std::net::TcpListener::bind((std::net::Ipv4Addr::UNSPECIFIED, (base + 1) as u16))
+                .unwrap();
+        let a = hold_ports(&dir, &ports(2, base), &record(&root, "a")).unwrap();
+        assert_eq!(held(&a), [base + 2, base + 3].into());
+        std::fs::remove_dir_all(&root).unwrap();
+    }
+
     /// A place with no ports is released without touching the host's
-    /// blocks of ports, which a sandboxed check may not reach: a
+    /// held ports, which a sandboxed check may not reach: a
     /// candidate's, and a session's.
     #[test]
     fn a_release_without_ports_never_takes_the_hosts_lock() {
@@ -2258,7 +2506,7 @@ mod tests {
         std::fs::create_dir_all(&root).unwrap();
         std::fs::write(root.join("not-a-dir"), "").unwrap();
         let places = Places::new(&root, Runs::new(&root, "sluice".into()))
-            .with_blocks(root.join("not-a-dir/blocks"));
+            .with_ports(root.join("not-a-dir/blocks"));
         let name = "try/main/90";
         let made = Made::new(Kind::Made, "worktree");
         places.write_record(name, &made).unwrap();
@@ -2281,7 +2529,7 @@ mod tests {
         let _ = std::fs::remove_dir_all(&root);
         std::fs::create_dir_all(&root).unwrap();
         let open = || {
-            Places::new(&root, Runs::new(&root, "sluice".into())).with_blocks(root.join("blocks"))
+            Places::new(&root, Runs::new(&root, "sluice".into())).with_ports(root.join("blocks"))
         };
         let places = open();
         let name = format!("session/{}", root.join("wt").display());

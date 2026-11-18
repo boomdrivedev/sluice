@@ -458,6 +458,85 @@ checkout SHALL stay held with it (123).
   (`a_checkout_git_no_longer_lists_is_freed` in
   `crates/sluice/tests/profiles/places.rs`)
 
+### Requirement: A checkout git left locked mid-way is undone
+
+Where git lists a checkout sluice made as locked with the reason
+`initializing`, which git writes while its `worktree add` is going and
+which an add that never finished leaves, sluice SHALL unlock it, remove
+it and prune git's entry of it before it makes the checkout again or
+releases it. A checkout locked for any other reason SHALL be held, named
+with git's words (123; record 0122; rule core.16).
+
+#### Scenario: A release after an add that never finished
+
+- **WHEN** `sluice/try/main/6`'s `git worktree add` was stopped part way,
+  leaving the checkout locked `initializing`, and its release runs
+- **THEN** the checkout is unlocked, removed and pruned, its record goes,
+  and git lists it no more
+  (`a_checkout_git_left_locked_initializing_is_released` in
+  `crates/sluice/tests/profiles/places.rs`)
+
+#### Scenario: Made again after an add that never finished
+
+- **WHEN** a claimed run's checkout is found locked `initializing` as
+  its run is started
+- **THEN** it is undone and made again at the combination, and the run
+  starts in it
+  (`a_checkout_git_left_locked_initializing_is_made_again` in
+  `crates/sluice/tests/profiles/places.rs`)
+
+#### Scenario: Another lock
+
+- **WHEN** a checkout sluice made is locked with the reason `kept by
+  hand`
+- **THEN** its release fails and holds it, naming the lock and its
+  words, and nothing unlocks it
+  (`a_checkout_locked_for_another_reason_is_held` in
+  `crates/sluice/tests/profiles/places.rs`)
+
+### Requirement: A pool's job releases its checkout before it ends
+
+`sluice job run` SHALL release the checkout it made, by the release the
+policy names, freeing its ports and scratch, before it exits, whatever
+its run came to and when it is stopped, on every pool. A release that
+fails SHALL be said in its output and its hand-over, and SHALL decide
+nothing of the run's outcome (core.10; record 0016; 123).
+
+#### Scenario: A run that passed
+
+- **WHEN** `sluice job run --claim pool/codebuild/4 --branch main` keeps
+  its run's report, and `main`'s policy names a release command
+- **THEN** the release command has run in the checkout, the checkout is
+  gone, and its ports and scratch are free before the command exits
+  (`job_run_releases_its_checkout_before_it_exits` in
+  `crates/sluice/tests/cli.rs`)
+
+#### Scenario: A job stopped while its run goes
+
+- **WHEN** `sluice job run` is stopped while its run's checks run
+- **THEN** it ends the run's process group, runs the release, says it
+  kept no report, and exits
+  (`job_run_stopped_releases_its_checkout` in
+  `crates/sluice/tests/cli.rs`)
+
+### Requirement: A reused machine's next job starts with nothing of an earlier job's running
+
+A pool whose machines run one job at a time and are reused SHALL have
+each job begin by ending every container the machine's engine runs and
+removing the sluice scratch and state an earlier job left, before it
+makes its checkout, so a job its pool stopped before its release leaves
+nothing running beside the next (record 0119; core.10).
+
+#### Scenario: The run buildspec
+
+- **WHEN** `sluice init codebuild` writes its template
+- **THEN** each run project's buildspec, before `sluice job run`, ends
+  every running container and removes the build user's sluice scratch
+  directory and the state an earlier build kept, keeping the engine's
+  images
+  (`a_run_build_starts_with_nothing_of_an_earlier_build_running` in
+  `crates/sluice/src/profiles/codebuild/template.rs`)
+
 ### Requirement: A release with nothing to free makes nothing
 
 A release in a worktree sluice holds nothing for, under a policy that

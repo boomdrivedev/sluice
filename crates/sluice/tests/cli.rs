@@ -14,6 +14,11 @@ use support::soon;
 
 const BRANCH: &str = "bolt/concurrent-units";
 
+/// Record 0122 (design D11): a branch's status names its queue's home
+/// under its first line; every branch of these fakes is kept in this
+/// host's own files, its policy naming no signer.
+const HOME: &str = "its queue is in this host's own files";
+
 const POLICY: &str = "[branches.\"bolt/*\"]\nrequired = [\"#gate\"]\nparallel = 4\ntrust = [\"open\", \"sandbox\", \"container\"]\n";
 
 struct Rounds(Cell<usize>);
@@ -48,10 +53,7 @@ fn sluice(f: &Fakes, args: &[&str]) -> (i32, String) {
         run(
             cli,
             f.seams(),
-            &support::FakeHost {
-                world: f.world.clone(),
-                reserved: 0,
-            },
+            &support::FakeHost::new(f.world.clone(), 0),
             &(),
             &(),
             &f.clock,
@@ -61,6 +63,26 @@ fn sluice(f: &Fakes, args: &[&str]) -> (i32, String) {
     })
     .unwrap();
     (code, String::from_utf8(out).unwrap())
+}
+
+/// The error `sluice <args>` stops with, in its words.
+fn sluice_err(f: &Fakes, args: &[&str]) -> String {
+    let cli = Cli::try_parse_from(std::iter::once("sluice").chain(args.iter().copied())).unwrap();
+    let mut out = Vec::new();
+    let e = settled(|| {
+        run(
+            cli,
+            f.seams(),
+            &support::FakeHost::new(f.world.clone(), 0),
+            &(),
+            &(),
+            &f.clock,
+            &Rounds(Cell::new(0)),
+            &mut out,
+        )
+    })
+    .expect_err("an error");
+    format!("{e:#}")
 }
 
 /// `command`, a sluice run in this process, and then a moment for each
@@ -140,6 +162,120 @@ fn submit_waits_and_lands() {
             format!("passed · landed as {}", &tip.0[..7]),
         ]
     );
+}
+
+/// satisfies: 152, 50, 51; record 0124 (design D10); the refused-landing
+/// spec's "The submitter's notice" and "The submissions behind it", and the
+/// submission-wait spec's "A landing the forge refused": a waiting submit
+/// whose landing the forge refuses while it waits exits 6 with the forge's
+/// words; a wait's document is the submission's record with the refusal;
+/// `sluice status <n>` gives the refused submission's row with the words,
+/// and a submission queued behind it waits behind the held landing; and
+/// the refused-landing spec's "Every document of a held submission": the
+/// wait's, `sluice status <n> --json`'s, `sluice status <branch> --all
+/// --json`'s and the inbox's give `refused` and the refusal's `notice`
+#[test]
+fn a_landing_the_forge_refused_is_told_with_its_words() {
+    let f = setup();
+    let words = "remote: error: GH013: Repository rule violations found for refs/heads/main.";
+    f.world.forge_refuses(BRANCH, Some(words));
+    work(
+        &f,
+        "unit/touches",
+        "crw-1-unit-1",
+        &[("plugin/lib/plan.py", Some("touched"))],
+    );
+    let (code, out) = sluice(&f, &["submit", BRANCH, "--worktree", "unit/touches"]);
+    assert_eq!(code, sluice::REFUSED, "{out}");
+    assert!(
+        out.contains(&format!("held: the forge refused its landing: {words}")),
+        "{out}"
+    );
+
+    let (code, out) = sluice(&f, &["wait", "1", "--json"]);
+    assert_eq!(code, sluice::REFUSED, "{out}");
+    let doc: serde_json::Value = serde_json::from_str(&out).unwrap();
+    assert_eq!(doc["id"], 1, "{doc}");
+    held_record(&doc, words);
+
+    work(
+        &f,
+        "unit/cards",
+        "crw-1-unit-2",
+        &[("tests/t_cards.py", Some("cards 2"))],
+    );
+    let (code, out) = sluice(
+        &f,
+        &["submit", BRANCH, "--worktree", "unit/cards", "--no-wait"],
+    );
+    assert_eq!(code, 0, "{out}");
+    sluice(&f, &["step", BRANCH]);
+    let (code, out) = sluice(&f, &["status", "1"]);
+    assert_eq!(code, 0, "{out}");
+    let row = out
+        .lines()
+        .find(|l| l.trim_start().starts_with("#1 "))
+        .unwrap_or_else(|| panic!("#1's row: {out}"));
+    assert!(
+        row.ends_with(&format!("held: the forge refused its landing: {words}")),
+        "{row}"
+    );
+    let (_, out) = sluice(&f, &["status", "2"]);
+    let row = out
+        .lines()
+        .find(|l| l.trim_start().starts_with("#2 "))
+        .unwrap_or_else(|| panic!("#2's row: {out}"));
+    assert!(
+        row.ends_with("waits behind the landing the forge refused of #1 unit/touches"),
+        "{row}"
+    );
+
+    // Every document of #1's record carries the refusal and its notice,
+    // and its delivery under `1:refused`; #2, queued, has neither.
+    let (code, out) = sluice(&f, &["status", "1", "--json"]);
+    assert_eq!(code, 0, "{out}");
+    let one: serde_json::Value = serde_json::from_str(&out).unwrap();
+    held_record(&one, words);
+    assert_eq!(one["delivery"]["key"], "1:refused", "{one}");
+    let (code, out) = sluice(&f, &["status", "2", "--json"]);
+    assert_eq!(code, 0, "{out}");
+    let two: serde_json::Value = serde_json::from_str(&out).unwrap();
+    assert!(two.get("refused").is_none(), "{two}");
+    assert!(two.get("notice").is_none(), "{two}");
+    let (code, out) = sluice(&f, &["status", BRANCH, "--all", "--json"]);
+    assert_eq!(code, 0, "{out}");
+    let all: serde_json::Value = serde_json::from_str(&out).unwrap();
+    let one = all["submissions"]
+        .as_array()
+        .and_then(|subs| subs.iter().find(|s| s["id"] == 1))
+        .unwrap_or_else(|| panic!("#1 among the submissions: {all}"));
+    held_record(one, words);
+    let (code, out) = sluice(&f, &["inbox", "--worktree", "unit/touches", "--json"]);
+    assert_eq!(code, 0, "{out}");
+    let inbox: serde_json::Value = serde_json::from_str(&out).unwrap();
+    let outcomes = inbox["outcomes"].as_array().unwrap();
+    assert_eq!(outcomes.len(), 1, "{inbox}");
+    assert_eq!(outcomes[0]["id"], 1, "{inbox}");
+    held_record(&outcomes[0], words);
+    assert_eq!(outcomes[0]["delivery"]["key"], "1:refused", "{inbox}");
+}
+
+/// 152, record 0124: `doc`, a refused submission's document, as every
+/// document of its record gives it: `state` `refused`, `refused` with the
+/// forge's `words` and when, and the notice of the refusal, naming it and
+/// the words.
+fn held_record(doc: &serde_json::Value, words: &str) {
+    assert_eq!(doc["state"], "refused", "{doc}");
+    assert_eq!(doc["refused"]["words"], words, "{doc}");
+    assert!(doc["refused"]["at"].is_string(), "{doc}");
+    let notice = doc["notice"]
+        .as_str()
+        .unwrap_or_else(|| panic!("a notice: {doc}"));
+    assert!(
+        notice.starts_with(&format!("[sluice] #{}'s landing", doc["id"])),
+        "{notice}"
+    );
+    assert!(notice.contains(words), "{notice}");
 }
 
 #[test]
@@ -745,32 +881,98 @@ fn a_reader_in_a_slow_read_is_current() {
     assert_eq!(v["ahead"], serde_json::json!([4]), "{v}");
 }
 
-/// 64, 129: a read that names no revision of the branch, as a reader's
-/// that could not ask its remote, is read past as a round reads.
+/// 64, 129 (design D16): a read that names no revision of the branch, as
+/// a reader's that could not ask its remote, is no read to form on: beside
+/// that reader keeping its tick, the forecast forms on the branch and its
+/// records as the host holds them since the host process's reading, and
+/// fetches nothing nor reads the records afresh itself.
 #[test]
-fn a_forecast_with_no_revision_reads_as_a_round() {
+fn a_forecast_beside_a_reader_with_no_revision_forms_as_the_host_holds_it() {
     let f = setup();
+    f.world.on_remote(BRANCH);
     let (_reader, mut doc, _, _) = reader_of_four(&f, 3);
     doc["branches"][0]
         .as_object_mut()
         .unwrap()
         .remove("revision");
     rewrite_readers_doc(&doc);
-    let v = check_forecast(&f);
+    work(
+        &f,
+        "unit/forecast",
+        "crw-1-unit-3",
+        &[("plugin/lib/plan.py", Some("two"))],
+    );
+    let (fetches, reads) = (f.world.fetches(), f.world.state_reads());
+    let (code, out) = sluice(
+        &f,
+        &[
+            "submit",
+            "--check",
+            BRANCH,
+            "--worktree",
+            "unit/forecast",
+            "--json",
+        ],
+    );
+    assert_eq!(code, CONFLICT, "{out}");
+    let v = json(&out);
     assert_eq!(v["onto"], f.world.tip(BRANCH).as_str(), "{v}");
     assert_eq!(v["ahead"], serde_json::json!([1]), "{v}");
+    assert_eq!(f.world.fetches(), fetches, "the forecast fetched");
+    assert_eq!(f.world.state_reads(), reads, "the forecast read afresh");
 }
 
-/// 64, 124, 129: where the host lacks `#4`'s head, the reader's read is
-/// no read to form on: the forecast reads as a round does.
+/// 64, 124, 129 (design D16): where the host lacks `#4`'s head, the
+/// reader's read is no read to form on, and the host holds too little to
+/// form on either: the forecast asks a reading afresh once and, where the
+/// head is still not on the host, says so as a read it could not make,
+/// fetching nothing.
 #[test]
-fn a_forecast_lacking_a_head_reads_as_a_round() {
+fn a_forecast_lacking_a_head_is_a_read_it_could_not_make() {
     let f = setup();
     let (_reader, _, _, one) = reader_of_four(&f, 3);
     f.world.lack(&one, true);
-    let v = check_forecast(&f);
-    assert_eq!(v["onto"], f.world.tip(BRANCH).as_str(), "{v}");
-    assert_eq!(v["ahead"], serde_json::json!([1]), "{v}");
+    work(
+        &f,
+        "unit/forecast",
+        "crw-1-unit-3",
+        &[("plugin/lib/plan.py", Some("two"))],
+    );
+    let (fetches, reads) = (f.world.fetches(), f.world.state_reads());
+    let cli = Cli::try_parse_from([
+        "sluice",
+        "submit",
+        "--check",
+        BRANCH,
+        "--worktree",
+        "unit/forecast",
+    ])
+    .unwrap();
+    let mut out = Vec::new();
+    let host = support::FakeHost::new(f.world.clone(), 0);
+    let e = settled(|| {
+        run(
+            cli,
+            f.seams(),
+            &host,
+            &(),
+            &(),
+            &f.clock,
+            &Rounds(Cell::new(0)),
+            &mut out,
+        )
+    })
+    .unwrap_err();
+    assert_eq!(
+        format!("{e:#}"),
+        format!(
+            "could not read what a forecast of {BRANCH} forms from: the host process's reading \
+             did not bring the work queued on {BRANCH} or a combination formed on it to this host"
+        )
+    );
+    assert!(out.is_empty(), "{}", String::from_utf8_lossy(&out));
+    assert_eq!(f.world.fetches(), fetches, "the forecast fetched");
+    assert_eq!(f.world.state_reads(), reads, "the forecast read afresh");
 }
 
 #[test]
@@ -1328,25 +1530,26 @@ fn status_lists_the_queue() {
     // ADR 0042: the combination under test, with how long it has run.
     let lines: Vec<&str> = out.lines().collect();
     assert_eq!(lines[0], header);
+    assert_eq!(lines[1], HOME, "{out}");
     assert!(
-        lines[1].starts_with(&format!("  testing {BRANCH} + #3 unit/forecast · ")),
+        lines[2].starts_with(&format!("  testing {BRANCH} + #3 unit/forecast · ")),
         "{out}"
     );
     // D13 (51; record 0102): after the queue, what is owed, since nobody
     // confirmed #1's landing or #2's blame.
     assert_eq!(
-        lines[2..],
+        lines[3..],
         [
             format!("  #3 unit/forecast  testing   crw-1-unit-3  unit/forecast   {BRANCH} + #3"),
             format!("2 no longer in the queue: sluice status {BRANCH} --all"),
             "OWED".to_string(),
             "  unit/batch-review · never confirmed".to_string(),
-            "    2:failed #2  owed until 2026-10-18T09:00:09Z · handed over by notice at \
-             2026-10-11T09:00:15Z"
+            "    2:failed #2  owed until 2026-10-18T09:00:11Z · handed over by notice at \
+             2026-10-11T09:00:18Z"
                 .to_string(),
             "  unit/touches · never confirmed".to_string(),
-            "    1:landed #1  owed until 2026-10-18T09:00:10Z · handed over by notice at \
-             2026-10-11T09:00:16Z"
+            "    1:landed #1  owed until 2026-10-18T09:00:14Z · handed over by notice at \
+             2026-10-11T09:00:19Z"
                 .to_string(),
             "confirm one with: sluice confirm <key>, in its worktree, or sluice confirm <key> \
              --as operator"
@@ -1359,16 +1562,17 @@ fn status_lists_the_queue() {
     assert_eq!(code, 0);
     let lines: Vec<&str> = out.lines().collect();
     assert_eq!(lines[0], header);
-    assert!(lines[1].starts_with(&format!("  testing {BRANCH} + #3 unit/forecast · ")));
+    assert_eq!(lines[1], HOME, "{out}");
+    assert!(lines[2].starts_with(&format!("  testing {BRANCH} + #3 unit/forecast · ")));
     assert_eq!(
-        lines[2],
+        lines[3],
         "  #1 unit/touches       landed    crw-1-unit-1  unit/touches"
     );
-    assert!(lines[3].starts_with(
+    assert!(lines[4].starts_with(
         "  #2 unit/batch-review  failed    crw-1-unit-2  unit/batch-review   tests:t-batch-cards on "
     ));
     assert_eq!(
-        lines[4],
+        lines[5],
         format!(
             "  #3 unit/forecast      testing   crw-1-unit-3  unit/forecast       {BRANCH} + #3"
         )
@@ -1610,10 +1814,7 @@ fn status_refuses_a_checkout_cache() {
     );
     let cli = Cli::try_parse_from(["sluice", "status", BRANCH]).unwrap();
     let mut out = Vec::new();
-    let host = support::FakeHost {
-        world: f.world.clone(),
-        reserved: 0,
-    };
+    let host = support::FakeHost::new(f.world.clone(), 0);
     let e = run(
         cli,
         f.seams(),
@@ -2498,6 +2699,8 @@ impl Pause for Between<'_> {
 #[test]
 fn overview_watch_prints_a_line_at_start_and_on_each_change() {
     let f = setup();
+    // The host process's passes start its combination, which stays.
+    f.world.hold_runs(true);
     work(
         &f,
         "unit/touches",
@@ -2522,10 +2725,7 @@ fn overview_watch_prints_a_line_at_start_and_on_each_change() {
     let code = run(
         cli,
         f.seams(),
-        &support::FakeHost {
-            world: f.world.clone(),
-            reserved: 0,
-        },
+        &support::FakeHost::new(f.world.clone(), 0),
         &(),
         &(),
         &f.clock,
@@ -2613,6 +2813,8 @@ fn seven_testing() -> serde_json::Value {
 #[test]
 fn watch_with_no_reader_writes_each_document() {
     let f = setup();
+    // The host process's passes start its combination, which stays.
+    f.world.hold_runs(true);
     work(
         &f,
         "unit/touches",
@@ -2742,20 +2944,45 @@ fn watch_of_another_repository_leads() {
     assert_eq!(readers_doc_of(other), Some(doc));
 }
 
-/// 129: a one-shot overview reads the records itself, beside a live
-/// reader or with none, and never takes the reader's place.
+/// 129 (design D16): a one-shot overview beside a reader that keeps its
+/// tick prints that reader's document of its reading, its text rendered
+/// from it as the watch's is, though the host's records hold none of it;
+/// with no reader, the records as the host holds them. It never takes the
+/// reader's place or writes its document.
 #[test]
-fn one_shot_overview_reads_the_records_beside_a_reader() {
+fn a_one_shot_overview_beside_a_reader_prints_its_document() {
     let f = setup();
-    sluice(&f, &["overview", "--json"]);
+    let (_, out) = sluice(&f, &["overview", "--json"]);
+    assert_eq!(json(&out)["branches"], serde_json::json!([]));
     assert!(!readers_file(REPOSITORY, "lock").exists());
-    let doc = seven_testing();
+    let mut doc = seven_testing();
+    doc["tick"] = 3600.into();
     let _reader = reader_of(REPOSITORY, &doc);
     let (code, out) = sluice(&f, &["overview", "--json"]);
     assert_eq!(code, 0, "{out}");
-    assert_eq!(json(&out)["branches"], serde_json::json!([]));
-    let (_, text) = sluice(&f, &["overview"]);
-    assert_eq!(text, "no branch has records here\n");
+    assert_eq!(json(&out), doc);
+    let (code, text) = sluice(&f, &["overview"]);
+    assert_eq!(code, 0, "{text}");
+    assert!(
+        text.starts_with(&format!("{BRANCH} at ")) && text.contains("#7"),
+        "{text}"
+    );
+    assert_eq!(readers_doc(), Some(doc));
+}
+
+/// 129 (design D16): the home view beside a reader that keeps its tick
+/// counts the branches from that reader's document, though the host's
+/// records hold none of it.
+#[test]
+fn the_home_view_beside_a_reader_counts_from_its_document() {
+    let f = setup();
+    assert_eq!(home(&f, "nowhere")["branches"], serde_json::json!([]));
+    let mut doc = seven_testing();
+    doc["tick"] = 3600.into();
+    let _reader = reader_of(REPOSITORY, &doc);
+    let v = home(&f, "nowhere");
+    assert_eq!(v["branches"][0]["branch"], BRANCH, "{v}");
+    assert_eq!(v["branches"][0]["testing"], 1, "{v}");
     assert_eq!(readers_doc(), Some(doc));
 }
 
@@ -2792,10 +3019,11 @@ fn one_testing(done: usize) -> serde_json::Value {
     json(&out)
 }
 
-/// 129: a wait that finds no reader becomes it, and writes the whole
-/// overview, every branch's, not only its own.
+/// overview-reader, "A wait with no reader" (129, 135): the host process
+/// the wait reaches is the reader, and writes the whole overview, every
+/// branch's, not only the wait's own.
 #[test]
-fn wait_with_no_reader_writes_the_whole_overview() {
+fn a_wait_with_no_reader_has_the_host_process_write_the_whole_overview() {
     let f = setup();
     let other = "bolt/other";
     f.world.init(other, &[(".config/sluice.toml", POLICY)]);
@@ -2849,10 +3077,45 @@ fn wait_follows_the_readers_progress() {
     assert_eq!(lines[1], "still waiting: sluice wait 1");
 }
 
+/// `doc`'s first submission of the branch given the work of `f`'s
+/// submission `id`: its head, its submitter and when it was submitted, so
+/// the reader's document holds that one submission as its reader read it,
+/// whatever else it says of it (core.48; record 0122, design D6).
+fn as_the_work_of(f: &Fakes, id: u64, mut doc: serde_json::Value) -> serde_json::Value {
+    let own = json(&sluice(f, &["status", &id.to_string(), "--json"]).1);
+    let held = &mut doc["branches"][0]["submissions"][0];
+    for key in ["head", "from", "submitted"] {
+        held[key] = own[key].clone();
+    }
+    doc
+}
+
 /// 129: out of time, a follower's `--json` is its record as the reader's
-/// document holds it.
+/// document holds it, which here says `testing` where its own records
+/// still say `queued`.
 #[test]
 fn wait_out_of_time_prints_the_readers_record() {
+    let f = setup();
+    f.world.hold_runs(true);
+    work(&f, "unit/a", "agent-a", &[("plugin/a", Some("a"))]);
+    sluice(&f, &["submit", BRANCH, "--worktree", "unit/a", "--no-wait"]);
+    let doc = as_the_work_of(&f, 1, one_testing(3));
+    let _reader = reader_of(REPOSITORY, &doc);
+    let (code, out) = sluice(&f, &["wait", "1", "--timeout", "2s", "--json"]);
+    assert_eq!(code, sluice::WAITING, "{out}");
+    let held = &doc["branches"][0]["submissions"][0];
+    assert_eq!(json(&out), *held);
+    assert_eq!(held["state"], "testing");
+    let (_, out) = sluice(&f, &["status", "1", "--json"]);
+    assert_eq!(json(&out)["state"], "queued");
+}
+
+/// core.48 (129; record 0122, design D6): a reader's document that gives
+/// a follower's number to other work, another head from another
+/// worktree, holds another submission: out of time, the wait's `--json`
+/// is its own record, read from its records, never the other's.
+#[test]
+fn a_wait_out_of_time_takes_no_other_works_record_from_the_reader() {
     let f = setup();
     f.world.hold_runs(true);
     work(&f, "unit/a", "agent-a", &[("plugin/a", Some("a"))]);
@@ -2861,11 +3124,20 @@ fn wait_out_of_time_prints_the_readers_record() {
     let _reader = reader_of(REPOSITORY, &doc);
     let (code, out) = sluice(&f, &["wait", "1", "--timeout", "2s", "--json"]);
     assert_eq!(code, sluice::WAITING, "{out}");
-    let held = &doc["branches"][0]["submissions"][0];
-    assert_eq!(json(&out), *held);
-    assert_eq!(held["state"], "testing");
-    let (_, out) = sluice(&f, &["status", "1", "--json"]);
-    assert_ne!(json(&out)["head"], held["head"]);
+    let other = &doc["branches"][0]["submissions"][0];
+    let own = json(&sluice(&f, &["status", "1", "--json"]).1);
+    assert_ne!(own["head"], other["head"]);
+    let waited = json(&out);
+    assert_eq!(
+        (
+            &waited["head"],
+            &waited["from"]["worktree"],
+            &waited["state"]
+        ),
+        (&own["head"], &own["from"]["worktree"], &own["state"]),
+        "{out}"
+    );
+    assert_eq!(waited["from"]["worktree"], "unit/a");
 }
 
 /// 129: once the reader's document no longer holds a follower's
@@ -2879,6 +3151,10 @@ fn followed_wait_reports_its_landing() {
     let reader = RefCell::new(reader_of(REPOSITORY, &json(&queued)));
     let between = |n: usize| {
         if n == 3 {
+            // The reader's rounds land it, and its document says so.
+            for _ in 0..8 {
+                f.sluice().step(BRANCH).unwrap();
+            }
             let (_, now) = sluice(&f, &["overview", "--json"]);
             let now = json(&now);
             assert_eq!(now["branches"][0]["submissions"], serde_json::json!([]));
@@ -2892,7 +3168,7 @@ fn followed_wait_reports_its_landing() {
     };
     let (code, out) = sluice_with(&f, &pause, &["wait", "1"]);
     assert_eq!(code, LANDED, "{out}");
-    // It waited on the document, whatever its own rounds had done.
+    // It waited on the document, and ran no round of its own.
     assert_eq!(pause.n.get(), 3, "{out}");
     let tip = f.world.tip(BRANCH);
     assert!(
@@ -2932,69 +3208,40 @@ fn followed_wait_reports_its_withdrawal() {
     assert_eq!(pause.n.get(), 2, "{out}");
 }
 
-/// 129: when the wait that is the reader ends, a watch that followed it
-/// is the reader within one pause, and printed nothing before but the
-/// documents the wait wrote.
+/// overview-reader, "The host process is killed" (129; design D7): a
+/// watch whose host process ended reaches it again at its next tick,
+/// starting it, and goes on following the last document until the new one
+/// writes the one it read from the records.
 #[test]
-fn watch_leads_once_the_readers_wait_ends() {
-    use std::sync::mpsc;
-
-    /// A pause that says it has paused and waits for the next tick; none
-    /// to come stops it.
-    struct Lockstep(mpsc::Sender<()>, mpsc::Receiver<()>);
-
-    impl Pause for Lockstep {
-        fn pause(&self) -> bool {
-            let _ = self.0.send(());
-            self.1.recv().is_ok()
+fn a_watch_follows_a_host_process_started_again() {
+    let f = one_queued();
+    f.world.hold_runs(true);
+    work(&f, "unit/b", "agent-b", &[("plugin/b", Some("b"))]);
+    let between = |n: usize| {
+        if n == 1 {
+            support::end_host_process();
+            sluice(&f, &["submit", BRANCH, "--worktree", "unit/b", "--no-wait"]);
         }
-    }
-
-    let readers = support::readers();
-    let (tick, ticks) = mpsc::channel();
-    let (paused, pauses) = mpsc::channel();
-    // Another process on the host, with fakes of its own: it reads them
-    // only once it is the reader.
-    let watch = std::thread::spawn(move || {
-        support::share_readers(readers);
-        ticks.recv().unwrap();
-        let g = setup();
-        sluice_with(
-            &g,
-            &Lockstep(paused, ticks),
-            &["overview", "--json", "--watch"],
-        )
-        .1
-    });
-
-    let f = setup();
-    work(&f, "unit/a", "agent-a", &[("plugin/a", Some("a"))]);
-    sluice(&f, &["submit", BRANCH, "--worktree", "unit/a", "--no-wait"]);
-    let wrote = RefCell::new(Vec::new());
-    let step = Then(Cell::new(0), |_| {
-        wrote
-            .borrow_mut()
-            .push(readers_doc().expect("the wait's document"));
-        tick.send(()).unwrap();
-        pauses.recv().unwrap();
-        true
-    });
-    let (code, out) = sluice_with(&f, &step, &["wait", "1"]);
-    assert_eq!(code, LANDED, "{out}");
-    // One tick once the wait has ended, then none.
-    tick.send(()).unwrap();
-    pauses.recv().unwrap();
-    drop(tick);
-    let out = watch.join().unwrap();
+    };
+    let pause = Between {
+        n: Cell::new(0),
+        rounds: 3,
+        between: &between,
+    };
+    let (code, out) = sluice_with(&f, &pause, &["overview", "--json", "--watch"]);
+    assert_eq!(code, sluice::STOPPED, "{out}");
     let lines: Vec<serde_json::Value> = out.lines().map(json).collect();
-    let (led, followed) = lines.split_last().expect("a line");
-    assert!(!followed.is_empty(), "{out}");
-    let wrote = wrote.into_inner();
-    for l in followed {
-        assert!(wrote.contains(l), "not the wait's: {l}");
-    }
-    assert_eq!(led["branches"], serde_json::json!([]), "{out}");
-    assert_eq!(readers_doc().as_ref(), Some(led));
+    // The first process's document, which stood while none wrote; then the
+    // one the process started again wrote.
+    assert_eq!(lines.len(), 2, "{out}");
+    let queued = |doc: &serde_json::Value| {
+        doc["branches"][0]["submissions"]
+            .as_array()
+            .map_or(0, Vec::len)
+    };
+    assert_eq!(queued(&lines[0]), 1, "{out}");
+    assert_eq!(queued(&lines[1]), 2, "{out}");
+    assert_eq!(readers_doc().map(|d| queued(&d)), Some(2));
 }
 
 /// The repository's reader's part as a sluice of `version`, the test's
@@ -3212,102 +3459,55 @@ fn an_older_watch_follows_once_its_lease_is_taken() {
     assert_eq!(readers_version().as_deref(), Some("0.53.0"));
 }
 
-/// 129: a wait of an older sluice that is the reader lets go once a newer
-/// watch takes its lease, and goes on as a follower wait: it says its
-/// combination's progress from the document the newer one writes, and
-/// ends as a follower wait does.
+/// overview-reader, "An older wait lets go" (129; design D7): a wait of an
+/// older sluice that is the reader lets go once the host process takes its
+/// lease, and the newer wait follows the document the host process writes
+/// from then on, saying its combination's progress from it.
 #[test]
-fn an_older_wait_follows_once_its_lease_is_taken() {
+fn an_older_wait_follows_once_the_host_process_takes_its_lease() {
     let f = setup();
     f.world.hold_runs(true);
     work(&f, "unit/a", "agent-a", &[("plugin/a", Some("a"))]);
-    work(&f, "unit/b", "agent-b", &[("plugin/b", Some("b"))]);
     sluice(&f, &["submit", BRANCH, "--worktree", "unit/a", "--no-wait"]);
-    let three = one_testing(3);
-    support::set_version("0.52.0");
-    let newer = RefCell::new(None);
-    let at_lease = RefCell::new(None);
+    // The older wait, reading, before any host process; the host process
+    // and the wait are a newer sluice.
+    let older = RefCell::new(reader_as("0.52.0"));
+    support::set_version("0.53.0");
+    assert!(is_reader(&older.borrow()));
     let between = |n: usize| match n {
         1 => {
-            assert!(readers_doc().is_some(), "the wait is no reader");
-            let mut r = reader_as("0.53.0");
-            assert!(
-                soon_stepped(&mut r, |_| leased()),
-                "no lease taken of an older reader"
+            assert!(leased(), "the host process took the older reader's lease");
+            assert_eq!(
+                readers_version().as_deref(),
+                Some("0.52.0"),
+                "it reads nothing before the older reader lets go"
             );
-            *at_lease.borrow_mut() = readers_doc();
-            // What the older wait would write, were it to read again.
-            sluice(&f, &["submit", BRANCH, "--worktree", "unit/b", "--no-wait"]);
-            *newer.borrow_mut() = Some(r);
+            // The older wait's next tick: it finds its lease taken.
+            older
+                .borrow_mut()
+                .step(false, sluice::reader::Drives::Nobody)
+                .unwrap();
+            assert!(!is_reader(&older.borrow()));
         }
         2 => {
-            assert_eq!(readers_doc(), *at_lease.borrow(), "written after its lease");
-            let mut newer = newer.borrow_mut();
-            let r = newer.as_mut().unwrap();
-            assert!(soon_stepped(r, is_reader), "the older reader's lock kept");
-            write_as(r, &three);
+            assert_eq!(readers_version().as_deref(), Some("0.53.0"));
         }
         _ => {}
     };
     let pause = Between {
         n: Cell::new(0),
-        rounds: 2,
+        rounds: 3,
         between: &between,
     };
     let (code, out) = sluice_with(&f, &pause, &["wait", "1"]);
     assert_eq!(code, sluice::STOPPED, "{out}");
-    let lines: Vec<&str> = out.lines().collect();
-    let [.., progress, last] = lines[..] else {
-        panic!("{out}");
-    };
     assert!(
-        progress.starts_with(&format!(
-            "testing {BRANCH} + #1 · 3/5 tasks · running t3:test"
-        )),
+        out.lines()
+            .any(|l| l.starts_with(&format!("testing {BRANCH} + #1 · "))),
         "{out}"
     );
-    assert_eq!(last, "still waiting: sluice wait 1");
+    assert!(out.ends_with("still waiting: sluice wait 1\n"), "{out}");
     assert_eq!(readers_version().as_deref(), Some("0.53.0"));
-}
-
-/// 129: a wait of a newer sluice than the live reader's takes no lease: it
-/// follows the reader's document until it ends, and the older reader stays
-/// the reader.
-#[test]
-fn a_newer_wait_never_takes_a_lease() {
-    let f = setup();
-    f.world.hold_runs(true);
-    for i in 1..=7 {
-        let (worktree, path) = (format!("unit/{i}"), format!("plugin/{i}"));
-        work(&f, &worktree, &format!("agent-{i}"), &[(&path, Some("x"))]);
-        sluice(
-            &f,
-            &["submit", BRANCH, "--worktree", &worktree, "--no-wait"],
-        );
-    }
-    let doc = seven_testing();
-    let reader = RefCell::new(reader_as("0.52.0"));
-    write_as(&mut reader.borrow_mut(), &doc);
-    support::set_version("0.53.0");
-    let between = |_: usize| {
-        assert!(!leased(), "a wait took the lease");
-        let mut reader = reader.borrow_mut();
-        reader.step(true, sluice::reader::Drives::Nobody).unwrap();
-        assert!(is_reader(&reader));
-    };
-    let pause = Between {
-        n: Cell::new(0),
-        rounds: 49,
-        between: &between,
-    };
-    // The fakes' clock moves a second at every read: time enough for the
-    // wait to pause, and be looked at, a few times before it runs out.
-    let (code, out) = sluice_with(&f, &pause, &["wait", "7", "--timeout", "10s", "--json"]);
-    assert_eq!(code, sluice::WAITING, "{out}");
-    assert!(pause.n.get() > 1, "{out}");
-    assert_eq!(json(&out), doc["branches"][0]["submissions"][0]);
-    assert_eq!(readers_version().as_deref(), Some("0.52.0"));
-    assert_eq!(readers_doc(), Some(doc));
 }
 
 // ---------------------------------------------------------------------------
@@ -3344,6 +3544,8 @@ fn assert_failure(doc: &serde_json::Value, words: &str) {
 #[test]
 fn a_watchs_read_fails_and_then_succeeds() {
     let f = one_queued();
+    // The host process's passes start its combination, which stays.
+    f.world.hold_runs(true);
     let written = RefCell::new(Vec::new());
     let between = |n: usize| {
         written
@@ -3375,6 +3577,8 @@ fn a_watchs_read_fails_and_then_succeeds() {
 #[test]
 fn a_failed_read_under_load() {
     let f = one_queued();
+    // The host process's passes start its combination, which stays.
+    f.world.hold_runs(true);
     let between = |n: usize| match n {
         1 => f.world.fail_state_list(Some(UNREADABLE)),
         2 => f.world.fail_state_list(None),
@@ -3394,11 +3598,15 @@ fn a_failed_read_under_load() {
     assert_eq!(untimed(&lines[2]), untimed(&lines[0]), "{out}");
 }
 
-/// 129: a failure that stands with the same words is written once and
-/// printed once: what the test put in its place after the first stands.
+/// 129: a failure that stands with the same words is written once by the
+/// host process: what the test put in its place after the first stands,
+/// and the watch, which prints what the document holds, printed the
+/// failure once.
 #[test]
 fn a_standing_failure_is_written_once() {
     let f = one_queued();
+    // The host process's passes start its combination, which stays.
+    f.world.hold_runs(true);
     let put = serde_json::json!({ "put": "by the test" });
     let between = |n: usize| match n {
         1 => f.world.fail_state_list(Some(UNREADABLE)),
@@ -3417,10 +3625,11 @@ fn a_standing_failure_is_written_once() {
     let (code, out) = sluice_with(&f, &pause, &["overview", "--json", "--watch"]);
     assert_eq!(code, sluice::STOPPED, "{out}");
     assert_eq!(pause.n.get(), 6, "{out}");
-    assert_eq!(readers_doc(), Some(put));
+    assert_eq!(readers_doc(), Some(put.clone()));
     let lines: Vec<serde_json::Value> = out.lines().map(json).collect();
-    assert_eq!(lines.len(), 2, "{out}");
+    assert_eq!(lines.len(), 3, "{out}");
     assert_failure(&lines[1], UNREADABLE);
+    assert_eq!(lines[2], put, "{out}");
 }
 
 /// 129: a watch whose repository is gone ends at its next read, as a
@@ -3442,10 +3651,7 @@ fn a_watch_ends_once_its_repository_is_removed() {
     };
     let cli = Cli::try_parse_from(["sluice", "overview", "--json", "--watch"]).unwrap();
     let mut out = Vec::new();
-    let host = support::FakeHost {
-        world: f.world.clone(),
-        reserved: 0,
-    };
+    let host = support::FakeHost::new(f.world.clone(), 0);
     let e = run(cli, f.seams(), &host, &(), &(), &f.clock, &pause, &mut out).unwrap_err();
     // `main` prints it as the error document and exits 3.
     assert_failure(&failure(&format!("{e:#}")), gone);
@@ -3459,6 +3665,8 @@ fn a_watch_ends_once_its_repository_is_removed() {
 #[test]
 fn a_watch_survives_a_failed_write_of_the_readers_document() {
     let f = one_queued();
+    // The host process's passes start its combination, which stays.
+    f.world.hold_runs(true);
     work(&f, "unit/b", "agent-b", &[("plugin/b", Some("b"))]);
     let name = sluice::runs::flat_name(REPOSITORY);
     // Where the document is written before it is renamed into place: a
@@ -3674,7 +3882,7 @@ fn a_follower_wait_out_of_time_on_a_failure() {
     let f = setup();
     f.world.hold_runs(true);
     seven_queued(&f);
-    let doc = seven_testing();
+    let doc = as_the_work_of(&f, 7, seven_testing());
     let _reader = reader_of(REPOSITORY, &doc);
     let step = Then(Cell::new(0), |n| {
         if n == 1 {
@@ -4113,25 +4321,54 @@ fn step_under_json() {
 }
 
 // ---------------------------------------------------------------------------
-// The host's driver: sluice run (135; ADR 0068)
+// sluice run, a follower of the host process (135; design D11)
 // ---------------------------------------------------------------------------
 
-/// The repository's driver on the fakes' host, the test's own, until
-/// dropped: a `sluice run` living in another process.
-fn driver() -> sluice::reader::Driver {
-    sluice::reader::Driver::take(&support::readers(), REPOSITORY)
-        .unwrap()
-        .expect("no driver of the repository yet")
+/// host-driver, "One pass": `sluice run --rounds 1` exits 0 after one pass
+/// of the host process, which forms the submission's combination, and the
+/// landing a later pass makes is what a run prints (135; design D11).
+#[test]
+fn sluice_run_follows_the_host_process() {
+    let f = one_queued();
+    f.world.hold_runs(true);
+    let (code, out) = sluice(&f, &["run", "--rounds", "1"]);
+    assert_eq!(code, 0, "{out}");
+    assert_eq!(state_of(&f, 1), "testing");
+    assert_eq!(f.world.started().len(), 1, "one combination formed");
+    f.world.complete_all();
+    f.world.fail_next_release();
+    let (code, out) = sluice(&f, &["run", "--rounds", "3"]);
+    assert_eq!(code, 0, "{out}");
+    assert_eq!(state_of(&f, 1), "landed");
+    // What the host process's pass said, printed as the pass printed it.
+    assert!(out.contains("could not release sluice/try/"), "{out}");
+    assert_eq!(f.world.started().len(), 1, "no second combination");
 }
 
-/// Whether a driver of the repository lives on the fakes' host.
-fn driver_live() -> bool {
-    sluice::reader::driver_live(&support::readers(), REPOSITORY)
+/// host-driver, "Started by hand": `sluice run` says once on stderr that
+/// nothing needs it, and `sluice --help` names no `run` (135).
+#[test]
+fn sluice_run_says_nothing_needs_it() {
+    if let Some(err) = stderr_of("sluice_run_says_nothing_needs_it") {
+        let said: Vec<&str> = err.lines().filter(|l| l.starts_with("sluice: ")).collect();
+        assert_eq!(
+            said,
+            ["sluice: sluice starts its own host process; nothing needs `sluice run`"],
+            "{err}"
+        );
+        return;
+    }
+    let f = one_queued();
+    let (code, out) = sluice(&f, &["run", "--rounds", "2"]);
+    assert_eq!(code, 0, "{out}");
+    let help = <Cli as clap::CommandFactory>::command()
+        .render_long_help()
+        .to_string();
+    assert!(
+        !help.lines().any(|l| l.trim_start().starts_with("run ")),
+        "{help}"
+    );
 }
-
-/// What a run beside a live driver says on stderr.
-const BESIDE: &str =
-    "sluice: another sluice run drives this repository on this host; this one runs nothing while it does";
 
 /// Submission `id`'s state, as its record says.
 fn state_of(f: &Fakes, id: u64) -> serde_json::Value {
@@ -4139,171 +4376,8 @@ fn state_of(f: &Fakes, id: u64) -> serde_json::Value {
     json(&out)["state"].clone()
 }
 
-/// 135: a second run beside the driver says so once on stderr, and runs
-/// no round at any pass while the driver lives.
-#[test]
-fn two_runs_at_once() {
-    if let Some(err) = stderr_of("two_runs_at_once") {
-        let said: Vec<&str> = err.lines().filter(|l| l.starts_with("sluice: ")).collect();
-        assert_eq!(said, [BESIDE], "{err}");
-        return;
-    }
-    let f = one_queued();
-    let _driver = driver();
-    let pause = Between {
-        n: Cell::new(0),
-        rounds: 1,
-        between: &|_| {},
-    };
-    let (code, out) = sluice_with(&f, &pause, &["run"]);
-    assert_eq!(code, sluice::STOPPED, "{out}");
-    assert_eq!(pause.n.get(), 2, "{out}");
-    assert_eq!(state_of(&f, 1), "queued");
-    assert!(f.world.started().is_empty());
-}
-
-/// 135: one pass from cron beside the driver exits 0, having run no
-/// round: the submission is queued still, and nothing started.
-#[test]
-fn one_pass_from_cron_beside_a_driver() {
-    let f = one_queued();
-    let _driver = driver();
-    let (code, out) = sluice(&f, &["run", "--rounds", "1"]);
-    assert_eq!((code, out.as_str()), (0, ""));
-    assert_eq!(state_of(&f, 1), "queued");
-    assert!(f.world.started().is_empty());
-    assert!(driver_live());
-}
-
-/// 135: once the driver stops, the run waiting beside it drives at its
-/// next pass, and the rounds land the submission.
-#[test]
-fn the_first_run_stops() {
-    let f = one_queued();
-    let first = RefCell::new(Some(driver()));
-    let between = |n: usize| {
-        if n == 1 {
-            assert!(f.world.started().is_empty());
-            drop(first.borrow_mut().take());
-            assert!(soon(|| !driver_live()), "the driver's lock kept");
-        }
-    };
-    let pause = Between {
-        n: Cell::new(0),
-        rounds: 6,
-        between: &between,
-    };
-    let (code, out) = sluice_with(&f, &pause, &["run"]);
-    assert_eq!(code, sluice::STOPPED, "{out}");
-    assert_eq!(state_of(&f, 1), "landed");
-    assert!(soon(|| !driver_live()));
-}
-
-/// The settings-take-up spec's "A pass under a new binding" (135; record
-/// 0107; design D3): a run whose every pass runs under seams and a host
-/// made afresh, as a run that took up changed settings binds them, stays
-/// the repository's driver throughout, never says another run drives it,
-/// and its rounds land the submission.
-#[test]
-fn a_run_keeps_driving_across_a_new_binding() {
-    if let Some(err) = stderr_of("a_run_keeps_driving_across_a_new_binding") {
-        assert!(!err.contains(BESIDE), "{err}");
-        return;
-    }
-    let f = one_queued();
-    let mut driving = sluice::Driving::new(None);
-    let pause = Rounds(Cell::new(0));
-    let mut out = Vec::new();
-    let mut passes = 0;
-    while state_of(&f, 1) != "landed" {
-        assert!(passes < 12, "{}", String::from_utf8_lossy(&out));
-        let bound = sluice_fakes::Fakes::of(f.world.clone());
-        let host = support::FakeHost {
-            world: f.world.clone(),
-            reserved: 0,
-        };
-        let driven = sluice::drive(
-            &mut driving,
-            bound.seams(),
-            &host,
-            &(),
-            &f.clock,
-            &pause,
-            &mut out,
-        )
-        .unwrap();
-        assert_eq!(driven, sluice::Driven::Next);
-        passes += 1;
-        assert!(
-            sluice::reader::Driver::take(&support::readers(), REPOSITORY)
-                .unwrap()
-                .is_none(),
-            "the driver's lock let go after pass {passes}"
-        );
-    }
-    assert!(passes > 1, "{}", String::from_utf8_lossy(&out));
-    drop(driving);
-    assert!(soon(|| !driver_live()));
-}
-
-/// The settings-take-up spec's "A run handed over counts its passes"
-/// (135; record 0107; core.31; design D4, D6): a `sluice run --rounds 3`
-/// that drives one pass and hands over what it carries drives on from it
-/// for the two passes left, the repository's driver held between every
-/// two passes, the old run dropped among them, and never says another
-/// run drives it.
-#[test]
-fn a_run_handed_over_keeps_driving_and_counts_its_passes() {
-    if let Some(err) = stderr_of("a_run_handed_over_keeps_driving_and_counts_its_passes") {
-        assert!(!err.contains(BESIDE), "{err}");
-        return;
-    }
-    let f = one_queued();
-    let pause = Rounds(Cell::new(0));
-    let mut out = Vec::new();
-    let held = |when: &str| {
-        assert!(
-            sluice::reader::Driver::take(&support::readers(), REPOSITORY)
-                .unwrap()
-                .is_none(),
-            "the driver's lock let go {when}"
-        );
-    };
-    let mut pass = |driving: &mut sluice::Driving| {
-        let bound = sluice_fakes::Fakes::of(f.world.clone());
-        let host = support::FakeHost {
-            world: f.world.clone(),
-            reserved: 0,
-        };
-        sluice::drive(
-            driving,
-            bound.seams(),
-            &host,
-            &(),
-            &f.clock,
-            &pause,
-            &mut out,
-        )
-        .unwrap()
-    };
-    let mut driving = sluice::Driving::new(Some(3));
-    assert_eq!(pass(&mut driving), sluice::Driven::Next);
-    held("after the first pass");
-    let carried = driving.hand_over().unwrap();
-    assert_eq!(carried.passes, 1);
-    drop(driving);
-    held("as the run handed over");
-    let mut driving = sluice::Driving::handed(Some(3), carried);
-    assert_eq!(pass(&mut driving), sluice::Driven::Next);
-    held("after the second pass");
-    assert_eq!(pass(&mut driving), sluice::Driven::Ended(0));
-    held("after the third pass");
-    drop(driving);
-    assert!(soon(|| !driver_live()));
-}
-
-/// 129, 135: the driver is the reader: with nothing queued, its pass
-/// writes the whole overview as the reader's document, as a one-shot
+/// 129, 135: the host process is the reader: with nothing queued, its
+/// pass writes the whole overview as the reader's document, as a one-shot
 /// overview reads it but for its time, naming its tick (64).
 #[test]
 fn a_driver_with_nothing_queued() {
@@ -4315,21 +4389,20 @@ fn a_driver_with_nothing_queued() {
     let (code, out) = sluice(&f, &["run", "--rounds", "1"]);
     assert_eq!((code, out.as_str()), (0, ""));
     let (_, overview) = sluice(&f, &["overview", "--json"]);
-    let doc = readers_doc().expect("the driver's document");
+    let doc = readers_doc().expect("the host process's document");
     let untimed = sluice::reader::untimed;
     let mut read = json(&overview);
     read["tick"] = 3.into();
     assert_eq!(untimed(&doc), untimed(&read));
     assert_eq!(doc["branches"][0]["branch"], BRANCH, "{doc}");
-    // It let both places go as it ended.
-    assert!(soon(|| !driver_live()));
+    // The fakes' host process lets the reader's place go with the command.
     assert!(soon(reader_free));
 }
 
-/// The host-driver spec's "The queue emptied while a run went on" (66,
-/// 129; design D4): the one submission withdrawn while its combination's
-/// run goes on and nothing else queued, the driver's next pass runs a
-/// round for the branch, which ends the run and releases its checkout.
+/// host-process, "The queue emptied while a run went on" (66, 129; design
+/// D5): the one submission withdrawn while its combination's run goes on
+/// and nothing else queued, the host process's next pass runs a round for
+/// the branch, which ends the run and releases its checkout.
 #[test]
 fn a_driver_ends_a_withdrawn_submissions_run_with_nothing_queued() {
     let f = one_queued();
@@ -4351,10 +4424,10 @@ fn a_driver_ends_a_withdrawn_submissions_run_with_nothing_queued() {
     assert!(!status.contains("\"combination\""), "{status}");
 }
 
-/// The host-driver spec's "Nothing under test and nothing queued" (129;
-/// rule core.31): with every submission landed, the driver's pass runs no
-/// round for the branch and reads no revision of it: a round's read of
-/// the branch, refused, would be said and fail the pass.
+/// host-process, "Nothing under test and nothing queued" (129; rule
+/// core.31): with every submission landed, the host process's pass runs no
+/// round for the branch and reads no revision of it: a round's read of the
+/// branch, refused, would be said and fail the pass.
 #[test]
 fn a_driver_runs_no_round_for_a_branch_with_nothing_in_play() {
     let f = setup();
@@ -4387,312 +4460,25 @@ fn reader_free() -> bool {
     )
 }
 
-/// 129, 133: a driver's read of the overview that fails is its document,
-/// in the words it was refused with; the pass goes on, and the run exits
-/// as it would.
+/// 129, 133: the host process's read of the overview that fails is its
+/// document, in the words it was refused with; the pass goes on, and the
+/// run that follows it exits as it would.
 #[test]
 fn a_driver_whose_read_fails_writes_the_failure() {
     let f = setup();
     f.world.fail_ref_list(Some(UNREADABLE));
     let (code, out) = sluice(&f, &["run", "--rounds", "1"]);
     assert_eq!((code, out.as_str()), (0, ""));
-    assert_failure(&readers_doc().expect("the driver's document"), UNREADABLE);
-}
-
-/// The reader's place, taken as the driver takes it, the place its own;
-/// its document `doc`.
-fn driver_reads(doc: &serde_json::Value) -> sluice::reader::Lead {
-    let readers = support::readers();
-    let itself = sluice::reader::Drives::Itself;
-    let taken = sluice::reader::Reader::take_given(&readers, REPOSITORY, sluice::VERSION, itself);
-    match taken.unwrap() {
-        sluice::reader::Reader::Lead(mut lead) => {
-            lead.write(doc).unwrap();
-            lead
-        }
-        sluice::reader::Reader::Follow(_) => panic!("the reader's place, held"),
-    }
-}
-
-/// 135: a watch that is the reader when a driver starts lets the place go
-/// within one tick and reads the records no more, so a submission queued
-/// then prints nothing; it follows the document the driver then writes.
-#[test]
-fn a_watch_was_the_reader() {
-    let f = one_queued();
-    work(&f, "unit/b", "agent-b", &[("plugin/b", Some("b"))]);
-    let doc = seven_testing();
-    let driving = RefCell::new(None);
-    let between = |n: usize| match n {
-        1 => {
-            *driving.borrow_mut() = Some((driver(), None));
-            sluice(&f, &["submit", BRANCH, "--worktree", "unit/b", "--no-wait"]);
-        }
-        2 => {
-            if let Some((_, reader)) = &mut *driving.borrow_mut() {
-                *reader = Some(driver_reads(&doc));
-            }
-        }
-        _ => {}
-    };
-    let pause = Between {
-        n: Cell::new(0),
-        rounds: 3,
-        between: &between,
-    };
-    let (code, out) = sluice_with(&f, &pause, &["overview", "--json", "--watch"]);
-    assert_eq!(code, sluice::STOPPED, "{out}");
-    let lines: Vec<serde_json::Value> = out.lines().map(json).collect();
-    assert_eq!(lines.len(), 2, "{out}");
-    assert_eq!(lines[0]["branches"][0]["depth"], 1, "{out}");
-    assert_eq!(lines[1], doc, "{out}");
-}
-
-/// 135: a watch that finds the reader's place free beside a live driver
-/// leaves it to the driver: it reads no records, and prints the document
-/// the driver writes once it has taken the place.
-#[test]
-fn a_watch_with_no_reader_beside_a_driver() {
-    let f = one_queued();
-    let doc = seven_testing();
-    let _driver = driver();
-    let reader = RefCell::new(None);
-    let between = |n: usize| {
-        if n == 2 {
-            assert_eq!(readers_doc(), None);
-            *reader.borrow_mut() = Some(driver_reads(&doc));
-        }
-    };
-    let pause = Between {
-        n: Cell::new(0),
-        rounds: 3,
-        between: &between,
-    };
-    let (code, out) = sluice_with(&f, &pause, &["overview", "--json", "--watch"]);
-    assert_eq!(code, sluice::STOPPED, "{out}");
-    let lines: Vec<serde_json::Value> = out.lines().map(json).collect();
-    assert_eq!(lines, [doc], "{out}");
-}
-
-/// 135: a wait beside a driver that has not reached its submission runs
-/// no round: out of time, its record is queued still, and nothing started.
-#[test]
-fn a_wait_beside_a_driver_that_has_not_reached_it() {
-    let f = one_queued();
-    let _driver = driver();
-    let (code, out) = sluice(&f, &["wait", "1", "--timeout", "2s", "--json"]);
-    assert_eq!(code, sluice::WAITING, "{out}");
-    assert_eq!(json(&out)["state"], "queued", "{out}");
-    assert!(f.world.started().is_empty());
-}
-
-/// 129, 135: where the reader is the driver, a wait follows its document
-/// and runs no round: out of time, it prints its record as the driver's
-/// document holds it.
-#[test]
-fn a_follower_wait_beside_a_driver() {
-    let f = one_queued();
-    let _driver = driver();
-    let (_, overview) = sluice(&f, &["overview", "--json"]);
-    let mut doc = json(&overview);
-    doc["branches"][0]["submissions"][0]["priority"] = 9.into();
-    let _reader = driver_reads(&doc);
-    let (code, out) = sluice(&f, &["wait", "1", "--timeout", "2s", "--json"]);
-    assert_eq!(code, sluice::WAITING, "{out}");
-    let held = &doc["branches"][0]["submissions"][0];
-    assert_eq!(json(&out), *held);
-    assert_eq!(held["state"], "queued");
-    assert!(f.world.started().is_empty());
-    assert_eq!(state_of(&f, 1), "queued");
-}
-
-/// 135: a wait that is the reader and runs rounds when the driver starts
-/// runs no round from its next tick and lets the reader's place go; it
-/// reports the outcome once the driver has decided it and written so.
-#[test]
-fn a_wait_was_the_reader() {
-    let f = one_queued();
-    f.world.hold_runs(true);
-    let driving = RefCell::new(None);
-    let between = |n: usize| match n {
-        1 => {
-            // Its own round started the combination, whose run then ends.
-            assert_eq!(f.world.started().len(), 1);
-            *driving.borrow_mut() = Some((driver(), None));
-            f.world.complete_all();
-        }
-        2 => {
-            // No round of the wait's read the run's result, and the place
-            // is the driver's to take.
-            assert_eq!(state_of(&f, 1), "testing");
-            assert!(soon(reader_free));
-            for _ in 0..3 {
-                sluice(&f, &["step", BRANCH]);
-            }
-            assert_eq!(state_of(&f, 1), "landed");
-            let (_, overview) = sluice(&f, &["overview", "--json"]);
-            if let Some((_, reader)) = &mut *driving.borrow_mut() {
-                *reader = Some(driver_reads(&json(&overview)));
-            }
-        }
-        _ => {}
-    };
-    let pause = Between {
-        n: Cell::new(0),
-        rounds: 4,
-        between: &between,
-    };
-    let (code, out) = sluice_with(&f, &pause, &["wait", "1"]);
-    assert_eq!(code, LANDED, "{out}");
-    assert_eq!(pause.n.get(), 2, "{out}");
-    assert_eq!(f.world.started().len(), 1);
-    let tip = f.world.tip(BRANCH);
-    assert!(
-        out.ends_with(&format!("passed · landed as {}\n", &tip.0[..7])),
-        "{out}"
+    assert_failure(
+        &readers_doc().expect("the host process's document"),
+        UNREADABLE,
     );
 }
 
-/// 135: a wait beside `sluice run` runs no round, and reports the outcome
-/// the run's rounds decide. The run's passes come between the wait's
-/// ticks, and the test's hold of the driver's lock stands for the run's
-/// process living on between them.
-#[test]
-fn a_wait_beside_a_driver_that_lands_it() {
-    let f = one_queued();
-    f.world.hold_runs(true);
-    let (code, out) = sluice(&f, &["run", "--rounds", "1"]);
-    assert_eq!(code, 0, "{out}");
-    assert_eq!(state_of(&f, 1), "testing");
-    let held = RefCell::new(Some(driver()));
-    let between = |n: usize| {
-        if n == 1 {
-            // The wait's first tick ran no round of its own.
-            assert_eq!(f.world.started().len(), 1);
-            drop(held.borrow_mut().take());
-            f.world.complete_all();
-            for _ in 0..6 {
-                if state_of(&f, 1) == "landed" {
-                    break;
-                }
-                let (code, out) = sluice(&f, &["run", "--rounds", "1"]);
-                assert_eq!(code, 0, "{out}");
-            }
-            assert_eq!(state_of(&f, 1), "landed");
-            *held.borrow_mut() = Some(driver());
-        }
-    };
-    let pause = Between {
-        n: Cell::new(0),
-        rounds: 10,
-        between: &between,
-    };
-    let (code, out) = sluice_with(&f, &pause, &["wait", "1"]);
-    assert_eq!(code, LANDED, "{out}");
-    assert_eq!(pause.n.get(), 1, "{out}");
-    assert!(
-        out.starts_with(&format!("testing {BRANCH} + #1 · ")),
-        "{out}"
-    );
-    let tip = f.world.tip(BRANCH);
-    assert!(
-        out.ends_with(&format!("passed · landed as {}\n", &tip.0[..7])),
-        "{out}"
-    );
-}
-
-/// 135: once the driver a wait follows stops, the wait runs rounds again
-/// from its next tick, and its own round lands the submission.
-#[test]
-fn the_driver_stops_while_a_wait_follows_it() {
-    let f = one_queued();
-    let first = RefCell::new(Some(driver()));
-    let between = |n: usize| {
-        if n == 1 {
-            assert!(f.world.started().is_empty());
-            assert_eq!(state_of(&f, 1), "queued");
-            drop(first.borrow_mut().take());
-            assert!(soon(|| !driver_live()), "the driver's lock kept");
-        }
-    };
-    let pause = Between {
-        n: Cell::new(0),
-        rounds: 10,
-        between: &between,
-    };
-    let (code, out) = sluice_with(&f, &pause, &["wait", "1"]);
-    assert_eq!(code, LANDED, "{out}");
-    assert!(!f.world.started().is_empty());
-    let tip = f.world.tip(BRANCH);
-    assert!(
-        out.ends_with(&format!("passed · landed as {}\n", &tip.0[..7])),
-        "{out}"
-    );
-}
-
-/// 135: a waiting submit beside a driver writes its submission and waits
-/// on it, running no round.
-#[test]
-fn a_waiting_submit_beside_a_driver() {
-    let f = setup();
-    work(&f, "unit/a", "agent-a", &[("plugin/a", Some("a"))]);
-    let _driver = driver();
-    let pause = Between {
-        n: Cell::new(0),
-        rounds: 2,
-        between: &|_| {},
-    };
-    let (code, out) = sluice_with(
-        &f,
-        &pause,
-        &["submit", BRANCH, "--worktree", "unit/a", "--json"],
-    );
-    assert_eq!(code, sluice::STOPPED, "{out}");
-    assert_eq!(json(&out)["state"], "queued", "{out}");
-    assert_eq!(state_of(&f, 1), "queued");
-    assert!(f.world.started().is_empty());
-}
-
-/// 125, 135: a group's waiting submit beside a driver queues every
-/// submission and waits on them, running no round.
-#[test]
-fn a_waiting_group_submit_beside_a_driver() {
-    let f = setup();
-    work(&f, "unit/a", "agent-a", &[("plugin/a", Some("a"))]);
-    work(&f, "unit/b", "agent-b", &[("plugin/b", Some("b"))]);
-    let _driver = driver();
-    let pause = Between {
-        n: Cell::new(0),
-        rounds: 2,
-        between: &|_| {},
-    };
-    let (code, out) = sluice_with(
-        &f,
-        &pause,
-        &[
-            "submit",
-            BRANCH,
-            "--worktree",
-            "unit/a",
-            "--worktree",
-            "unit/b",
-            "--json",
-        ],
-    );
-    assert_eq!(code, sluice::STOPPED, "{out}");
-    let doc = json(&out);
-    let states: Vec<&serde_json::Value> = doc["submissions"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .map(|x| &x["state"])
-        .collect();
-    assert_eq!(states, ["queued", "queued"], "{out}");
-    assert!(f.world.started().is_empty());
-}
-
-/// 129, 135: with no driver, a wait that follows a watch's document runs
-/// rounds between its reads, as it always has.
+/// 129, 135 (design D7, D9): a wait follows the reader's document as it
+/// finds it, and runs no round of its own: while a reader of the same
+/// version holds the place, the host process follows it too, and nothing
+/// moves.
 #[test]
 fn a_wait_follows_a_watch() {
     let f = one_queued();
@@ -4705,8 +4491,8 @@ fn a_wait_follows_a_watch() {
     };
     let (code, out) = sluice_with(&f, &pause, &["wait", "1"]);
     assert_eq!(code, sluice::STOPPED, "{out}");
-    assert!(!f.world.started().is_empty());
-    assert_ne!(state_of(&f, 1), "queued");
+    assert!(f.world.started().is_empty());
+    assert_eq!(state_of(&f, 1), "queued");
 }
 
 // ---------------------------------------------------------------------------
@@ -4729,10 +4515,7 @@ fn exec_with(f: &Fakes, reserved: usize, pause: &dyn Pause, args: &[&str]) -> (i
     let cli =
         Cli::try_parse_from(["sluice", "exec"].into_iter().chain(args.iter().copied())).unwrap();
     let mut out = Vec::new();
-    let host = support::FakeHost {
-        world: f.world.clone(),
-        reserved,
-    };
+    let host = support::FakeHost::new(f.world.clone(), reserved);
     let code = run(cli, f.seams(), &host, &(), &(), &f.clock, pause, &mut out).unwrap();
     (code, String::from_utf8(out).unwrap())
 }
@@ -4855,6 +4638,111 @@ fn exec_waits_for_room() {
     assert_eq!(f.world.started().len(), 1);
 }
 
+/// 150, S75 (record 0087; design D12): an agent's check waiting while a
+/// combination's run waits too says `a combination's run starts first`
+/// once the host has a free run, which the combination's run takes; the
+/// agent's check starts in the next run to come free.
+#[test]
+fn exec_waits_for_a_combinations_run() {
+    let f = setup();
+    f.world.host_limit(1);
+    f.world.hold_runs(true);
+    f.world.session_run("/w/other", true);
+    work(
+        &f,
+        "unit/a",
+        "agent-a",
+        &[("plugin/lib/plan.py", Some("p2"))],
+    );
+    work(&f, "unit/q", "agent-q", &[("plugin/q", Some("q"))]);
+    sluice(&f, &["submit", BRANCH, "--worktree", "unit/q", "--no-wait"]);
+    // The round finds the host full: the combination's run waits.
+    sluice(&f, &["step", BRANCH]);
+    assert!(f.world.started().is_empty());
+    let pause = Then(Cell::new(0), |n| {
+        match n {
+            1 => f.world.kill_session("/w/other"),
+            2 => {
+                // The combination's round asks for the free run, and takes it.
+                sluice(&f, &["step", BRANCH]);
+                assert_eq!(f.world.started().len(), 1, "the combination's run");
+            }
+            3 => {
+                // Runs end from now, the agent's own among them.
+                f.world.hold_runs(false);
+                f.world.complete_all();
+                sluice(&f, &["step", BRANCH]);
+            }
+            _ => {}
+        }
+        true
+    });
+    let (code, out) = exec_with(&f, 0, &pause, &[BRANCH, "--worktree", "unit/a"]);
+    assert_eq!(code, LANDED, "{out}");
+    assert!(out.contains("waiting: the host is at its bound\n"), "{out}");
+    assert!(
+        out.contains("waiting: a combination's run starts first\n"),
+        "{out}"
+    );
+    assert_eq!(
+        f.world.started().len(),
+        2,
+        "the combination's, then the agent's"
+    );
+}
+
+/// host-process, "A session's check waits behind a combination" (150;
+/// design D12): the overview's room names the runs waiting by kind and
+/// whose turn the next contested run is, and its host process; `sluice
+/// status` with no target says the same room.
+#[test]
+fn the_overview_names_the_runs_waiting_and_the_turn() {
+    let f = one_queued();
+    f.world.host_limit(1);
+    f.world.hold_runs(true);
+    sluice(&f, &["step", BRANCH]);
+    assert_eq!(f.world.started().len(), 1, "the combination's run holds it");
+    work(
+        &f,
+        "unit/a",
+        "agent-a",
+        &[("plugin/lib/plan.py", Some("p2"))],
+    );
+    let seen = RefCell::new(None);
+    let said = RefCell::new(String::new());
+    let pause = Then(Cell::new(0), |n| {
+        match n {
+            1 => {
+                *seen.borrow_mut() = Some(overview_doc(&f, 0));
+                *said.borrow_mut() = sluice(&f, &["status"]).1;
+            }
+            2 => {
+                f.world.hold_runs(false);
+                f.world.complete_all();
+                sluice(&f, &["step", BRANCH]);
+            }
+            _ => {}
+        }
+        true
+    });
+    let (code, out) = exec_with(&f, 0, &pause, &[BRANCH, "--worktree", "unit/a"]);
+    assert_eq!(code, LANDED, "{out}");
+    let doc = seen.into_inner().expect("read while the check waited");
+    assert_eq!(
+        doc["room"]["waiting"],
+        serde_json::json!({ "queue": 0, "sessions": 1 }),
+        "{doc}"
+    );
+    assert_eq!(doc["room"]["turn"], "queue", "{doc}");
+    assert_eq!(doc["host_process"]["pid"], std::process::id(), "{doc}");
+    assert_eq!(doc["host_process"]["version"], sluice::VERSION, "{doc}");
+    let said = said.into_inner();
+    assert!(
+        said.contains("host: 1 of 1 runs · 1 queue · waiting: 1 agent\n"),
+        "{said}"
+    );
+}
+
 /// 71: a start the check seam refuses at the host's bound, another
 /// repository's run having taken the last one after the count was read,
 /// waits as one the count refused, says so once, and starts on the next
@@ -4937,7 +4825,7 @@ fn the_counts_say_when_agents_checks_hold_the_queue_back() {
     let (_, text) = sluice(&f, &["overview"]);
     assert!(text.lines().next().unwrap().ends_with(clause), "{text}");
     assert!(
-        text.contains("\nhost: 2 of 2 runs · 1 queue · 1 agent\n"),
+        text.contains("\nhost: 2 of 2 runs · 1 queue · 1 agent · waiting: 1 combination\n"),
         "{text}"
     );
     let (_, text) = sluice(&f, &["status", BRANCH]);
@@ -4959,10 +4847,7 @@ fn the_counts_say_when_agents_checks_hold_the_queue_back() {
 fn overview_doc(f: &Fakes, reserved: usize) -> serde_json::Value {
     let cli = Cli::try_parse_from(["sluice", "overview", "--json"]).unwrap();
     let mut out = Vec::new();
-    let host = support::FakeHost {
-        world: f.world.clone(),
-        reserved,
-    };
+    let host = support::FakeHost::new(f.world.clone(), reserved);
     let pause = Rounds(Cell::new(0));
     run(cli, f.seams(), &host, &(), &(), &f.clock, &pause, &mut out).unwrap();
     serde_json::from_slice(&out).unwrap()
@@ -5021,7 +4906,11 @@ fn overview_shows_an_agents_check_and_the_hosts_room() {
     assert_eq!(w["run"]["tasks"][0]["state"], "running");
     assert_eq!(
         during["room"],
-        serde_json::json!({"bound": 3, "queue": 0, "sessions": 1, "reserve": 1})
+        serde_json::json!({
+            "bound": 3, "queue": 0, "sessions": 1, "reserve": 1,
+            "waiting": {"queue": 0, "sessions": 0}, "turn": "queue",
+            "repositories": {},
+        })
     );
     assert_eq!(
         f.world.version(BRANCH),
@@ -5168,10 +5057,7 @@ fn overview_watch_prints_when_a_checks_task_moves() {
     };
     let cli = Cli::try_parse_from(["sluice", "overview", "--json", "--watch"]).unwrap();
     let mut out = Vec::new();
-    let host = support::FakeHost {
-        world: f.world.clone(),
-        reserved: 0,
-    };
+    let host = support::FakeHost::new(f.world.clone(), 0);
     run(cli, f.seams(), &host, &(), &(), &f.clock, &pause, &mut out).unwrap();
     let out = String::from_utf8(out).unwrap();
     let docs: Vec<serde_json::Value> = out
@@ -5554,10 +5440,7 @@ fn release(f: &Fakes, args: &[&str]) -> (i32, String) {
     )
     .unwrap();
     let mut out = Vec::new();
-    let host = support::FakeHost {
-        world: f.world.clone(),
-        reserved: 0,
-    };
+    let host = support::FakeHost::new(f.world.clone(), 0);
     let code = run(
         cli,
         f.seams(),
@@ -5961,10 +5844,7 @@ fn status_and_overview_carry_a_worktrees_last_result() {
     run(
         cli,
         f.seams(),
-        &support::FakeHost {
-            world: f.world.clone(),
-            reserved: 0,
-        },
+        &support::FakeHost::new(f.world.clone(), 0),
         &(),
         &(),
         &f.clock,
@@ -6094,10 +5974,7 @@ fn a_held_place_is_one_entry() {
 fn sluice_with(f: &Fakes, pause: &dyn Pause, args: &[&str]) -> (i32, String) {
     let cli = Cli::try_parse_from(std::iter::once("sluice").chain(args.iter().copied())).unwrap();
     let mut out = Vec::new();
-    let host = support::FakeHost {
-        world: f.world.clone(),
-        reserved: 0,
-    };
+    let host = support::FakeHost::new(f.world.clone(), 0);
     let code = settled(|| run(cli, f.seams(), &host, &(), &(), &f.clock, pause, &mut out)).unwrap();
     (code, String::from_utf8(out).unwrap())
 }
@@ -6340,67 +6217,35 @@ impl Pause for Unpaused {
     }
 }
 
-/// 134: a round whose call the forge could not answer for the retry
-/// policy's time, so that its seam answers 5xx once the policy is spent,
-/// ends `sluice wait` and a waiting submit at once: each says it could not
-/// read, on stderr with how long and the forge's words and on stdout with
-/// how to wait again, and exits 3, no outcome. The wait never reads again
-/// of its own (rule core.29); nothing was decided of the submission, which
-/// lands once the forge answers.
+/// 134, 133 (design D9): a round of the host process's whose call the
+/// forge could not answer for the retry policy's time is said once on
+/// stderr, in its words, and `sluice wait` goes on following: the round
+/// after lands the submission, and the wait reports it, exit 0.
 #[test]
-fn a_wait_whose_round_the_forge_could_not_answer_says_it_could_not_read() {
-    const TEST: &str = "a_wait_whose_round_the_forge_could_not_answer_says_it_could_not_read";
+fn a_round_the_forge_could_not_answer_is_said_once_and_the_wait_goes_on() {
+    const TEST: &str = "a_round_the_forge_could_not_answer_is_said_once_and_the_wait_goes_on";
     if let Some(err) = stderr_of(TEST) {
         let said: Vec<&str> = err
             .lines()
-            .filter(|l| l.starts_with("sluice: could not read #"))
+            .filter(|l| l.starts_with(&format!("sluice: {BRANCH}: ")))
             .collect();
-        assert_eq!(said.len(), 3, "{err}");
-        for line in said {
-            assert!(
-                line.contains(" for 0s, so whether it landed is not known: starting a run in ")
-                    && line.ends_with(": 503 Service Unavailable"),
-                "{err}"
-            );
-        }
+        assert_eq!(said.len(), 1, "{err}");
+        assert!(said[0].ends_with(": 503 Service Unavailable"), "{err}");
+        assert!(!err.contains("could not read #"), "{err}");
         return;
     }
     let f = setup();
     work(&f, "unit/a", "agent-a", &[("plugin/a", Some("a"))]);
     sluice(&f, &["submit", BRANCH, "--worktree", "unit/a", "--no-wait"]);
     f.world.unanswer_starts(1);
-    let (code, out) = sluice_with(&f, &Unpaused, &["wait", "1"]);
-    assert_eq!(code, sluice::INTERNAL, "{out}");
-    assert!(out.ends_with("could not read #1: sluice wait 1\n"), "{out}");
+    let stop = Then(Cell::new(0), |n| n < 40);
+    let (code, out) = sluice_with(&f, &stop, &["wait", "1"]);
+    assert_eq!(code, LANDED, "{out}");
+    let tip = f.world.tip(BRANCH);
     assert!(
-        !out.contains("landed as") && !out.contains("failed"),
+        out.ends_with(&format!("passed · landed as {}\n", &tip.0[..7])),
         "{out}"
     );
-
-    f.world.unanswer_starts(1);
-    let (code, out) = sluice_with(&f, &Unpaused, &["wait", "1", "--json"]);
-    assert_eq!(code, sluice::INTERNAL, "{out}");
-    let v = json(&out);
-    assert_eq!(v["error"]["kind"], "internal");
-    assert_eq!(v["error"]["next"], serde_json::json!(["sluice wait 1"]));
-    let message = v["error"]["message"].as_str().unwrap();
-    assert!(
-        message.starts_with("could not read #1 for 0s, so whether it landed is not known: "),
-        "{message}"
-    );
-    assert!(message.ends_with(": 503 Service Unavailable"), "{message}");
-    let (_, out) = sluice(&f, &["status", "1", "--json"]);
-    assert_ne!(json(&out)["state"], "failed");
-
-    work(&f, "unit/b", "agent-b", &[("plugin/b", Some("b"))]);
-    f.world.unanswer_starts(1);
-    let (code, out) = sluice_with(&f, &Unpaused, &["submit", BRANCH, "--worktree", "unit/b"]);
-    assert_eq!(code, sluice::INTERNAL, "{out}");
-    assert!(out.ends_with("could not read #2: sluice wait 2\n"), "{out}");
-
-    assert_eq!(sluice(&f, &["wait", "2"]).0, LANDED);
-    let (_, out) = sluice(&f, &["status", "1", "--json"]);
-    assert_eq!(json(&out)["state"], "landed");
 }
 
 /// 134: Ctrl-C while a wait's call to a remote is between tries ends the
@@ -6481,9 +6326,12 @@ impl sluice::PullRequests for Pull7 {
         _: sluice_core::Seams<'_>,
         _: &dyn sluice_core::Clock,
         _: &str,
-        _: sluice::Taker,
-    ) -> anyhow::Result<bool> {
-        Ok(true)
+    ) -> anyhow::Result<sluice::Intake> {
+        Ok(sluice::Intake {
+            takes: true,
+            asked: true,
+            causes: Vec::new(),
+        })
     }
 
     fn open(
@@ -6538,10 +6386,19 @@ impl sluice::PullRequests for Pull7 {
 /// The branch, taking pull requests.
 fn pulls_setup() -> Fakes {
     let f = Fakes::new();
-    let policy = POLICY.replace(
-        "[branches.\"bolt/*\"]\n",
-        "[branches.\"bolt/*\"]\nremote = \"origin\"\n",
-    ) + "\n[branches.\"bolt/*\".pull_requests]\n";
+    // 137 (design D22, D28): a signer named, so `bolt/*`'s records are kept
+    // on its remote and the host that keeps it takes its pull requests in.
+    let policy = "[signers.a]\nssh = \".config/sluice.signers\"\n\n".to_string()
+        + &POLICY
+            .replace(
+                "[branches.\"bolt/*\"]\n",
+                "[branches.\"bolt/*\"]\nremote = \"origin\"\n",
+            )
+            .replace(
+                "trust = [\"open\", \"sandbox\", \"container\"]\n",
+                "trust = [\"a\"]\n",
+            )
+        + "\n[branches.\"bolt/*\".pull_requests]\n";
     f.world.init(
         BRANCH,
         &[(".config/sluice.toml", &policy), ("plugin/a", "a")],
@@ -6559,10 +6416,7 @@ fn sluice_pulls(
 ) -> (i32, String) {
     let cli = Cli::try_parse_from(std::iter::once("sluice").chain(args.iter().copied())).unwrap();
     let mut out = Vec::new();
-    let host = support::FakeHost {
-        world: f.world.clone(),
-        reserved: 0,
-    };
+    let host = support::FakeHost::new(f.world.clone(), 0);
     let code =
         settled(|| run(cli, f.seams(), &host, &(), pulls, &f.clock, pause, &mut out)).unwrap();
     (code, String::from_utf8(out).unwrap())
@@ -7410,13 +7264,14 @@ fn status_and_overview_show_a_hold_while_it_lasts() {
                 "{BRANCH} at {} · 1 in the queue · testing 0 at once (up to 4)",
                 &landing[..7]
             ),
+            HOME.to_string(),
             held.clone(),
             "  #2 unit/b  queued    agent-b  unit/b".to_string(),
             format!("1 no longer in the queue: sluice status {BRANCH} --all"),
             // D13 (51; record 0102): #1's landing, which nobody confirmed.
             "OWED".to_string(),
             "  unit/a · never confirmed".to_string(),
-            "    1:landed #1  owed until 2026-10-18T09:00:12Z · handed over by notice at \
+            "    1:landed #1  owed until 2026-10-18T09:00:13Z · handed over by notice at \
              2026-10-11T09:00:16Z, wait at 2026-10-11T09:00:19Z"
                 .to_string(),
             "confirm one with: sluice confirm <key>, in its worktree, or sluice confirm <key> \
@@ -7556,16 +7411,14 @@ fn a_release_failing_after_the_landing_leaves_it_landed() {
     assert!(f.world.live_places().is_empty());
 }
 
-/// 122: pushing the outcome fails after the landing, in the round
-/// `sluice wait` ran: landed, exit 0, and the push's failure on stderr.
+/// 122 (rule core.48; design D9): pushing the outcome fails after the
+/// landing, in the host process's round `sluice wait` follows: landed,
+/// exit 0, and nothing said of what failed after it, which is the host
+/// process's.
 #[test]
 fn a_push_failing_after_the_landing_leaves_it_landed() {
     if let Some(err) = stderr_of("a_push_failing_after_the_landing_leaves_it_landed") {
-        assert_eq!(
-            after_the_landing(&err),
-            ["sluice: after the landing: crashed after delivering 1:landed"],
-            "{err}"
-        );
+        assert!(after_the_landing(&err).is_empty(), "{err}");
         return;
     }
     let f = setup();
@@ -7606,13 +7459,14 @@ fn a_landing_whose_release_fails_is_one_document_under_json() {
     assert_eq!(v["landed_as"], f.world.tip(BRANCH).0);
 }
 
-/// 122, 24: the round a waiting submit ran moves the branch and fails
-/// writing that it landed: the submission is reported landed as the
-/// landing's commit, and the next round records it so.
+/// 122, 24 (design D9): the host process's round a waiting submit follows
+/// moves the branch and fails writing that it landed: the submission is
+/// reported landed as the landing's commit, and the next round records it
+/// so.
 #[test]
 fn a_landing_the_round_did_not_record_is_reported_landed() {
     if let Some(err) = stderr_of("a_landing_the_round_did_not_record_is_reported_landed") {
-        assert_eq!(after_the_landing(&err).len(), 1, "{err}");
+        assert!(after_the_landing(&err).is_empty(), "{err}");
         return;
     }
     let f = setup();
@@ -7652,10 +7506,23 @@ fn a_landing_the_round_did_not_record_is_reported_landed() {
     );
 }
 
-/// 122: a round that fails before the branch moved is sluice failing
-/// itself, as before: the submission is not reported landed.
+/// 122 (design D9): a round of the host process's that fails before the
+/// branch moved is said once on stderr, in its words, and the waiting
+/// submit goes on: the submission is not reported landed by it, and the
+/// round after, finishing the landing, lands it.
 #[test]
-fn a_round_failing_before_the_landing_is_an_error() {
+fn a_round_failing_before_the_landing_is_said_and_the_wait_goes_on() {
+    const TEST: &str = "a_round_failing_before_the_landing_is_said_and_the_wait_goes_on";
+    if let Some(err) = stderr_of(TEST) {
+        let said = err
+            .lines()
+            .filter(|l| {
+                l.starts_with(&format!("sluice: {BRANCH}: ")) && l.contains("crashed before moving")
+            })
+            .count();
+        assert_eq!(said, 1, "{err}");
+        return;
+    }
     let f = setup();
     work(&f, "unit/a", "agent-a", &[("plugin/a", Some("a"))]);
     let between = |n: usize| {
@@ -7668,18 +7535,11 @@ fn a_round_failing_before_the_landing_is_an_error() {
         rounds: 5,
         between: &between,
     };
-    let cli = Cli::try_parse_from(["sluice", "submit", BRANCH, "--worktree", "unit/a"]).unwrap();
-    let mut out = Vec::new();
-    let host = support::FakeHost {
-        world: f.world.clone(),
-        reserved: 0,
-    };
-    let e = run(cli, f.seams(), &host, &(), &(), &f.clock, &pause, &mut out).unwrap_err();
-    assert!(format!("{e:#}").contains("crashed before moving"), "{e:#}");
-    let out = String::from_utf8(out).unwrap();
-    assert!(!out.contains("landed as"), "{out}");
+    let (code, out) = sluice_with(&f, &pause, &["submit", BRANCH, "--worktree", "unit/a"]);
+    assert_eq!(code, LANDED, "{out}");
+    assert_eq!(out.matches("landed as").count(), 1, "{out}");
     let (_, out) = sluice(&f, &["status", "1", "--json"]);
-    assert_eq!(json(&out)["state"], "landing");
+    assert_eq!(json(&out)["state"], "landed");
 }
 
 // ---------------------------------------------------------------------------
@@ -8241,12 +8101,13 @@ fn status_shows_this_hosts_copy_behind_while_it_lasts() {
     assert_eq!(code, 0);
     let lines: Vec<&str> = out.lines().collect();
     assert_eq!(
-        lines[..2],
+        lines[..3],
         [
             format!(
                 "{BRANCH} at {} · 0 in the queue · testing 0 at once (up to 4)",
                 &landing.0[..7]
             ),
+            HOME.to_string(),
             format!(
                 "this host's {BRANCH} is at {}, behind the landing {}: {lock}",
                 &made.0[..7],
@@ -8270,7 +8131,7 @@ fn status_shows_this_hosts_copy_behind_while_it_lasts() {
     sluice(&f, &["step", BRANCH]);
     assert_eq!(f.world.copy_of(BRANCH), Some(landing));
     let (_, out) = sluice(&f, &["status", BRANCH]);
-    assert!(!out.contains("this host's"), "{out}");
+    assert!(!out.contains(&format!("this host's {BRANCH}")), "{out}");
     let v = json(&sluice(&f, &["status", BRANCH, "--json"]).1);
     assert!(v["copy"].is_null(), "{v}");
 }
@@ -8356,8 +8217,9 @@ fn status_shows_the_writes_its_protection_refused() {
     assert_eq!(code, 0, "{out}");
     let lines: Vec<&str> = out.lines().collect();
     assert_eq!(
-        lines[1..5],
+        lines[1..6],
         [
+            HOME.to_string(),
             format!(
                 "sluice refused writes to {BRANCH} in the last day, by commands that are not sluice's:"
             ),
@@ -8412,7 +8274,7 @@ fn status_tells_a_local_branchs_refused_writes_what_to_do() {
     let (_, out) = sluice(&f, &["status", BRANCH]);
     let lines: Vec<&str> = out.lines().collect();
     assert_eq!(
-        lines[2..5],
+        lines[3..6],
         [
             format!("  {commit}"),
             "    on build-1: 1 time, first 2026-11-02T16:01:20Z, last 2026-11-02T16:01:20Z, \
@@ -9025,6 +8887,10 @@ mod refused_alone {
             self.host.reserved()
         }
 
+        fn host_process(&self) -> &dyn sluice::host_process::HostProcess {
+            self.host.host_process()
+        }
+
         fn peer(&self) -> sluice_core::Peer {
             sluice_core::Peer {
                 systems: Some(self.systems.clone()),
@@ -9127,10 +8993,7 @@ mod refused_alone {
             )],
         );
         let host = Naming {
-            host: support::FakeHost {
-                world: f.world.clone(),
-                reserved: 0,
-            },
+            host: support::FakeHost::new(f.world.clone(), 0),
             systems: vec!["linux-x64".into()],
         };
         let cli = Cli::try_parse_from(["sluice", "run", "--rounds", "1"]).unwrap();
@@ -9179,10 +9042,7 @@ mod read_once {
         let cli =
             Cli::try_parse_from(std::iter::once("sluice").chain(args.iter().copied())).unwrap();
         let mut out = Vec::new();
-        let host = support::FakeHost {
-            world: f.world.clone(),
-            reserved: 0,
-        };
+        let host = support::FakeHost::new(f.world.clone(), 0);
         let code = run(cli, seams, &host, &(), &(), &f.clock, pause, &mut out).unwrap();
         (code, String::from_utf8(out).unwrap())
     }
@@ -9664,7 +9524,8 @@ mod number_on_two_branches {
     }
 
     /// 26, record 0114: a wait given the branch follows that branch's
-    /// submission to its landing, and leaves the other queued.
+    /// submission to its landing, never the other's, which the host
+    /// process moves as its own (135).
     #[test]
     fn a_wait_given_the_branch_follows_it_to_its_landing() {
         let f = both_queued();
@@ -9675,7 +9536,7 @@ mod number_on_two_branches {
             (v["id"].clone(), v["branch"].clone(), v["state"].clone()),
             (26.into(), B.into(), "landed".into())
         );
-        assert_eq!(on(&f, A)["state"], "queued");
+        assert_eq!(on(&f, A)["branch"], A);
     }
 
     /// 26, record 0114: given the branch, a command reads it alone, and
@@ -9894,8 +9755,8 @@ mod number_on_two_branches {
     }
 
     /// Record 0114: a waiting submit given a number another branch holds
-    /// follows its own branch's submission to its landing, and leaves the
-    /// other queued.
+    /// follows its own branch's submission to its landing, never the
+    /// other's, which the host process moves as its own (135).
     #[test]
     fn a_waiting_submit_follows_its_own_branch_to_its_landing() {
         let f = setup();
@@ -9915,7 +9776,7 @@ mod number_on_two_branches {
             (1.into(), B.into(), "landed".into())
         );
         let (_, out) = sluice(&f, &["status", "1", "--branch", A, "--json"]);
-        assert_eq!(json(&out)["state"], "queued", "{out}");
+        assert_eq!(json(&out)["branch"], A, "{out}");
     }
 
     /// Record 0114: a command given the branch names it in every command
@@ -9989,4 +9850,1625 @@ mod number_on_two_branches {
             "{out}"
         );
     }
+}
+
+/// settings-take-up, "A run handed over counts its passes" (135; record
+/// 0107; design D11): a `sluice run --rounds 3` that followed one pass of
+/// the host process and handed over what it carries follows on from what
+/// it handed over, and ends after two passes more, saying again nothing it
+/// said.
+#[test]
+fn a_run_handed_over_keeps_following_and_counts_its_passes() {
+    use sluice::host_process::ask::Follower;
+    use sluice::host_process::protocol::FollowKind;
+    use sluice::{Driven, Following};
+    let f = one_queued();
+    f.world.hold_runs(true);
+    let host = support::FakeHost::new(f.world.clone(), 0);
+    let s = sluice_core::Sluice::new(f.seams(), &f.clock);
+    let here = sluice::host_process::Here {
+        s: &s,
+        host: &host,
+        pulls: &(),
+        clock: &f.clock,
+    };
+    let pause = Rounds(Cell::new(0));
+    let mut out = Vec::new();
+
+    let mut following = Following::new(Some(3));
+    following.start(&s).unwrap();
+    let mut follower = Follower::new(&here, FollowKind::Run);
+    let first = following
+        .next(&here, &mut follower, &pause, &mut out)
+        .unwrap();
+    assert_eq!(first, Driven::Next);
+    let doc = sluice::hand_over::HandOver {
+        settings: String::new(),
+        tables: vec!["[telemetry]".into()],
+        passes: following.passes(),
+        told: following.told(),
+    };
+    assert_eq!((doc.passes, doc.told), (1, true));
+
+    let mut afresh = Following::handed(Some(3), &doc);
+    let mut follower = Follower::new(&here, FollowKind::Run);
+    let next = afresh.next(&here, &mut follower, &pause, &mut out).unwrap();
+    assert_eq!(next, Driven::Next);
+    let last = afresh.next(&here, &mut follower, &pause, &mut out).unwrap();
+    assert_eq!(last, Driven::Ended(0));
+    assert_eq!(afresh.passes(), 3);
+    assert!(afresh.told(), "it says again nothing it said");
+}
+
+/// Record 0119 (design D11): `main` on `origin`, its runs for
+/// `macos-arm64`, which this world's hosts are not, taken by the `forge`
+/// pool on GitHub Actions; `a/` holds `a:test`, tagged `gate`.
+const POOLED: &str = "[tests]\nrunner = \"fake\"\n\n[checkout]\n\n\
+    [branches.main]\nrequired = [\"#gate\"]\nparallel = 4\ntimeout = \"20m\"\n\
+    trust = [\"box\", \"forge\"]\nremote = \"origin\"\nsystems = [\"macos-arm64\"]\n\
+    \n[signers.box]\nssh = \"box ssh-ed25519 AAAA\"\n\
+    \n[signers.forge]\ngithub = { workflow = \".github/workflows/sluice.yml\", ref = \"refs/heads/main\" }\n\
+    \n[pools.forge]\ngithub = { workflow = \".github/workflows/sluice.yml\" }\nsigner = \"forge\"\n\
+    runners = { macos-arm64 = \"macos-15\" }\n\
+    \n[systems]\nlinux-x64 = { os = \"linux\", arch = \"x86_64\" }\n\
+    macos-arm64 = { os = \"macos\", arch = \"aarch64\" }\n";
+
+/// Record 0119 (design D11): a world whose `main` holds `projects`, each
+/// `<p>/lib` with its check `<p>:test`, and one submission changing each,
+/// whose run the lead, host `a` with no room of its own, claimed for the
+/// pool and dispatched; the world's host is then `runner`, the pool's
+/// job's. The claim is answered.
+fn pooled(f: &Fakes, projects: &[&str]) -> String {
+    pooled_as(f, POOLED, projects)
+}
+
+/// [`pooled`], under `policy`.
+fn pooled_as(f: &Fakes, policy: &str, projects: &[&str]) -> String {
+    let libs: Vec<(String, String)> = projects
+        .iter()
+        .map(|p| (format!("{p}/lib"), format!("{p}1")))
+        .collect();
+    let mut files = vec![(POLICY_PATH, policy)];
+    files.extend(libs.iter().map(|(p, c)| (p.as_str(), c.as_str())));
+    f.world.init("main", &files);
+    for p in projects {
+        f.world.task(&format!("{p}:test"), &format!("{p}/"));
+    }
+    let changes: Vec<(String, String)> = projects
+        .iter()
+        .map(|p| (format!("{p}/lib"), format!("{p}2")))
+        .collect();
+    let changes: Vec<(&str, Option<&str>)> = changes
+        .iter()
+        .map(|(p, c)| (p.as_str(), Some(c.as_str())))
+        .collect();
+    let head = f.world.work(&f.world.tip("main"), &changes);
+    f.world.session("unit/a", "agent-a", &head);
+    f.world.be_host("a");
+    f.world.signs_as("box");
+    f.world.no_room();
+    let lead = pool_lead(f);
+    lead.submit(&sluice_core::SubmitRequest {
+        head: sluice_core::SubmitHead::Worktree("unit/a".into()),
+        branch: "main".into(),
+        after: Vec::new(),
+        priority: 0,
+        subject: None,
+    })
+    .unwrap()
+    .expect("accepted");
+    lead.step("main").unwrap();
+    let launches = f.world.launches();
+    assert_eq!(launches.len(), 1, "the pool's job dispatched");
+    f.world.be_host("runner");
+    launches[0].claim.clone()
+}
+
+/// Host `a`, which leads `main` and has no room of its own.
+fn pool_lead(f: &Fakes) -> sluice_core::Sluice<'_> {
+    f.sluice().as_peer(sluice_core::Peer {
+        name: "a".into(),
+        lease: Duration::from_secs(300),
+        alive: Duration::from_secs(120),
+        signer: Some("box".into()),
+        systems: None,
+        expire_after: sluice_core::EXPIRE_AFTER,
+    })
+}
+
+/// The runs of `main`'s first combination, as its records hold them.
+fn pooled_runs(f: &Fakes) -> Vec<sluice_core::records::SystemRun> {
+    let snap = f.sluice().seams().state.read("main").unwrap();
+    let doc = sluice_core::line::Line::load("main", snap).unwrap().doc;
+    doc.candidates[0].runs.clone()
+}
+
+/// satisfies: record 0119 (design D11); 82, 88; the actions-pool spec's
+/// "A pool's run job records nothing"
+#[test]
+fn job_run_writes_its_report_and_records_nothing() {
+    let f = Fakes::new();
+    let claim = pooled(&f, &["a"]);
+    // The lead writes the run running from its run job's start, before
+    // the job reads its records (record 0122, design D12).
+    f.world.be_host("a");
+    let since = "2026-11-16T03:00:00Z".to_string();
+    f.world.move_job(
+        &claim,
+        sluice_seams::Job::Running {
+            since: since.clone(),
+        },
+    );
+    pool_lead(&f).step("main").unwrap();
+    f.world.be_host("runner");
+    let runs = pooled_runs(&f);
+    assert_eq!(runs[0].state, sluice_core::records::RunState::Running);
+    assert_eq!(runs[0].running.as_deref(), Some(since.as_str()));
+    let version = f.world.version("main");
+    let results = f.world.results_log();
+    let out = support::Scratch::new("job-run");
+    let dir = out.path().join("sluice-run");
+    let (code, said) = sluice(
+        &f,
+        &[
+            "job",
+            "run",
+            "--claim",
+            &claim,
+            "--branch",
+            "main",
+            "--out",
+            dir.to_str().unwrap(),
+        ],
+    );
+    assert_eq!(code, 0, "{said}");
+    assert!(said.contains("1 passed, 0 failed"), "{said}");
+    let report: sluice_seams::RunReport =
+        serde_json::from_slice(&std::fs::read(dir.join("report.json")).unwrap()).unwrap();
+    assert_eq!(report.tasks.len(), 1);
+    assert_eq!(report.tasks[0].task, "a:test");
+    assert_eq!(report.tasks[0].outcome, Outcome::Pass);
+    let keys = std::fs::read_to_string(dir.join("proof/keys")).unwrap();
+    assert!(keys.starts_with("a:test "), "{keys}");
+    assert_eq!(f.world.version("main"), version, "no state written");
+    assert_eq!(f.world.results_log(), results, "nothing recorded");
+    assert_eq!(pooled_runs(&f), runs, "the run as the lead left it");
+
+    // A claim that holds no run of the branch starts nothing, and says why.
+    let none = out.path().join("none");
+    let (code, said) = sluice(
+        &f,
+        &[
+            "job",
+            "run",
+            "--claim",
+            "pool/forge/99",
+            "--branch",
+            "main",
+            "--out",
+            none.to_str().unwrap(),
+        ],
+    );
+    assert_eq!(code, sluice::INTERNAL, "{said}");
+    let why = std::fs::read_to_string(none.join("why")).unwrap();
+    assert!(
+        why.contains("no run of main waits for its job under pool/forge/99"),
+        "{why}"
+    );
+    assert!(!none.join("report.json").exists());
+}
+
+/// satisfies: record 0016, 123; rule core.10; the place-release spec's "A
+/// run that passed": `sluice job run` releases the checkout it made before
+/// it exits, by the release the policy names, the checkout gone with its
+/// ports and scratch; a release that fails is said in its output and its
+/// hand-over, deciding nothing of the run's outcome
+#[test]
+fn job_run_releases_its_checkout_before_it_exits() {
+    let f = Fakes::new();
+    let claim = pooled(&f, &["a"]);
+    let out = support::Scratch::new("job-run-release");
+    let dir = out.path().join("sluice-run");
+    let args = [
+        "job",
+        "run",
+        "--claim",
+        &claim,
+        "--branch",
+        "main",
+        "--out",
+        dir.to_str().unwrap(),
+    ];
+    let (code, said) = sluice(&f, &args);
+    assert_eq!(code, 0, "{said}");
+    let place = f
+        .world
+        .made_places()
+        .last()
+        .cloned()
+        .expect("a checkout made");
+    assert!(
+        said.contains(&format!("released its checkout {place}")),
+        "{said}"
+    );
+    assert_eq!(
+        f.world.release_attempts(),
+        std::slice::from_ref(&place),
+        "its release ran"
+    );
+    assert!(f.world.released_places().contains(&place));
+    assert!(
+        !f.world.live_places().contains(&place),
+        "gone, ports and all"
+    );
+    assert_eq!(f.world.live_runs(), 0);
+    assert!(dir.join("report.json").exists());
+    assert!(!dir.join("why").exists());
+
+    // A release that fails: said, beside the report, and the run's outcome
+    // stands.
+    let f = Fakes::new();
+    let claim = pooled(&f, &["a"]);
+    f.world.release_fails(Some("the stack would not stop"));
+    let dir = out.path().join("failed-release");
+    let args = [
+        "job",
+        "run",
+        "--claim",
+        &claim,
+        "--branch",
+        "main",
+        "--out",
+        dir.to_str().unwrap(),
+    ];
+    let (code, said) = sluice(&f, &args);
+    assert_eq!(code, 0, "{said}");
+    assert!(said.contains("1 passed, 0 failed"), "{said}");
+    assert!(
+        said.contains("was not released") && said.contains("the stack would not stop"),
+        "{said}"
+    );
+    assert!(dir.join("report.json").exists(), "the report stands");
+    let why = std::fs::read_to_string(dir.join("why")).unwrap();
+    assert!(
+        why.contains("was not released") && why.contains("the stack would not stop"),
+        "{why}"
+    );
+}
+
+/// satisfies: record 0016, 123; rule core.10; the place-release spec's "A
+/// job stopped while its run goes": it ends the run's process group, runs
+/// the release, says it kept no report, and exits
+#[test]
+fn job_run_stopped_releases_its_checkout() {
+    struct Stop;
+    impl Pause for Stop {
+        fn pause(&self) -> bool {
+            false
+        }
+    }
+    let f = Fakes::new();
+    let claim = pooled(&f, &["a"]);
+    f.world.hold_runs(true);
+    let out = support::Scratch::new("job-run-stopped");
+    let dir = out.path().join("sluice-run");
+    let (code, said) = sluice_with(
+        &f,
+        &Stop,
+        &[
+            "job",
+            "run",
+            "--claim",
+            &claim,
+            "--branch",
+            "main",
+            "--out",
+            dir.to_str().unwrap(),
+        ],
+    );
+    assert_eq!(code, sluice::STOPPED, "{said}");
+    let place = f
+        .world
+        .made_places()
+        .last()
+        .cloned()
+        .expect("a checkout made");
+    assert!(said.contains("no report: the job was stopped"), "{said}");
+    assert!(
+        said.contains(&format!("released its checkout {place}")),
+        "{said}"
+    );
+    assert_eq!(f.world.live_runs(), 0, "its run ended");
+    assert_eq!(
+        f.world.release_attempts(),
+        std::slice::from_ref(&place),
+        "its release ran"
+    );
+    assert!(!f.world.live_places().contains(&place));
+    assert!(!dir.join("report.json").exists());
+    let why = std::fs::read_to_string(dir.join("why")).unwrap();
+    assert!(
+        why.contains("the job was stopped before its run ended"),
+        "{why}"
+    );
+}
+
+/// Whether this is the child `test` runs alone in, where it may set the
+/// process's environment, as pointing the AWS SDK at a fake; outside it,
+/// that child is run, and must pass.
+fn alone(test: &str) -> bool {
+    if std::env::var("SLUICE_TEST_ALONE").as_deref() == Ok(test) {
+        return true;
+    }
+    let out = support::isolated(&mut std::process::Command::new(
+        std::env::current_exe().unwrap(),
+    ))
+    .args(["--exact", test, "--nocapture"])
+    .env("SLUICE_TEST_ALONE", test)
+    .output()
+    .unwrap();
+    let said = String::from_utf8_lossy(&out.stdout);
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        out.status.success() && said.contains(&format!("test {test} ... ok")),
+        "{test}, alone:\n{said}{err}"
+    );
+    false
+}
+
+/// Record 0119 (design D1): `main` on `origin`, its runs for `linux-x64`,
+/// which this world's hosts are not, taken by the CodeBuild pool
+/// `codebuild`, whose `kms` signer lists `public`.
+fn on_codebuild(public: &str) -> String {
+    format!(
+        "[tests]\nrunner = \"fake\"\n\n[checkout]\n\n\
+         [branches.main]\nrequired = [\"#gate\"]\nparallel = 4\ntimeout = \"20m\"\n\
+         trust = [\"box\", \"codebuild\"]\nremote = \"origin\"\nsystems = [\"linux-x64\"]\n\
+         \n[signers.box]\nssh = \"box ssh-ed25519 AAAA\"\n\
+         \n[signers.codebuild]\nkms = {{ key = \"{key}\", public = \"{public}\" }}\nsystems = [\"linux-x64\"]\n\
+         \n[pools.codebuild]\ncodebuild = {{ region = \"us-east-1\", sign = \"sluice-sign\" }}\nsigner = \"codebuild\"\n\
+         runners = {{ linux-x64 = \"sluice-run-linux-x64\" }}\n\
+         \n[systems]\nlinux-x64 = {{ os = \"linux\", arch = \"x86_64\" }}\n\
+         macos-arm64 = {{ os = \"macos\", arch = \"aarch64\" }}\n",
+        key = support::aws::KEY
+    )
+}
+
+/// The run build of `claim`'s run on `main` the CodeBuild fake holds, its
+/// hand-over the zip of `ran` as CodeBuild recorded it; its ARN.
+fn run_build(aws: &support::aws::FakeAws, claim: &str, ran: &std::path::Path) -> String {
+    let zip = support::aws::zip_of(ran);
+    aws.put_object(
+        "sluice-hand-over",
+        "sluice-run-linux-x64/1/sluice-run.zip",
+        &zip,
+    );
+    aws.put_build(
+        "sluice-run-linux-x64",
+        "SUCCEEDED",
+        &[
+            ("SLUICE_CLAIM", claim),
+            ("SLUICE_BRANCH", "main"),
+            ("SLUICE_SYSTEM", "linux-x64"),
+        ],
+        Some((
+            "arn:aws:s3:::sluice-hand-over/sluice-run-linux-x64/1/sluice-run.zip",
+            &support::aws::sha256(&zip),
+        )),
+    )
+}
+
+/// satisfies: record 0119 (design D6); 78, 109; rule core.62; the
+/// codebuild-pool spec's "A hand-over another build wrote": the sign build
+/// keeps a run build's hand-over only where its SHA-256 is the one
+/// CodeBuild recorded, signs what the tree bears out with the pool's key,
+/// and otherwise signs nothing and the run ends with no outcome saying so,
+/// nobody blamed; a build no pool's run project made, one not ended, and
+/// one naming no claim are refused
+#[test]
+fn job_sign_keeps_a_hand_over_only_as_codebuild_recorded_it() {
+    use sluice_core::records::{CheckOutcome, RunState};
+    if !alone("job_sign_keeps_a_hand_over_only_as_codebuild_recorded_it") {
+        return;
+    }
+    let aws = support::aws::FakeAws::start();
+    let key = aws.with_key("alias/sluice-sign");
+    aws.point_here();
+    let f = Fakes::new();
+    let claim = pooled_as(&f, &on_codebuild(&support::aws::public(&key)), &["a"]);
+    let out = support::Scratch::new("job-sign-build");
+    let ran = job_run(&f, &claim, out.path());
+    let arn = run_build(&aws, &claim, &ran);
+
+    // As CodeBuild recorded it: what the tree bears out is signed.
+    let sign = out.path().join("sign");
+    let (code, said) = sluice(
+        &f,
+        &[
+            "job",
+            "sign",
+            "--build",
+            &arn,
+            "--out",
+            sign.to_str().unwrap(),
+        ],
+    );
+    assert_eq!(code, 0, "{said}");
+    assert!(said.contains("signed 1 keys"), "{said}");
+    assert!(sign.join("run/report.json").exists());
+    let envelope: sluice::signing::dsse::Envelope =
+        serde_json::from_slice(&std::fs::read(sign.join("record.json")).unwrap()).unwrap();
+    assert_eq!(envelope.signatures[0].keyid, support::aws::KEY);
+    let half = sluice::signing::kms::public_half(&support::aws::public(&key)).unwrap();
+    sluice::signing::kms::verify(&envelope, support::aws::KEY, &half).unwrap();
+    let statement = sluice::signing::statement::Statement::from_envelope(&envelope).unwrap();
+    assert_eq!(statement.predicate.claim.as_deref(), Some(claim.as_str()));
+    assert_eq!(statement.predicate.claims.system, "linux-x64");
+    assert_eq!(statement.predicate.results[0].check, "a:test");
+    let ops = aws.operations();
+    assert!(ops.contains(&"BatchGetBuilds".to_string()), "{ops:?}");
+    assert!(ops.contains(&"Sign".to_string()), "{ops:?}");
+
+    // Another build's object in its place: nothing signed.
+    let forged = out.path().join("forged");
+    std::fs::create_dir_all(&forged).unwrap();
+    std::fs::write(forged.join("report.json"), b"{}").unwrap();
+    aws.put_object(
+        "sluice-hand-over",
+        "sluice-run-linux-x64/1/sluice-run.zip",
+        &support::aws::zip_of(&forged),
+    );
+    let differs = out.path().join("differs");
+    let (code, said) = sluice(
+        &f,
+        &[
+            "job",
+            "sign",
+            "--build",
+            &arn,
+            "--out",
+            differs.to_str().unwrap(),
+        ],
+    );
+    assert_eq!(code, 0, "{said}");
+    assert!(said.contains("is not what CodeBuild recorded"), "{said}");
+    assert!(!differs.join("record.json").exists());
+    assert!(!differs.join("run/report.json").exists());
+    // Builds a sign build refuses.
+    let stray = aws.put_build(
+        "someone-elses-project",
+        "SUCCEEDED",
+        &[("SLUICE_CLAIM", &claim), ("SLUICE_BRANCH", "main")],
+        None,
+    );
+    let running = aws.put_build(
+        "sluice-run-linux-x64",
+        "IN_PROGRESS",
+        &[("SLUICE_CLAIM", &claim), ("SLUICE_BRANCH", "main")],
+        None,
+    );
+    let unclaimed = aws.put_build("sluice-run-linux-x64", "SUCCEEDED", &[], None);
+    for (build, said) in [
+        (&stray, "names for no system"),
+        (&running, "has not ended"),
+        (&unclaimed, "names no SLUICE_CLAIM"),
+    ] {
+        let dir = out.path().join("refused");
+        let e = sluice_err(
+            &f,
+            &[
+                "job",
+                "sign",
+                "--build",
+                build,
+                "--out",
+                dir.to_str().unwrap(),
+            ],
+        );
+        assert!(e.contains(said), "{build}: {e}");
+        assert!(!dir.join("record.json").exists());
+    }
+
+    let (code, said) = sluice(
+        &f,
+        &[
+            "job",
+            "record",
+            "--build",
+            &arn,
+            "--from",
+            differs.to_str().unwrap(),
+        ],
+    );
+    assert_eq!(code, 0, "{said}");
+    let runs = pooled_runs(&f);
+    assert_eq!(runs[0].state, RunState::Closed);
+    let ended = runs[0].ended.as_ref().expect("ended");
+    let why = ended.why.clone().unwrap_or_default();
+    assert!(why.contains("is not what CodeBuild recorded"), "{why}");
+    assert!(ended
+        .outcomes
+        .values()
+        .all(|o| matches!(o, CheckOutcome::None { .. })));
+    assert!(f.world.results_log().is_empty(), "nothing recorded");
+}
+
+/// satisfies: record 0119 (design D6); 77, 109; the codebuild-pool spec's
+/// "A run build's passes": the sign build's record of both passes, signed
+/// by the pool's key, is added among `codebuild`'s runs, and the run reads
+/// ended and closed under its claim in one write; recorded again under a
+/// claim that no longer holds the run, nothing is written
+#[test]
+fn job_record_build_ends_the_run_with_what_the_key_signed() {
+    use sluice_core::records::{CheckOutcome, RunState};
+    if !alone("job_record_build_ends_the_run_with_what_the_key_signed") {
+        return;
+    }
+    let aws = support::aws::FakeAws::start();
+    let key = aws.with_key("alias/sluice-sign");
+    aws.point_here();
+    let f = Fakes::new();
+    let claim = pooled_as(&f, &on_codebuild(&support::aws::public(&key)), &["a", "b"]);
+    let out = support::Scratch::new("job-record-build");
+    let ran = job_run(&f, &claim, out.path());
+    let arn = run_build(&aws, &claim, &ran);
+    let sign = out.path().join("sign");
+    let (code, said) = sluice(
+        &f,
+        &[
+            "job",
+            "sign",
+            "--build",
+            &arn,
+            "--out",
+            sign.to_str().unwrap(),
+        ],
+    );
+    assert_eq!(code, 0, "{said}");
+    assert!(said.contains("signed 2 keys"), "{said}");
+    let record = std::fs::read(sign.join("record.json")).unwrap();
+
+    let version = f.world.version("main");
+    let results = f.world.results_log();
+    let (code, said) = sluice(
+        &f,
+        &[
+            "job",
+            "record",
+            "--build",
+            &arn,
+            "--from",
+            sign.to_str().unwrap(),
+        ],
+    );
+    assert_eq!(code, 0, "{said}");
+    assert!(said.contains(&format!("ended {claim}'s run")), "{said}");
+    assert!(said.contains("2 of 2 signed results passed"), "{said}");
+    assert_eq!(f.world.version("main"), version + 1, "one write");
+    let adds = f.world.signed_adds();
+    assert_eq!(adds.len(), 1, "one envelope among the signer's runs");
+    assert_eq!(adds[0].0, "codebuild", "refs/sluice/runs/codebuild");
+    let combination = pooled_combination(&f);
+    assert!(
+        adds[0].1.starts_with(&format!("{combination}/linux-x64/")),
+        "{}",
+        adds[0].1
+    );
+    assert_eq!(adds[0].2, record);
+    let envelope: sluice::signing::dsse::Envelope = serde_json::from_slice(&adds[0].2).unwrap();
+    let half = sluice::signing::kms::public_half(&support::aws::public(&key)).unwrap();
+    sluice::signing::kms::verify(&envelope, support::aws::KEY, &half).unwrap();
+    let statement = sluice::signing::statement::Statement::from_envelope(&envelope).unwrap();
+    let mut checks: Vec<&str> = statement
+        .predicate
+        .results
+        .iter()
+        .map(|r| r.check.as_str())
+        .collect();
+    checks.sort();
+    assert_eq!(checks, ["a:test", "b:test"]);
+    let run = pooled_runs(&f)[0].clone();
+    assert_eq!(run.state, RunState::Closed);
+    let ended = run.ended.expect("ended");
+    for check in ["a:test", "b:test"] {
+        assert_eq!(
+            ended.outcomes.get(check),
+            Some(&CheckOutcome::Passed),
+            "{ended:?}"
+        );
+    }
+    assert_eq!(f.world.results_log(), results, "nothing of this host's");
+
+    // Its claim no longer holds the run: refused, with nothing written.
+    let version = f.world.version("main");
+    let (code, said) = sluice(
+        &f,
+        &[
+            "job",
+            "record",
+            "--build",
+            &arn,
+            "--from",
+            sign.to_str().unwrap(),
+        ],
+    );
+    assert_eq!(code, FAILED, "{said}");
+    assert!(said.contains("no longer holds a run"), "{said}");
+    assert_eq!(f.world.version("main"), version, "nothing written");
+    assert_eq!(f.world.signed_adds().len(), 1);
+}
+
+/// `sluice job run` under `claim` on `main`, its directory under `out`.
+fn job_run(f: &Fakes, claim: &str, out: &std::path::Path) -> std::path::PathBuf {
+    let dir = out.join("sluice-run");
+    let (code, said) = sluice(
+        f,
+        &[
+            "job",
+            "run",
+            "--claim",
+            claim,
+            "--branch",
+            "main",
+            "--out",
+            dir.to_str().unwrap(),
+        ],
+    );
+    assert_eq!(code, 0, "{said}");
+    dir
+}
+
+/// satisfies: record 0119 (design D11); 78, 109; the actions-pool spec's
+/// "The sign job signs only what the combination's tree bears out"
+#[test]
+fn job_sign_signs_only_what_the_tree_bears_out() {
+    let f = Fakes::new();
+    let claim = pooled(&f, &["a", "b"]);
+    let out = support::Scratch::new("job-sign");
+    let ran = job_run(&f, &claim, out.path());
+    let report: sluice_seams::RunReport =
+        serde_json::from_slice(&std::fs::read(ran.join("report.json")).unwrap()).unwrap();
+    let key_of = |task: &str| {
+        report
+            .tasks
+            .iter()
+            .find(|t| t.task == task)
+            .unwrap_or_else(|| panic!("{task} in the report"))
+            .hash
+            .clone()
+    };
+    let (a, _) = (key_of("a:test"), key_of("b:test"));
+    // b:test's key names an input the combination's tree does not hold.
+    f.world.forges("b:test");
+    let starts = f.world.run_starts().len();
+    let version = f.world.version("main");
+    let results = f.world.results_log();
+    let sign = out.path().join("sluice-sign");
+    let (code, said) = sluice(
+        &f,
+        &[
+            "job",
+            "sign",
+            "--claim",
+            &claim,
+            "--branch",
+            "main",
+            "--from",
+            out.path().to_str().unwrap(),
+            "--out",
+            sign.to_str().unwrap(),
+        ],
+    );
+    assert_eq!(code, 0, "{said}");
+    assert!(said.contains("not signed: b:test"), "{said}");
+    assert!(said.contains("signs 1 keys"), "{said}");
+    let subjects = std::fs::read_to_string(sign.join("subjects")).unwrap();
+    assert_eq!(subjects, format!("{a}  a:test@macos-arm64\n"));
+    let run: sluice::signing::statement::Run =
+        serde_json::from_slice(&std::fs::read(sign.join("predicate.json")).unwrap()).unwrap();
+    assert_eq!(run.results.len(), 1);
+    assert_eq!(run.results[0].check, "a:test");
+    assert_eq!(run.claim.as_deref(), Some(claim.as_str()));
+    assert_eq!(run.claims.system, "macos-arm64");
+    assert_eq!(run.combination, pooled_combination(&f));
+    assert_eq!(
+        std::fs::read_to_string(sign.join("predicate-type")).unwrap(),
+        sluice::signing::statement::RUN_PREDICATE
+    );
+    assert_eq!(f.world.run_starts().len(), starts, "nothing of it ran");
+    assert_eq!(f.world.version("main"), version, "no state written");
+    assert_eq!(f.world.results_log(), results, "nothing recorded");
+
+    // Every key refused: no subjects, so nothing is signed.
+    f.world.forges("a:test");
+    let (code, said) = sluice(
+        &f,
+        &[
+            "job",
+            "sign",
+            "--claim",
+            &claim,
+            "--branch",
+            "main",
+            "--from",
+            ran.to_str().unwrap(),
+            "--out",
+            sign.to_str().unwrap(),
+        ],
+    );
+    assert_eq!(code, 0, "{said}");
+    assert!(said.contains("no key the tree bears out"), "{said}");
+    assert!(!sign.join("subjects").exists());
+}
+
+/// The revision of `main`'s first combination.
+fn pooled_combination(f: &Fakes) -> Rev {
+    let snap = f.sluice().seams().state.read("main").unwrap();
+    sluice_core::line::Line::load("main", snap)
+        .unwrap()
+        .doc
+        .candidates[0]
+        .revision
+        .clone()
+}
+
+/// `sluice job sign` under `claim` on `main`, from `from`, into `out`'s
+/// `sluice-sign`; and the bundle `actions/attest` would make of what it
+/// wrote, its signatures aside.
+fn job_sign(f: &Fakes, claim: &str, from: &std::path::Path, out: &std::path::Path) -> String {
+    use base64::Engine as _;
+    let sign = out.join("sluice-sign");
+    let (code, said) = sluice(
+        f,
+        &[
+            "job",
+            "sign",
+            "--claim",
+            claim,
+            "--branch",
+            "main",
+            "--from",
+            from.to_str().unwrap(),
+            "--out",
+            sign.to_str().unwrap(),
+        ],
+    );
+    assert_eq!(code, 0, "{said}");
+    let run: sluice::signing::statement::Run =
+        serde_json::from_slice(&std::fs::read(sign.join("predicate.json")).unwrap()).unwrap();
+    let statement = sluice::signing::statement::Statement::of(run);
+    let payload =
+        base64::engine::general_purpose::STANDARD.encode(serde_json::to_vec(&statement).unwrap());
+    serde_json::json!({
+        "mediaType": "application/vnd.dev.sigstore.bundle.v0.3+json",
+        "dsseEnvelope": {
+            "payloadType": "application/vnd.in-toto+json",
+            "payload": payload,
+            "signatures": [],
+        },
+    })
+    .to_string()
+}
+
+/// `sluice job record` under `claim` on `main`, with `bundle` where given.
+fn job_record(f: &Fakes, claim: &str, bundle: Option<&std::path::Path>) -> (i32, String) {
+    let mut args = vec!["job", "record", "--claim", claim, "--branch", "main"];
+    if let Some(b) = bundle {
+        args.extend(["--bundle", b.to_str().unwrap()]);
+    }
+    sluice(f, &args)
+}
+
+/// satisfies: record 0119 (design D11); 77, 109; the actions-pool spec's
+/// "A record under a lapsed claim is refused"
+#[test]
+fn job_record_under_a_lapsed_claim_is_refused() {
+    use sluice_core::records::{CheckOutcome, RunState};
+    // Under the claim that holds the run: the bundle among the pool's
+    // signer's runs, and the run ended from it and closed in one write.
+    let f = Fakes::new();
+    let claim = pooled(&f, &["a"]);
+    let out = support::Scratch::new("job-record");
+    let ran = job_run(&f, &claim, out.path());
+    let bundle = out.path().join("bundle.json");
+    std::fs::write(&bundle, job_sign(&f, &claim, &ran, out.path())).unwrap();
+    let version = f.world.version("main");
+    let (code, said) = job_record(&f, &claim, Some(&bundle));
+    assert_eq!(code, 0, "{said}");
+    assert_eq!(f.world.version("main"), version + 1, "one write");
+    let adds = f.world.signed_adds();
+    assert_eq!(adds.len(), 1);
+    assert_eq!(adds[0].0, "forge");
+    let combination = pooled_combination(&f);
+    assert!(
+        adds[0]
+            .1
+            .starts_with(&format!("{combination}/macos-arm64/")),
+        "{}",
+        adds[0].1
+    );
+    assert_eq!(adds[0].2, std::fs::read(&bundle).unwrap());
+    let run = pooled_runs(&f)[0].clone();
+    assert_eq!(run.state, RunState::Closed);
+    let ended = run.ended.expect("ended");
+    assert_eq!(
+        ended.outcomes.get("a:test"),
+        Some(&CheckOutcome::Passed),
+        "{ended:?}"
+    );
+
+    // A claim that lapsed: refused, with nothing written.
+    let f = Fakes::new();
+    let claim = pooled(&f, &["a"]);
+    let out = support::Scratch::new("job-record-lapsed");
+    let ran = job_run(&f, &claim, out.path());
+    let bundle = out.path().join("bundle.json");
+    std::fs::write(&bundle, job_sign(&f, &claim, &ran, out.path())).unwrap();
+    f.world.be_host("a");
+    f.world.move_job(
+        &claim,
+        sluice_seams::Job::Ended {
+            recorded: false,
+            why: None,
+        },
+    );
+    pool_lead(&f).step("main").unwrap();
+    f.world.be_host("runner");
+    let lapsed = pooled_runs(&f)[0].clone();
+    assert_eq!(
+        lapsed.state,
+        RunState::Closed,
+        "the lead ended the lapsed claim"
+    );
+    let version = f.world.version("main");
+    let (code, said) = job_record(&f, &claim, Some(&bundle));
+    assert_eq!(code, sluice::FAILED, "{said}");
+    assert!(said.contains("no longer holds a run of main"), "{said}");
+    assert_eq!(f.world.version("main"), version, "nothing written");
+    assert!(f.world.signed_adds().is_empty(), "no bundle added");
+    assert_eq!(pooled_runs(&f)[0], lapsed);
+
+    // With no bundle, after a run job that kept no report: ended with no
+    // outcome, for why the run job gave.
+    let f = Fakes::new();
+    let claim = pooled(&f, &["a"]);
+    let out = support::Scratch::new("job-record-none");
+    let ran = out.path().join("sluice-run");
+    std::fs::create_dir_all(&ran).unwrap();
+    std::fs::write(ran.join("why"), "the runner had no room for the run").unwrap();
+    let (code, said) = sluice(
+        &f,
+        &[
+            "job",
+            "record",
+            "--claim",
+            &claim,
+            "--branch",
+            "main",
+            "--from",
+            out.path().to_str().unwrap(),
+        ],
+    );
+    assert_eq!(code, 0, "{said}");
+    let run = pooled_runs(&f)[0].clone();
+    assert_eq!(run.state, RunState::Closed);
+    assert_eq!(
+        run.ended.unwrap().outcomes["#gate"],
+        CheckOutcome::None {
+            why: "the runner had no room for the run".into()
+        }
+    );
+    assert!(f.world.signed_adds().is_empty());
+}
+
+/// satisfies: record 0119 (design D7, D11); 78, 109; the actions-pool
+/// spec's "A key the tree does not bear out": on a branch whose gate is a
+/// tag, a check of the run job's report that `sluice job sign` left out is
+/// left without a result when the run ends, and its follow-up holds it,
+/// never read as passed under the tag
+#[test]
+fn job_record_leaves_a_key_the_tree_does_not_bear_out_without_a_result() {
+    use sluice_core::records::{CandidateState, CheckOutcome, RunState};
+    let f = Fakes::new();
+    let claim = pooled(&f, &["a", "b"]);
+    let out = support::Scratch::new("job-record-left-out");
+    let ran = job_run(&f, &claim, out.path());
+    // b:test's key names an input the combination's tree does not hold.
+    f.world.forges("b:test");
+    let bundle = out.path().join("bundle.json");
+    std::fs::write(&bundle, job_sign(&f, &claim, &ran, out.path())).unwrap();
+    let (code, said) = sluice(
+        &f,
+        &[
+            "job",
+            "record",
+            "--claim",
+            &claim,
+            "--branch",
+            "main",
+            "--bundle",
+            bundle.to_str().unwrap(),
+            "--from",
+            ran.to_str().unwrap(),
+        ],
+    );
+    assert_eq!(code, 0, "{said}");
+    assert!(said.contains("left without a result: b:test"), "{said}");
+    let run = pooled_runs(&f)[0].clone();
+    assert_eq!(run.state, RunState::Closed);
+    let ended = run.ended.expect("ended");
+    assert_eq!(ended.outcomes.get("a:test"), Some(&CheckOutcome::Passed));
+    assert_eq!(
+        ended.outcomes.get("b:test"),
+        Some(&CheckOutcome::None {
+            why: "b:test: its record names an input the tree does not hold".into()
+        }),
+        "{ended:?}"
+    );
+
+    // The lead reads the run undecided: its follow-up holds b:test alone,
+    // and the combination is not passed.
+    f.world.be_host("a");
+    pool_lead(&f).step("main").unwrap();
+    let runs = pooled_runs(&f);
+    let follow = runs
+        .iter()
+        .find(|r| r.follows == Some(0))
+        .expect("a follow-up of the run");
+    assert_eq!(follow.checks, ["b:test".to_string()]);
+    let snap = f.sluice().seams().state.read("main").unwrap();
+    let doc = sluice_core::line::Line::load("main", snap).unwrap().doc;
+    assert_ne!(doc.candidates[0].state, CandidateState::Passed);
+}
+
+/// A working copy holding `policy` as its policy, for `sluice init`.
+fn copy_with(policy: &str) -> support::Scratch {
+    let dir = support::Scratch::new("init-actions");
+    std::fs::create_dir_all(dir.path().join(".config")).unwrap();
+    std::fs::write(dir.path().join(POLICY_PATH), policy).unwrap();
+    dir
+}
+
+/// `sluice init actions` in `dir`, `--force` where asked.
+fn init_actions(f: &Fakes, dir: &std::path::Path, force: bool) -> (i32, String) {
+    let mut args = vec!["init", "actions", "--worktree", dir.to_str().unwrap()];
+    if force {
+        args.push("--force");
+    }
+    sluice(f, &args)
+}
+
+const INIT_POLICY: &str = "[tests]\nrunner = \"moon\"\n\n# The queue's gate.\n\
+    [branches.main]\nrequired = [\"#gate\"]\nremote = \"origin\"\n";
+
+/// satisfies: record 0119 (design D14); C.8; the actions-pool spec's
+/// "sluice init actions sets the pool up"
+#[test]
+fn init_actions_writes_both_workflows_and_the_pool() {
+    use sluice::profiles::github::workflows;
+    let f = setup();
+    let dir = copy_with(INIT_POLICY);
+    let (code, said) = init_actions(&f, dir.path(), false);
+    assert_eq!(code, 0, "{said}");
+    let read = |name: &str| {
+        std::fs::read_to_string(dir.path().join(".github/workflows").join(name)).unwrap()
+    };
+    let runners =
+        std::collections::BTreeMap::from([("linux-x64".to_string(), "ubuntu-24.04".to_string())]);
+    assert_eq!(
+        read("sluice.yml"),
+        workflows::sluice(sluice::VERSION, &runners)
+    );
+    assert_eq!(
+        read("sluice-pr.yml"),
+        workflows::sluice_pr(sluice::VERSION, &runners)
+    );
+    let policy = std::fs::read_to_string(dir.path().join(POLICY_PATH)).unwrap();
+    assert!(
+        policy.starts_with(INIT_POLICY),
+        "the file's own lines untouched: {policy}"
+    );
+    let p = sluice_core::policy::Policy::parse(&policy).expect("the policy parses");
+    assert_eq!(p.pools.len(), 1);
+    assert_eq!(p.pools[0].name, "forge");
+    assert_eq!(p.pools[0].signer, "forge");
+    assert_eq!(p.pools[0].runners, runners);
+    assert!(p.signers.contains_key("forge"));
+    assert!(said.contains("Actions, read and write"), "{said}");
+    assert!(said.contains("environment named `sluice`"), "{said}");
+
+    assert!(said.contains("[systems], naming linux-x64,"), "{said}");
+
+    // Again: nothing changes.
+    let (code, said) = init_actions(&f, dir.path(), false);
+    assert_eq!(code, 0, "{said}");
+    assert!(said.contains("sluice.yml: as sluice writes it"), "{said}");
+    assert!(said.contains("names its pool on GitHub already"), "{said}");
+    assert_eq!(
+        std::fs::read_to_string(dir.path().join(POLICY_PATH)).unwrap(),
+        policy
+    );
+
+    // A policy naming linux-x64 and macos-arm64, and a system GitHub hosts
+    // no runner for: a runner for each it hosts, the other named, and the
+    // signer's workflow on main, where it runs from.
+    let systems = format!(
+        "{INIT_POLICY}\n[systems]\nlinux-x64 = {{ os = \"linux\", arch = \"x86_64\" }}\n\
+         macos-arm64 = {{ os = \"macos\", arch = \"aarch64\" }}\n\
+         riscv = {{ os = \"linux\", arch = \"riscv64\" }}\n"
+    );
+    let dir = copy_with(&systems);
+    let (code, said) = init_actions(&f, dir.path(), false);
+    assert_eq!(code, 0, "{said}");
+    let policy = std::fs::read_to_string(dir.path().join(POLICY_PATH)).unwrap();
+    assert!(policy.starts_with(&systems), "{policy}");
+    assert_eq!(policy.matches("[systems]").count(), 1, "{policy}");
+    assert!(
+        policy.contains(
+            "[signers.forge]\ngithub = { workflow = \".github/workflows/sluice.yml\", ref = \
+             \"refs/heads/main\" }\n"
+        ),
+        "{policy}"
+    );
+    let p = sluice_core::policy::Policy::parse(&policy).expect("the policy parses");
+    assert_eq!(
+        p.pools[0].runners,
+        std::collections::BTreeMap::from([
+            ("linux-x64".to_string(), "ubuntu-24.04".to_string()),
+            ("macos-arm64".to_string(), "macos-15".to_string()),
+        ])
+    );
+    assert!(
+        said.contains("GitHub hosts no runner for riscv (linux riscv64)"),
+        "{said}"
+    );
+    assert!(!said.contains("[systems], naming"), "{said}");
+}
+
+/// satisfies: record 0119 (design D14); the actions-pool spec's "A
+/// workflow that differs is left unless forced"
+#[test]
+fn init_actions_leaves_a_differing_workflow_unless_forced() {
+    use sluice::profiles::github::workflows;
+    let f = setup();
+    let dir = copy_with(INIT_POLICY);
+    let at = dir.path().join(".github/workflows");
+    std::fs::create_dir_all(&at).unwrap();
+    let runners =
+        std::collections::BTreeMap::from([("linux-x64".to_string(), "ubuntu-24.04".to_string())]);
+    let edited =
+        workflows::sluice(sluice::VERSION, &runners).replace("name: sluice\n", "name: ours\n");
+    std::fs::write(at.join("sluice.yml"), &edited).unwrap();
+    let (code, said) = init_actions(&f, dir.path(), false);
+    assert_eq!(code, FAILED, "{said}");
+    assert!(
+        said.contains("sluice.yml: left as it is; line 8 holds \"name: ours\", where sluice writes \"name: sluice\"; --force writes it"),
+        "{said}"
+    );
+    assert_eq!(
+        std::fs::read_to_string(at.join("sluice.yml")).unwrap(),
+        edited
+    );
+    assert!(at.join("sluice-pr.yml").exists(), "the other is written");
+
+    let (code, said) = init_actions(&f, dir.path(), true);
+    assert_eq!(code, 0, "{said}");
+    assert_eq!(
+        std::fs::read_to_string(at.join("sluice.yml")).unwrap(),
+        workflows::sluice(sluice::VERSION, &runners)
+    );
+}
+
+/// A working copy holding `policy`, its origin `acme/widgets` on GitHub,
+/// for `sluice init codebuild`.
+fn codebuild_copy(policy: &str) -> support::Scratch {
+    let dir = copy_with(policy);
+    for args in [
+        vec!["init", "-q"],
+        vec![
+            "remote",
+            "add",
+            "origin",
+            "https://github.com/acme/widgets.git",
+        ],
+    ] {
+        let out = support::git_command()
+            .current_dir(dir.path())
+            .args(&args)
+            .output()
+            .unwrap();
+        assert!(out.status.success(), "{out:?}");
+    }
+    dir
+}
+
+/// `sluice init codebuild` in `dir`, with `more` after it.
+fn init_codebuild(f: &Fakes, dir: &std::path::Path, more: &[&str]) -> (i32, String) {
+    let mut args = vec!["init", "codebuild", "--worktree", dir.to_str().unwrap()];
+    args.extend(more);
+    sluice(f, &args)
+}
+
+/// satisfies: record 0119 (design D10); C.8; the codebuild-pool spec's "A
+/// repository with no pool": the template for the systems given, one
+/// fleet and one run project each, naming the release that writes it and
+/// the repository its builds clone; how to deploy it, the secret to fill
+/// and `sluice init codebuild --stack` said; with no systems given, each
+/// `[systems]` names that CodeBuild runs on Linux, the others said
+#[test]
+fn init_codebuild_writes_the_stack() {
+    use sluice::profiles::codebuild::template::{self, System};
+    let f = setup();
+    let dir = codebuild_copy(INIT_POLICY);
+    let (code, said) = init_codebuild(&f, dir.path(), &["--systems", "linux-x64"]);
+    assert_eq!(code, 0, "{said}");
+    let written = std::fs::read_to_string(dir.path().join(".config/sluice-codebuild.yml")).unwrap();
+    let x64 = System::linux("linux-x64", "linux", "x86_64").unwrap();
+    assert_eq!(
+        written,
+        template::render(sluice::VERSION, "acme/widgets", std::slice::from_ref(&x64))
+    );
+    assert_eq!(written.matches("Type: AWS::CodeBuild::Fleet").count(), 1);
+    assert!(written.contains("RunLinuxX64:") && !written.contains("RunLinuxArm64:"));
+    assert!(
+        said.contains("written, a fleet and a run project for linux-x64"),
+        "{said}"
+    );
+    assert!(
+        said.contains("aws cloudformation deploy --template-file .config/sluice-codebuild.yml"),
+        "{said}"
+    );
+    assert!(
+        said.contains("aws secretsmanager put-secret-value --secret-id sluice-app-key"),
+        "{said}"
+    );
+    assert!(
+        said.contains("sluice init codebuild --stack sluice"),
+        "{said}"
+    );
+    assert_eq!(
+        std::fs::read_to_string(dir.path().join(POLICY_PATH)).unwrap(),
+        INIT_POLICY,
+        "the policy is the stack's to name"
+    );
+    let (code, said) = init_codebuild(&f, dir.path(), &["--systems", "linux-x64"]);
+    assert_eq!(code, 0, "{said}");
+    assert!(
+        said.contains("sluice-codebuild.yml: as sluice writes it"),
+        "{said}"
+    );
+
+    // The policy's systems: each CodeBuild runs on Linux, and the others
+    // named.
+    let systems = format!(
+        "{INIT_POLICY}\n[systems]\nlinux-x64 = {{ os = \"linux\", arch = \"x86_64\" }}\n\
+         linux-arm64 = {{ os = \"linux\", arch = \"aarch64\" }}\n\
+         macos-arm64 = {{ os = \"macos\", arch = \"aarch64\" }}\n"
+    );
+    let dir = codebuild_copy(&systems);
+    let (code, said) = init_codebuild(&f, dir.path(), &[]);
+    assert_eq!(code, 0, "{said}");
+    let written = std::fs::read_to_string(dir.path().join(".config/sluice-codebuild.yml")).unwrap();
+    assert!(written.contains("RunLinuxX64:") && written.contains("RunLinuxArm64:"));
+    assert!(
+        said.contains("a fleet and a run project for linux-arm64, linux-x64"),
+        "{said}"
+    );
+    assert!(
+        said.contains(
+            "CodeBuild runs no Linux fleet for macos-arm64 (macos aarch64); it is left out"
+        ),
+        "{said}"
+    );
+    let e = sluice_err(
+        &f,
+        &[
+            "init",
+            "codebuild",
+            "--worktree",
+            dir.path().to_str().unwrap(),
+            "--systems",
+            "macos-arm64",
+        ],
+    );
+    assert!(
+        e.contains("CodeBuild runs no Linux fleet for macos-arm64"),
+        "{e}"
+    );
+}
+
+/// satisfies: record 0119 (design D10); the codebuild-pool spec's "A
+/// template already there": one that differs is left, said how, exit 1,
+/// and written with `--force`
+#[test]
+fn init_codebuild_leaves_a_differing_template_unless_forced() {
+    use sluice::profiles::codebuild::template::{self, System};
+    let f = setup();
+    let dir = codebuild_copy(INIT_POLICY);
+    let x64 = System::linux("linux-x64", "linux", "x86_64").unwrap();
+    let wants = template::render(sluice::VERSION, "acme/widgets", std::slice::from_ref(&x64));
+    let edited = wants.replace("    Default: 4\n", "    Default: 12\n");
+    assert_ne!(edited, wants);
+    std::fs::write(dir.path().join(".config/sluice-codebuild.yml"), &edited).unwrap();
+    let (code, said) = init_codebuild(&f, dir.path(), &[]);
+    assert_eq!(code, FAILED, "{said}");
+    assert!(
+        said.contains("sluice-codebuild.yml: left as it is; line ")
+            && said.contains(
+                "holds \"Default: 12\", where sluice writes \"Default: 4\"; --force writes it"
+            ),
+        "{said}"
+    );
+    assert_eq!(
+        std::fs::read_to_string(dir.path().join(".config/sluice-codebuild.yml")).unwrap(),
+        edited
+    );
+    let (code, said) = init_codebuild(&f, dir.path(), &["--force"]);
+    assert_eq!(code, 0, "{said}");
+    assert_eq!(
+        std::fs::read_to_string(dir.path().join(".config/sluice-codebuild.yml")).unwrap(),
+        wants
+    );
+}
+
+/// satisfies: record 0119 (design D10); the codebuild-pool spec's "A
+/// deployed stack": the stack's key read by its alias, and the signer, its
+/// ARN and public half, and the pool, its region, sign project and run
+/// project, appended to the policy, its own lines untouched; again, nothing
+/// changes; a key of another spec refused, with nothing written
+#[test]
+fn init_codebuild_from_a_stack_appends_the_pool() {
+    if !alone("init_codebuild_from_a_stack_appends_the_pool") {
+        return;
+    }
+    let aws = support::aws::FakeAws::start();
+    let key = aws.with_key("alias/sluice-sign");
+    aws.point_here();
+    let f = setup();
+    let dir = codebuild_copy(INIT_POLICY);
+    let (code, said) = init_codebuild(
+        &f,
+        dir.path(),
+        &["--stack", "sluice", "--region", "us-east-1"],
+    );
+    assert_eq!(code, 0, "{said}");
+    assert!(said.contains(support::aws::KEY), "{said}");
+    assert!(said.contains("sluice pool check"), "{said}");
+    assert_eq!(aws.operations(), ["GetPublicKey"]);
+    let asked: serde_json::Value = serde_json::from_str(&aws.requests()[0].body).unwrap();
+    assert_eq!(asked["KeyId"], "alias/sluice-sign");
+    let policy = std::fs::read_to_string(dir.path().join(POLICY_PATH)).unwrap();
+    assert!(
+        policy.starts_with(INIT_POLICY),
+        "its own lines untouched: {policy}"
+    );
+    let p = sluice_core::policy::Policy::parse(&policy).expect("the policy parses");
+    let signer = &p.signers["codebuild"];
+    assert_eq!(signer.identity.0, "kms");
+    let sluice_seams::Setting::Tables(t) = &signer.identity.1 else {
+        panic!("{:?}", signer.identity)
+    };
+    assert_eq!(
+        t[0]["key"],
+        sluice_seams::Setting::Text(support::aws::KEY.into())
+    );
+    assert_eq!(
+        t[0]["public"],
+        sluice_seams::Setting::Text(support::aws::public(&key))
+    );
+    assert_eq!(p.pools.len(), 1);
+    let pool = &p.pools[0];
+    assert_eq!(
+        (pool.name.as_str(), pool.signer.as_str()),
+        ("codebuild", "codebuild")
+    );
+    assert_eq!(pool.kind.0, "codebuild");
+    let sluice_seams::Setting::Tables(t) = &pool.kind.1 else {
+        panic!("{:?}", pool.kind)
+    };
+    assert_eq!(
+        t[0]["region"],
+        sluice_seams::Setting::Text("us-east-1".into())
+    );
+    assert_eq!(
+        t[0]["sign"],
+        sluice_seams::Setting::Text("sluice-sign".into())
+    );
+    assert_eq!(
+        pool.runners,
+        std::collections::BTreeMap::from([(
+            "linux-x64".to_string(),
+            "sluice-run-linux-x64".to_string()
+        )])
+    );
+
+    let (code, said) = init_codebuild(
+        &f,
+        dir.path(),
+        &["--stack", "sluice", "--region", "us-east-1"],
+    );
+    assert_eq!(code, 0, "{said}");
+    assert!(
+        said.contains("names [signers.codebuild] and [pools.codebuild] already"),
+        "{said}"
+    );
+    assert_eq!(
+        std::fs::read_to_string(dir.path().join(POLICY_PATH)).unwrap(),
+        policy
+    );
+
+    // A key of another spec: refused, the policy as it was.
+    aws.held.lock().unwrap().spec = Some("RSA_2048".into());
+    let other = codebuild_copy(INIT_POLICY);
+    let e = sluice_err(
+        &f,
+        &[
+            "init",
+            "codebuild",
+            "--worktree",
+            other.path().to_str().unwrap(),
+            "--stack",
+            "sluice",
+            "--region",
+            "us-east-1",
+        ],
+    );
+    assert!(e.contains("RSA_2048") && e.contains("ECC_NIST_P256"), "{e}");
+    assert_eq!(
+        std::fs::read_to_string(other.path().join(POLICY_PATH)).unwrap(),
+        INIT_POLICY
+    );
+}
+
+/// `main` on `origin` trusting the CodeBuild pool `codebuild`, its key's
+/// public half `public`, and `lead`, its leading hosts' signer, which may
+/// claim no system, testing as `rules` say.
+fn fleet_policy(public: &str, rules: &str) -> String {
+    format!(
+        "[tests]\nrunner = \"fake\"\n\n[checkout]\n\n\
+         [branches.main]\nrequired = [\"#gate\"]\n{rules}timeout = \"45m\"\n\
+         trust = [\"lead\", \"codebuild\"]\nremote = \"origin\"\nsystems = [\"linux-x64\"]\n\
+         \n[signers.lead]\nssh = \"lead ssh-ed25519 AAAA\"\nsystems = []\n\
+         \n[signers.codebuild]\nkms = {{ key = \"{key}\", public = \"{public}\" }}\nsystems = [\"linux-x64\"]\n\
+         \n[pools.codebuild]\ncodebuild = {{ region = \"us-east-1\", sign = \"sluice-sign\" }}\nsigner = \"codebuild\"\n\
+         runners = {{ linux-x64 = \"sluice-run-linux-x64\" }}\n\
+         \n[systems]\nlinux-x64 = {{ os = \"linux\", arch = \"x86_64\" }}\n",
+        key = support::aws::KEY
+    )
+}
+
+/// A fake AWS holding the stack `sluice` for `acme/widgets`, its fleet
+/// growing to ten, the environment pointed at it, and no host settings
+/// naming a profile.
+fn fleet_deployed() -> (support::aws::FakeAws, p256::ecdsa::SigningKey) {
+    let aws = support::aws::FakeAws::start();
+    let key = aws.with_key("alias/sluice-sign");
+    aws.deploy("sluice", "acme/widgets", 10);
+    aws.point_here();
+    let settings = support::Scratch::new("pool-check-settings");
+    std::env::set_var("XDG_CONFIG_HOME", settings.path());
+    std::mem::forget(settings);
+    (aws, key)
+}
+
+/// satisfies: record 0119 (design D11); the codebuild-pool spec's "A branch
+/// that tests one combination at a time": with `batch = true` and
+/// `parallel = 3` beside a fleet growing to ten, `sluice pool check` says a
+/// branch on a fleet tests side by side, `batch = false` with `parallel =
+/// 10`, and exits 0 where every other line passes
+#[test]
+fn pool_check_says_a_fleet_tests_side_by_side() {
+    if !alone("pool_check_says_a_fleet_tests_side_by_side") {
+        return;
+    }
+    let (aws, key) = fleet_deployed();
+    let f = Fakes::new();
+    let policy = fleet_policy(&support::aws::public(&key), "batch = true\nparallel = 3\n");
+    f.world.init("main", &[(POLICY_PATH, policy.as_str())]);
+    let (code, said) = sluice(&f, &["pool", "check", "main"]);
+    assert_eq!(code, 0, "{said}");
+    assert!(!said.contains("failed"), "{said}");
+    for line in [
+        "ok      main is led by a host signing as lead",
+        "ok      [pools.codebuild] is reached in us-east-1 as arn:aws:sts::111122223333:assumed-role/sluice-lead/host",
+        "ok      sluice-run-linux-x64 runs linux-x64 on the reserved-capacity fleet sluice-linux-x64, LINUX_EC2",
+        "ok      sluice-run-linux-x64's buildspec is as sluice",
+        "ok      sluice-run-linux-x64 may take 90 minutes, longer than the branch's timeout of 45",
+        "ok      sluice-sign's buildspec is as sluice",
+        "is ECC_NIST_P256, SIGN_VERIFY, and its public half is the one [signers.codebuild] lists",
+        "note    a branch on a fleet tests side by side: batch = false, with parallel = 10, the fleets' maximum",
+    ] {
+        assert!(said.contains(line), "{line}\n{said}");
+    }
+    let ops = aws.operations();
+    for op in [
+        "GetCallerIdentity",
+        "BatchGetProjects",
+        "BatchGetFleets",
+        "GetPublicKey",
+    ] {
+        assert!(ops.iter().any(|o| o == op), "{op}: {ops:?}");
+    }
+
+    // Side by side at the fleets' size: nothing to say.
+    let f = Fakes::new();
+    let policy = fleet_policy(
+        &support::aws::public(&key),
+        "batch = false\nparallel = 10\n",
+    );
+    f.world.init("main", &[(POLICY_PATH, policy.as_str())]);
+    let (code, said) = sluice(&f, &["pool", "check", "main"]);
+    assert_eq!(code, 0, "{said}");
+    assert!(!said.contains("note"), "{said}");
+}
+
+/// satisfies: record 0119 (design D11); rule core.60; the codebuild-pool
+/// spec's "A branch no host can lead": `main` trusting the pool's signer
+/// alone, `sluice pool check main` says no host can lead it and exits 1
+#[test]
+fn pool_check_names_a_branch_no_host_can_lead() {
+    if !alone("pool_check_names_a_branch_no_host_can_lead") {
+        return;
+    }
+    let (_aws, key) = fleet_deployed();
+    let f = Fakes::new();
+    let policy = fleet_policy(
+        &support::aws::public(&key),
+        "batch = false\nparallel = 10\n",
+    )
+    .replace(
+        "trust = [\"lead\", \"codebuild\"]",
+        "trust = [\"codebuild\"]",
+    );
+    f.world.init("main", &[(POLICY_PATH, policy.as_str())]);
+    let (code, said) = sluice(&f, &["pool", "check", "main"]);
+    assert_eq!(code, FAILED, "{said}");
+    assert!(
+        said.contains(
+            "failed  main's trust names no signer a host signs as, so no host can lead it and it \
+             forms nothing: trust the signer its leading hosts sign as beside the pool's, with \
+             systems = [] so it claims no run"
+        ),
+        "{said}"
+    );
+    assert_eq!(said.matches("failed").count(), 1, "{said}");
+}
+
+/// satisfies: record 0119 (design D11); the codebuild-pool spec's "A key
+/// the policy does not list": the key KMS answers differs from the half
+/// `[signers.codebuild]` lists, and `sluice pool check` names the key and
+/// exits 1
+#[test]
+fn pool_check_names_a_key_the_policy_does_not_list() {
+    if !alone("pool_check_names_a_key_the_policy_does_not_list") {
+        return;
+    }
+    let (_aws, _key) = fleet_deployed();
+    let another = p256::ecdsa::SigningKey::random(&mut rand_core::OsRng);
+    let f = Fakes::new();
+    let policy = fleet_policy(
+        &support::aws::public(&another),
+        "batch = false\nparallel = 10\n",
+    );
+    f.world.init("main", &[(POLICY_PATH, policy.as_str())]);
+    let (code, said) = sluice(&f, &["pool", "check", "main"]);
+    assert_eq!(code, FAILED, "{said}");
+    assert!(
+        said.contains(&format!(
+            "failed  the key {}'s public half is not the one [signers.codebuild] lists",
+            support::aws::KEY
+        )),
+        "{said}"
+    );
+    assert_eq!(said.matches("failed").count(), 1, "{said}");
+}
+
+/// satisfies: record 0119 (design D14); the actions-pool spec's "A pool the
+/// policy names is kept"
+#[test]
+fn init_actions_keeps_a_pool_the_policy_names() {
+    let f = setup();
+    let policy = format!(
+        "{INIT_POLICY}\n[systems]\nmacos-arm64 = {{ os = \"macos\", arch = \"aarch64\" }}\n\
+         \n[signers.ci]\ngithub = {{ workflow = \".github/workflows/sluice.yml\", ref = \"refs/heads/main\" }}\n\
+         \n[pools.ci]\ngithub = {{ workflow = \".github/workflows/sluice.yml\" }}\nsigner = \"ci\"\n\
+         runners = {{ macos-arm64 = \"macos-15-large\" }}\n"
+    );
+    let dir = copy_with(&policy);
+    let (code, said) = init_actions(&f, dir.path(), false);
+    assert_eq!(code, 0, "{said}");
+    assert_eq!(
+        std::fs::read_to_string(dir.path().join(POLICY_PATH)).unwrap(),
+        policy,
+        "the policy as it was"
+    );
+    let pr = std::fs::read_to_string(dir.path().join(".github/workflows/sluice-pr.yml")).unwrap();
+    assert!(
+        pr.contains("include: [{system: macos-arm64, runner: macos-15-large}]"),
+        "{pr}"
+    );
+}
+
+/// satisfies: 113, 15; record 0119 (design D11): a pull request's head
+/// run, run and signed with no claim, has its bundle added among the
+/// pool's signer's runs, and no state is written.
+#[test]
+fn job_record_of_a_head_adds_its_bundle_with_no_claim() {
+    use base64::Engine as _;
+    let f = Fakes::new();
+    pooled(&f, &["a"]);
+    let head = f.world.tip("main");
+    let out = support::Scratch::new("job-head");
+    let ran = out.path().join("sluice-run");
+    let sign = out.path().join("sluice-sign");
+    let version = f.world.version("main");
+    for args in [
+        vec![
+            "job",
+            "run",
+            "--head",
+            head.as_str(),
+            "--branch",
+            "main",
+            "--system",
+            "macos-arm64",
+            "--out",
+            ran.to_str().unwrap(),
+        ],
+        vec![
+            "job",
+            "sign",
+            "--head",
+            head.as_str(),
+            "--branch",
+            "main",
+            "--system",
+            "macos-arm64",
+            "--from",
+            ran.to_str().unwrap(),
+            "--out",
+            sign.to_str().unwrap(),
+        ],
+    ] {
+        let (code, said) = sluice(&f, &args);
+        assert_eq!(code, 0, "{said}");
+    }
+    let run: sluice::signing::statement::Run =
+        serde_json::from_slice(&std::fs::read(sign.join("predicate.json")).unwrap()).unwrap();
+    assert_eq!(run.claim, None);
+    assert_eq!(run.combination, head);
+    let payload = base64::engine::general_purpose::STANDARD
+        .encode(serde_json::to_vec(&sluice::signing::statement::Statement::of(run)).unwrap());
+    let bundle = out.path().join("bundle.json");
+    std::fs::write(
+        &bundle,
+        serde_json::json!({
+            "dsseEnvelope": { "payloadType": "application/vnd.in-toto+json", "payload": payload, "signatures": [] },
+        })
+        .to_string(),
+    )
+    .unwrap();
+    let (code, said) = sluice(
+        &f,
+        &[
+            "job",
+            "record",
+            "--head",
+            head.as_str(),
+            "--branch",
+            "main",
+            "--bundle",
+            bundle.to_str().unwrap(),
+        ],
+    );
+    assert_eq!(code, 0, "{said}");
+    let adds = f.world.signed_adds();
+    assert_eq!(adds.len(), 1);
+    assert_eq!(adds[0].0, "forge");
+    assert!(
+        adds[0].1.starts_with(&format!("{head}/macos-arm64/")),
+        "{}",
+        adds[0].1
+    );
+    assert_eq!(f.world.version("main"), version, "no state written");
 }

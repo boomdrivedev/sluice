@@ -11,9 +11,10 @@ condition the branch's policy names holds on its head.
 ### Requirement: A branch turns pull requests on in its policy
 A branch's policy SHALL accept a `[branches."<pattern>".pull_requests]`
 table with `reviews`, a count of approving reviews, default 0, and
-`checks`, a list of check names, default empty. The table SHALL be
-refused on a branch with no `remote`. The conditions SHALL be read from
-the branch's revision.
+`checks`, a list of check names other systems post, default empty;
+sluice's own checks are read from its results, never listed there. The
+table SHALL be refused on a branch with no `remote`. The conditions
+SHALL be read from the branch's revision.
 
 #### Scenario: Pull requests need a remote
 - **WHEN** a branch's policy has a `pull_requests` table and no `remote`
@@ -22,6 +23,12 @@ the branch's revision.
 #### Scenario: A pull request cannot loosen its own conditions
 - **WHEN** a pull request changes `.config/sluice.toml` to lower `reviews`
 - **THEN** its conditions are still the ones on the branch's revision
+
+#### Scenario: sluice's own check in checks
+- **WHEN** `checks` names a check sluice itself posts on a request's head
+- **THEN** the policy is refused, naming the check and saying sluice reads its own checks from its results
+  (`a_pull_request_table_naming_sluices_own_check_is_refused` in
+  `crates/sluice-core/src/policy.rs`)
 
 ### Requirement: A pull request is submitted when it is ready
 On the host that takes a branch's pull requests in, each asking of the
@@ -134,42 +141,42 @@ the one sent back included.
 
 ### Requirement: A pull request sluice cannot read holds no other
 When a round cannot fetch an open pull request's head, or cannot read
-its reviews, checks or timeline, draft or ready, it SHALL print a
-warning naming the pull request (`pull/<n>`) and what failed, SHALL NOT
-submit it that round, and SHALL go on to the branch's other pull
-requests, submitting, forecasting and posting each as it would have
-been. It SHALL read that pull request again each round until it can be
-read or it is closed.
+its reviews, checks or timeline, draft or ready, it SHALL NOT submit it
+that round, and SHALL go on to the branch's other pull requests,
+submitting, forecasting and posting each as it would have been. It
+SHALL read that pull request again each round until it can be read or
+it is closed, and SHALL say what failed, naming `pull/<n>`, as a
+standing intake failure is said (128).
 
 #### Scenario: GitHub serves no head for one of two pull requests
-- **WHEN** two pull requests are open into `main`, out of draft, every condition holding, and GitHub serves no head for the first, whose branch is gone
-- **THEN** the round's warning names the first and the failed fetch, and the second is submitted, its combination formed and its state posted
+- **WHEN** two pull requests are open into `main`, out of draft, every condition holding, and GitHub serves no head for the first, whose branch is gone, and `sluice step main` runs
+- **THEN** its warning names the first and the failed fetch, and the second is submitted, its combination formed and its state posted
 
 #### Scenario: Read again until GitHub serves its head
-- **WHEN** a pull request's head could not be fetched, and later its branch is pushed again so GitHub serves its head
-- **THEN** each round until then names it in a warning, and the first round after submits it
+- **WHEN** a pull request's head could not be fetched for ten passes, and later its branch is pushed again so GitHub serves its head
+- **THEN** each `sluice step` until then names it in a warning, main's log holds one `read-refused` line marked `intake` for it, and the first round after submits it
 
 #### Scenario: Closed, it is no longer read
 - **WHEN** a pull request whose head could not be fetched is closed
 - **THEN** no later round names it
 
 #### Scenario: A draft whose head cannot be fetched
-- **WHEN** a draft's head cannot be fetched and another pull request is ready with every condition holding
-- **THEN** the round's warning names the draft, and the other pull request is submitted
+- **WHEN** a draft's head cannot be fetched and another pull request is ready with every condition holding, and `sluice step main` runs
+- **THEN** its warning names the draft, and the other pull request is submitted
 
 #### Scenario: Reviews that cannot be read
-- **WHEN** the policy names `reviews = 1`, GitHub answers an error for one pull request's reviews, and another pull request has its review
-- **THEN** the round's warning names the first and the failed read, the first is not submitted, and the second is submitted
+- **WHEN** the policy names `reviews = 1`, GitHub answers an error for one pull request's reviews, another pull request has its review, and `sluice step main` runs
+- **THEN** its warning names the first and the failed read, the first is not submitted, and the second is submitted
 
 ### Requirement: A failure that is no one pull request's still ends intake
 A failure that is no single pull request's, such as listing the
 branch's pull requests or reading its records, SHALL end that branch's
-intake for the round with a warning, and the round SHALL still land
-what is queued.
+intake for the round, said as a standing intake failure is said, and
+the round SHALL still land what is queued.
 
 #### Scenario: GitHub's list of pull requests fails
-- **WHEN** GitHub answers an error for the list of `main`'s open pull requests
-- **THEN** the round's warning says intake of `main` failed, no pull request is submitted or withdrawn, and a submission already queued is still tested and landed
+- **WHEN** GitHub answers an error for the list of `main`'s open pull requests, and `sluice step main` runs
+- **THEN** its warning says intake of `main` failed, no pull request is submitted or withdrawn, and a submission already queued is still tested and landed
 
 ### Requirement: A group's pull requests are taken together
 
@@ -217,3 +224,66 @@ submission as that landing (122, 5).
 #### Scenario: Landed by another queue while queued
 - **WHEN** a submitted pull request is under test, and another queue of the branch, a second copy of the repository, lands its head, so GitHub calls it merged
 - **THEN** its submission is not withdrawn: it is landed as that queue's landing commit, its run ended, nothing more lands of it, and `sluice wait` on it exits 0
+
+### Requirement: A pull request table on records each host keeps refuses its branch alone
+A branch's `pull_requests` table SHALL refuse that branch alone, naming
+`[signers]` and `sluice init actions`, in a policy that names no
+`[signers]`, whose branches' records each host keeps; the policy's other
+branches SHALL be read as before (56, 137, S64).
+
+#### Scenario: Pull requests need records on the remote
+- **WHEN** main's policy has a `pull_requests` table and `remote = "origin"`, names no `[signers]`, and gives `bolt/*` a table too
+- **THEN** a `sluice submit main` exits 2 naming main, `[signers]` and `sluice init actions`, pushes and opens nothing, and a submission to `bolt/x` is tested and lands
+
+#### Scenario: Status shows the refusal
+- **WHEN** main is so refused
+- **THEN** `sluice status main` prints the refusal, and `sluice overview` names main with it
+
+### Requirement: A standing intake failure is said once for each cause and host
+A cause of an intake failure, what intake asked and the words it was
+refused with, SHALL be said by the host process once while it stands on
+that host, at the pass that logs it on the branch, and never again
+until it has ended, whether the process restarted or not, which is read
+from what the records seam keeps and from no process's memory. A
+`sluice step` SHALL print every warning its round's intake met, each
+time (128; rules core.11, core.14, core.28).
+
+#### Scenario: Forty passes refused alike
+- **WHEN** GitHub refuses main's list of pull requests with the same words for forty passes of the host process, which restarts once among them
+- **THEN** the host process's log says it once, and main's log holds one `read-refused` line marked `intake` for it
+
+#### Scenario: A step beside them
+- **WHEN** that refusal stands and `sluice step main` runs twice
+- **THEN** each step prints the warning on stderr, and main's log gains no line for it
+
+#### Scenario: A submit's own intake
+- **WHEN** that refusal stands and `sluice submit main --no-wait` runs on the host that keeps main
+- **THEN** the submit prints the warning on its stderr, and main's log gains no line for it
+
+### Requirement: A run on a pull request's head counts toward its combination
+
+A run of `sluice-pr.yml` on a pull request's head, signed by
+`sluice.yml`'s sign job on the branch the forge signer names, SHALL be
+recorded under its keys and systems as any run is, and a combination
+that shares a key on a system SHALL read that result without running the
+check again (15, 113). A head run signed by a signer the branch does not
+trust SHALL count for nothing.
+
+#### Scenario: Passed before it was ready (S40)
+
+- **WHEN** a pull request's head passed `cli:build` on three systems on
+  the pool, and it is submitted behind one submission that changes no
+  input of `cli:build`
+- **THEN** its combination reads the three passes by key and runs only
+  the checks the submission ahead changes
+  (`s40_a_pull_requests_head_runs_count_by_key` in
+  `crates/sluice-conformance/tests/peers.rs`)
+
+#### Scenario: A head run by a signer the branch does not trust
+
+- **WHEN** a pull request's head was run and signed by a signer `main`
+  does not trust
+- **THEN** its combination runs every required check as if the head had
+  never been run
+  (`a_head_run_by_an_untrusted_signer_counts_for_nothing` in
+  `crates/sluice-conformance/tests/peers.rs`)

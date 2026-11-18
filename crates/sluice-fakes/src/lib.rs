@@ -8,21 +8,25 @@
 //! The records fake stores the real bytes the core writes (53), so a
 //! file store need only put them on disk.
 
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
 
 use anyhow::{anyhow, bail, Result};
 use chrono::{DateTime, Duration as Span, TimeZone, Utc};
+use sluice_core::home::{HomeStore, Owed};
+use sluice_core::policy::POLICY_PATH;
+use sluice_core::records::{HomeDoc, HomeState, HERE, HOME_FILE};
 use sluice_core::{Clock, Seams, Sluice};
 use sluice_seams::{
-    Adopted, AtBound, Branch, Changes, CheckedOut, Checkout, Delivery, Driver, Enforced, Equip,
-    EquipStep, Equipped, Formed, GoneRelease, Guard, HostCopy, HostRun, KeptOutTask, LandingCommit,
-    LastResult, Moved, Network, NotRun, Notification, Outcome, Place, PreviewPlace, Progress,
-    Proof, ReadRefused, Reading, Reads, ReleaseFailure, ReleasePolicy, Released, Rev, RunHandle,
-    RunReport, RunRequest, Running, Session, SessionPlace, Settings, Snapshot, Source, State,
-    Submitter, TaskLog, TaskProgress, TaskResult, Tests, Unanswered, Written,
+    Adopted, AtBound, Branch, Carried, Changes, CheckedOut, Checkout, Delivery, Driver, Enforced,
+    Equip, EquipStep, Equipped, Formed, GoneRelease, Guard, HostCopy, HostRun, KeptOutTask,
+    LandingCommit, LastResult, Moved, Network, NotRun, Notification, Outcome, Part, Place,
+    PreviewPlace, Progress, Proof, ReadRefused, Reading, Reads, ReleaseFailure, ReleasePolicy,
+    Released, ResultAsk, Rev, RunHandle, RunKind, RunReport, RunRequest, Running, Session,
+    SessionPlace, Settings, Snapshot, Source, State, Stopped, Submitter, TaskLog, TaskProgress,
+    TaskResult, Tests, Unanswered, Written,
 };
 
 /// A tree: path to content.
@@ -35,6 +39,24 @@ pub enum Crash {
     BeforeMove,
     /// The process stops after the branch moved, before it is recorded.
     AfterMove,
+    /// Record 0122 (design D3): the step stops once, after the next
+    /// checkout is made, before anything is written of it.
+    AfterCheckout,
+    /// Record 0122 (design D3): the step stops once, after the next run's
+    /// checks are started, before its `running` is written.
+    AfterStart,
+    /// Record 0122 (design D3): the step stops once, after the next run's
+    /// results are recorded, before its end is written.
+    AfterResults,
+    /// Record 0122 (design D3): the step stops once, after the next
+    /// checkout is released, before its run is written closed.
+    AfterRelease,
+    /// Record 0122 (design D3, D12): the step stops once, before the next
+    /// dispatch of a pool's job is sent.
+    BeforeDispatch,
+    /// Record 0122 (design D3, D12): the step stops once, after the next
+    /// dispatch of a pool's job is sent, before it is written.
+    AfterDispatch,
 }
 
 #[derive(Clone, Debug)]
@@ -85,6 +107,8 @@ struct RunState {
     lost: bool,
     killed: bool,
     report: Option<RunReport>,
+    /// Record 0122 (design D3): its own start, by the world's clock.
+    started: String,
 }
 
 impl RunState {
@@ -105,7 +129,12 @@ impl RunState {
 struct Line {
     version: u64,
     files: BTreeMap<String, Vec<u8>>,
-    locked: bool,
+}
+
+/// Record 0122 (design D2): the name a host's own files go by among the
+/// fakes' homes; a remote's home goes by the remote's name.
+fn own_home(host: &str) -> String {
+    format!("here@{host}")
 }
 
 #[derive(Default)]
@@ -168,7 +197,17 @@ struct Inner {
     failed_refs: Option<String>,
     /// Each host's refusal document of a branch, by host and branch (133).
     refusals: BTreeMap<(String, String), Vec<u8>>,
+    /// This host's refusal of each branch's intake (design D27).
+    intake_refusals: BTreeMap<(String, String), Vec<u8>>,
+    /// Each host's refusal of a branch's pools' reads (design D5 of the
+    /// change `a-codebuild-fleet-runs-a-queues-checks`).
+    pool_refusals: BTreeMap<(String, String), Vec<u8>>,
     crash: Option<Crash>,
+    /// 152, record 0124 (design D10): each branch whose every move the forge
+    /// refuses, with its words, until cleared.
+    forge_refuses: BTreeMap<String, String>,
+    /// Each move the forge refused, by branch, in order.
+    refusals_of_moves: Vec<String>,
     // the check
     tasks: Vec<TaskDef>,
     fail_rules: Vec<(String, Predicate)>,
@@ -256,9 +295,27 @@ struct Inner {
     unanswered_starts: usize,
     /// The next start finds the host at its bound (71).
     refuse_start: bool,
+    /// How many times the records were read afresh (design D16).
+    state_reads: Cell<usize>,
+    /// The next hold finds the host at its bound, as when another
+    /// repository's run took the last one (71).
+    refuse_hold: bool,
+    /// Every part held, by kind, in order (record 0087).
+    holds: Vec<RunKind>,
+    /// Whether each release of a place and each outcome pushed asks, as an
+    /// agent's `sluice exec` asks meanwhile, for a session's room.
+    probe_holds: bool,
+    /// What each such ask was answered: whether the room was there.
+    probed: Vec<bool>,
     host_limit: Option<usize>,
+    /// The hosts with no room for a run of their own, whatever the limit
+    /// (design D8 of `a-queues-home-is-written-in-its-records`).
+    full: BTreeSet<String>,
     /// Other repositories' runs going on each host, by host (71).
     other_runs: BTreeMap<String, usize>,
+    /// Parts of each host's bound held and not yet started, by host and
+    /// kind (71; record 0087).
+    parts: BTreeMap<(String, RunKind), usize>,
     /// The system the host's executor is, as `(os, arch)` (87).
     platform: (String, String),
     /// Tasks whose reported keys the candidate's tree does not bear out
@@ -267,9 +324,6 @@ struct Inner {
     /// Where the run's record of a pass is looked for and not found:
     /// while set, every ran pass is unkept (114; record 0105).
     no_proof: Option<String>,
-    /// Submissions left behind when a branch's records moved to its
-    /// remote, by branch (design D10).
-    left: BTreeMap<String, Vec<Vec<u8>>>,
     /// What each host last saw of each branch, by host and branch (73).
     seen: BTreeMap<(String, String), (u64, String)>,
     /// The host that made each candidate's place (81).
@@ -285,6 +339,13 @@ struct Inner {
     launch_fails: Option<bool>,
     /// The pool jobs that ended, by claim (77, 88).
     jobs_ended: BTreeSet<String>,
+    /// Where set, every read of a pool's job fails with these words, as a
+    /// pool refusing it (77, 133; design D5 of the change
+    /// `a-codebuild-fleet-runs-a-queues-checks`).
+    jobs_refused: Option<String>,
+    /// Record 0122 (design D12): each pool job's state as a test moved it,
+    /// by its claim.
+    jobs: BTreeMap<String, sluice_seams::Job>,
     /// Every branch a pool was woken for, in order (111).
     wakes: Vec<String>,
     /// The signer the host's results are recorded as signed by (78).
@@ -364,9 +425,23 @@ struct Inner {
     undelivered: Vec<Notification>,
     crash_notify: bool,
     // the records
-    lines: BTreeMap<String, Line>,
+    /// Each branch's records in each of its homes, by home and branch: a
+    /// host's own files as [`own_home`] names them, a remote's by its name
+    /// (record 0122; design D1).
+    lines: BTreeMap<(String, String), Line>,
+    /// The branches whose lock is held, one lock a branch on the host
+    /// (rule core.14), whichever home its records are in.
+    locks: BTreeSet<String>,
+    /// How many carries wrote anything (record 0122; design D3).
+    carries: usize,
+    /// The next carry stops after its target's write, before it closes
+    /// the home it carried from (59).
+    stop_carry: bool,
     /// Each branch's candidates' tasks, kept beside its records.
     progress: BTreeMap<String, BTreeMap<String, Vec<TaskProgress>>>,
+    /// Record 0119 (design D11): each record a pool's sign job added, by
+    /// its signer and path.
+    signed_adds: Vec<(String, String, Vec<u8>)>,
     results: Vec<u8>,
     set_asides: Vec<u8>,
     next_id: u64,
@@ -619,6 +694,12 @@ impl World {
         self.0.borrow().fetches
     }
 
+    /// How many times a branch's records were read afresh, as a round
+    /// reads them, rather than as the host holds them (129; design D16).
+    pub fn state_reads(&self) -> usize {
+        self.0.borrow().state_reads.get()
+    }
+
     /// How many times a branch's revision was read, fetched or as held
     /// (129).
     pub fn revision_reads(&self) -> usize {
@@ -687,6 +768,21 @@ impl World {
         self.0.borrow().levels
     }
 
+    /// 152, record 0124 (design D10): from now the forge refuses each move
+    /// of `branch` with `words`, or, with `None`, takes them again.
+    pub fn forge_refuses(&self, branch: &str, words: Option<&str>) {
+        let mut inner = self.0.borrow_mut();
+        match words {
+            Some(w) => inner.forge_refuses.insert(branch.into(), w.into()),
+            None => inner.forge_refuses.remove(branch),
+        };
+    }
+
+    /// Each move the forge refused, by branch, in order.
+    pub fn refused_moves(&self) -> Vec<String> {
+        self.0.borrow().refusals_of_moves.clone()
+    }
+
     pub fn crash(&self, crash: Crash) {
         self.0.borrow_mut().crash = Some(crash);
     }
@@ -744,6 +840,12 @@ impl World {
     /// Runs leave `task` without a result, as a runner that skips it.
     pub fn skips(&self, task: &str) {
         self.0.borrow_mut().skip.insert(task.into());
+    }
+
+    /// Runs give `task` a result again, as a runner that no longer skips
+    /// it.
+    pub fn stops_skipping(&self, task: &str) {
+        self.0.borrow_mut().skip.remove(task);
     }
 
     /// The runner keeps `task` out of its CI mode: never run, missing, and
@@ -956,6 +1058,52 @@ impl World {
         self.0.borrow_mut().refuse_start = true;
     }
 
+    /// The next hold of a part finds the host at its bound, as when
+    /// another repository's run took the last one (71).
+    pub fn refuse_next_hold(&self) {
+        self.0.borrow_mut().refuse_hold = true;
+    }
+
+    /// From now, each release of a place and each outcome pushed asks for
+    /// a session's room as an agent's `sluice exec` would meanwhile, and
+    /// gives it back at once: what a round holds between its decision and
+    /// its starts (rule core.49).
+    pub fn probe_holds(&self, probe: bool) {
+        self.0.borrow_mut().probe_holds = probe;
+    }
+
+    /// What each ask [`World::probe_holds`] made was answered: whether a
+    /// session's room was there.
+    pub fn probed(&self) -> Vec<bool> {
+        self.0.borrow().probed.clone()
+    }
+
+    /// An agent's ask for a session's room meanwhile, where asked for.
+    fn probe(inner: &mut Inner) {
+        if inner.probe_holds {
+            let free = FakeTests::count(inner).total() < inner.host_limit.unwrap_or(usize::MAX);
+            inner.probed.push(free);
+        }
+    }
+
+    /// Every part of the host's bound held so far, by kind, in order
+    /// (record 0087).
+    pub fn holds(&self) -> Vec<RunKind> {
+        self.0.borrow().holds.clone()
+    }
+
+    /// The parts of this world's host's bound held and not yet started
+    /// (record 0087).
+    pub fn parts_held(&self) -> usize {
+        let inner = self.0.borrow();
+        inner
+            .parts
+            .iter()
+            .filter(|((h, _), _)| *h == inner.host)
+            .map(|(_, n)| n)
+            .sum()
+    }
+
     /// Runs started from now stay running until completed.
     pub fn hold_runs(&self, hold: bool) {
         self.0.borrow_mut().hold = hold;
@@ -1007,6 +1155,23 @@ impl World {
 
     pub fn host_limit(&self, limit: usize) {
         self.0.borrow_mut().host_limit = Some(limit);
+    }
+
+    /// From now, this world's host has no room for a run: its bound is 0,
+    /// whatever another host's is, as a lead that leaves its branch's runs
+    /// to other hosts has.
+    pub fn no_room(&self) {
+        let mut inner = self.0.borrow_mut();
+        let host = inner.host.clone();
+        inner.full.insert(host);
+    }
+
+    /// From now, this world's host has room again, as one whose other runs
+    /// have ended.
+    pub fn has_room(&self) {
+        let mut inner = self.0.borrow_mut();
+        let host = inner.host.clone();
+        inner.full.remove(&host);
     }
 
     /// From now, `n` runs of other repositories go on this world's host,
@@ -1195,22 +1360,6 @@ impl World {
         inner.refused_state.get(&key).cloned()
     }
 
-    /// `doc`, a submission's document of this host's own records, left
-    /// behind on `branch` when its records moved to the remote.
-    pub fn leave_behind(&self, branch: &str, doc: &str) {
-        self.0
-            .borrow_mut()
-            .left
-            .entry(branch.into())
-            .or_default()
-            .push(doc.as_bytes().to_vec());
-    }
-
-    /// What is still left behind on `branch`.
-    pub fn left_behind(&self, branch: &str) -> usize {
-        self.0.borrow().left.get(branch).map_or(0, Vec::len)
-    }
-
     /// Every run started on a pool.
     pub fn launches(&self) -> Vec<sluice_seams::Launch> {
         self.0.borrow().launches.clone()
@@ -1225,8 +1374,19 @@ impl World {
     }
 
     /// The pool's job under `claim` has ended: lost, cancelled, or done.
+    /// Record 0122 (design D12): the pool's job of `claim` stands as `job`.
+    pub fn move_job(&self, claim: &str, job: sluice_seams::Job) {
+        self.0.borrow_mut().jobs.insert(claim.into(), job);
+    }
+
     pub fn end_job(&self, claim: &str) {
         self.0.borrow_mut().jobs_ended.insert(claim.into());
+    }
+
+    /// Every read of a pool's job fails with `words` from now, or, with
+    /// `None`, is answered again (77, 133).
+    pub fn refuse_jobs(&self, words: Option<&str>) {
+        self.0.borrow_mut().jobs_refused = words.map(String::from);
     }
 
     /// Every branch a pool was woken for.
@@ -1274,6 +1434,17 @@ impl World {
     }
 
     /// The revisions runs were started on, in order of starting.
+    /// Record 0122 (design D3): each run's own start, by the world's clock,
+    /// in the order they started.
+    pub fn run_starts(&self) -> Vec<String> {
+        self.0
+            .borrow()
+            .runs
+            .iter()
+            .map(|r| r.started.clone())
+            .collect()
+    }
+
     pub fn started(&self) -> Vec<Rev> {
         self.requests().into_iter().map(|r| r.revision).collect()
     }
@@ -1904,28 +2075,198 @@ impl World {
         self.0.borrow_mut().next_id = n;
     }
 
-    /// A branch's record file as written.
+    /// A branch's record file as written, in the home this host's reads
+    /// of it are routed to (record 0122; design D2).
     pub fn file(&self, branch: &str, path: &str) -> Option<String> {
-        self.0
-            .borrow()
-            .lines
-            .get(branch)
-            .and_then(|l| l.files.get(path))
-            .map(|b| String::from_utf8(b.clone()).expect("records are text"))
+        self.files(branch)
+            .remove(path)
+            .map(|b| String::from_utf8(b).expect("records are text"))
     }
 
-    /// Every file of a branch's records, as written.
+    /// Every file of a branch's records, as written, in the home this
+    /// host's reads of it are routed to.
     pub fn files(&self, branch: &str) -> BTreeMap<String, Vec<u8>> {
-        self.0
-            .borrow()
+        let inner = self.0.borrow();
+        let Ok(home) = World::route(&inner, branch) else {
+            return BTreeMap::new();
+        };
+        inner
             .lines
-            .get(branch)
+            .get(&(home, branch.to_string()))
             .map(|l| l.files.clone())
             .unwrap_or_default()
     }
 
     pub fn version(&self, branch: &str) -> u64 {
-        self.0.borrow().lines.get(branch).map_or(0, |l| l.version)
+        let inner = self.0.borrow();
+        World::route(&inner, branch)
+            .ok()
+            .and_then(|home| inner.lines.get(&(home, branch.to_string())))
+            .map_or(0, |l| l.version)
+    }
+
+    /// Record 0122 (design D1): a branch's record file as written in the
+    /// home `home`, `here` for this host's own files or a remote's name.
+    pub fn file_in(&self, home: &str, branch: &str, path: &str) -> Option<String> {
+        let inner = self.0.borrow();
+        let key = (World::home_key(&inner, home), branch.to_string());
+        inner
+            .lines
+            .get(&key)
+            .and_then(|l| l.files.get(path))
+            .map(|b| String::from_utf8(b.clone()).expect("records are text"))
+    }
+
+    /// Record 0122 (design D1): `branch`'s home document in `home`, as
+    /// written; `None` where that home holds none.
+    pub fn home_in(&self, home: &str, branch: &str) -> Option<HomeDoc> {
+        let text = self.file_in(home, branch, HOME_FILE)?;
+        Some(serde_json::from_str(&text).expect("a home document reads"))
+    }
+
+    /// Record 0122 (design D1): put `doc` as `branch`'s home document in
+    /// `home`, as a host that wrote it would have, moving no version.
+    pub fn put_home(&self, home: &str, branch: &str, doc: &HomeDoc) {
+        let mut inner = self.0.borrow_mut();
+        let key = (World::home_key(&inner, home), branch.to_string());
+        let line = inner.lines.entry(key).or_default();
+        line.files
+            .insert(HOME_FILE.into(), sluice_core::records::to_document(doc));
+    }
+
+    /// Record 0122 (design D3): how many carries wrote anything.
+    pub fn carries(&self) -> usize {
+        self.0.borrow().carries
+    }
+
+    /// Record 0122 (59): the next carry stops after its target's write,
+    /// before it closes the home it carried from, as a process stopped
+    /// there would.
+    pub fn stop_next_carry(&self) {
+        self.0.borrow_mut().stop_carry = true;
+    }
+
+    /// 51, record 0122 (design D4): the session in `worktree` submits as
+    /// made on `host`, as a session's driver names the host it ran on.
+    pub fn from_host(&self, worktree: &str, host: &str) {
+        let mut inner = self.0.borrow_mut();
+        let session = inner
+            .worktrees
+            .get_mut(worktree)
+            .unwrap_or_else(|| panic!("no session in {worktree}"));
+        session.from.host = Some(host.into());
+    }
+
+    /// Design D2: the home document the first write into the home keyed
+    /// `key` writes, where it holds none and the write puts none: open,
+    /// naming the home and the branch's head, whose policy chose it.
+    fn opened_home(inner: &Inner, key: &str, branch: &str, changes: &Changes) -> Option<Vec<u8>> {
+        let holds = inner
+            .lines
+            .get(&(key.to_string(), branch.to_string()))
+            .is_some_and(|l| l.files.contains_key(HOME_FILE));
+        if holds || changes.put.contains_key(HOME_FILE) {
+            return None;
+        }
+        let at = match key.starts_with("here@") {
+            true => HERE,
+            false => key,
+        };
+        let doc = HomeDoc::open(at, inner.refs.get(branch).cloned());
+        Some(sluice_core::records::to_document(&doc))
+    }
+
+    /// The key of the home `home` names, as this host reads it.
+    fn home_key(inner: &Inner, home: &str) -> String {
+        match home {
+            HERE => own_home(&inner.host),
+            remote => remote.to_string(),
+        }
+    }
+
+    /// `branch`'s home document in the home keyed `key`, as written.
+    fn home_at(inner: &Inner, key: &str, branch: &str) -> Option<HomeDoc> {
+        let bytes = inner
+            .lines
+            .get(&(key.to_string(), branch.to_string()))?
+            .files
+            .get(HOME_FILE)?;
+        serde_json::from_slice(bytes).ok()
+    }
+
+    /// Record 0122 (design D2): the home `branch`'s records are read and
+    /// written in, by this host: its own `home.json`, open or moving, then
+    /// closed to the home its pointer names; where it has none, a remote's
+    /// that is open or moving; where none holds a home, the policy at the
+    /// branch's head, a remote it names with signers, its own files
+    /// otherwise. A remote home closed toward the hosts' own files routes
+    /// to this host's own. This host's own home open while a remote's that
+    /// came from this host's own files is live refuses the branch, naming
+    /// both (26).
+    fn route(inner: &Inner, branch: &str) -> Result<String> {
+        let own = own_home(&inner.host);
+        let remotes: BTreeSet<String> = inner
+            .lines
+            .keys()
+            .filter(|(h, b)| b == branch && !h.starts_with("here@"))
+            .map(|(h, _)| h.clone())
+            .collect();
+        let remote_live = |r: &str| World::home_at(inner, r, branch).filter(HomeDoc::is_live);
+        if let Some(home) = World::home_at(inner, &own, branch) {
+            match home.state {
+                HomeState::Open => {
+                    for r in &remotes {
+                        let split = remote_live(r).is_some_and(|h| {
+                            h.came_from.as_ref().is_some_and(|c| {
+                                c.home == HERE && c.host.as_deref() == Some(inner.host.as_str())
+                            })
+                        });
+                        if split {
+                            return Err(sluice_core::home::two_homes(branch, HERE, r));
+                        }
+                    }
+                    return Ok(own);
+                }
+                HomeState::Moving => return Ok(own),
+                HomeState::Closed => {
+                    let to = home.closed_to().unwrap_or(HERE).to_string();
+                    if to == HERE {
+                        return Ok(own);
+                    }
+                    return Ok(match World::home_at(inner, &to, branch) {
+                        Some(r) if r.closed_to() == Some(HERE) => own,
+                        _ => to,
+                    });
+                }
+            }
+        }
+        for r in &remotes {
+            match World::home_at(inner, r, branch) {
+                Some(h) if h.is_live() => return Ok(r.clone()),
+                Some(h) if h.closed_to() == Some(HERE) => return Ok(own),
+                _ => {}
+            }
+        }
+        Ok(World::named_at_head(inner, branch).unwrap_or(own))
+    }
+
+    /// Design D2: the remote the policy at `branch`'s head keeps its
+    /// records on, signers and a `remote` named for it; `None` for the
+    /// host's own files, or where no policy there reads.
+    fn named_at_head(inner: &Inner, branch: &str) -> Option<String> {
+        let tip = inner.refs.get(branch)?;
+        let text = inner.commits.get(tip)?.tree.get(POLICY_PATH)?;
+        let policy = sluice_core::policy::Policy::parse(text).ok()?;
+        if policy.signers.is_empty() {
+            return None;
+        }
+        policy.remote_of(branch).ok().flatten()
+    }
+
+    /// Record 0119 (design D11): each record a pool's sign job added, by
+    /// its signer and path.
+    pub fn signed_adds(&self) -> Vec<(String, String, Vec<u8>)> {
+        self.0.borrow().signed_adds.clone()
     }
 
     pub fn results_log(&self) -> String {
@@ -1971,12 +2312,11 @@ impl World {
     }
 
     pub fn hold_lock(&self, branch: &str, held: bool) {
-        self.0
-            .borrow_mut()
-            .lines
-            .entry(branch.into())
-            .or_default()
-            .locked = held;
+        let mut inner = self.0.borrow_mut();
+        match held {
+            true => inner.locks.insert(branch.into()),
+            false => inner.locks.remove(branch),
+        };
     }
 }
 
@@ -2155,6 +2495,12 @@ impl Branch for FakeBranch {
         if found.as_ref() != Some(expected) {
             return Ok(Moved::Elsewhere(found));
         }
+        // 152, record 0124 (design D10): the forge refuses the move, the
+        // branch where it was expected.
+        if let Some(words) = inner.forge_refuses.get(branch).cloned() {
+            inner.refusals_of_moves.push(branch.to_string());
+            return Ok(Moved::Refused(words));
+        }
         inner.refs.insert(branch.into(), to.clone());
         inner.moves.push(MoveRecord {
             branch: branch.into(),
@@ -2224,16 +2570,64 @@ impl FakeTests {
             .iter()
             .filter(|r| r.live() && r.queue() && r.host == inner.host)
             .count();
+        let parts = |kind| {
+            inner
+                .parts
+                .get(&(inner.host.clone(), kind))
+                .copied()
+                .unwrap_or(0)
+        };
         Running {
-            queue: own + inner.other_runs.get(&inner.host).copied().unwrap_or(0),
-            sessions: inner.sessions.values().filter(|(r, _)| *r).count(),
+            queue: own
+                + inner.other_runs.get(&inner.host).copied().unwrap_or(0)
+                + parts(RunKind::Queue),
+            sessions: inner.sessions.values().filter(|(r, _)| *r).count() + parts(RunKind::Session),
+        }
+    }
+}
+
+/// A part of the fakes' host's bound (71; record 0087): counted while it
+/// is held, and given back when it is dropped unstarted. A start that
+/// takes it moves its room to the run it starts.
+struct FakePart {
+    world: std::rc::Weak<RefCell<Inner>>,
+    host: String,
+    kind: RunKind,
+    /// Taken by a start, which counted it out itself.
+    spent: bool,
+}
+
+impl FakePart {
+    fn give_back(inner: &mut Inner, host: &str, kind: RunKind) {
+        if let Some(n) = inner.parts.get_mut(&(host.to_string(), kind)) {
+            *n = n.saturating_sub(1);
+        }
+    }
+}
+
+impl Drop for FakePart {
+    fn drop(&mut self) {
+        if self.spent {
+            return;
+        }
+        if let Some(world) = self.world.upgrade() {
+            if let Ok(mut inner) = world.try_borrow_mut() {
+                FakePart::give_back(&mut inner, &self.host, self.kind);
+            }
         }
     }
 }
 
 impl Tests for FakeTests {
-    fn start(&self, request: &RunRequest) -> Result<RunHandle> {
+    fn start(&self, request: &RunRequest, part: Part) -> Result<RunHandle> {
+        // The part's room moves to the run, or back to the host where the
+        // start fails: either way it is held no longer.
+        let mut part = part.take::<FakePart>().ok();
         let mut inner = self.0 .0.borrow_mut();
+        if let Some(p) = part.as_mut() {
+            FakePart::give_back(&mut inner, &p.host, p.kind);
+            p.spent = true;
+        }
         let held = inner
             .places
             .get(&request.place.name)
@@ -2260,12 +2654,9 @@ impl Tests for FakeTests {
         ) {
             bail!("the open executor cannot keep a run off the network");
         }
-        // 71: admitted against the host's count, other repositories' runs
-        // among it, before anything of the run runs.
-        let running = FakeTests::count(&inner);
-        if running.total() >= inner.host_limit.unwrap_or(usize::MAX)
-            || std::mem::take(&mut inner.refuse_start)
-        {
+        // 71: its room was held by its part; a part the host no longer
+        // honours is refused before anything of the run runs.
+        if std::mem::take(&mut inner.refuse_start) {
             return Err(AtBound.into());
         }
         if std::mem::take(&mut inner.crash_start) {
@@ -2287,6 +2678,7 @@ impl Tests for FakeTests {
         let nix_system = inner.nix_systems.get(&host).cloned();
         let live = inner.places.keys().cloned().collect();
         inner.live_at_start.push((request.place.name.clone(), live));
+        let started = inner.now.to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
         inner.runs.push(RunState {
             request: request.clone(),
             host,
@@ -2295,8 +2687,34 @@ impl Tests for FakeTests {
             lost: false,
             killed: false,
             report: None,
+            started,
         });
-        Ok(RunHandle(format!("run-{}", inner.runs.len() - 1)))
+        let run = RunHandle(format!("run-{}", inner.runs.len() - 1));
+        if inner.crash == Some(Crash::AfterStart) {
+            inner.crash = None;
+            return Err(Stopped(format!(
+                "crashed after starting a run in {}",
+                request.place.name
+            ))
+            .into());
+        }
+        Ok(run)
+    }
+
+    /// Record 0122 (design D3): the last run this host started in the
+    /// checkout, as the supervisor's files would say, and its own start.
+    fn found(&self, place: &str) -> Result<Option<sluice_seams::Found>> {
+        let inner = self.0 .0.borrow();
+        Ok(inner
+            .runs
+            .iter()
+            .enumerate()
+            .rev()
+            .find(|(_, r)| r.request.place.name == place && r.host == inner.host)
+            .map(|(n, r)| sluice_seams::Found {
+                run: RunHandle(format!("run-{n}")),
+                since: r.started.clone(),
+            }))
     }
 
     fn progress(&self, run: &RunHandle) -> Result<Progress> {
@@ -2314,11 +2732,13 @@ impl Tests for FakeTests {
         if r.lost || r.killed {
             return Ok(Progress::Lost);
         }
-        if let Some(report) = r.report {
-            return Ok(Progress::Finished(report));
-        }
+        // 60, 114, record 0122 (design D8): a run still going is never
+        // finished, whatever of it there is to read.
         if !r.complete {
             return Ok(Progress::Running);
+        }
+        if let Some(report) = r.report {
+            return Ok(Progress::Finished(report));
         }
         let report = World::evaluate(&mut inner, &r.request);
         inner.runs[n].report = Some(report.clone());
@@ -2380,12 +2800,55 @@ impl Tests for FakeTests {
     }
 
     fn bound(&self) -> Result<usize> {
-        Ok(self.0 .0.borrow().host_limit.unwrap_or(usize::MAX))
+        let inner = self.0 .0.borrow();
+        if inner.full.contains(&inner.host) {
+            return Ok(0);
+        }
+        Ok(inner.host_limit.unwrap_or(usize::MAX))
+    }
+
+    /// 71 (record 0087): a part while the parts held and the runs going
+    /// on the host, other repositories' and sessions' among them, are
+    /// under its bound.
+    fn hold(&self, kind: RunKind) -> Result<Option<Part>> {
+        let mut inner = self.0 .0.borrow_mut();
+        if std::mem::take(&mut inner.refuse_hold) {
+            return Ok(None);
+        }
+        let running = FakeTests::count(&inner);
+        let bound = match inner.full.contains(&inner.host) {
+            true => 0,
+            false => inner.host_limit.unwrap_or(usize::MAX),
+        };
+        if running.total() >= bound {
+            return Ok(None);
+        }
+        let host = inner.host.clone();
+        *inner.parts.entry((host.clone(), kind)).or_default() += 1;
+        inner.holds.push(kind);
+        Ok(Some(Part::new(
+            kind,
+            FakePart {
+                world: Rc::downgrade(&self.0 .0),
+                host,
+                kind,
+                spent: false,
+            },
+        )))
     }
 
     fn launch(&self, launch: &sluice_seams::Launch) -> Result<()> {
         let mut inner = self.0 .0.borrow_mut();
         let path = format!("dispatching {} for {}", launch.pool, launch.claim);
+        if inner.crash == Some(Crash::BeforeDispatch) {
+            inner.crash = None;
+            return Err(Stopped(format!("crashed before {path}")).into());
+        }
+        if inner.crash == Some(Crash::AfterDispatch) {
+            inner.crash = None;
+            inner.launches.push(launch.clone());
+            return Err(Stopped(format!("crashed after {path}")).into());
+        }
         match inner.launch_fails.take() {
             Some(false) => bail!("{path}: 404 Not Found"),
             Some(true) => {
@@ -2399,13 +2862,33 @@ impl Tests for FakeTests {
         }
     }
 
-    fn job_alive(
+    /// Record 0122 (design D12): the job's state as a test moved it; one
+    /// launched and not moved is queued, one ended with no record, and a
+    /// claim never launched has none.
+    fn job(
         &self,
         _kind: &(String, sluice_seams::Setting),
+        _runners: &BTreeMap<String, String>,
         claim: &str,
         _remote: Option<&str>,
-    ) -> Result<bool> {
-        Ok(!self.0 .0.borrow().jobs_ended.contains(claim))
+    ) -> Result<sluice_seams::Job> {
+        let inner = self.0 .0.borrow();
+        if let Some(words) = &inner.jobs_refused {
+            bail!("{words}");
+        }
+        if let Some(job) = inner.jobs.get(claim) {
+            return Ok(job.clone());
+        }
+        if inner.jobs_ended.contains(claim) {
+            return Ok(sluice_seams::Job::Ended {
+                recorded: false,
+                why: None,
+            });
+        }
+        Ok(match inner.launches.iter().any(|l| l.claim == claim) {
+            true => sluice_seams::Job::Queued,
+            false => sluice_seams::Job::None,
+        })
     }
 
     fn wake(
@@ -2483,6 +2966,69 @@ impl Tests for FakeTests {
                 proof.refused.push(refuse(t));
             } else {
                 proof.proven.push(t.task.clone());
+            }
+        }
+        Ok(proof)
+    }
+
+    /// Record 0119 (design D11): the fake's proof of a key is a line of
+    /// `keys`, `<task> <key>`; a ran pass whose proof the world keeps none
+    /// of has no line.
+    fn keep_proof(
+        &self,
+        _run: &RunHandle,
+        report: &RunReport,
+        dir: &std::path::Path,
+    ) -> Result<()> {
+        let inner = self.0 .0.borrow();
+        let kept = |t: &&TaskResult| {
+            inner.no_proof.is_none()
+                || !(matches!(t.source, Source::Ran { .. }) && t.outcome == Outcome::Pass)
+        };
+        let lines: String = report
+            .tasks
+            .iter()
+            .chain(&report.dependencies)
+            .filter(kept)
+            .map(|t| format!("{} {}\n", t.task, t.hash))
+            .collect();
+        std::fs::create_dir_all(dir)?;
+        std::fs::write(dir.join("keys"), lines)?;
+        Ok(())
+    }
+
+    /// Record 0119 (design D11): a key is borne out where its run job kept
+    /// its line in `keys` and the world forged nothing of its task; a ran
+    /// pass with no line is unkept.
+    fn proven_from(
+        &self,
+        dir: &std::path::Path,
+        _revision: &Rev,
+        _tests: &sluice_seams::Settings,
+        report: &RunReport,
+    ) -> Result<Proof> {
+        let inner = self.0 .0.borrow();
+        let keys = std::fs::read_to_string(dir.join("keys")).unwrap_or_default();
+        let kept = |t: &TaskResult| keys.lines().any(|l| l == format!("{} {}", t.task, t.hash));
+        let mut proof = Proof::default();
+        for t in report.tasks.iter().chain(&report.dependencies) {
+            if inner.forged.contains(&t.task) {
+                proof.refused.push(sluice_seams::Refused {
+                    task: t.task.clone(),
+                    key: t.hash.clone(),
+                    why: format!(
+                        "{}: its record names an input the tree does not hold",
+                        t.task
+                    ),
+                });
+            } else if kept(t) {
+                proof.proven.push(t.task.clone());
+            } else if matches!(t.source, Source::Ran { .. }) && t.outcome == Outcome::Pass {
+                proof.unkept.push(NotRun {
+                    task: t.task.clone(),
+                    reason: "it passed, but nothing the run job handed over proves it ran".into(),
+                    key: Some(t.hash.clone()),
+                });
             }
         }
         Ok(proof)
@@ -2714,6 +3260,16 @@ impl Checkout for FakeCheckout {
         if let Some(words) = &inner.checkout_fails {
             bail!("{words}");
         }
+        // Record 0122 (design D3): a checkout this host made at `rev`, by a
+        // step that stopped before its run started, is the place.
+        if inner.places.get(name) == Some(rev) && inner.place_host.get(name) == Some(&inner.host) {
+            return Ok(Place {
+                name: name.into(),
+                path: format!("/fake/places/{name}").into(),
+                tmp: format!("/fake/tmp/{name}").into(),
+                env: Default::default(),
+            });
+        }
         // 32: two places on one host never collide.
         if inner.places.contains_key(name) || inner.worktrees.contains_key(name) {
             bail!("place {name} already exists");
@@ -2729,6 +3285,10 @@ impl Checkout for FakeCheckout {
         inner.made.push(name.into());
         let host = inner.host.clone();
         inner.place_host.insert(name.into(), host);
+        if inner.crash == Some(Crash::AfterCheckout) {
+            inner.crash = None;
+            return Err(Stopped(format!("crashed after making {name}")).into());
+        }
         Ok(Place {
             name: name.into(),
             path: format!("/fake/places/{name}").into(),
@@ -2885,6 +3445,7 @@ impl Checkout for FakeCheckout {
             !self.0 .0.borrow().worktrees.contains_key(name) && !name.starts_with("session/"),
             "sluice released a session's place {name}"
         );
+        World::probe(&mut self.0 .0.borrow_mut());
         if self.0 .0.borrow().places.contains_key(name) {
             self.attempt(name)?;
         }
@@ -2892,6 +3453,11 @@ impl Checkout for FakeCheckout {
             bail!("the release command of {name} failed");
         }
         self.drop_place(name);
+        let mut inner = self.0 .0.borrow_mut();
+        if inner.crash == Some(Crash::AfterRelease) {
+            inner.crash = None;
+            return Err(Stopped(format!("crashed after releasing {name}")).into());
+        }
         Ok(())
     }
 
@@ -3099,6 +3665,7 @@ impl Driver for FakeDriver {
     /// nothing.
     fn notify(&self, notification: &Notification) -> Result<Delivery> {
         let mut inner = self.0 .0.borrow_mut();
+        World::probe(&mut inner);
         let to = &notification.to;
         if inner.undelivering.contains(&to.agent) {
             inner.undelivered.push(notification.clone());
@@ -3128,6 +3695,92 @@ impl Guard for FakeGuard<'_> {}
 impl Drop for FakeGuard<'_> {
     fn drop(&mut self) {
         self.world.hold_lock(&self.branch, false);
+    }
+}
+
+/// Record 0122 (design D3): one home of a branch in the fakes' records,
+/// keyed as [`World::route`] keys it, for the core's carry.
+struct FakeHome<'a> {
+    world: &'a World,
+    key: String,
+    branch: String,
+}
+
+impl HomeStore for FakeHome<'_> {
+    fn name(&self) -> String {
+        match self.key.starts_with("here@") {
+            true => HERE.into(),
+            false => self.key.clone(),
+        }
+    }
+
+    fn read(&self) -> Result<Snapshot> {
+        let inner = self.world.0.borrow();
+        Ok(
+            match inner.lines.get(&(self.key.clone(), self.branch.clone())) {
+                Some(l) => Snapshot {
+                    version: l.version,
+                    files: l
+                        .files
+                        .iter()
+                        .filter(|(p, _)| *p != "version" && finished_name(p).is_none())
+                        .map(|(p, b)| (p.clone(), b.clone()))
+                        .collect(),
+                },
+                None => Snapshot::default(),
+            },
+        )
+    }
+
+    fn read_finished(&self, name: &str) -> Result<Option<Vec<u8>>> {
+        let inner = self.world.0.borrow();
+        Ok(inner
+            .lines
+            .get(&(self.key.clone(), self.branch.clone()))
+            .and_then(|l| {
+                l.files
+                    .get(&format!("{}/{name}", sluice_seams::FINISHED))
+                    .cloned()
+            }))
+    }
+
+    fn write(&self, read_at: u64, changes: Changes) -> Result<Written> {
+        let mut inner = self.world.0.borrow_mut();
+        let line = inner
+            .lines
+            .entry((self.key.clone(), self.branch.clone()))
+            .or_default();
+        if line.version != read_at {
+            return Ok(Written::Refused);
+        }
+        for (path, bytes) in changes.put {
+            line.files.insert(path, bytes);
+        }
+        for (path, bytes) in changes.append {
+            line.files.entry(path).or_default().extend(bytes);
+        }
+        for path in changes.remove {
+            line.files.remove(&path);
+        }
+        line.version += 1;
+        let v = line.version;
+        line.files
+            .insert("version".into(), format!("{v}\n").into_bytes());
+        Ok(Written::Written(v))
+    }
+
+    /// The fakes number every home from one count.
+    fn raise_past(&self, number: u64) -> Result<()> {
+        let mut inner = self.world.0.borrow_mut();
+        inner.next_id = inner.next_id.max(number + 1);
+        Ok(())
+    }
+
+    fn next_number(&self) -> Result<u64> {
+        let mut inner = self.world.0.borrow_mut();
+        let id = inner.next_id;
+        inner.next_id += 1;
+        Ok(id)
     }
 }
 
@@ -3185,36 +3838,12 @@ impl State for FakeState {
         Ok(())
     }
 
-    fn left_behind(&self, branch: &str) -> Result<Vec<Vec<u8>>> {
-        Ok(self
-            .0
-             .0
-            .borrow()
-            .left
-            .get(branch)
-            .cloned()
-            .unwrap_or_default())
-    }
-
-    fn forget_left_behind(&self, branch: &str, ids: &[u64]) -> Result<()> {
-        if let Some(left) = self.0 .0.borrow_mut().left.get_mut(branch) {
-            left.retain(|doc| {
-                let id = serde_json::from_slice::<serde_json::Value>(doc)
-                    .ok()
-                    .and_then(|v| v["id"].as_u64());
-                !id.is_some_and(|id| ids.contains(&id))
-            });
-        }
-        Ok(())
-    }
-
     fn lock<'a>(&'a self, branch: &str) -> Result<Option<Box<dyn Guard + 'a>>> {
         let mut inner = self.0 .0.borrow_mut();
-        let line = inner.lines.entry(branch.into()).or_default();
-        if line.locked {
+        World::route(&inner, branch)?;
+        if !inner.locks.insert(branch.into()) {
             return Ok(None);
         }
-        line.locked = true;
         Ok(Some(Box::new(FakeGuard {
             world: &self.0,
             branch: branch.into(),
@@ -3232,22 +3861,30 @@ impl State for FakeState {
         Ok(())
     }
 
+    /// As the host holds them: no read afresh is counted (design D16).
     fn read_held(&self, branch: &str) -> Result<Snapshot> {
-        self.read(branch)
+        let read = self.read(branch);
+        let inner = self.0 .0.borrow();
+        inner
+            .state_reads
+            .set(inner.state_reads.get().saturating_sub(1));
+        read
     }
 
     fn read(&self, branch: &str) -> Result<Snapshot> {
         let inner = self.0 .0.borrow();
+        inner.state_reads.set(inner.state_reads.get() + 1);
         if let Some(said) = inner.failed_state.get(branch) {
             bail!("{said}");
         }
+        let key = (World::route(&inner, branch)?, branch.to_string());
         if let Some(said) = World::state_refused(&inner, branch) {
             // 80: answered from what was last read, when there is any.
-            if !inner.lines.get(branch).is_some_and(|l| l.version > 0) {
+            if !inner.lines.get(&key).is_some_and(|l| l.version > 0) {
                 return Err(World::refused(format!("refs/sluice/state/{branch}"), &said));
             }
         }
-        Ok(match inner.lines.get(branch) {
+        Ok(match inner.lines.get(&key) {
             Some(l) => Snapshot {
                 version: l.version,
                 files: l
@@ -3270,9 +3907,10 @@ impl State for FakeState {
         if let Some(said) = inner.failed_state.get(branch) {
             bail!("{said}");
         }
+        let key = (World::route(&inner, branch)?, branch.to_string());
         Ok(inner
             .lines
-            .get(branch)
+            .get(&key)
             .map(|l| {
                 l.files
                     .iter()
@@ -3295,16 +3933,24 @@ impl State for FakeState {
         if interfere {
             inner.interfere -= 1;
         }
-        let line = inner.lines.entry(branch.into()).or_default();
         // As the real records: a write needs the branch's lock.
-        if !line.locked {
+        if !inner.locks.contains(branch) {
             bail!("writing {branch}'s records without holding its lock");
         }
+        let home = World::route(&inner, branch)?;
+        let opened = World::opened_home(&inner, &home, branch, &changes);
+        let line = inner.lines.entry((home, branch.into())).or_default();
         if interfere {
             line.version += 1;
         }
         if line.version != read_at {
             return Ok(Written::Refused);
+        }
+        // Design D2: the first write into a home that holds no home
+        // document writes it, open, naming the home and the revision whose
+        // policy chose it.
+        if let Some(doc) = opened {
+            line.files.insert(HOME_FILE.into(), doc);
         }
         for (path, bytes) in changes.put {
             line.files.insert(path, bytes);
@@ -3327,12 +3973,16 @@ impl State for FakeState {
         if let Some(said) = &inner.failed_list {
             bail!("{said}");
         }
-        Ok(inner
+        let own = own_home(&inner.host);
+        let mut all: Vec<String> = inner
             .lines
             .iter()
-            .filter(|(_, l)| l.version > 0)
-            .map(|(b, _)| b.clone())
-            .collect())
+            .filter(|((h, _), l)| l.version > 0 && (*h == own || !h.starts_with("here@")))
+            .map(|((_, b), _)| b.clone())
+            .collect();
+        all.sort();
+        all.dedup();
+        Ok(all)
     }
 
     fn publish_head(&self, _branch: &str, head: &Rev) -> Result<()> {
@@ -3433,6 +4083,140 @@ impl State for FakeState {
         Ok(())
     }
 
+    fn intake_refusal(&self, branch: &str) -> Result<Option<Vec<u8>>> {
+        let inner = self.0 .0.borrow();
+        let key = (inner.host.clone(), branch.to_string());
+        Ok(inner.intake_refusals.get(&key).cloned())
+    }
+
+    fn keep_intake_refusal(&self, branch: &str, doc: Option<&[u8]>) -> Result<()> {
+        let mut inner = self.0 .0.borrow_mut();
+        let key = (inner.host.clone(), branch.to_string());
+        match doc {
+            Some(doc) => inner.intake_refusals.insert(key, doc.to_vec()),
+            None => inner.intake_refusals.remove(&key),
+        };
+        Ok(())
+    }
+
+    fn pool_refusal(&self, branch: &str) -> Result<Option<Vec<u8>>> {
+        let inner = self.0 .0.borrow();
+        let key = (inner.host.clone(), branch.to_string());
+        Ok(inner.pool_refusals.get(&key).cloned())
+    }
+
+    fn keep_pool_refusal(&self, branch: &str, doc: Option<&[u8]>) -> Result<()> {
+        let mut inner = self.0 .0.borrow_mut();
+        let key = (inner.host.clone(), branch.to_string());
+        match doc {
+            Some(doc) => inner.pool_refusals.insert(key, doc.to_vec()),
+            None => inner.pool_refusals.remove(&key),
+        };
+        Ok(())
+    }
+
+    /// Record 0122 (design D3, D4): as the records binding carries, by the
+    /// core's one carry, between this host's own home and the remote's.
+    fn carry(&self, branch: &str) -> Result<Carried> {
+        let inner = self.0 .0.borrow();
+        if !inner.locks.contains(branch) {
+            bail!("carrying {branch}'s records without holding its lock");
+        }
+        let me = inner.host.clone();
+        let own = own_home(&me);
+        let routed = World::route(&inner, branch)?;
+        let home = World::home_at(&inner, &routed, branch);
+        let (from, to, owed) = match home.as_ref().and_then(HomeDoc::moving_to) {
+            Some(to) => {
+                let to = World::home_key(&inner, to);
+                let owed = match to == own {
+                    true => Owed::Mine,
+                    false => Owed::All,
+                };
+                (routed.clone(), to, owed)
+            }
+            None => {
+                // Not moving: what this host made, left in a remote home
+                // closed toward the hosts' own files.
+                let remote = inner
+                    .lines
+                    .keys()
+                    .filter(|(h, b)| b == branch && !h.starts_with("here@"))
+                    .map(|(h, _)| h.clone())
+                    .find(|r| {
+                        World::home_at(&inner, r, branch)
+                            .is_some_and(|h| h.closed_to() == Some(HERE))
+                    });
+                match remote {
+                    Some(r) if routed == own => (r, own.clone(), Owed::Mine),
+                    _ => return Ok(Carried::default()),
+                }
+            }
+        };
+        let chosen_at = home
+            .as_ref()
+            .and_then(|h| h.moving.as_ref())
+            .and_then(|m| m.chosen_at.clone());
+        let now = inner.now.to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
+        drop(inner);
+        let source = FakeHome {
+            world: &self.0,
+            key: from,
+            branch: branch.into(),
+        };
+        let target = FakeHome {
+            world: &self.0,
+            key: to,
+            branch: branch.into(),
+        };
+        let stop = || -> Result<()> {
+            let mut inner = self.0 .0.borrow_mut();
+            inner.carries += 1;
+            if std::mem::take(&mut inner.stop_carry) {
+                bail!("stopped after carrying {branch}'s queue, before closing its home");
+            }
+            Ok(())
+        };
+        sluice_core::home::carry(branch, &source, &target, &me, owed, chosen_at, &now, &stop)
+    }
+
+    fn closed_homes(&self, branch: &str) -> Result<Vec<String>> {
+        let inner = self.0 .0.borrow();
+        let own = own_home(&inner.host);
+        Ok(inner
+            .lines
+            .keys()
+            .filter(|(h, b)| b == branch && (*h == own || !h.starts_with("here@")))
+            .filter(|(h, _)| {
+                World::home_at(&inner, h, branch).is_some_and(|d| d.state == HomeState::Closed)
+            })
+            .map(|(h, _)| match h.starts_with("here@") {
+                true => HERE.to_string(),
+                false => h.clone(),
+            })
+            .collect())
+    }
+
+    fn read_in(&self, branch: &str, home: &str) -> Result<Snapshot> {
+        let key = World::home_key(&self.0 .0.borrow(), home);
+        FakeHome {
+            world: &self.0,
+            key,
+            branch: branch.into(),
+        }
+        .read()
+    }
+
+    fn read_finished_in(&self, branch: &str, home: &str, name: &str) -> Result<Option<Vec<u8>>> {
+        let key = World::home_key(&self.0 .0.borrow(), home);
+        FakeHome {
+            world: &self.0,
+            key,
+            branch: branch.into(),
+        }
+        .read_finished(name)
+    }
+
     fn allocate_id(&self, _branch: &str) -> Result<u64> {
         let mut inner = self.0 .0.borrow_mut();
         let id = inner.next_id;
@@ -3445,8 +4229,9 @@ impl State for FakeState {
         Ok(id)
     }
 
-    fn results(&self, _: &str) -> Result<Vec<u8>> {
-        Ok(self.0 .0.borrow().results.clone())
+    /// From their own log, the lines `ask` names (design D17).
+    fn results_for(&self, _: &str, ask: &ResultAsk) -> Result<Vec<u8>> {
+        Ok(ask.answer(&self.0 .0.borrow().results))
     }
 
     fn verifies_own(&self, _: &str, _: &Rev) -> Result<bool> {
@@ -3454,10 +4239,25 @@ impl State for FakeState {
         Ok(!inner.unlisted.contains(&inner.host))
     }
 
+    fn add_signed(&self, branch: &str, signer: &str, path: &str, record: &[u8]) -> Result<()> {
+        let mut inner = self.0 .0.borrow_mut();
+        if World::route(&inner, branch)?.starts_with("here@") {
+            bail!("{branch}'s records hold no signer's runs, since its policy names no signer");
+        }
+        inner
+            .signed_adds
+            .push((signer.into(), path.into(), record.to_vec()));
+        Ok(())
+    }
+
     fn record_results(&self, lines: &[u8]) -> Result<()> {
         let mut inner = self.0 .0.borrow_mut();
         let Some(signer) = inner.signer.clone() else {
             inner.results.extend(lines);
+            if inner.crash == Some(Crash::AfterResults) {
+                inner.crash = None;
+                return Err(Stopped("crashed after recording results".into()).into());
+            }
             return Ok(());
         };
         // Signed with a key no policy lists, it verifies for no gate.
@@ -3469,6 +4269,10 @@ impl State for FakeState {
         for mut l in sluice_core::records::parse_lines::<sluice_core::records::ResultLine>(lines)? {
             l.signer = Some(signer.clone());
             inner.results.extend(sluice_core::records::to_line(&l));
+        }
+        if inner.crash == Some(Crash::AfterResults) {
+            inner.crash = None;
+            return Err(Stopped("crashed after recording results".into()).into());
         }
         Ok(())
     }
@@ -3516,7 +4320,7 @@ impl State for FakeState {
     ) -> Result<()> {
         let mut inner = self.0 .0.borrow_mut();
         // As a round's: kept under the branch's lock (rule core.14).
-        if !inner.lines.get(branch).is_some_and(|l| l.locked) {
+        if !inner.locks.contains(branch) {
             bail!("keeping {branch}'s tasks without holding its lock");
         }
         let kept = inner.progress.entry(branch.into()).or_default();
@@ -3544,6 +4348,275 @@ impl Clock for FakeClock {
 mod tests {
     use super::*;
     use sluice_seams::Decided;
+
+    const SIGNED: &str = "[tests]\nrunner = \"fake\"\n\n[checkout]\n\n\
+        [branches.\"bolt/*\"]\nrequired = [\"#gate\"]\nremote = \"origin\"\n\
+        trust = [\"box\"]\n\n[signers.box]\nssh = \"box ssh-ed25519 AAAA\"\n";
+    const UNSIGNED: &str = "[tests]\nrunner = \"fake\"\n\n[checkout]\n\n\
+        [branches.\"bolt/*\"]\nrequired = [\"#gate\"]\ntrust = [\"open\"]\n";
+
+    /// A submission's document, `id` made on `host` from `worktree`.
+    fn submission(id: u64, worktree: &str, host: &str) -> Vec<u8> {
+        format!(
+            "{{\"schema\":\"sluice/submission@1\",\"id\":{id},\"branch\":\"bolt/x\",\
+             \"head\":\"h{worktree}\",\"from\":{{\"agent\":\"a\",\"worktree\":\"{worktree}\",\
+             \"host\":\"{host}\"}},\"submitted\":\"t\",\"after\":[],\"priority\":0,\
+             \"attempt\":1,\"state\":\"queued\"}}"
+        )
+        .into_bytes()
+    }
+
+    /// Write `files` into `bolt/x`'s records wherever they are routed.
+    fn put(f: &Fakes, files: &[(String, Vec<u8>)]) -> Written {
+        let _lock = f.state.lock("bolt/x").unwrap().unwrap();
+        let read = f.state.read("bolt/x").unwrap();
+        let changes = Changes {
+            put: files.iter().cloned().collect(),
+            ..Changes::default()
+        };
+        f.state.write("bolt/x", read.version, changes).unwrap()
+    }
+
+    fn line(f: &Fakes) -> sluice_core::line::Line {
+        sluice_core::line::Line::load("bolt/x", f.state.read("bolt/x").unwrap()).unwrap()
+    }
+
+    /// Record 0122 (design D1, D2): a branch with no home anywhere is
+    /// routed by the policy at its head, and its first write writes the
+    /// home that policy chose; once it has a home, the records are read
+    /// where its `home.json` says, this host's own first, a closed one by
+    /// its pointer, whatever the policy at the head names; and this host's
+    /// own home open beside a remote's that came from it refuses the branch,
+    /// naming both.
+    #[test]
+    fn a_fake_branch_is_read_in_the_home_its_records_name() {
+        let f = Fakes::new();
+        let made = f.world.init("bolt/x", &[(POLICY_PATH, UNSIGNED)]);
+        put(
+            &f,
+            &[(
+                "submissions/1.json".into(),
+                submission(1, "unit/a", "fake-host"),
+            )],
+        );
+        let own = f
+            .world
+            .home_in(HERE, "bolt/x")
+            .expect("its first write wrote it");
+        assert_eq!((own.at.as_str(), own.state), (HERE, HomeState::Open));
+        assert_eq!(own.chosen_at, Some(made));
+        assert!(f.world.home_in("origin", "bolt/x").is_none());
+
+        // A policy naming the remote moves no reading.
+        f.world
+            .hand_commit("bolt/x", &[(POLICY_PATH, Some(SIGNED))]);
+        assert!(line(&f).subs.contains_key(&1));
+        put(
+            &f,
+            &[(
+                "submissions/2.json".into(),
+                submission(2, "unit/b", "fake-host"),
+            )],
+        );
+        assert!(f
+            .world
+            .file_in("origin", "bolt/x", "submissions/2.json")
+            .is_none());
+        assert_eq!(line(&f).subs.len(), 2);
+
+        // Closed toward origin, it is read on origin.
+        let mut closed = own.clone();
+        closed.state = HomeState::Closed;
+        closed.closed = Some(sluice_core::records::Closed {
+            to: "origin".into(),
+            carried: BTreeMap::new(),
+        });
+        f.world.put_home(HERE, "bolt/x", &closed);
+        f.world
+            .put_home("origin", "bolt/x", &HomeDoc::open("origin", None));
+        assert!(line(&f).subs.is_empty());
+        put(
+            &f,
+            &[(
+                "submissions/3.json".into(),
+                submission(3, "unit/c", "fake-host"),
+            )],
+        );
+        assert!(f
+            .world
+            .file_in("origin", "bolt/x", "submissions/3.json")
+            .is_some());
+
+        // Another host with no records of it finds it on origin.
+        f.world.be_host("other");
+        assert_eq!(line(&f).subs.keys().copied().collect::<Vec<_>>(), [3]);
+        // Origin closed toward the hosts' own files: each host's own.
+        let mut home = HomeDoc::open("origin", None);
+        home.state = HomeState::Closed;
+        home.closed = Some(sluice_core::records::Closed {
+            to: HERE.into(),
+            carried: BTreeMap::new(),
+        });
+        f.world.put_home("origin", "bolt/x", &home);
+        assert!(line(&f).subs.is_empty());
+        f.world.be_host("fake-host");
+        assert_eq!(line(&f).subs.len(), 2, "this host's own home again");
+
+        // Own open, beside a live origin home that came from it.
+        let mut split = HomeDoc::open("origin", None);
+        split.came_from = Some(sluice_core::records::CameFrom {
+            home: HERE.into(),
+            host: Some("fake-host".into()),
+            carried: BTreeMap::new(),
+        });
+        f.world.put_home("origin", "bolt/x", &split);
+        f.world.put_home(HERE, "bolt/x", &own);
+        let refused = f.state.read("bolt/x").unwrap_err().to_string();
+        assert!(
+            refused.contains("this host's own files") && refused.contains("origin"),
+            "{refused}"
+        );
+        assert!(f.state.lock("bolt/x").is_err());
+
+        // A branch with no home anywhere, signers and a remote at its head.
+        let f = Fakes::new();
+        f.world.init("bolt/x", &[(POLICY_PATH, SIGNED)]);
+        put(
+            &f,
+            &[(
+                "submissions/1.json".into(),
+                submission(1, "unit/a", "fake-host"),
+            )],
+        );
+        assert_eq!(
+            f.world.home_in("origin", "bolt/x").map(|h| h.at),
+            Some("origin".to_string())
+        );
+        assert!(f.world.home_in(HERE, "bolt/x").is_none());
+    }
+
+    /// Record 0122 (design D3 to D5): a carry moves a moving home's live
+    /// submissions to the home it names under their numbers, the next where
+    /// the target holds one, opens it naming where it came from and closes
+    /// the old one with its pointer; a carry stopped after its first write
+    /// is closed by the next, which carries nothing twice; and a branch
+    /// coming home carries only this host's own.
+    #[test]
+    fn a_fake_carry_moves_the_live_records_once() {
+        let f = Fakes::new();
+        f.world.init("bolt/x", &[(POLICY_PATH, UNSIGNED)]);
+        put(
+            &f,
+            &[
+                (
+                    "submissions/52.json".into(),
+                    submission(52, "unit/a", "fake-host"),
+                ),
+                (
+                    "submissions/53.json".into(),
+                    submission(53, "unit/b", "fake-host"),
+                ),
+            ],
+        );
+        // Origin's branch already holds a #53, another host's.
+        f.world
+            .put_home("origin", "bolt/x", &HomeDoc::open("origin", None));
+        {
+            let mut inner = f.world.0.borrow_mut();
+            let line = inner
+                .lines
+                .entry(("origin".into(), "bolt/x".into()))
+                .or_default();
+            line.files.insert(
+                "submissions/53.json".into(),
+                submission(53, "unit/z", "other"),
+            );
+            line.version = 1;
+            inner.next_id = 60;
+        }
+        let mut moving = f.world.home_in(HERE, "bolt/x").unwrap();
+        moving.state = HomeState::Moving;
+        moving.moving = Some(sluice_core::records::Moving {
+            to: "origin".into(),
+            chosen_at: None,
+            since: "t".into(),
+        });
+        f.world.put_home(HERE, "bolt/x", &moving);
+        f.world.stop_next_carry();
+        {
+            let _lock = f.state.lock("bolt/x").unwrap().unwrap();
+            assert!(
+                f.state.carry("bolt/x").is_err(),
+                "stopped after its first write"
+            );
+        }
+        assert_eq!(f.world.carries(), 1);
+        assert_eq!(
+            f.world.home_in(HERE, "bolt/x").unwrap().state,
+            HomeState::Moving
+        );
+        let carried = {
+            let _lock = f.state.lock("bolt/x").unwrap().unwrap();
+            f.state.carry("bolt/x").unwrap()
+        };
+        assert_eq!(carried.to.as_deref(), Some("origin"));
+        assert_eq!(carried.numbers, BTreeMap::from([(52, 52), (53, 60)]));
+        let origin: Vec<u64> = line(&f).subs.keys().copied().collect();
+        assert_eq!(origin, [52, 53, 60], "each carried once");
+        let sixty = line(&f).subs[&60].clone();
+        assert_eq!(
+            (sixty.was, sixty.carried_from.as_deref()),
+            (Some(53), Some(HERE))
+        );
+        let own = f.world.home_in(HERE, "bolt/x").unwrap();
+        assert_eq!(own.closed_to(), Some("origin"));
+        assert_eq!(own.closed.unwrap().carried[&53].number, 60);
+        assert!(f
+            .world
+            .file_in(HERE, "bolt/x", "submissions/52.json")
+            .is_none());
+        // Origin was open: its own home stands as it was.
+        assert_eq!(f.world.home_in("origin", "bolt/x").unwrap().came_from, None);
+        // A carry made writes nothing more.
+        let again = {
+            let _lock = f.state.lock("bolt/x").unwrap().unwrap();
+            f.state.carry("bolt/x").unwrap()
+        };
+        assert_eq!(again, Carried::default());
+        assert_eq!(f.world.carries(), 2);
+
+        // Coming home: origin moving to the hosts' own files, as its lead
+        // writes it; the lead takes its own, another host its own after.
+        let mut home = f.world.home_in("origin", "bolt/x").unwrap();
+        home.state = HomeState::Moving;
+        home.moving = Some(sluice_core::records::Moving {
+            to: HERE.into(),
+            chosen_at: None,
+            since: "t".into(),
+        });
+        f.world.put_home("origin", "bolt/x", &home);
+        f.world.be_host("other");
+        let lead = {
+            let _lock = f.state.lock("bolt/x").unwrap().unwrap();
+            f.state.carry("bolt/x").unwrap()
+        };
+        assert_eq!(lead.numbers, BTreeMap::from([(53, 53)]));
+        let here = f.world.home_in(HERE, "bolt/x").unwrap();
+        assert_eq!(here.came_from.unwrap().home, "origin");
+        assert_eq!(line(&f).subs.keys().copied().collect::<Vec<_>>(), [53]);
+        f.world.be_host("fake-host");
+        let mine = {
+            let _lock = f.state.lock("bolt/x").unwrap().unwrap();
+            f.state.carry("bolt/x").unwrap()
+        };
+        assert_eq!(mine.numbers, BTreeMap::from([(52, 52), (60, 60)]));
+        assert_eq!(line(&f).subs.keys().copied().collect::<Vec<_>>(), [52, 60]);
+        let origin = f.world.home_in("origin", "bolt/x").unwrap();
+        let carried = origin.closed.unwrap().carried;
+        assert_eq!(carried[&53].host.as_deref(), Some("other"));
+        assert_eq!(carried[&60].host.as_deref(), Some("fake-host"));
+        assert_eq!(f.world.carries(), 4);
+    }
 
     /// Record 0114: the records give the number `numbers_from` sets next,
     /// and count on from it, so a test can make two branches hold one.
@@ -3626,7 +4699,7 @@ mod tests {
                 replay: false,
                 system: None,
             };
-            let h = f.tests.start(&request).unwrap();
+            let h = f.tests.start(&request, queue_part(&f)).unwrap();
             match f.tests.progress(&h).unwrap() {
                 Progress::Finished(r) => r.executor.grant,
                 other => panic!("{other:?}"),
@@ -3739,7 +4812,7 @@ mod tests {
                 replay: true,
                 system: None,
             };
-            let h = f.tests.start(&request).unwrap();
+            let h = f.tests.start(&request, queue_part(&f)).unwrap();
             match f.tests.progress(&h).unwrap() {
                 Progress::Finished(r) => (h, r),
                 other => panic!("{other:?}"),
@@ -3811,7 +4884,7 @@ mod tests {
             replay: true,
             system: None,
         };
-        let h = f.tests.start(&request).unwrap();
+        let h = f.tests.start(&request, queue_part(&f)).unwrap();
         let Progress::Finished(r) = f.tests.progress(&h).unwrap() else {
             panic!("finished")
         };
@@ -3852,7 +4925,7 @@ mod tests {
                 replay: false,
                 system: None,
             };
-            let h = f.tests.start(&request).unwrap();
+            let h = f.tests.start(&request, queue_part(&f)).unwrap();
             match f.tests.progress(&h).unwrap() {
                 Progress::Finished(r) => (h, r),
                 other => panic!("{other:?}"),
@@ -3912,7 +4985,7 @@ mod tests {
             replay: false,
             system: None,
         };
-        let h = f.tests.start(&request).unwrap();
+        let h = f.tests.start(&request, queue_part(&f)).unwrap();
         let Progress::Finished(r) = f.tests.progress(&h).unwrap() else {
             panic!("finished")
         };
@@ -3930,8 +5003,85 @@ mod tests {
         );
     }
 
+    /// A part of the fakes' host's bound for a combination's run.
+    fn queue_part(f: &Fakes) -> Part {
+        f.tests
+            .hold(RunKind::Queue)
+            .unwrap()
+            .expect("room on the host")
+    }
+
+    fn a_request(f: &Fakes, name: &str, rev: &Rev) -> RunRequest {
+        RunRequest {
+            place: f.checkout.materialize(name, rev, &Settings::new()).unwrap(),
+            revision: rev.clone(),
+            required: Vec::new(),
+            since: None,
+            limit: None,
+            limits: Default::default(),
+            tests: Settings::new(),
+            command: None,
+            replay: true,
+            system: None,
+        }
+    }
+
+    /// 71 (record 0087): a part is held while the parts held and the runs
+    /// going are under the bound, other repositories' and sessions' among
+    /// them, and none past it.
+    #[test]
+    fn a_part_is_refused_at_the_bound() {
+        let f = Fakes::new();
+        let rev = f.world.init("main", &[("x", "1")]);
+        f.world.host_limit(3);
+        f.world.hold_runs(true);
+        f.world.other_runs(1);
+        let first = f.tests.hold(RunKind::Queue).unwrap().expect("room");
+        assert_eq!(first.kind(), RunKind::Queue);
+        f.tests
+            .start(&a_request(&f, "sluice/try/main/1", &rev), first)
+            .unwrap();
+        let second = f.tests.hold(RunKind::Session).unwrap().expect("room");
+        assert_eq!(
+            f.tests.running().unwrap(),
+            Running {
+                queue: 2,
+                sessions: 1
+            },
+            "the part counts while it is held"
+        );
+        assert!(f.tests.hold(RunKind::Queue).unwrap().is_none());
+        assert!(f.tests.hold(RunKind::Session).unwrap().is_none());
+        drop(second);
+        f.world.complete(&rev);
+        assert!(f.tests.hold(RunKind::Queue).unwrap().is_some());
+    }
+
+    /// 71 (record 0087): a part dropped unstarted, or one whose start
+    /// failed, gives its room back at once.
+    #[test]
+    fn a_dropped_part_frees_its_room() {
+        let f = Fakes::new();
+        let rev = f.world.init("main", &[("x", "1")]);
+        f.world.host_limit(1);
+        f.world.hold_runs(true);
+        let part = f.tests.hold(RunKind::Queue).unwrap().expect("room");
+        assert_eq!(f.world.parts_held(), 1);
+        assert!(f.tests.hold(RunKind::Session).unwrap().is_none());
+        drop(part);
+        assert_eq!(f.world.parts_held(), 0);
+        assert_eq!(f.tests.running().unwrap(), Running::default());
+        // A start that fails gives its part back.
+        let part = f.tests.hold(RunKind::Queue).unwrap().expect("room");
+        f.world.start_fails(Some("the toolchain did not enter"));
+        let request = a_request(&f, "sluice/try/main/1", &rev);
+        assert!(f.tests.start(&request, part).is_err());
+        assert_eq!(f.tests.running().unwrap(), Running::default());
+        assert!(f.tests.hold(RunKind::Queue).unwrap().is_some());
+    }
+
     /// 71: the host's count holds other repositories' runs beside its own,
-    /// and a start at the bound is refused with nothing of it run.
+    /// and no part is held at the bound, nothing of a run started.
     #[test]
     fn the_host_count_holds_other_repositories_runs() {
         let f = Fakes::new();
@@ -3961,19 +5111,27 @@ mod tests {
             replay: true,
             system: None,
         };
-        f.tests.start(&request("sluice/try/main/1")).unwrap();
+        f.tests
+            .start(&request("sluice/try/main/1"), queue_part(&f))
+            .unwrap();
         assert_eq!(f.tests.running().unwrap().queue, 2);
         let second = request("sluice/try/main/2");
-        let err = f.tests.start(&second).unwrap_err();
-        assert!(err.downcast_ref::<AtBound>().is_some(), "{err:#}");
+        assert!(f.tests.hold(RunKind::Queue).unwrap().is_none());
         assert_eq!(f.world.requests().len(), 1, "nothing of it ran");
         // Another host's count is its own.
         f.world.be_host("other");
         assert_eq!(f.tests.running().unwrap().queue, 0);
         f.world.be_host("fake-host");
         f.world.other_runs(0);
-        f.tests.start(&second).unwrap();
+        f.tests.start(&second, queue_part(&f)).unwrap();
         assert_eq!(f.tests.running().unwrap().queue, 2);
+        // A part the host no longer honours is refused at its start.
+        f.world.host_limit(3);
+        let third = request("sluice/try/main/3");
+        f.world.refuse_next_start();
+        let err = f.tests.start(&third, queue_part(&f)).unwrap_err();
+        assert!(err.downcast_ref::<AtBound>().is_some(), "{err:#}");
+        assert_eq!(f.world.parts_held(), 0);
     }
 
     /// 124: a branch on a remote has a host copy, levelled only from the
@@ -4101,7 +5259,7 @@ mod tests {
         LastResult {
             at: "2026-10-16T09:00:00Z".into(),
             head: Rev("a".into()),
-            kind: sluice_seams::RunKind::Checks,
+            kind: sluice_seams::SessionRunKind::Checks,
             outcome,
             recorded: true,
             tasks: Vec::new(),

@@ -31,13 +31,16 @@ use std::process::{Output, Stdio};
 use std::rc::Rc;
 
 use anyhow::{anyhow, bail, Context, Result};
-use sluice_core::records::{parse_lines, to_line, ResultKind, ResultLine, RESULT_SCHEMA};
+use sluice_core::records::{
+    parse_lines, to_line, HomeDoc, ResultKind, ResultLine, HOME_FILE, RESULT_SCHEMA,
+};
 use sluice_seams::{
-    read_refused, Changes, Enforced, Guard, ReadRefused, Rev, Snapshot, State, TaskLog,
+    read_refused, Changes, Enforced, Guard, ReadRefused, ResultAsk, Rev, Snapshot, State, TaskLog,
     TaskProgress, Written, FINISHED, KEPT_LOGS,
 };
 
 use super::local_files::LocalFiles;
+use super::local_refs::LocalRefs;
 use super::pushed_refs::{command, Pushed, PushedRefs};
 use crate::signing::dsse::Envelope;
 use crate::signing::ssh;
@@ -67,8 +70,21 @@ pub enum SignerKey {
         allowed: Vec<ssh::Allowed>,
         digest: String,
     },
-    /// A forge job's keyless identity, verified by the forge's profile.
-    Keyless,
+    /// 78, 79, record 0119 (design D13): a forge job's keyless identity,
+    /// its workflow at its ref in the branch's repository, verified
+    /// against the roots sluice carries; `None` where the policy's table
+    /// or the branch's remote names none, which verifies nothing.
+    Keyless(Option<crate::profiles::github::keyless::Identity>),
+    /// 78, record 0119 (design D7 of the change
+    /// `a-codebuild-fleet-runs-a-queues-checks`): a key in a key service,
+    /// by its ARN, verified by the public half the policy lists with no
+    /// service asked; and a digest of the two that tells this key from
+    /// another the same signer is listed with elsewhere.
+    Kms {
+        key: String,
+        public: p256::ecdsa::VerifyingKey,
+        digest: String,
+    },
 }
 
 impl SignerKey {
@@ -88,6 +104,16 @@ impl SignerKey {
         })
     }
 
+    /// A `kms` signer: `key` a key's ARN, `public` its public half as the
+    /// policy lists it, the base64 of its DER SubjectPublicKeyInfo.
+    pub fn kms(key: &str, public: &str) -> Result<SignerKey> {
+        Ok(SignerKey::Kms {
+            key: key.into(),
+            public: crate::signing::kms::public_half(public)?,
+            digest: sha256_hex(format!("{key} {}", public.trim()).as_bytes()),
+        })
+    }
+
     /// Whether `key` is among those listed: a signature it makes verifies
     /// (78, 87).
     pub fn lists(&self, key: &ssh_key::PublicKey) -> bool {
@@ -95,7 +121,14 @@ impl SignerKey {
             SignerKey::Ssh { allowed, .. } => {
                 allowed.iter().any(|a| a.key.key_data() == key.key_data())
             }
-            SignerKey::Keyless => false,
+            // 78, record 0119 (design D13): a pool's job holds no key; its
+            // signer is listed by its identity, so a job may claim.
+            SignerKey::Keyless(identity) => identity.is_some(),
+            // Record 0119 (design D7; boomdrive-design's ruling of
+            // 2026-11-16): a kms signer's one listed key is its key in the
+            // key service, so no host signs as one: whatever SSH key it
+            // holds, it is not accepted, leads nothing and claims nothing.
+            SignerKey::Kms { .. } => false,
         }
     }
 
@@ -103,7 +136,8 @@ impl SignerKey {
     fn digest(&self) -> &str {
         match self {
             SignerKey::Ssh { digest, .. } => digest,
-            SignerKey::Keyless => "keyless",
+            SignerKey::Keyless(_) => "keyless",
+            SignerKey::Kms { digest, .. } => digest,
         }
     }
 }
@@ -143,6 +177,9 @@ pub struct RemoteRefs {
     /// 129: a tick's ask fetched the hosts' signs of life since
     /// [`State::beats`] last answered: the next answers from it.
     asked: std::cell::Cell<bool>,
+    /// 129 (design D16): every answer reads what the host process's last
+    /// ask fetched, and none fetches ([`RemoteRefs::hold`]).
+    held: std::cell::Cell<bool>,
 }
 
 impl RemoteRefs {
@@ -161,7 +198,15 @@ impl RemoteRefs {
             stale: RefCell::default(),
             verified: RefCell::default(),
             asked: std::cell::Cell::new(false),
+            held: std::cell::Cell::new(false),
         }
+    }
+
+    /// 129 (design D16): from now on the hosts' signs of life are read as
+    /// the host process's last ask fetched them, with no fetch: a one-shot
+    /// read's.
+    pub fn hold(&self) {
+        self.held.set(true);
     }
 
     /// The same profile, its branches locked through `locks`, the lock the
@@ -191,10 +236,66 @@ impl RemoteRefs {
         self.pushed.remote()
     }
 
+    /// Record 0122 (design D5; record 0114): raise the remote's count past
+    /// `number`, so it gives no number up to it, by a leased write of
+    /// `refs/sluice/ids`; a count already past it is left as it is.
+    pub fn raise_ids_past(&self, number: u64) -> Result<()> {
+        let name = "refs/sluice/ids";
+        for _ in 0..ADD_TRIES {
+            let tip = self.fetch(name)?;
+            let next: u64 = match &tip {
+                Some(c) => match self.tree(c)?.get("next") {
+                    Some((_, b)) => std::str::from_utf8(b)?.trim().parse()?,
+                    None => 1,
+                },
+                None => 1,
+            };
+            if next > number {
+                return Ok(());
+            }
+            let files = BTreeMap::from([(
+                "next".to_string(),
+                self.blob(format!("{}\n", number + 1).as_bytes())?,
+            )]);
+            let commit = self.commit(&files, None, &format!("next id {}", number + 1))?;
+            if self.push_leased(&commit, name, tip.as_deref())? {
+                return Ok(());
+            }
+        }
+        bail!(
+            "raising the submission ids on {} was refused {ADD_TRIES} times",
+            self.remote()
+        )
+    }
+
+    /// Record 0122 (design D2): `branch`'s home document in its state on
+    /// the remote as this host last fetched it, read with no process and
+    /// without touching what a write is leased on; `None` where the state
+    /// fetched holds none, or none was fetched.
+    pub fn held_home(&self, branch: &str) -> Result<Option<HomeDoc>> {
+        fetched_home(self.pushed.local(), self.remote(), branch)
+    }
+
     /// The results each signer in `signers` signed, each verified with the
     /// key `signers` lists for it and with no other, and this host's own
     /// replays (core.9). `signers` is the list the policy of the branch
     /// whose gate reads them names (78; rule core.22).
+    /// Where this host's own replays on the remote are kept (design D17).
+    pub fn own_results_path(&self) -> PathBuf {
+        self.own.results_path()
+    }
+
+    /// `signer`'s runs on the remote as this host last fetched them, read
+    /// for a branch whose policy lists `key` for it: what the host
+    /// process's results index reads (design D17; rule core.22).
+    pub fn signer_ref<'a>(&'a self, signer: &'a str, key: &'a SignerKey) -> FetchedRuns<'a> {
+        FetchedRuns {
+            refs: self,
+            signer,
+            key,
+        }
+    }
+
     pub fn results_with(&self, signers: &BTreeMap<String, SignerKey>) -> Result<Vec<u8>> {
         let mut bytes = self.own.results_log()?;
         for (signer, key) in signers {
@@ -438,6 +539,12 @@ impl RemoteRefs {
             all.extend(blobs.clone());
             let commit = self.commit(&all, tip.as_deref(), message)?;
             if self.push_leased(&commit, name, tip.as_deref())? {
+                // What was pushed is read here as fetched, so the host
+                // process's index reads a round's own runs with no fetch
+                // (design D17).
+                self.pushed
+                    .local()
+                    .write_ref(&self.fetched(name), &Rev(commit.clone()))?;
                 return Ok(());
             }
         }
@@ -605,9 +712,38 @@ pub(crate) fn ask(pushed: &PushedRefs) -> Result<()> {
     let heads = format!("+{HEADS}:refs/sluice-fetched/{remote}/heads/*");
     let combinations =
         format!("+refs/sluice/combinations/*:refs/sluice-fetched/{remote}/combinations/*");
-    let specs = [&state, &hosts, &branches, &heads, &combinations].map(String::as_str);
+    // Design D17: each signer's runs, which the host process's results
+    // index reads as this ask last fetched them.
+    let runs = format!("+refs/sluice/runs/*:refs/sluice-fetched/{remote}/runs/*");
+    let specs = [&state, &hosts, &branches, &heads, &combinations, &runs].map(String::as_str);
     pushed.fetch_specs("refs/sluice/*", &specs, &["--prune"])?;
     Ok(())
+}
+
+/// Record 0122 (design D2): `branch`'s home document in its state on
+/// `remote` as this host last fetched it into `local`, read with no
+/// process and with no profile of the remote opened, so a branch whose
+/// home is this host's own files asks its remote nothing for it (129;
+/// rule core.31); `None` where the state fetched holds none, or none was
+/// fetched.
+pub(crate) fn fetched_home(
+    local: &LocalRefs,
+    remote: &str,
+    branch: &str,
+) -> Result<Option<HomeDoc>> {
+    let name = state_ref(branch)?;
+    let rest = name.strip_prefix("refs/sluice/").unwrap_or(&name);
+    let Some(at) = local.read_ref(&format!("refs/sluice-fetched/{remote}/{rest}"))? else {
+        return Ok(None);
+    };
+    let entries = local.tree_entries(at.as_str())?;
+    let Some((_, oid)) = entries.iter().find(|(p, _)| p == HOME_FILE) else {
+        return Ok(None);
+    };
+    let bytes = local.blob(oid)?;
+    Ok(Some(serde_json::from_slice(&bytes).with_context(|| {
+        format!("reading {branch}'s {HOME_FILE} on {remote}")
+    })?))
 }
 
 /// 129: the branches whose state this host fetched from `pushed`'s remote,
@@ -617,6 +753,57 @@ pub(crate) fn fetched_branches(pushed: &PushedRefs) -> Result<Vec<(String, Rev)>
         .local()
         .refs_under(&format!("refs/sluice-fetched/{}/state/", pushed.remote()))
 }
+/// A signer's runs on a remote as this host last fetched them, read for a
+/// branch whose policy lists `key` for the signer (design D17; rule
+/// core.22).
+pub struct FetchedRuns<'a> {
+    refs: &'a RemoteRefs,
+    signer: &'a str,
+    key: &'a SignerKey,
+}
+
+impl crate::host_process::results::SignerRef for FetchedRuns<'_> {
+    fn signer(&self) -> &str {
+        self.signer
+    }
+
+    fn digest(&self) -> &str {
+        self.key.digest()
+    }
+
+    fn entries(&self) -> Result<Vec<(String, String)>> {
+        let name = format!("refs/sluice/runs/{}", self.signer);
+        match self.refs.pushed.read_ref(&self.refs.fetched(&name))? {
+            Some(commit) => self.refs.pushed.local().tree_entries(commit.as_str()),
+            None => Ok(Vec::new()),
+        }
+    }
+
+    fn blob(&self, oid: &str) -> Result<Vec<u8>> {
+        self.refs.pushed.local().blob(oid)
+    }
+
+    fn verify(&self, bytes: &[u8]) -> Result<Vec<ResultLine>> {
+        verify(self.signer, self.key, bytes)
+    }
+}
+
+/// Keep `doc` at `path`, written whole, or remove it with `None` (133).
+fn keep_file(path: &Path, doc: Option<&[u8]>) -> Result<()> {
+    let Some(doc) = doc else {
+        return match std::fs::remove_file(path) {
+            Ok(()) => Ok(()),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
+            Err(e) => Err(e.into()),
+        };
+    };
+    std::fs::create_dir_all(path.parent().expect("a parent"))?;
+    let tmp = path.with_extension("json.tmp");
+    std::fs::write(&tmp, doc)?;
+    std::fs::rename(&tmp, path)?;
+    Ok(())
+}
+
 /// `refs/sluice/state/<branch>`, for a branch git may name.
 fn state_ref(branch: &str) -> Result<String> {
     if branch.is_empty()
@@ -646,14 +833,52 @@ fn tempfile_path(git_dir: &Path, what: &str) -> Result<PathBuf> {
 /// alone, and a statement with none reads with no limits and no grant
 /// (19, 138; design D3).
 fn verify(signer: &str, key: &SignerKey, bytes: &[u8]) -> Result<Vec<ResultLine>> {
-    let envelope: Envelope = serde_json::from_slice(bytes).context("not a DSSE envelope")?;
-    let who = match key {
-        SignerKey::Ssh { allowed, .. } => ssh::verify(&envelope, allowed)?
-            .map(|a| a.principal.clone())
-            .ok_or_else(|| anyhow!("no key {signer} lists signed it"))?,
-        SignerKey::Keyless => bail!("{signer}'s keyless signatures are not verified on this host"),
+    let (s, who) = match key {
+        SignerKey::Ssh { allowed, .. } => {
+            let envelope: Envelope =
+                serde_json::from_slice(bytes).context("not a DSSE envelope")?;
+            let who = ssh::verify(&envelope, allowed)?
+                .map(|a| a.principal.clone())
+                .ok_or_else(|| anyhow!("no key {signer} lists signed it"))?;
+            (Statement::from_envelope(&envelope)?, who)
+        }
+        // 78, 79, record 0119 (design D13): a bundle verified against the
+        // roots sluice carries, by the signer's workflow and ref; one that
+        // does not verify is left out, naming the identity it carried.
+        SignerKey::Keyless(identity) => {
+            let identity = identity.as_ref().ok_or_else(|| {
+                anyhow!("[signers.{signer}] github names no workflow and ref this host can verify")
+            })?;
+            let bundle = std::str::from_utf8(bytes).context("not a Sigstore bundle")?;
+            let statement = crate::profiles::github::keyless::verify(bundle, identity)?;
+            let s: Statement = serde_json::from_value(statement)
+                .context("the bundle's statement is no run's")
+                .and_then(Statement::checked)?;
+            let who = s
+                .predicate
+                .claim
+                .clone()
+                .unwrap_or_else(|| signer.to_string());
+            (s, who)
+        }
+        // 78, 79, record 0119 (design D7): an envelope the listed key
+        // signed, under its ARN, verified by the listed half alone; one
+        // under another ARN, or that the half does not verify, is left
+        // out, naming the key.
+        SignerKey::Kms { key, public, .. } => {
+            let envelope: Envelope =
+                serde_json::from_slice(bytes).context("not a DSSE envelope")?;
+            crate::signing::kms::verify(&envelope, key, public)
+                .with_context(|| format!("[signers.{signer}] kms names the key {key}"))?;
+            let s = Statement::from_envelope(&envelope)?;
+            let who = s
+                .predicate
+                .claim
+                .clone()
+                .unwrap_or_else(|| signer.to_string());
+            (s, who)
+        }
     };
-    let s = Statement::from_envelope(&envelope)?;
     let run = s.predicate;
     let held = run.held.clone().unwrap_or_default();
     Ok(run
@@ -773,7 +998,7 @@ fn held_key(e: &Enforced) -> Option<HeldKey> {
     })
 }
 
-fn sha256_hex(bytes: &[u8]) -> String {
+pub(crate) fn sha256_hex(bytes: &[u8]) -> String {
     use sha2::{Digest, Sha256};
     Sha256::digest(bytes)
         .iter()
@@ -840,7 +1065,7 @@ impl State for RemoteRefs {
     /// 129: once a tick's ask fetched them, the next answer reads what it
     /// fetched, with no fetch of its own.
     fn beats(&self) -> Result<BTreeMap<String, (String, Vec<u8>)>> {
-        if !self.asked.replace(false) {
+        if !self.asked.replace(false) && !self.held.get() {
             let spec = format!(
                 "+refs/sluice/hosts/*:refs/sluice-fetched/{}/hosts/*",
                 self.remote()
@@ -966,6 +1191,30 @@ impl State for RemoteRefs {
         self.stale.borrow().get(branch).cloned()
     }
 
+    fn intake_refusal(&self, branch: &str) -> Result<Option<Vec<u8>>> {
+        match std::fs::read(self.own_file("intake", branch)?) {
+            Ok(b) => Ok(Some(b)),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
+            Err(e) => Err(e.into()),
+        }
+    }
+
+    fn keep_intake_refusal(&self, branch: &str, doc: Option<&[u8]>) -> Result<()> {
+        keep_file(&self.own_file("intake", branch)?, doc)
+    }
+
+    fn pool_refusal(&self, branch: &str) -> Result<Option<Vec<u8>>> {
+        match std::fs::read(self.own_file("pool", branch)?) {
+            Ok(b) => Ok(Some(b)),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
+            Err(e) => Err(e.into()),
+        }
+    }
+
+    fn keep_pool_refusal(&self, branch: &str, doc: Option<&[u8]>) -> Result<()> {
+        keep_file(&self.own_file("pool", branch)?, doc)
+    }
+
     fn refusal(&self, branch: &str) -> Result<Option<Vec<u8>>> {
         match std::fs::read(self.refusal_file(branch)?) {
             Ok(b) => Ok(Some(b)),
@@ -1065,6 +1314,12 @@ impl State for RemoteRefs {
             return Ok(Written::Refused);
         }
         self.read.borrow_mut().remove(branch);
+        // Record 0122 (design D2): the state this write left is the state
+        // this host holds of the remote, so what it reads with no fetch,
+        // the home among it, is what it wrote.
+        self.pushed
+            .local()
+            .write_ref(&self.fetched(&name), &Rev(commit.clone()))?;
         // 82: a submission moved to the finished records has left sluice,
         // and its head with it.
         let prefix = format!("{FINISHED}/");
@@ -1117,8 +1372,8 @@ impl State for RemoteRefs {
     /// This host's own replays alone: the profile keeps no signer's key,
     /// so a branch's signed runs are read with
     /// [`RemoteRefs::results_with`] and its own policy's list (78).
-    fn results(&self, _: &str) -> Result<Vec<u8>> {
-        self.results_with(&BTreeMap::new())
+    fn results_for(&self, _: &str, ask: &ResultAsk) -> Result<Vec<u8>> {
+        Ok(ask.answer(&self.results_with(&BTreeMap::new())?))
     }
 
     /// Nothing this host signs counts: with no list, no signed run is
@@ -1129,9 +1384,25 @@ impl State for RemoteRefs {
 
     /// Could-not-run-1 116: every result set aside on the remote, one file
     /// each under `refs/sluice/set-aside`. A set-aside only stops a result
-    /// counting, so any host that submits may add one.
+    /// counting, so any host that submits may add one. 129 (design D16):
+    /// held, as this host last fetched them, with no fetch.
+    /// Record 0119 (design D11; 109): added to `refs/sluice/runs/<signer>`
+    /// on top of whatever it holds.
+    fn add_signed(&self, _branch: &str, signer: &str, path: &str, record: &[u8]) -> Result<()> {
+        let files = BTreeMap::from([(path.to_string(), record.to_vec())]);
+        self.add(
+            &format!("refs/sluice/runs/{signer}"),
+            &files,
+            &format!("sluice: {signer}'s run {path}"),
+        )
+    }
+
     fn set_asides(&self) -> Result<Vec<u8>> {
-        let Some(commit) = self.fetch(SET_ASIDE)? else {
+        let commit = match self.held.get() {
+            true => self.pushed.read_ref(&self.fetched(SET_ASIDE))?.map(|r| r.0),
+            false => self.fetch(SET_ASIDE)?,
+        };
+        let Some(commit) = commit else {
             return Ok(Vec::new());
         };
         let mut bytes = Vec::new();
@@ -1273,5 +1544,71 @@ impl State for RemoteRefs {
     ) -> Result<()> {
         self.own
             .put_progress_under(&self.locks, branch, candidate, tasks)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::profiles::github::keyless::Identity;
+
+    /// A bundle of the public-good instance, issued to prefix-dev's
+    /// workflow `action.yaml` on its `main`, its statement a conda
+    /// package's: the recorded one the forge tests read.
+    const PUBLIC_GOOD: &str = include_str!("../../tests/profiles/forge/public-good.sigstore.json");
+
+    /// 78, record 0119 (design D13; rule core.22): a `github` signer lists
+    /// a pool's job, which holds no key, so its job may claim, and one whose
+    /// table or remote names no workflow lists nothing; a bundle issued to
+    /// another workflow is left out, naming the identity it carried; one
+    /// issued to the signer's own workflow that holds no run's statement
+    /// counts for nothing; and a signer with no identity verifies nothing.
+    #[test]
+    fn a_github_signers_record_counts_only_from_its_own_workflow() {
+        let ours = SignerKey::Keyless(Some(Identity::workflow(
+            "acme",
+            "widgets",
+            ".github/workflows/sluice.yml",
+            "refs/heads/main",
+        )));
+        let key = ssh_key::PrivateKey::random(&mut rand_core::OsRng, ssh_key::Algorithm::Ed25519)
+            .unwrap();
+        assert!(ours.lists(key.public_key()));
+        assert!(!SignerKey::Keyless(None).lists(key.public_key()));
+
+        let said = format!(
+            "{:#}",
+            verify("forge", &ours, PUBLIC_GOOD.as_bytes()).unwrap_err()
+        );
+        assert!(
+            said.contains(
+                "prefix-dev/sigstore-example/.github/workflows/action.yaml@refs/heads/main"
+            ),
+            "the identity it carried: {said}"
+        );
+
+        let theirs = SignerKey::Keyless(Some(Identity::workflow(
+            "prefix-dev",
+            "sigstore-example",
+            ".github/workflows/action.yaml",
+            "refs/heads/main",
+        )));
+        let said = format!(
+            "{:#}",
+            verify("forge", &theirs, PUBLIC_GOOD.as_bytes()).unwrap_err()
+        );
+        assert!(
+            said.contains("the bundle's statement is no run's"),
+            "{said}"
+        );
+
+        let said = format!(
+            "{:#}",
+            verify("forge", &SignerKey::Keyless(None), PUBLIC_GOOD.as_bytes()).unwrap_err()
+        );
+        assert!(
+            said.contains("[signers.forge] github names no workflow and ref"),
+            "{said}"
+        );
     }
 }

@@ -249,9 +249,11 @@ fn the_window_shrinks_on_a_failure_grows_on_passes_and_the_host_bounds_it() {
     assert_eq!(h.w().live_runs(), 1);
 }
 
-/// satisfies: 60, S15, 37
+/// satisfies: 60, S15, 37; record 0122: the run ends with no outcome, and
+/// its follow-up runs its checks again
 #[test]
 fn a_run_whose_executor_stopped_has_no_outcome_and_runs_again() {
+    use sluice_core::records::CheckOutcome;
     let h = Harness::bolt();
     h.w().hold_runs(true);
     h.work("unit/a", "agent-a", &[("a/lib", Some("a2"))]);
@@ -261,6 +263,16 @@ fn a_run_whose_executor_stopped_has_no_outcome_and_runs_again() {
     h.w().lose(&c);
     h.step();
     assert!(h.events().iter().any(|e| matches!(e, Event::Lost { .. })));
+    let runs = h.doc().candidates[0].runs.clone();
+    let ended = runs[0].ended.as_ref().expect("the run ended");
+    assert_eq!(
+        ended.outcomes.get("#gate"),
+        Some(&CheckOutcome::None {
+            why: "its executor stopped before it reported".into()
+        })
+    );
+    assert_eq!(runs[1].follows, Some(0));
+    assert_eq!(runs[1].checks, runs[0].checks);
     h.w().hold_runs(false);
     h.w().complete_all();
     h.settle();
@@ -276,19 +288,40 @@ fn a_landed_change_to_the_gate_runs_every_check_it_now_requires() {
     ));
 }
 
-/// satisfies: 70, 55
+/// satisfies: 70, 55; 60, 114; record 0122: a report holding none of the
+/// required checks is no pass: the run ends with no outcome for them,
+/// nobody is blamed, and a follow-up holds them
 #[test]
 fn a_report_holding_none_of_the_required_checks_is_no_pass() {
+    use sluice_core::records::CheckOutcome;
     let h = Harness::new(&policy(false, "fail", 4).replace("#gate", "#nothing"));
     h.work("unit/a", "agent-a", &[("a/lib", Some("a2"))]);
     let one = h.submit("unit/a");
-    h.settle();
-    assert_eq!(h.sub(one).state, State::Failed);
+    for _ in 0..3 {
+        h.step();
+    }
+    let s = h.sub(one);
+    assert!(
+        s.state != State::Landed && s.state != State::Failed,
+        "{s:?}"
+    );
+    assert!(s.failed.is_empty());
+    assert!(!h.events().iter().any(|e| matches!(e, Event::Blamed { .. })));
+    let runs = h.doc().candidates[0].runs.clone();
+    let ended = runs[0].ended.as_ref().expect("the run ended");
+    assert_eq!(
+        ended.outcomes.get("#nothing"),
+        Some(&CheckOutcome::None {
+            why: "the run's report holds no outcome for it".into()
+        })
+    );
+    assert_eq!(runs[1].follows, Some(0));
+    assert_eq!(runs[1].checks, ["#nothing"]);
 }
 
 /// Two bolt branches, each with two submissions, under a bound of two;
-/// how many runs are live after `serves` steps both branches.
-fn live_runs_serving(serves: sluice_core::Serves) -> usize {
+/// how many runs are live after rounds of both branches.
+fn live_runs_of_two_branches() -> usize {
     let h = Harness::bolt();
     let other = "bolt/y";
     h.w().init(
@@ -322,7 +355,7 @@ fn live_runs_serving(serves: sluice_core::Serves) -> usize {
             .unwrap()
             .unwrap();
     }
-    let s = h.sluice().serving(serves);
+    let s = h.sluice();
     for _ in 0..3 {
         s.step(BRANCH).unwrap();
         s.step(other).unwrap();
@@ -333,37 +366,30 @@ fn live_runs_serving(serves: sluice_core::Serves) -> usize {
 /// satisfies: 71
 #[test]
 fn every_instance_on_the_host_shares_its_bound() {
-    // One instance serving every branch: two runs across both.
-    assert_eq!(live_runs_serving(sluice_core::Serves::Every), 2);
-    // Instances that each serve the branch they step share the host's
-    // bound all the same: two runs across both.
-    assert_eq!(live_runs_serving(sluice_core::Serves::Stepped), 2);
+    // Rounds of either branch hold each run's part of the host's bound
+    // (rule core.49): two runs across both.
+    assert_eq!(live_runs_of_two_branches(), 2);
 }
 
 /// satisfies: 71; session-runs-1 89
 #[test]
-fn session_runs_hold_the_bound_under_either_instance() {
-    for serves in [sluice_core::Serves::Stepped, sluice_core::Serves::Every] {
-        let h = Harness::bolt();
-        h.w().host_limit(2);
-        h.w().session_run("/work/a", true);
-        h.w().session_run("/work/b", true);
-        h.work("unit/a", "agent-a", &[("a/lib", Some("a2"))]);
-        let one = h.submit("unit/a");
-        let s = h.sluice().serving(serves);
-        s.step(BRANCH).unwrap();
-        s.step(BRANCH).unwrap();
-        assert!(
-            h.w().started().is_empty(),
-            "{serves:?}: started into a full bound"
-        );
-        // A session run whose process is gone holds nothing.
-        h.w().kill_session("/work/a");
-        s.step(BRANCH).unwrap();
-        assert_eq!(h.w().started().len(), 1, "{serves:?}");
-        h.settle();
-        assert_eq!(h.sub(one).state, State::Landed);
-    }
+fn session_runs_hold_the_bound() {
+    let h = Harness::bolt();
+    h.w().host_limit(2);
+    h.w().session_run("/work/a", true);
+    h.w().session_run("/work/b", true);
+    h.work("unit/a", "agent-a", &[("a/lib", Some("a2"))]);
+    let one = h.submit("unit/a");
+    let s = h.sluice();
+    s.step(BRANCH).unwrap();
+    s.step(BRANCH).unwrap();
+    assert!(h.w().started().is_empty(), "started into a full bound");
+    // A session run whose process is gone holds nothing.
+    h.w().kill_session("/work/a");
+    s.step(BRANCH).unwrap();
+    assert_eq!(h.w().started().len(), 1);
+    h.settle();
+    assert_eq!(h.sub(one).state, State::Landed);
 }
 
 /// satisfies: 71; session-runs-1 89, 91
@@ -481,20 +507,38 @@ fn a_limit_the_executor_cannot_hold_refuses_the_run() {
     assert_ne!(h.sub(one).state, State::Landed);
 }
 
-/// satisfies: 15, 55
+/// satisfies: 15, 55; 60, 114; record 0122: a required check the run left
+/// without a result is no pass: it has no outcome, nobody is blamed, and a
+/// follow-up holding it settles it
 #[test]
 fn a_required_check_the_run_left_without_a_result_is_no_pass() {
+    use sluice_core::records::CheckOutcome;
     let h = Harness::bolt();
     h.w().skips("b:test");
     h.work("unit/a", "agent-a", &[("b/lib", Some("b2"))]);
     let one = h.submit("unit/a");
-    h.settle();
-    assert_eq!(h.sub(one).state, State::Failed);
+    h.step();
+    h.step();
+    assert_ne!(h.sub(one).state, State::Landed, "no pass");
+    assert!(h.sub(one).failed.is_empty());
     assert!(results(&h).iter().all(|r| r.task != "b:test"));
-    match &h.w().delivered()[0].decided {
-        Decided::Failed { failed, .. } => assert_eq!(failed, &vec!["b:test".to_string()]),
-        other => panic!("delivered {other:?}"),
-    }
+    assert!(h.w().delivered().is_empty(), "nobody is blamed");
+    let runs = h.doc().candidates[0].runs.clone();
+    let ended = runs[0].ended.as_ref().expect("the run ended");
+    assert_eq!(
+        ended.outcomes.get("b:test"),
+        Some(&CheckOutcome::None {
+            why: "the run's report holds no outcome for it".into()
+        })
+    );
+    assert_eq!(
+        (runs[1].follows, runs[1].checks.as_slice()),
+        (Some(0), &["b:test".to_string()][..])
+    );
+    h.w().stops_skipping("b:test");
+    h.settle();
+    assert_eq!(h.sub(one).state, State::Landed);
+    assert!(results(&h).iter().any(|r| r.task == "b:test"));
 }
 
 /// satisfies: 15, 27 (ADR 0044)
@@ -670,6 +714,10 @@ fn a_replay_no_trusted_pass_proves_runs_again_with_no_replay() {
         })
         .expect("an unproven line");
     assert_eq!(tasks.len(), 3);
+    // Record 0122 (design D7): its follow-up held the unproven checks.
+    assert!(events
+        .iter()
+        .any(|e| matches!(e, Event::Opened { run: 1, .. })));
     // The first attempt's replays are recorded as replays (core.9), and
     // the runs as runs.
     let r = results(&h);
@@ -755,7 +803,11 @@ fn a_combination_opens_one_run_per_system() {
     );
     // This host is linux-x64: it runs that run alone, and the other stays
     // open for an executor of its system (87).
-    assert_eq!(runs[0].state, sluice_core::records::RunState::Passed);
+    assert_eq!(runs[0].state, sluice_core::records::RunState::Closed);
+    assert_eq!(
+        runs[0].ended.as_ref().map(|e| e.verdict()),
+        Some(sluice_core::records::RunVerdict::Passed)
+    );
     assert_eq!(runs[1].state, sluice_core::records::RunState::Open);
     let req = &h.w().requests()[0];
     assert_eq!(req.system.as_deref(), Some("linux-x64"));
@@ -779,21 +831,23 @@ fn a_run_no_executor_takes_reads_as_not_passed_at_the_time_limit() {
     for _ in 0..4 {
         s.step(BRANCH).unwrap();
     }
+    // Record 0122 (design D6): not passed, nobody blamed and no check
+    // failed; the macos-arm64 run's checks say no host that may take it was
+    // live, and the submission stays queued, formed again.
     let sub = h.sub(one);
-    assert_eq!(sub.state, State::Failed);
-    assert_eq!(sub.result.as_deref(), Some("timed out"));
-    let missing: Vec<(&str, Option<&str>)> = sub
-        .failed
+    assert_ne!(sub.state, State::Failed);
+    assert!(sub.failed.is_empty(), "{:?}", sub.failed);
+    let events = h.events();
+    assert!(!events.iter().any(|e| matches!(e, Event::Blamed { .. })));
+    assert!(events.iter().any(|e| matches!(
+        e,
+        Event::Ended { system: Some(s), why: Some(w), .. }
+            if s == "macos-arm64" && w == "no host that may take it was live"
+    )));
+    assert!(events
         .iter()
-        .map(|f| (f.task.as_str(), f.system.as_deref()))
-        .collect();
-    assert_eq!(
-        missing,
-        [
-            ("a:test", Some("macos-arm64")),
-            ("b:test", Some("macos-arm64"))
-        ]
-    );
+        .any(|e| matches!(e, Event::Result { result, .. } if result == "not passed")));
+    assert!(h.w().delivered().is_empty());
     // Each result names the system it ran on.
     assert!(results(&h)
         .iter()
@@ -847,4 +901,71 @@ fn a_fail_under_another_grant_is_never_weighed_against_a_pass() {
         (a[0].0, a[0].1.as_deref(), a[1].0, a[1].1.as_deref()),
         (Outcome::Fail, Some("g1"), Outcome::Pass, Some("g2"))
     );
+}
+
+/// satisfies: 69, 109, 15, 38; design D17: a result belongs to its key
+/// and its system, not to a branch. A bolt's passes, recorded under their
+/// keys, still count for `main`'s gate once the bolt landed and was
+/// removed: `main`'s combination, whose tree gives each check the same
+/// key, replays them with nothing run, and the results log still holds
+/// the bolt's runs.
+#[test]
+fn a_removed_branchs_results_still_count() {
+    let h = Harness::bolt();
+    let main_policy = format!(
+        "{}\n[branches.main]\nrequired = [\"#gate\"]\nparallel = 4\nbatch = false\n\
+         flaky = \"fail\"\ntimeout = \"20m\"\ntrust = [\"open\", \"sandbox\", \"container\"]\n",
+        policy(false, "fail", 4)
+    );
+    h.w().init(
+        "main",
+        &[
+            (".config/sluice.toml", &main_policy),
+            ("a/lib", "a1"),
+            ("b/lib", "b1"),
+            ("c/lib", "c1"),
+        ],
+    );
+    h.work("unit/a", "agent-a", &[("a/lib", Some("a2"))]);
+    let one = h.submit("unit/a");
+    h.settle();
+    assert_eq!(h.sub(one).state, State::Landed);
+    let ran = h.w().observed().len();
+    let bolts: Vec<ResultLine> = results(&h)
+        .into_iter()
+        .filter(|l| l.branch == BRANCH && l.kind == ResultKind::Ran)
+        .collect();
+    assert!(!bolts.is_empty());
+
+    // The bolt lands onto main, and is removed.
+    let before = h.w().tip("main");
+    let head = h.w().work(&before, &[("a/lib", Some("a2"))]);
+    h.w().delete_branch(BRANCH);
+    h.w().session("unit/m", "agent-m", &head);
+    let s = h.sluice();
+    let two = s
+        .submit(&sluice_core::SubmitRequest {
+            head: sluice_core::SubmitHead::Worktree("unit/m".into()),
+            branch: "main".into(),
+            after: vec![],
+            priority: 0,
+            subject: None,
+        })
+        .unwrap()
+        .unwrap()
+        .id;
+    for _ in 0..6 {
+        s.step("main").unwrap();
+    }
+    assert_ne!(h.w().tip("main"), before, "#{two} landed on main");
+    // Nothing ran again: main's gate counted the bolt's passes (15, 38).
+    assert_eq!(h.w().observed().len(), ran);
+    let r = results(&h);
+    let replays: Vec<&ResultLine> = r.iter().filter(|l| l.branch == "main").collect();
+    assert!(!replays.is_empty());
+    assert!(replays.iter().all(|l| l.kind == ResultKind::Replayed));
+    // The bolt's runs stay in the log (69, 109).
+    for b in &bolts {
+        assert!(r.contains(b), "{b:?} is gone from the results log");
+    }
 }

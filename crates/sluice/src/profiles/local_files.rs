@@ -22,7 +22,7 @@ use std::path::{Path, PathBuf};
 use anyhow::{anyhow, bail, Context, Result};
 use serde::{Deserialize, Serialize};
 use sluice_seams::{
-    Changes, Guard, Snapshot, State, TaskLog, TaskProgress, Written, FINISHED, KEPT_LOGS,
+    Changes, Guard, ResultAsk, Snapshot, State, TaskLog, TaskProgress, Written, FINISHED, KEPT_LOGS,
 };
 
 use crate::runs::flat_name;
@@ -38,6 +38,11 @@ const PROGRESS: &str = ".progress";
 /// 133: this host's refusals of its branches' remotes, beside the records
 /// and never in them; the dot keeps them out of [`State::branches`].
 const REFUSED: &str = ".refused";
+/// 133 (design D27): this host's refusal of each branch's intake.
+const INTAKE_REFUSED: &str = ".intake";
+/// This host's refusal of the reads of a branch's pools' jobs (design D5
+/// of the change `a-codebuild-fleet-runs-a-queues-checks`).
+const POOL_REFUSED: &str = ".pool";
 const PROGRESS_SCHEMA: &str = "sluice/progress@1";
 
 /// One candidate's tasks as kept: the candidate is named inside, since a
@@ -105,6 +110,33 @@ impl LocalFiles {
         }
     }
 
+    /// Record 0122 (design D5; record 0114): raise the host's count past
+    /// `number`, so it gives no number up to it; a count already past it is
+    /// left as it is.
+    pub fn raise_ids_past(&self, number: u64) -> Result<()> {
+        std::fs::create_dir_all(&self.root)
+            .with_context(|| format!("creating {}", self.root.display()))?;
+        let lock = open_lock(&self.root.join(".lock"))?;
+        lock.lock().context("locking the repository's records")?;
+        let path = self.root.join(".next-id");
+        let next: u64 = match std::fs::read_to_string(&path) {
+            Ok(s) => s
+                .trim()
+                .parse()
+                .with_context(|| format!("{} holds {s:?}", path.display()))?,
+            Err(e) if e.kind() == ErrorKind::NotFound => 1,
+            Err(e) => return Err(e).with_context(|| format!("reading {}", path.display())),
+        };
+        if next <= number {
+            write_atomic(
+                &self.root,
+                ".next-id",
+                format!("{}\n", number + 1).as_bytes(),
+            )?;
+        }
+        Ok(())
+    }
+
     fn dir(&self, branch: &str) -> Result<PathBuf> {
         if branch.is_empty()
             || branch == RESULTS
@@ -115,6 +147,38 @@ impl LocalFiles {
             bail!("{branch:?} cannot name a branch's records");
         }
         Ok(self.root.join(branch))
+    }
+
+    /// 133: this host's document `branch`'s file under `dir` keeps, a
+    /// refusal of its remote or of its intake (design D27).
+    fn read_kept(&self, dir: &str, branch: &str) -> Result<Option<Vec<u8>>> {
+        self.dir(branch)?;
+        let path = self.root.join(dir).join(format!("{branch}.json"));
+        match std::fs::read(&path) {
+            Ok(b) => Ok(Some(b)),
+            Err(e) if e.kind() == ErrorKind::NotFound => Ok(None),
+            Err(e) => Err(e).with_context(|| format!("reading {}", path.display())),
+        }
+    }
+
+    /// Keep `doc` as `branch`'s file under `dir`, or remove it.
+    fn keep_kept(&self, dir: &str, branch: &str, doc: Option<&[u8]>) -> Result<()> {
+        self.dir(branch)?;
+        let dir = self.root.join(dir);
+        let name = format!("{branch}.json");
+        match doc {
+            Some(doc) => write_atomic(&dir, &name, doc),
+            None => match std::fs::remove_file(dir.join(&name)) {
+                Ok(()) => Ok(()),
+                Err(e) if e.kind() == ErrorKind::NotFound => Ok(()),
+                Err(e) => Err(e).with_context(|| format!("removing {name}")),
+            },
+        }
+    }
+
+    /// 69: where the results log is (design D17).
+    pub(crate) fn results_path(&self) -> PathBuf {
+        self.root.join(RESULTS)
     }
 
     /// 69: the results log as written, one JSON document per line.
@@ -552,10 +616,10 @@ impl State for LocalFiles {
         Ok(id)
     }
 
-    /// Every result this host recorded, whichever branch reads them: none
-    /// is signed, so no signer's key is read.
-    fn results(&self, _: &str) -> Result<Vec<u8>> {
-        self.results_log()
+    /// The results this host recorded that `ask` names, whichever branch
+    /// reads them: none is signed, so no signer's key is read.
+    fn results_for(&self, _: &str, ask: &ResultAsk) -> Result<Vec<u8>> {
+        Ok(ask.answer(&self.results_log()?))
     }
 
     fn keep_logs(&self, branch: &str, candidate: &str, logs: &[TaskLog]) -> Result<Vec<TaskLog>> {
@@ -592,27 +656,27 @@ impl State for LocalFiles {
     }
 
     fn refusal(&self, branch: &str) -> Result<Option<Vec<u8>>> {
-        self.dir(branch)?;
-        let path = self.root.join(REFUSED).join(format!("{branch}.json"));
-        match std::fs::read(&path) {
-            Ok(b) => Ok(Some(b)),
-            Err(e) if e.kind() == ErrorKind::NotFound => Ok(None),
-            Err(e) => Err(e).with_context(|| format!("reading {}", path.display())),
-        }
+        self.read_kept(REFUSED, branch)
     }
 
     fn keep_refusal(&self, branch: &str, doc: Option<&[u8]>) -> Result<()> {
-        self.dir(branch)?;
-        let dir = self.root.join(REFUSED);
-        let name = format!("{branch}.json");
-        match doc {
-            Some(doc) => write_atomic(&dir, &name, doc),
-            None => match std::fs::remove_file(dir.join(&name)) {
-                Ok(()) => Ok(()),
-                Err(e) if e.kind() == ErrorKind::NotFound => Ok(()),
-                Err(e) => Err(e).with_context(|| format!("removing {name}")),
-            },
-        }
+        self.keep_kept(REFUSED, branch, doc)
+    }
+
+    fn intake_refusal(&self, branch: &str) -> Result<Option<Vec<u8>>> {
+        self.read_kept(INTAKE_REFUSED, branch)
+    }
+
+    fn keep_intake_refusal(&self, branch: &str, doc: Option<&[u8]>) -> Result<()> {
+        self.keep_kept(INTAKE_REFUSED, branch, doc)
+    }
+
+    fn pool_refusal(&self, branch: &str) -> Result<Option<Vec<u8>>> {
+        self.read_kept(POOL_REFUSED, branch)
+    }
+
+    fn keep_pool_refusal(&self, branch: &str, doc: Option<&[u8]>) -> Result<()> {
+        self.keep_kept(POOL_REFUSED, branch, doc)
     }
 
     fn progress(&self, branch: &str) -> Result<BTreeMap<String, Vec<TaskProgress>>> {

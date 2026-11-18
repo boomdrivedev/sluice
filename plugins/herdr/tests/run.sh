@@ -661,9 +661,16 @@ pass
 
 fresh 'watch: herdr gone'
 touch "$H/down"
-began=$(date +%s)
-SLUICE_HERDR_TICK=1 sh "$plugin/bin/watch.sh" --ticks 10 2>/dev/null
-[ $(($(date +%s) - began)) -lt 6 ] || fail "the watcher kept going without herdr"
+# Sixty ticks, which a watcher that kept going takes a minute to run, so
+# its end is waited for and the bound sits far from both.
+SLUICE_HERDR_TICK=1 sh "$plugin/bin/watch.sh" --ticks 60 2>/dev/null &
+w=$!
+if ! ends_within "$w" 20; then
+  fail "the watcher kept going ${took}s without herdr"
+  kill "$w" 2>/dev/null
+elif [ "$took" -gt 4 ]; then
+  echo "note: the watcher took ${took}s to end without herdr"
+fi
 [ -f "$S/watch.lease" ] && fail "the watcher left its lease"
 [ -e "$(folder_of herdr)/socket" ] && fail "the server is still registered"
 pass

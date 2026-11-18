@@ -6,8 +6,9 @@
 
 use anyhow::{anyhow, Result};
 use sluice_seams::{
-    GoneRelease, Guard, LastResult, Limits, Outcome, Place, ReleasePolicy, Rev, RunHandle, RunKind,
-    RunOutcome, RunReport, RunRequest, Session, SessionPlace, Source, TaskProgress, TaskState,
+    GoneRelease, Guard, LastResult, Limits, Outcome, Part, Place, ReleasePolicy, Rev, RunHandle,
+    RunOutcome, RunReport, RunRequest, Session, SessionPlace, SessionRunKind, Source, TaskProgress,
+    TaskState,
 };
 
 use crate::policy::{Policy, Rules};
@@ -185,13 +186,15 @@ impl Sluice<'_> {
     }
 
     /// 89, 90: adopt the session's worktree and start its run there, of
-    /// the checks or of `command`. The caller has counted the run against the bound.
+    /// the checks or of `command`, in `part`, the room in the host's bound
+    /// its caller holds for it (71, 150; rule core.49).
     pub fn start_session(
         &self,
         plan: &SessionPlan,
         worktree: &str,
         head: &Rev,
         command: Option<&str>,
+        part: Part,
     ) -> Result<SessionStart> {
         let place = self.seams.checkout.adopt(
             worktree,
@@ -200,7 +203,7 @@ impl Sluice<'_> {
             &self.now(),
         )?;
         let request = Sluice::session_request(plan, place.clone(), head, command);
-        let run = self.seams.tests.start(&request)?;
+        let run = self.seams.tests.start(&request, part)?;
         Ok(SessionStart { place, run })
     }
 
@@ -304,9 +307,9 @@ impl Sluice<'_> {
             at: self.now(),
             head: head.clone(),
             kind: if command {
-                RunKind::Command
+                SessionRunKind::Command
             } else {
-                RunKind::Checks
+                SessionRunKind::Checks
             },
             outcome,
             recorded,
@@ -365,7 +368,16 @@ impl Sluice<'_> {
         report: &RunReport,
     ) -> Result<usize> {
         let now = self.now();
-        let have = self.results(&plan.branch)?;
+        // Design D17: the results of the keys this run observed alone.
+        let ask = report
+            .tasks
+            .iter()
+            .chain(&report.dependencies)
+            .filter(|t| matches!(t.source, Source::Ran { .. }))
+            .fold(sluice_seams::ResultAsk::default(), |ask, t| {
+                ask.key(&t.task, &t.hash)
+            });
+        let have = self.results_for(&plan.branch, &ask)?;
         let mut bytes = Vec::new();
         let mut n = 0;
         for t in report.tasks.iter().chain(&report.dependencies) {

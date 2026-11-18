@@ -297,3 +297,209 @@ fn a_branch_that_is_not_held_has_nothing_to_accept() {
     );
     assert_eq!(h.version(), version, "nothing recorded");
 }
+
+/// satisfies: 129; design D16: a status read held, once the host
+/// process's reading is current, reads every branch as the host holds it
+/// and asks no remote: no fetch of the branch and no read of its records
+/// afresh. One that is not held reads them afresh, and a round never reads
+/// held.
+#[test]
+fn a_held_status_asks_no_remote() {
+    let h = Harness::bolt();
+    h.w().on_remote(BRANCH);
+    h.work("unit/a", "agent-a", &[("a/lib", Some("a2"))]);
+    let one = h.submit("unit/a");
+    let (fetches, reads) = (h.w().fetches(), h.w().state_reads());
+    let status = h.sluice().holding().status(BRANCH).unwrap();
+    assert_eq!(status.submissions.len(), 1);
+    assert_eq!(status.submissions[0].id, one);
+    assert_eq!(
+        (h.w().fetches(), h.w().state_reads()),
+        (fetches, reads),
+        "a held status asked a remote"
+    );
+    h.sluice().status(BRANCH).unwrap();
+    assert!(h.w().fetches() + h.w().state_reads() > fetches + reads);
+    assert!(h.sluice().holding().round(BRANCH).is_err());
+}
+
+/// satisfies: record 0122, 26 (design D11); the queue-home spec's "A move
+/// waiting": the overview's branch and a branch's status name its home, `in
+/// this host's own files` and `on origin`, and, while a move is written,
+/// where it goes, since when, and how many combinations under test it
+/// waits for.
+#[test]
+fn the_overview_names_each_branchs_home_and_its_move() {
+    use sluice_core::overview::{HomeView, MovingView};
+    let unsigned = sluice_conformance::policy(false, "fail", 4);
+    let signed = unsigned.replace(
+        "trust = [\"open\", \"sandbox\", \"container\"]\n",
+        "trust = [\"box\"]\nremote = \"origin\"\n",
+    ) + "\n[signers.box]\nssh = \"box ssh-ed25519 AAAA\"\n";
+    let home_of = |h: &Harness| {
+        let s = h.sluice();
+        let view = s
+            .overview(None)
+            .unwrap()
+            .into_iter()
+            .find(|b| b.branch == BRANCH)
+            .expect("the overview lists the branch");
+        let status = s.status(BRANCH).unwrap().home;
+        assert_eq!(
+            view.home, status,
+            "the overview and the status say one home"
+        );
+        view.home.expect("a home")
+    };
+
+    let h = Harness::new(&unsigned);
+    h.w().hold_runs(true);
+    h.work(
+        "unit/p",
+        "agent-p",
+        &[(".config/sluice.toml", Some(&signed))],
+    );
+    let p = h.submit("unit/p");
+    let at = h.w().work(&h.sub(p).head, &[("a/lib", Some("a2"))]);
+    h.w().session("unit/a", "agent-a", &at);
+    h.submit("unit/a");
+    h.step();
+    let here = home_of(&h);
+    assert_eq!(
+        here,
+        HomeView {
+            at: "here".into(),
+            moving: None
+        }
+    );
+    assert_eq!(here.line(), "in this host's own files");
+    let first = h
+        .doc()
+        .candidates
+        .iter()
+        .find(|c| c.submissions == [p])
+        .unwrap()
+        .revision
+        .clone();
+    h.w().complete(&first);
+    h.step();
+    h.step();
+    let moving = home_of(&h);
+    let since = match &moving.moving {
+        Some(MovingView { to, since, waiting }) => {
+            assert_eq!((to.as_str(), *waiting), ("origin", 1));
+            since.clone()
+        }
+        None => panic!("no move: {moving:?}"),
+    };
+    assert_eq!(
+        moving.line(),
+        format!("moving to origin since {since}, waiting for 1 combination under test")
+    );
+    let v = serde_json::to_value(&moving).unwrap();
+    assert_eq!(v["at"], "here");
+    assert_eq!(v["moving"]["to"], "origin");
+
+    let h = Harness::new(&signed);
+    h.work("unit/a", "agent-a", &[("a/lib", Some("a2"))]);
+    h.submit("unit/a");
+    let origin = home_of(&h);
+    assert_eq!(origin.line(), "on origin");
+}
+
+/// A branch whose records are on its remote, trusting the signer `box`,
+/// led by `a`, which signs as `box`; and `a` itself, with no room, so the
+/// run it opens waits open (design D8 of `peers`).
+fn led_with_no_room(h: &Harness) -> sluice_core::Sluice<'_> {
+    h.w().be_host("a");
+    let s = h.sluice().as_peer(sluice_core::Peer {
+        name: "a".into(),
+        lease: std::time::Duration::from_secs(300),
+        alive: std::time::Duration::from_secs(120),
+        signer: Some("box".into()),
+        systems: None,
+        expire_after: sluice_core::EXPIRE_AFTER,
+    });
+    h.w().no_room();
+    s
+}
+
+/// The bolt's policy with its records on `origin`, trusting `box`.
+fn signed() -> Harness {
+    let p = sluice_conformance::policy(false, "fail", 4).replace(
+        "trust = [\"open\", \"sandbox\", \"container\"]\n",
+        "trust = [\"box\"]\nremote = \"origin\"\n",
+    ) + "\n[signers.box]\nssh = \"box ssh-ed25519 AAAA\"\n";
+    let h = Harness::new(&p);
+    h.w().signs_as("box");
+    h
+}
+
+/// satisfies: record 0122; 26; the run-life spec's "A status reads each
+/// run's state", a run waiting for room
+#[test]
+fn a_run_waiting_for_room_says_since_when() {
+    let h = signed();
+    h.work("unit/a", "agent-a", &[("a/lib", Some("a2"))]);
+    h.submit("unit/a");
+    led_with_no_room(&h).step(BRANCH).unwrap();
+    h.w().advance(chrono::Duration::minutes(12));
+    led_with_no_room(&h).step(BRANCH).unwrap();
+    let view = h.sluice().branch_view_of(BRANCH).unwrap();
+    let c = &view.candidates[0];
+    let run = &c.runs[0];
+    assert_eq!(run.state, sluice_core::records::RunState::Open);
+    let opened = h.doc().candidates[0].runs[0]
+        .opened
+        .clone()
+        .expect("when it opened");
+    assert_eq!(run.since.as_deref(), Some(opened.as_str()));
+    let now = chrono::DateTime::parse_from_rfc3339(&opened)
+        .unwrap()
+        .to_utc()
+        + chrono::Duration::minutes(12);
+    let said = sluice_core::overview::run_time(c, now).expect("a line of its runs");
+    assert_eq!(said, format!("waiting for room since {opened}"));
+    assert!(!said.contains(" of "), "no time against its limit: {said}");
+}
+
+/// satisfies: record 0122; 26, 66; the run-life spec's "A status reads
+/// each run's state", a running run
+#[test]
+fn a_running_runs_time_is_its_own() {
+    let h = signed();
+    h.w().hold_runs(true);
+    h.work("unit/a", "agent-a", &[("a/lib", Some("a2"))]);
+    h.submit("unit/a");
+    led_with_no_room(&h).step(BRANCH).unwrap();
+    // It waits 30 minutes for room, then runs.
+    h.w().advance(chrono::Duration::minutes(30));
+    led_with_no_room(&h).step(BRANCH).unwrap();
+    h.w().has_room();
+    h.sluice()
+        .as_peer(sluice_core::Peer {
+            name: "a".into(),
+            lease: std::time::Duration::from_secs(300),
+            alive: std::time::Duration::from_secs(120),
+            signer: Some("box".into()),
+            systems: None,
+            expire_after: sluice_core::EXPIRE_AFTER,
+        })
+        .step(BRANCH)
+        .unwrap();
+    let running = h.doc().candidates[0].runs[0]
+        .running
+        .clone()
+        .expect("its own start");
+    let view = h.sluice().branch_view_of(BRANCH).unwrap();
+    let c = &view.candidates[0];
+    assert_eq!(c.runs[0].since.as_deref(), Some(running.as_str()));
+    let now = chrono::DateTime::parse_from_rfc3339(&running)
+        .unwrap()
+        .to_utc()
+        + chrono::Duration::minutes(4);
+    assert_eq!(
+        sluice_core::overview::run_time(c, now).as_deref(),
+        Some("4m00s of 20m")
+    );
+}

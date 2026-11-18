@@ -111,6 +111,9 @@ impl Sluice<'_> {
                 self.forget_released(branch, place, &how)?;
                 how
             }
+            // Record 0122 (design D3): a process that stopped part way
+            // through the release reads nothing of it.
+            Err(e) if sluice_seams::stopped(&e) => return Err(e),
             Err(e) => self.failed_release(branch, place, &format!("{e:#}"))?,
         };
         Ok(ReleaseOutcome {

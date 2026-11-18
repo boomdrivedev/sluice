@@ -20,12 +20,12 @@ kinds. Add signers in one reviewed landing that also rewrites `trust`.
 linux-x64   = { os = "linux", arch = "x86_64" }
 macos-arm64 = { os = "macos", arch = "aarch64" }
 
-[signers.box]                    # a host the operator keeps running
+[signers.box]                    # a standing executor of the operator's
 ssh = "exec@build-1 ssh-ed25519 AAAA..."
 confined = true                  # its checkouts are containers no session reaches
 systems = ["linux-x64"]
 
-[signers.mac]                    # a Mac the operator keeps running
+[signers.mac]                    # a Mac standing executor
 ssh = "exec@mac-1 ssh-ed25519 AAAA..."
 confined = true
 systems = ["macos-arm64"]
@@ -84,8 +84,8 @@ alive = "2m"   # how often this host shows it is alive; a claim lapses after it
 name = "build-1" # default: the host name; set it when two hosts share one
 ```
 
-`sluice run` on a host with `[signing]` claims the runs its signer counts
-for. A host with no `[signing]` records nothing on a branch kept on the
+sluice's host process on a host with `[signing]` claims the runs its
+signer counts for, while it runs. A host with no `[signing]` records nothing on a branch kept on the
 remote, and says so.
 
 ## Set it up, in order
@@ -131,11 +131,13 @@ will submit or run checks.
    under new ids (`sluice status <old id>` names the new one).
 
 5. **Start the standing executors.** On each host that should take runs
-   without a session waiting, keep `sluice run` running from a clone of the
-   repository: under the host's own service manager (launchd, systemd, a
-   terminal multiplexer). sluice starts no service itself. It takes the
-   runs of its systems that its signer counts for, earliest first, up to
-   `[runs] max`.
+   without a session waiting, keep a clone of the repository, and have a
+   command of sluice's run in it whenever the host should take work:
+   `sluice status` from whatever wakes the host, or the wake the
+   deployment names. That command starts sluice's host process, which
+   nothing installs: it takes the runs of its systems that its signer
+   counts for, earliest first, up to `[runs] max`, and ends once none is
+   left for it.
 
 6. **Check it.** `sluice overview` lists each host serving the remote, with
    its signer, system, runs held and room. `sluice status <branch>` warns

@@ -331,9 +331,12 @@ fn signed_runs_are_read_verified_on_another_host() {
             .is_empty()
     );
     // Nor does a profile asked with no list.
-    assert!(parse_lines::<ResultLine>(&hc.results("main").unwrap())
-        .unwrap()
-        .is_empty());
+    assert!(parse_lines::<ResultLine>(
+        &hc.results_for("main", &sluice_seams::ResultAsk::every())
+            .unwrap()
+    )
+    .unwrap()
+    .is_empty());
 }
 
 /// 19, 138, design D3 (the check-grant spec's "Two grants in one
@@ -513,69 +516,6 @@ fn logs_are_kept_on_the_remote_for_the_last_candidates() {
     assert_eq!(refs.lines().count(), KEPT_LOGS);
     assert!(!refs.contains("refs/sluice/logs/main/c1\n"));
     assert!(refs.contains(&format!("refs/sluice/logs/main/c{}\n", KEPT_LOGS + 2)));
-}
-
-/// Design D10: the first host to take a branch whose records moved to its
-/// remote pushes its own queue there as the starting state; another host
-/// whose queue was not first leaves its queued submissions behind, for its
-/// round to submit again.
-#[test]
-fn the_first_hosts_queue_moves_and_the_others_is_left_behind() {
-    use sluice::profiles::branches::Branches;
-    use sluice::profiles::local_files::LocalFiles;
-    use sluice::profiles::records::Records;
-
-    let k = key();
-    let a = Repo::new("rr-move");
-    a.write(
-        ".config/sluice.toml",
-        &format!(
-            "[signers.box]\nssh = \"box {}\"\n\n[branches.main]\nremote = \"origin\"\ntrust = [\"box\"]\n",
-            k.public_key().to_openssh().unwrap()
-        ),
-    );
-    a.git(&["add", "-A"]);
-    a.git(&["commit", "-q", "-m", "signers"]);
-    let bare = a.bare_origin();
-    let b = Repo::clone_of(bare.path(), "rr-move-b");
-    // Each host's own queue, as its sluice wrote it before the move.
-    let own = |r: &Repo, id: u64| {
-        let s = LocalFiles::new(&r.dir().join(".git"));
-        let _g = s.lock("main").unwrap().unwrap();
-        let doc = format!(
-            "{{\"schema\":\"sluice/submission@1\",\"id\":{id},\"branch\":\"main\",\"state\":\"queued\"}}\n"
-        );
-        s.write("main", 0, put(&[(&format!("submissions/{id}.json"), &doc)]))
-            .unwrap();
-    };
-    own(&a, 5);
-    own(&b, 9);
-
-    let records = |r: &Repo| {
-        Records::new(
-            &r.dir().join(".git"),
-            Branches::open_as(r.dir(), None, recorded()).unwrap(),
-            None,
-        )
-    };
-    let ra = records(&a);
-    drop(ra.lock("main").unwrap().unwrap());
-    let moved = ra.read("main").unwrap();
-    assert!(moved.files.contains_key("submissions/5.json"));
-    assert!(ra.left_behind("main").unwrap().is_empty());
-
-    let rb = records(&b);
-    drop(rb.lock("main").unwrap().unwrap());
-    assert!(!rb
-        .read("main")
-        .unwrap()
-        .files
-        .contains_key("submissions/9.json"));
-    let left = rb.left_behind("main").unwrap();
-    assert_eq!(left.len(), 1);
-    assert!(String::from_utf8_lossy(&left[0]).contains("\"id\":9"));
-    rb.forget_left_behind("main", &[9]).unwrap();
-    assert!(rb.left_behind("main").unwrap().is_empty());
 }
 
 /// 134, 122, 77: a host's sign of life whose push was cut after it was
@@ -1065,12 +1005,15 @@ fn records(repo: &Repo) -> sluice::profiles::records::Records {
 
 /// The tasks of the signed runs `branch`'s gate reads, in order.
 fn signed(r: &sluice::profiles::records::Records, branch: &str) -> Vec<String> {
-    let mut tasks: Vec<String> = parse_lines::<ResultLine>(&r.results(branch).unwrap())
-        .unwrap()
-        .into_iter()
-        .filter(|l| l.signer.is_some())
-        .map(|l| l.task)
-        .collect();
+    let mut tasks: Vec<String> = parse_lines::<ResultLine>(
+        &r.results_for(branch, &sluice_seams::ResultAsk::every())
+            .unwrap(),
+    )
+    .unwrap()
+    .into_iter()
+    .filter(|l| l.signer.is_some())
+    .map(|l| l.task)
+    .collect();
     tasks.sort();
     tasks
 }
@@ -1290,4 +1233,825 @@ fn a_branch_in_the_hosts_own_files_numbers_from_the_hosts_count() {
         .contains_key(&format!("submissions/{next}.json")));
     assert_eq!(r.allocate_id("main").unwrap(), 1, "origin's count");
     assert_eq!(r.allocate_id("scratch").unwrap(), 5);
+}
+
+/// A submission's document, `id` on `branch` from `worktree`.
+fn submission_doc(id: u64, branch: &str, worktree: &str) -> String {
+    format!(
+        "{{\"schema\":\"sluice/submission@1\",\"id\":{id},\"branch\":\"{branch}\",\
+         \"head\":\"h{id}\",\"from\":{{\"agent\":\"a\",\"worktree\":\"{worktree}\"}},\
+         \"submitted\":\"t\",\"after\":[],\"priority\":0,\"attempt\":1,\"state\":\"queued\"}}\n"
+    )
+}
+
+/// Write submission `id` to `branch` through `r`, as a submit does: under
+/// the branch's lock, from the version read.
+fn submit_through(r: &sluice::profiles::records::Records, branch: &str, id: u64) -> Written {
+    let _g = r.wait_lock(branch).unwrap();
+    let at = r.read(branch).unwrap().version;
+    let doc = submission_doc(id, branch, &format!("unit/{id}"));
+    r.write(
+        branch,
+        at,
+        put(&[(&format!("submissions/{id}.json"), &doc)]),
+    )
+    .unwrap()
+}
+
+/// `branch`'s home document in `files`, as read.
+fn home_of(files: &BTreeMap<String, Vec<u8>>) -> Option<sluice_core::records::HomeDoc> {
+    files
+        .get(sluice_core::records::HOME_FILE)
+        .map(|b| serde_json::from_slice(b).unwrap())
+}
+
+/// satisfies: record 0122, C.6 (design D2); the queue-home spec's "A
+/// policy that names another home does not move the reading": `main`'s
+/// queue open in this host's own files stays read and written there after
+/// a landing brings a policy naming signers and `remote = "origin"`, by a
+/// process started afresh as by one already running, until a move closes
+/// it; origin is given no state of it.
+#[test]
+fn a_branchs_home_is_read_from_its_records_not_its_policy() {
+    use sluice_core::records::{HomeState, HERE};
+    let k = key();
+    let a = Repo::new("rr-home-records");
+    a.write(
+        ".config/sluice.toml",
+        "[branches.main]\nremote = \"origin\"\n",
+    );
+    a.git(&["add", "-A"]);
+    a.git(&["commit", "-q", "-m", "no signers"]);
+    let bare = a.bare_origin();
+    let r = records(&a);
+    assert_eq!(submit_through(&r, "main", 1), Written::Written(1));
+    let own = home_of(&r.read("main").unwrap().files).expect("its first write wrote its home");
+    assert_eq!((own.at.as_str(), own.state), (HERE, HomeState::Open));
+
+    a.push_change(".config/sluice.toml", &signers_policy(&[("box", &[&k])]));
+    for r in [r, records(&a)] {
+        r.next_pass();
+        assert!(r.route("main").unwrap().is_none(), "this host's own files");
+        assert!(matches!(submit_through(&r, "main", 2), Written::Written(_)));
+        let read = r.read("main").unwrap();
+        assert!(read.files.contains_key("submissions/1.json"));
+        assert_eq!(home_of(&read.files), Some(own.clone()));
+        // Written again by the next process: back to one submission.
+        let _g = r.wait_lock("main").unwrap();
+        let at = r.read("main").unwrap().version;
+        let mut c = put(&[]);
+        c.remove.insert("submissions/2.json".into());
+        r.write("main", at, c).unwrap();
+    }
+    let listed = support::git_command()
+        .args([
+            "ls-remote",
+            bare.path().to_str().unwrap(),
+            "refs/sluice/state/*",
+        ])
+        .output()
+        .unwrap();
+    assert!(listed.stdout.is_empty(), "origin holds no state of main");
+}
+
+/// satisfies: record 0122, 129 (design D2); the queue-home spec's "A host
+/// with no records of the branch": host A's queue of `bolt/x` is open on
+/// origin, and its policy has since dropped its signers; host B, holding
+/// no records of it, reads its home from origin's state as its tick
+/// fetched it, not from the policy at its head, and its submission is
+/// written there under origin's next number, origin's home as A wrote it.
+#[test]
+fn a_host_with_no_records_of_a_branch_finds_its_home_on_the_remote() {
+    let k = key();
+    let a = Repo::new("rr-home-found");
+    a.write(".config/sluice.toml", &signers_policy(&[("box", &[&k])]));
+    a.git(&["add", "-A"]);
+    a.git(&["commit", "-q", "-m", "signers"]);
+    let bare = a.bare_origin();
+    let signed_x =
+        signers_policy(&[("box", &[&k])]).replace("[branches.release]", "[branches.\"bolt/x\"]");
+    a.branch(
+        "bolt/x",
+        "main",
+        &[(".config/sluice.toml", Some(&signed_x))],
+    );
+    a.git(&["push", "-q", "origin", "bolt/x"]);
+    let ra = records(&a);
+    assert!(
+        ra.route("bolt/x").unwrap().is_some(),
+        "by its policy, origin"
+    );
+    let first = ra.allocate_id("bolt/x").unwrap();
+    assert_eq!(submit_through(&ra, "bolt/x", first), Written::Written(1));
+    let homed = home_of(&ra.read("bolt/x").unwrap().files).expect("written on origin");
+    assert_eq!(homed.at, "origin");
+    // A landing drops bolt/x's signers; its remote stays named.
+    a.branch(
+        "bolt/x",
+        "bolt/x",
+        &[(
+            ".config/sluice.toml",
+            Some("[branches.\"bolt/x\"]\nremote = \"origin\"\n"),
+        )],
+    );
+    a.git(&["push", "-q", "origin", "bolt/x"]);
+
+    let b = Repo::clone_of(bare.path(), "rr-home-found-b");
+    b.git(&["fetch", "-q", "origin", "bolt/x:bolt/x"]);
+    let rb = records(&b);
+    assert!(LocalFiles::new(&b.dir().join(".git"))
+        .read("bolt/x")
+        .unwrap()
+        .files
+        .is_empty());
+    rb.refresh().unwrap();
+    assert!(
+        rb.route("bolt/x").unwrap().is_some(),
+        "origin, as its records say"
+    );
+    let next = rb.allocate_id("bolt/x").unwrap();
+    assert_eq!(next, first + 1, "origin's next number");
+    assert_eq!(submit_through(&rb, "bolt/x", next), Written::Written(2));
+    let on_origin = rb.read("bolt/x").unwrap();
+    assert!(on_origin
+        .files
+        .contains_key(&format!("submissions/{next}.json")));
+    assert_eq!(home_of(&on_origin.files), Some(homed));
+    assert!(LocalFiles::new(&b.dir().join(".git"))
+        .read("bolt/x")
+        .unwrap()
+        .files
+        .is_empty());
+}
+
+/// satisfies: record 0122, 26 (design D2); the queue-home spec's "Two open
+/// homes": this host's own files and origin's state of `bolt/x` both hold
+/// an open home, origin's come from this host's own files, so its queue is
+/// in two places: a read, a lock and a write of `bolt/x` are refused naming
+/// both homes, and `main` is read as before.
+#[test]
+fn two_open_homes_refuse_the_branch_naming_both() {
+    use sluice_core::records::{to_document, CameFrom, HomeDoc, HERE, HOME_FILE};
+    let k = key();
+    let a = Repo::new("rr-two-homes");
+    a.write(".config/sluice.toml", &signers_policy(&[("box", &[&k])]));
+    a.git(&["add", "-A"]);
+    a.git(&["commit", "-q", "-m", "signers"]);
+    let _bare = a.bare_origin();
+    let signed_x =
+        signers_policy(&[("box", &[&k])]).replace("[branches.release]", "[branches.\"bolt/x\"]");
+    a.branch(
+        "bolt/x",
+        "main",
+        &[(".config/sluice.toml", Some(&signed_x))],
+    );
+    a.git(&["push", "-q", "origin", "bolt/x"]);
+    a.git(&["switch", "-q", "main"]);
+    let mut on_origin = HomeDoc::open("origin", None);
+    on_origin.came_from = Some(CameFrom {
+        home: HERE.into(),
+        host: Some("host-a".into()),
+        carried: BTreeMap::new(),
+    });
+    let theirs = host(&a, None);
+    theirs
+        .write(
+            "bolt/x",
+            0,
+            put(&[(
+                HOME_FILE,
+                &String::from_utf8(to_document(&on_origin)).unwrap(),
+            )]),
+        )
+        .unwrap();
+    let own = LocalFiles::new(&a.dir().join(".git"));
+    {
+        let _g = own.lock("bolt/x").unwrap().unwrap();
+        let doc = String::from_utf8(to_document(&HomeDoc::open(HERE, None))).unwrap();
+        own.write("bolt/x", 0, put(&[(HOME_FILE, &doc)])).unwrap();
+    }
+    let r = records(&a).as_host("host-a");
+    r.refresh().unwrap();
+    let said = r.read("bolt/x").unwrap_err().to_string();
+    assert!(
+        said.contains("this host's own files") && said.contains("origin"),
+        "{said}"
+    );
+    assert!(r.lock("bolt/x").is_err());
+    assert!(r.write("bolt/x", 1, put(&[])).is_err());
+    assert!(
+        r.read("main").is_ok(),
+        "every other branch is read as before"
+    );
+}
+
+/// satisfies: record 0122, C.6 (design D2); the queue-home spec's "The
+/// first submission writes the home" and "A branch with no signers", and
+/// the remote-records spec's "Signers move the state to the remote" and
+/// "No signers, no change": a branch with no home anywhere has one written
+/// by its first write, on origin naming origin and the revision whose
+/// policy chose it where that policy has `[signers.box]` and `remote =
+/// "origin"` for it, the host's own files left unwritten; and in the host's
+/// own files naming them where the policy names no signers, nothing under
+/// `refs/sluice/` pushed.
+#[test]
+fn the_first_write_writes_the_home_its_policy_chose() {
+    use sluice_core::records::{HomeState, HERE};
+    let k = key();
+    let a = Repo::new("rr-first-home");
+    a.write(".config/sluice.toml", &signers_policy(&[("box", &[&k])]));
+    a.git(&["add", "-A"]);
+    a.git(&["commit", "-q", "-m", "signers"]);
+    let bare = a.bare_origin();
+    let chose = a.rev("main");
+    let r = records(&a);
+    assert_eq!(submit_through(&r, "main", 1), Written::Written(1));
+    let on_origin = host(&a, None).read("main").unwrap();
+    assert!(on_origin.files.contains_key("submissions/1.json"));
+    let home = home_of(&on_origin.files).expect("origin holds main's home");
+    assert_eq!(
+        (home.at.as_str(), home.state, home.chosen_at),
+        ("origin", HomeState::Open, Some(Rev::new(&chose)))
+    );
+    let own = LocalFiles::new(&a.dir().join(".git"));
+    assert!(
+        own.read("main").unwrap().files.is_empty(),
+        "the host's own files are not written"
+    );
+
+    // No signers: the host's own files, nothing pushed under refs/sluice/.
+    let b = Repo::new("rr-first-home-local");
+    b.write(
+        ".config/sluice.toml",
+        "[branches.main]\nremote = \"origin\"\n",
+    );
+    b.git(&["add", "-A"]);
+    b.git(&["commit", "-q", "-m", "no signers"]);
+    let bare_b = b.bare_origin();
+    let chose = b.rev("main");
+    let r = records(&b);
+    assert_eq!(submit_through(&r, "main", 1), Written::Written(1));
+    let read = LocalFiles::new(&b.dir().join(".git")).read("main").unwrap();
+    assert!(read.files.contains_key("submissions/1.json"));
+    let home = home_of(&read.files).expect("the host's own files hold main's home");
+    assert_eq!(
+        (home.at.as_str(), home.state, home.chosen_at),
+        (HERE, HomeState::Open, Some(Rev::new(&chose)))
+    );
+    let listed = support::git_command()
+        .args([
+            "ls-remote",
+            bare_b.path().to_str().unwrap(),
+            "refs/sluice/*",
+        ])
+        .output()
+        .unwrap();
+    let refs = String::from_utf8_lossy(&listed.stdout).to_string();
+    assert!(refs.is_empty(), "nothing pushed: {refs}");
+    drop(bare);
+}
+
+/// A submission's document on `main`, `id` made on host-a from
+/// `unit/<id>`, in `state`.
+fn carried_doc(id: u64, state: &str) -> String {
+    format!(
+        "{{\"schema\":\"sluice/submission@1\",\"id\":{id},\"branch\":\"main\",\
+         \"head\":\"h{id}\",\"from\":{{\"agent\":\"a\",\"worktree\":\"unit/{id}\",\"host\":\"host-a\"}},\
+         \"submitted\":\"t{id}\",\"after\":[],\"priority\":0,\"attempt\":1,\"state\":\"{state}\"}}\n"
+    )
+}
+
+/// An outcome owed to `unit/<id>` under `<id>:<outcome>`, in weir's
+/// spelling (core.52).
+fn owed(id: u64, outcome: &str) -> String {
+    format!(
+        "{{\"format\": \"weir-delivery/1\", \"key\": \"{id}:{outcome}\", \"readers\": [\"unit/{id}\"], \
+         \"message\": \"#{id} {outcome}\", \"recorded_at\": \"2026-11-14T10:00:00Z\", \
+         \"expires_at\": \"2026-11-21T10:00:00Z\"}}\n"
+    )
+}
+
+/// A host whose `main` names signers and origin, with origin.
+fn signed_main(name: &str) -> (Repo, Scratch) {
+    let a = Repo::new(name);
+    a.write(
+        ".config/sluice.toml",
+        &signers_policy(&[("box", &[&key()])]),
+    );
+    a.git(&["add", "-A"]);
+    a.git(&["commit", "-q", "-m", "signers"]);
+    let bare = a.bare_origin();
+    (a, bare)
+}
+
+/// This host's own queue of `main`: `subs` as `(id, state)`, `deliveries`
+/// as written, and its home moving to origin.
+fn own_queue_moving(repo: &Repo, subs: &[(u64, &str)], deliveries: &str) {
+    use sluice_core::records::{to_document, HomeDoc, HomeState, Moving, HERE, HOME_FILE};
+    let mut home = HomeDoc::open(HERE, None);
+    home.state = HomeState::Moving;
+    home.moving = Some(Moving {
+        to: "origin".into(),
+        chosen_at: Some(Rev::new(&repo.rev("main"))),
+        since: "2026-11-14T10:00:00Z".into(),
+    });
+    let own = LocalFiles::new(&repo.dir().join(".git"));
+    let _g = own.wait_lock("main").unwrap();
+    let at = own.read("main").unwrap().version;
+    let mut files: Vec<(String, String)> = subs
+        .iter()
+        .map(|(id, state)| (format!("submissions/{id}.json"), carried_doc(*id, state)))
+        .collect();
+    files.push((
+        HOME_FILE.into(),
+        String::from_utf8(to_document(&home)).unwrap(),
+    ));
+    if !deliveries.is_empty() {
+        files.push(("deliveries.jsonl".into(), deliveries.into()));
+    }
+    let put_files: Vec<(&str, &str)> = files.iter().map(|(p, d)| (&p[..], &d[..])).collect();
+    own.write("main", at, put(&put_files)).unwrap();
+}
+
+/// `r`'s carry of `main`, under its lock, as a round asks it.
+fn carry_main(r: &sluice::profiles::records::Records) -> sluice_seams::Carried {
+    let _g = r.wait_lock("main").unwrap();
+    r.carry("main").unwrap()
+}
+
+/// satisfies: record 0122, 62, 63, core.41, core.52 (design D3, D5); the
+/// queue-home spec's "A host's queue moves to origin" and "Numbers past the
+/// remote's count": #52 queued and #53 blamed, in this host's own files and
+/// moving to origin, go there under their numbers and states in one leased
+/// write with the deliveries store whole and a home open naming where it
+/// came from, `refs/sluice/ids` raised past 53; then this host's own home
+/// is closed with its pointer and their documents leave it.
+#[test]
+fn a_hosts_queue_moves_to_its_remote_with_its_numbers() {
+    use sluice_core::line::Line;
+    use sluice_core::records::{Event, HomeState, HERE};
+    let (a, _bare) = signed_main("rr-carry");
+    own_queue_moving(&a, &[(52, "queued"), (53, "failed")], &owed(53, "failed"));
+    let r = records(&a).as_host("host-a");
+    assert!(
+        r.route("main").unwrap().is_none(),
+        "moving, in its own files"
+    );
+    let carried = carry_main(&r);
+    assert_eq!(carried.to.as_deref(), Some("origin"));
+    assert_eq!(carried.numbers, BTreeMap::from([(52, 52), (53, 53)]));
+
+    let theirs = host(&a, None);
+    let line = Line::load("main", theirs.read("main").unwrap()).unwrap();
+    assert_eq!(
+        line.subs
+            .values()
+            .map(|s| (s.id, s.state.word()))
+            .collect::<Vec<_>>(),
+        [(52, "queued"), (53, "failed")]
+    );
+    assert!(line
+        .subs
+        .values()
+        .all(|s| s.was.is_none() && s.carried_from.is_none()));
+    assert_eq!(line.deliveries().len(), 1, "the deliveries store whole");
+    let home = line.home.clone().unwrap();
+    assert_eq!((home.at.as_str(), home.state), ("origin", HomeState::Open));
+    let came = home.came_from.unwrap();
+    assert_eq!(
+        (came.home.as_str(), came.host.as_deref()),
+        (HERE, Some("host-a"))
+    );
+    assert_eq!(came.carried, BTreeMap::from([(52, 52), (53, 53)]));
+    let log = Line::read_log(&theirs.read("main").unwrap()).unwrap();
+    assert!(log.iter().any(|l| l.event
+        == Event::Carried {
+            to: "origin".into(),
+            numbers: BTreeMap::from([(52, 52), (53, 53)]),
+        }));
+    assert_eq!(theirs.allocate_id("main").unwrap(), 54, "past 53");
+
+    let own = LocalFiles::new(&a.dir().join(".git")).read("main").unwrap();
+    let own = Line::load("main", own).unwrap();
+    assert!(own.subs.is_empty(), "their documents left it");
+    let closed = own.home.unwrap();
+    assert_eq!(closed.closed_to(), Some("origin"));
+    assert_eq!(closed.closed.unwrap().carried[&53].number, 53);
+    r.next_pass();
+    assert!(r.route("main").unwrap().is_some(), "read on origin now");
+    assert_eq!(
+        carry_main(&r),
+        sluice_seams::Carried::default(),
+        "nothing more"
+    );
+}
+
+/// satisfies: record 0122, record 0114, core.41 (design D5); the
+/// queue-home spec's "A carried number the new home holds takes the next
+/// one": origin's `main` holds #52 live and #41 finished; this host's #41
+/// and #52 are carried under origin's next numbers, each naming the number
+/// it had in `was` and this host's own files in `carried_from`, and #70 is
+/// kept, the count raised past it first.
+#[test]
+fn a_number_the_remote_holds_is_carried_under_the_next() {
+    use sluice_core::line::Line;
+    use sluice_core::records::{to_document, HomeDoc, HERE, HOME_FILE};
+    let (a, _bare) = signed_main("rr-carry-next");
+    let theirs = host(&a, None);
+    let other = carried_doc(52, "queued")
+        .replace("host-a", "host-b")
+        .replace("\"h52\"", "\"hb52\"");
+    let finished = carried_doc(41, "landed")
+        .replace("host-a", "host-b")
+        .replace("\"h41\"", "\"hb41\"");
+    let index = "{\"id\":41,\"state\":\"landed\",\"worktree\":\"unit/41\"}\n";
+    let home = String::from_utf8(to_document(&HomeDoc::open("origin", None))).unwrap();
+    theirs
+        .write(
+            "main",
+            0,
+            put(&[
+                (HOME_FILE, &home),
+                ("submissions/52.json", &other),
+                (".finished/41.json", &finished),
+                ("finished.jsonl", index),
+            ]),
+        )
+        .unwrap();
+    own_queue_moving(&a, &[(41, "queued"), (52, "conflict"), (70, "queued")], "");
+    let r = records(&a).as_host("host-a");
+    let carried = carry_main(&r);
+    assert_eq!(
+        carried.numbers,
+        BTreeMap::from([(41, 71), (52, 72), (70, 70)])
+    );
+    let line = Line::load("main", theirs.read("main").unwrap()).unwrap();
+    let was: Vec<(u64, Option<u64>, Option<&str>)> = line
+        .subs
+        .values()
+        .map(|s| (s.id, s.was, s.carried_from.as_deref()))
+        .collect();
+    assert_eq!(
+        was,
+        [
+            (52, None, None),
+            (70, None, None),
+            (71, Some(41), Some(HERE)),
+            (72, Some(52), Some(HERE)),
+        ]
+    );
+    let own = Line::load(
+        "main",
+        LocalFiles::new(&a.dir().join(".git")).read("main").unwrap(),
+    )
+    .unwrap();
+    let pointer = own.home.unwrap().closed.unwrap().carried;
+    assert_eq!(
+        pointer
+            .iter()
+            .map(|(o, t)| (*o, t.number))
+            .collect::<Vec<_>>(),
+        [(41, 71), (52, 72), (70, 70)]
+    );
+}
+
+/// satisfies: record 0122, 59 (design D3); the queue-home spec's "Stopped
+/// after the new home was written": origin already holds what a carry wrote
+/// of this host's queue, and this host's own home is still moving with the
+/// submissions, as a carry stopped between its writes leaves them; the next
+/// carry closes this host's own home naming origin, writes nothing more on
+/// origin, and each submission is there once.
+#[test]
+fn a_carry_stopped_after_the_remote_was_written_is_closed_by_the_next() {
+    use sluice_core::line::Line;
+    let (a, _bare) = signed_main("rr-carry-stopped");
+    own_queue_moving(&a, &[(52, "queued"), (53, "failed")], &owed(53, "failed"));
+    let r = records(&a).as_host("host-a");
+    carry_main(&r);
+    // As a carry stopped before its second write leaves it: this host's own
+    // home still moving, its submissions still there.
+    own_queue_moving(&a, &[(52, "queued"), (53, "failed")], &owed(53, "failed"));
+    let theirs = host(&a, None);
+    let written = theirs.read("main").unwrap().version;
+    r.next_pass();
+    let carried = carry_main(&r);
+    assert_eq!(carried.numbers, BTreeMap::from([(52, 52), (53, 53)]));
+    assert_eq!(
+        theirs.read("main").unwrap().version,
+        written,
+        "nothing more on origin"
+    );
+    let line = Line::load("main", theirs.read("main").unwrap()).unwrap();
+    assert_eq!(line.subs.keys().copied().collect::<Vec<_>>(), [52, 53]);
+    assert_eq!(line.deliveries().len(), 1);
+    let own = Line::load(
+        "main",
+        LocalFiles::new(&a.dir().join(".git")).read("main").unwrap(),
+    )
+    .unwrap();
+    assert_eq!(own.home.unwrap().closed_to(), Some("origin"));
+    assert!(own.subs.is_empty());
+}
+
+/// Submission `id` on `main` made on `host`, written through `r` as a
+/// submit writes it.
+fn submit_from(r: &sluice::profiles::records::Records, id: u64, host: &str) {
+    let _g = r.wait_lock("main").unwrap();
+    let at = r.read("main").unwrap().version;
+    let doc = carried_doc(id, "queued").replace("host-a", host);
+    let written = r
+        .write(
+            "main",
+            at,
+            put(&[(&format!("submissions/{id}.json"), &doc)]),
+        )
+        .unwrap();
+    assert!(matches!(written, Written::Written(_)));
+}
+
+/// satisfies: record 0122, 26, C.6 at e966dcb (design D4, D5); the
+/// queue-home spec's "Two hosts' submissions come home": `main` open on
+/// origin with #7 made on host-a and #8 on host-b, two clones of one bare
+/// remote; a landing brings a policy naming no signers and host-a's round,
+/// leading, writes the move home. Host-a's carry takes #7 into its own
+/// files and closes origin's home toward the hosts' own; host-b's next
+/// carry takes #8 into its own, writing its pointer on origin, and owes
+/// nothing after.
+#[test]
+fn a_branch_comes_home_each_host_taking_its_own_submissions() {
+    use sluice_core::line::Line;
+    use sluice_core::records::{HomeState, Moving, HERE};
+    let (a, bare) = signed_main("rr-home-coming");
+    let b = Repo::clone_of(bare.path(), "rr-home-coming-b");
+    let ra = records(&a).as_host("host-a");
+    let rb = records(&b).as_host("host-b");
+    submit_from(&ra, ra.allocate_id("main").unwrap(), "host-a");
+    rb.refresh().unwrap();
+    submit_from(&rb, rb.allocate_id("main").unwrap(), "host-b");
+    let theirs = host(&a, None);
+    let both: Vec<u64> = Line::load("main", theirs.read("main").unwrap())
+        .unwrap()
+        .subs
+        .keys()
+        .copied()
+        .collect();
+    assert_eq!(both, [1, 2]);
+
+    // A landing drops the signers; host-a's round writes the move home.
+    a.push_change(
+        ".config/sluice.toml",
+        "[branches.main]\nremote = \"origin\"\n",
+    );
+    b.git(&["pull", "-q", "--ff-only"]);
+    {
+        let _g = ra.wait_lock("main").unwrap();
+        let mut line = Line::load("main", ra.read("main").unwrap()).unwrap();
+        let home = line.home.as_mut().unwrap();
+        home.state = HomeState::Moving;
+        home.moving = Some(Moving {
+            to: HERE.into(),
+            chosen_at: Some(Rev::new(&a.rev("main"))),
+            since: "2026-11-14T10:00:00Z".into(),
+        });
+        assert!(matches!(
+            ra.write("main", line.version, line.changes()).unwrap(),
+            Written::Written(_)
+        ));
+    }
+    ra.next_pass();
+    let lead = carry_main(&ra);
+    assert_eq!(lead.to.as_deref(), Some(HERE));
+    assert_eq!(lead.numbers, BTreeMap::from([(1, 1)]));
+    let own_a = Line::load(
+        "main",
+        LocalFiles::new(&a.dir().join(".git")).read("main").unwrap(),
+    )
+    .unwrap();
+    assert_eq!(own_a.subs.keys().copied().collect::<Vec<_>>(), [1]);
+    assert_eq!(own_a.home.as_ref().unwrap().state, HomeState::Open);
+    assert_eq!(own_a.home.unwrap().came_from.unwrap().home, "origin");
+    let origin = Line::load("main", theirs.read("main").unwrap()).unwrap();
+    assert_eq!(origin.home.as_ref().unwrap().closed_to(), Some(HERE));
+    assert_eq!(
+        origin.subs.keys().copied().collect::<Vec<_>>(),
+        [2],
+        "host-b's, left for it"
+    );
+
+    // Host-b's round reads the closed home and takes its own.
+    rb.refresh().unwrap();
+    rb.next_pass();
+    assert!(rb.route("main").unwrap().is_none(), "the hosts' own files");
+    let mine = carry_main(&rb);
+    assert_eq!(mine.numbers, BTreeMap::from([(2, 2)]));
+    let own_b = Line::load(
+        "main",
+        LocalFiles::new(&b.dir().join(".git")).read("main").unwrap(),
+    )
+    .unwrap();
+    assert_eq!(own_b.subs.keys().copied().collect::<Vec<_>>(), [2]);
+    assert_eq!(own_b.subs[&2].state.word(), "queued");
+    let origin = Line::load("main", theirs.read("main").unwrap()).unwrap();
+    assert!(origin.subs.is_empty());
+    let by: Vec<(u64, u64, Option<String>)> = origin
+        .home
+        .unwrap()
+        .closed
+        .unwrap()
+        .carried
+        .into_iter()
+        .map(|(n, t)| (n, t.number, t.host))
+        .collect();
+    assert_eq!(
+        by,
+        [(1, 1, Some("host-a".into())), (2, 2, Some("host-b".into()))]
+    );
+    let written = theirs.read("main").unwrap().version;
+    rb.next_pass();
+    assert_eq!(
+        carry_main(&rb),
+        sluice_seams::Carried::default(),
+        "owes nothing"
+    );
+    ra.next_pass();
+    assert_eq!(carry_main(&ra), sluice_seams::Carried::default());
+    assert_eq!(theirs.read("main").unwrap().version, written);
+}
+
+/// The key in KMS a CodeBuild pool's sign build signs with, by its ARN.
+const KMS_KEY: &str = "arn:aws:kms:us-east-1:111122223333:key/1234abcd-12ab-34cd-56ef-1234567890ab";
+
+/// `key`'s public half as KMS's `GetPublicKey` answers it and the policy
+/// lists it: the base64 of its DER SubjectPublicKeyInfo.
+fn kms_public(key: &p256::ecdsa::SigningKey) -> String {
+    use base64::Engine as _;
+    const PREFIX: &[u8] = &[
+        0x30, 0x59, 0x30, 0x13, 0x06, 0x07, 0x2a, 0x86, 0x48, 0xce, 0x3d, 0x02, 0x01, 0x06, 0x08,
+        0x2a, 0x86, 0x48, 0xce, 0x3d, 0x03, 0x01, 0x07, 0x03, 0x42, 0x00,
+    ];
+    let point = key.verifying_key().to_encoded_point(false);
+    base64::engine::general_purpose::STANDARD.encode([PREFIX, point.as_bytes()].concat())
+}
+
+/// A pool's run of `cli:build` on `main`, passed, under `claim`, as its
+/// sign build signs it with `key` under `KMS_KEY`, the signature's S made
+/// high, as KMS may answer it.
+fn kms_record(key: &p256::ecdsa::SigningKey, claim: &str) -> Vec<u8> {
+    use p256::ecdsa::signature::hazmat::PrehashSigner as _;
+    use sluice::signing::statement::{Claims, Run, RunResult, Statement};
+    let statement = Statement::of(Run {
+        results: vec![RunResult {
+            check: "cli:build".into(),
+            key: "cli-build-key".into(),
+            outcome: Outcome::Pass,
+            replayed: false,
+            took_ms: Some(1_000),
+            attempts: Some(1),
+        }],
+        claims: Claims {
+            executor: "codebuild".into(),
+            confined: false,
+            system: "linux-x64".into(),
+        },
+        branch: "main".into(),
+        combination: Rev::new("c0ffee"),
+        claim: Some(claim.into()),
+        at: "2026-11-16T12:00:00Z".into(),
+        held: None,
+    });
+    let envelope = sluice::signing::kms::envelope_of(&statement, KMS_KEY, |digest| {
+        let sig: p256::ecdsa::Signature = key.sign_prehash(digest).unwrap();
+        let low = sig.normalize_s().unwrap_or(sig);
+        let (r, s) = low.split_scalars();
+        let high = p256::ecdsa::Signature::from_scalars(r, -s).unwrap();
+        Ok(high.to_der().as_bytes().to_vec())
+    })
+    .unwrap();
+    serde_json::to_vec(&envelope).unwrap()
+}
+
+/// 78, 79, record 0119 (design D7): a `kms` signer's envelope on its ref,
+/// signed by the listed key with a high S, reads on another host as signed
+/// by the signer, verified by the public half the policy lists alone; no
+/// AWS service is reached, since nothing but git and the half is read; and
+/// the signer lists no host's SSH key.
+#[test]
+fn a_kms_record_verifies_by_the_listed_half_alone() {
+    use sluice_seams::State as _;
+    let (a, _bare, b) = two_hosts("rr-kms");
+    let kms_key = p256::ecdsa::SigningKey::random(&mut rand_core::OsRng);
+    host(&a, None)
+        .add_signed(
+            "main",
+            "codebuild",
+            "pool-codebuild-4",
+            &kms_record(&kms_key, "pool/codebuild/4"),
+        )
+        .unwrap();
+    let signers = BTreeMap::from([(
+        "codebuild".into(),
+        SignerKey::kms(KMS_KEY, &kms_public(&kms_key)).unwrap(),
+    )]);
+    let read: Vec<ResultLine> =
+        parse_lines(&host(&b, None).results_with(&signers).unwrap()).unwrap();
+    assert_eq!(read.len(), 1, "{read:?}");
+    let l = &read[0];
+    assert_eq!(l.task, "cli:build");
+    assert_eq!(l.outcome, Outcome::Pass);
+    assert_eq!(l.signer.as_deref(), Some("codebuild"));
+    assert_eq!(l.host.as_deref(), Some("pool/codebuild/4"));
+    assert_eq!(l.system.as_deref(), Some("linux-x64"));
+    // No host's SSH key is a kms signer's key.
+    assert!(!SignerKey::kms(KMS_KEY, &kms_public(&kms_key))
+        .unwrap()
+        .lists(key().public_key()));
+}
+
+/// 78, 79, S18, record 0119 (design D7): an envelope under the listed ARN
+/// that another P-256 key signed counts for nothing, its check missing and
+/// never failed, and why it is left out names the signer and the key; one
+/// the listed key signed under another ARN counts for nothing either.
+#[test]
+fn a_kms_record_by_another_key_counts_for_nothing() {
+    use sluice::host_process::results::SignerRef as _;
+    use sluice_seams::State as _;
+    let (a, _bare, b) = two_hosts("rr-kms-other");
+    let (listed, other) = (
+        p256::ecdsa::SigningKey::random(&mut rand_core::OsRng),
+        p256::ecdsa::SigningKey::random(&mut rand_core::OsRng),
+    );
+    let forged = kms_record(&other, "pool/codebuild/4");
+    host(&a, None)
+        .add_signed("main", "codebuild", "pool-codebuild-4", &forged)
+        .unwrap();
+    let signer = SignerKey::kms(KMS_KEY, &kms_public(&listed)).unwrap();
+    let signers = BTreeMap::from([("codebuild".into(), signer.clone())]);
+    let hb = host(&b, None);
+    let read: Vec<ResultLine> = parse_lines(&hb.results_with(&signers).unwrap()).unwrap();
+    assert!(read.is_empty(), "missing, never failed: {read:?}");
+    let why = format!(
+        "{:#}",
+        hb.signer_ref("codebuild", &signer)
+            .verify(&forged)
+            .unwrap_err()
+    );
+    assert!(
+        why.contains("[signers.codebuild]")
+            && why.contains(KMS_KEY)
+            && why.contains("does not verify"),
+        "{why}"
+    );
+
+    let elsewhere = String::from_utf8(kms_record(&listed, "pool/codebuild/5"))
+        .unwrap()
+        .replace(KMS_KEY, "arn:aws:kms:us-east-1:111122223333:key/another");
+    let why = format!(
+        "{:#}",
+        hb.signer_ref("codebuild", &signer)
+            .verify(elsewhere.as_bytes())
+            .unwrap_err()
+    );
+    assert!(
+        why.contains("[signers.codebuild]") && why.contains("key/another"),
+        "{why}"
+    );
+}
+
+/// 78, 87, rule core.60 (boomdrive-design's ruling of 2026-11-16 on the
+/// change `a-codebuild-fleet-runs-a-queues-checks`): a kms signer's one key
+/// is its key in KMS, so a host signing as one, with any SSH key, is
+/// verified as no signer of the branch's: it is not accepted, leads
+/// nothing and claims nothing.
+#[test]
+fn a_kms_record_is_never_a_hosts() {
+    let kms_key = p256::ecdsa::SigningKey::random(&mut rand_core::OsRng);
+    let a = Repo::new("rr-kms-host");
+    a.write(
+        ".config/sluice.toml",
+        &format!(
+            "[signers.codebuild]\nkms = {{ key = \"{KMS_KEY}\", public = \"{}\" }}\n\
+             \n[branches.main]\nremote = \"origin\"\ntrust = [\"codebuild\"]\n",
+            kms_public(&kms_key)
+        ),
+    );
+    a.git(&["add", "-A"]);
+    a.git(&["commit", "-q", "-m", "a kms signer"]);
+    let _bare = a.bare_origin();
+    let keys = Scratch::new("rr-kms-host-key");
+    let path = keys.path().join("signing");
+    key()
+        .write_openssh_file(&path, ssh_key::LineEnding::LF)
+        .unwrap();
+    use std::os::unix::fs::PermissionsExt;
+    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).unwrap();
+    let r = sluice::profiles::records::Records::new(
+        &a.dir().join(".git"),
+        sluice::profiles::branches::Branches::open_as(a.dir(), None, recorded()).unwrap(),
+        Some(sluice::instance::Signing {
+            signer: "codebuild".into(),
+            key: path,
+        }),
+    );
+    let main = Rev::new(a.rev("main"));
+    assert!(!r.verifies_own("main", &main).unwrap());
 }

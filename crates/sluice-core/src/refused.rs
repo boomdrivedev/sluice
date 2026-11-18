@@ -31,6 +31,16 @@ pub struct Refusal {
     pub earlier: Vec<Refusal>,
 }
 
+/// What a refusal is of, which its lines are marked by: the branch's
+/// remote, its intake (design D27) or its pools' reads (design D5 of the
+/// change `a-codebuild-fleet-runs-a-queues-checks`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Of {
+    Remote,
+    Intake,
+    Pool,
+}
+
 /// One ref asked for and what git said of its refusal (133).
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Cause {
@@ -115,10 +125,19 @@ impl Refusal {
     /// a `read-refused` for each cause not logged, and a `read-again` once
     /// it ended.
     pub fn unwritten(&self, host: &str) -> Vec<(String, Event)> {
+        self.unwritten_as(host, Of::Remote)
+    }
+
+    /// [`Refusal::unwritten`], each line marked `intake` where this is a
+    /// refusal of the branch's intake (design D27), and `pool` where it is
+    /// one of its pools' reads (design D5 of the change
+    /// `a-codebuild-fleet-runs-a-queues-checks`).
+    pub fn unwritten_as(&self, host: &str, of: Of) -> Vec<(String, Event)> {
+        let (intake, pool) = (of == Of::Intake, of == Of::Pool);
         let mut lines: Vec<(String, Event)> = self
             .earlier
             .iter()
-            .flat_map(|r| r.unwritten(host))
+            .flat_map(|r| r.unwritten_as(host, of))
             .collect();
         let mut causes: Vec<&Cause> = self.causes.iter().filter(|c| !c.logged).collect();
         causes.sort_by(|a, b| a.at.cmp(&b.at));
@@ -130,6 +149,8 @@ impl Refusal {
                     remote: self.remote.clone(),
                     asked: c.asked.clone(),
                     said: c.said.clone(),
+                    intake,
+                    pool,
                 },
             )
         }));
@@ -142,6 +163,8 @@ impl Refusal {
                     since: self.since.clone(),
                     stood: self.stood().unwrap_or(0),
                     rounds: self.rounds,
+                    intake,
+                    pool,
                 },
             ));
         }
@@ -258,6 +281,8 @@ mod tests {
                     since: "2026-10-26T09:16:40Z".into(),
                     stood: 1800,
                     rounds: 12,
+                    intake: false,
+                    pool: false,
                 }
             )]
         );

@@ -13,6 +13,9 @@ exceptions:
   - GitHub
   - GitHub Actions
   - GitHub Pages
+  - CodeBuild
+  - AWS
+  - KMS
   - Nix
   - macOS
   - Linux
