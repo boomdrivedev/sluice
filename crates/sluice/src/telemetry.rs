@@ -28,20 +28,23 @@
 //! what reads as a secret. The kept copy on disk is the record (20, 26;
 //! rule core.11); a record lost on the way is never sent again.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
+use std::ffi::OsStr;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::OnceLock;
 use std::time::Duration;
 
 use anyhow::Result;
 use opentelemetry::logs::{AnyValue, LogRecord as _};
-use opentelemetry::trace::{TraceContextExt, TracerProvider as _};
+use opentelemetry::propagation::{Extractor, TextMapPropagator};
+use opentelemetry::trace::{SpanContext, TraceContextExt, TracerProvider as _};
 use opentelemetry::InstrumentationScope;
 use opentelemetry_appender_tracing::layer::OpenTelemetryTracingBridge;
 use opentelemetry_otlp::{LogExporter, MetricExporter, Protocol, SpanExporter, WithExportConfig};
 use opentelemetry_sdk::error::OTelSdkResult;
 use opentelemetry_sdk::logs::{self, LogProcessor, SdkLogRecord, SdkLoggerProvider};
 use opentelemetry_sdk::metrics::SdkMeterProvider;
+use opentelemetry_sdk::propagation::TraceContextPropagator;
 use opentelemetry_sdk::trace::SdkTracerProvider;
 use opentelemetry_sdk::Resource;
 use sluice_core::OUTPUT;
@@ -293,6 +296,84 @@ impl Settings {
             .rev()
             .find(|(k, _)| k == name)
             .map(|(_, v)| v.as_str())
+    }
+}
+
+/// The trace context a command was started under, as its caller gave it in
+/// `TRACEPARENT` and, where given, `TRACESTATE` (153; design D1): the
+/// caller's span, remote, and its `TRACEPARENT` as W3C writes it, which a
+/// submission keeps (design D4). It names only where sluice's spans nest:
+/// whether sluice sends is never read from it (design D7; rule core.53).
+#[derive(Clone, Debug, PartialEq)]
+pub struct Caller {
+    /// The caller's span, read as a remote span context.
+    pub context: SpanContext,
+    /// Its `TRACEPARENT` as W3C writes it.
+    pub traceparent: String,
+}
+
+impl Caller {
+    /// The context `env`, as name and value pairs, gives in `TRACEPARENT`
+    /// and `TRACESTATE`, read by OpenTelemetry's W3C trace context
+    /// propagator over the names its environment carrier gives them;
+    /// `None` where `TRACEPARENT` is missing or does not read as W3C's
+    /// trace context, said nowhere (design D1).
+    pub fn read<K, V>(env: impl IntoIterator<Item = (K, V)>) -> Option<Caller>
+    where
+        K: AsRef<OsStr>,
+        V: AsRef<OsStr>,
+    {
+        let mut carried = HashMap::new();
+        for (name, value) in env {
+            let name = name.as_ref().to_str();
+            if let (Some(name @ ("TRACEPARENT" | "TRACESTATE")), Some(value)) =
+                (name, value.as_ref().to_str())
+            {
+                carried.insert(name.to_string(), value.to_string());
+            }
+        }
+        let context = extract(&Variables(carried))?;
+        let mut written = HashMap::new();
+        TraceContextPropagator::new().inject_context(
+            &opentelemetry::Context::new().with_remote_span_context(context.clone()),
+            &mut written,
+        );
+        Some(Caller {
+            traceparent: written.remove("traceparent")?,
+            context,
+        })
+    }
+}
+
+/// The span a `TRACEPARENT` kept as text names, read as [`Caller::read`]
+/// reads one, with no trace state; `None` where it does not read (design
+/// D5).
+pub fn traceparent(text: &str) -> Option<SpanContext> {
+    extract(&Variables(HashMap::from([(
+        "TRACEPARENT".to_string(),
+        text.to_string(),
+    )])))
+}
+
+/// The remote span context W3C's propagator reads from `carrier`.
+fn extract(carrier: &Variables) -> Option<SpanContext> {
+    let cx = TraceContextPropagator::new().extract(carrier);
+    let span = cx.span();
+    let context = span.span_context();
+    context.is_valid().then(|| context.clone())
+}
+
+/// Environment variables as OpenTelemetry's environment carrier names
+/// them: a propagator's field in upper case.
+struct Variables(HashMap<String, String>);
+
+impl Extractor for Variables {
+    fn get(&self, key: &str) -> Option<&str> {
+        self.0.get(&key.to_ascii_uppercase()).map(String::as_str)
+    }
+
+    fn keys(&self) -> Vec<&str> {
+        self.0.keys().map(String::as_str).collect()
     }
 }
 
@@ -1019,6 +1100,80 @@ mod tests {
                 reads_environment: true,
             }
         );
+    }
+
+    /// 153 (design D1): `TRACEPARENT`, beside a `TRACESTATE`, reads as a
+    /// remote context with its trace state and its `TRACEPARENT` as given;
+    /// one W3C's trace context does not read is none.
+    #[test]
+    fn a_trace_context_is_read_as_w3c_reads_it() {
+        let trace = "4bf92f3577b34da6a3ce929d0e0e4736";
+        let span = "00f067aa0ba902b7";
+        let given = format!("00-{trace}-{span}-01");
+        let read = Caller::read([
+            ("PATH", "/bin"),
+            ("TRACEPARENT", given.as_str()),
+            ("TRACESTATE", "agent=a1,flume=f2"),
+        ])
+        .expect("a context");
+        assert_eq!(read.traceparent, given);
+        assert_eq!(read.context.trace_id().to_string(), trace);
+        assert_eq!(read.context.span_id().to_string(), span);
+        assert!(read.context.is_remote() && read.context.is_sampled());
+        assert_eq!(read.context.trace_state().header(), "agent=a1,flume=f2");
+        // A kept `TRACEPARENT` reads as the same span, with no trace state.
+        let kept = traceparent(&given).expect("the kept context");
+        assert_eq!(
+            (kept.trace_id(), kept.span_id(), kept.trace_flags()),
+            (
+                read.context.trace_id(),
+                read.context.span_id(),
+                read.context.trace_flags()
+            )
+        );
+        assert_eq!(kept.trace_state().header(), "");
+
+        for wrong in [
+            format!("00-{}-{span}-01", "0".repeat(32)),
+            format!("00-{}-{span}-01", trace.to_uppercase()),
+            format!("ff-{trace}-{span}-01"),
+            format!("00-{trace}-{span}"),
+            String::new(),
+        ] {
+            assert_eq!(
+                Caller::read([("TRACEPARENT", wrong.as_str())]),
+                None,
+                "{wrong}"
+            );
+            assert_eq!(traceparent(&wrong), None, "{wrong}");
+        }
+        assert_eq!(Caller::read([("TRACESTATE", "agent=a1")]), None);
+    }
+
+    /// 153 (design D7; rule core.53): a caller's context turns nothing on.
+    /// With no choice of the command's and no `[telemetry]`, the settings
+    /// chosen beside a `TRACEPARENT` send nothing, as they would without
+    /// it.
+    #[test]
+    fn a_caller_s_context_turns_nothing_on() {
+        let context = [
+            (
+                "TRACEPARENT",
+                "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01",
+            ),
+            ("TRACESTATE", "agent=a1"),
+        ];
+        let chosen = choose(Choices::default(), None, &context);
+        assert!(!chosen.send, "{chosen:?}");
+        assert_eq!(
+            chosen.signals,
+            choose(Choices::default(), None, &[]).signals
+        );
+        let quiet = HostTelemetry {
+            send: Some(false),
+            ..HostTelemetry::default()
+        };
+        assert!(!choose(Choices::default(), Some(&quiet), &context).send);
     }
 
     #[test]

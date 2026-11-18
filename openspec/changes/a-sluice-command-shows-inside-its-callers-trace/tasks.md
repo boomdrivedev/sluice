@@ -15,8 +15,8 @@ it.
 
 ## 2. A command reads its caller's context
 
-- [ ] 2.1 In `crates/sluice/src/telemetry.rs`, add `Caller`, read from an environment's `TRACEPARENT` and `TRACESTATE` by OpenTelemetry's W3C trace context propagator: the remote span context and its `TRACEPARENT` as W3C writes it, none where it does not read (design D1); and the reading of a kept `TRACEPARENT` text into a span context that D5's link uses. True when `cargo test -p sluice --lib a_trace_context_is_read_as_w3c_reads_it` passes.
-- [ ] 2.2 Hold that `Settings::choose` reads no context: telemetry asked of nothing, with no table and a `TRACEPARENT` in the environment, sends nothing (design D7; rule core.53). True when `cargo test -p sluice --lib a_caller_s_context_turns_nothing_on` passes.
+- [x] 2.1 In `crates/sluice/src/telemetry.rs`, add `Caller`, read from an environment's `TRACEPARENT` and `TRACESTATE` by OpenTelemetry's W3C trace context propagator: the remote span context and its `TRACEPARENT` as W3C writes it, none where it does not read (design D1); and the reading of a kept `TRACEPARENT` text into a span context that D5's link uses. True when `cargo test -p sluice --lib a_trace_context_is_read_as_w3c_reads_it` passes.
+- [x] 2.2 Hold that `Settings::choose` reads no context: telemetry asked of nothing, with no table and a `TRACEPARENT` in the environment, sends nothing (design D7; rule core.53). True when `cargo test -p sluice --lib a_caller_s_context_turns_nothing_on` passes.
 
 ## 3. A command nests under its caller
 
