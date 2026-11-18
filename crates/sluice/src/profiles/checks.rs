@@ -65,7 +65,7 @@ use sluice_seams::{
     log_tail, AtBound, Enforced, Equip, EquipStep, Equipped, Found, HostRun, KeptOutTask, Limits,
     Network, NotRun, Outcome, Part, Place, Progress, Proof, Reading, Reads, Refusals, Rev,
     RunHandle, RunKind, RunReport, RunRequest, Running, Setting, Settings, Source, TaskLog,
-    TaskProgress, TaskResult, Tests, Through,
+    TaskProgress, TaskResult, TaskState, Tests, Through,
 };
 
 use super::moon::{self, Moon};
@@ -2685,6 +2685,43 @@ impl Tests for Checks {
         let times = self.runs.times(&run.0).unwrap_or_default();
         Ok(Moon.progress(&meta.place, &out, &times, &meta.targets, started))
     }
+
+    /// 153 (design D6): a finished run's checks as its runner timed them:
+    /// the `command` runner's one check from the run's own start and end;
+    /// nothing for a run still going or lost.
+    fn timed(&self, run: &RunHandle) -> Result<Vec<TaskProgress>> {
+        let RunState::Finished(ended) = self.runs.state(&run.0)? else {
+            return Ok(Vec::new());
+        };
+        let meta: Meta = serde_json::from_value(self.runs.request(&run.0)?.meta)
+            .with_context(|| format!("reading run {}", run.0))?;
+        Ok(match meta.runner.as_str() {
+            "moon" => Vec::new(),
+            _ => command_timed(&meta, &ended),
+        })
+    }
+}
+
+/// 153 (design D6): the `command` runner's one check, timed by the run's
+/// own start and end (`result.json`); none where the command could not be
+/// started, which ran nothing.
+fn command_timed(meta: &Meta, ended: &Ended) -> Vec<TaskProgress> {
+    if ended.error.is_some() {
+        return Vec::new();
+    }
+    meta.targets
+        .iter()
+        .map(|t| TaskProgress {
+            target: t.clone(),
+            state: match ended.passed() {
+                true => TaskState::Passed,
+                false => TaskState::Failed,
+            },
+            started: Some(ended.started.clone()),
+            ended: Some(ended.ended.clone()),
+            exit: ended.exit,
+        })
+        .collect()
 }
 
 /// The `command` runner's one check: its key is the command and the

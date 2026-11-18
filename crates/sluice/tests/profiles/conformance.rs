@@ -242,6 +242,10 @@ impl Tests for RecordedChecks {
     fn tasks(&self, run: &RunHandle) -> Result<Vec<TaskProgress>> {
         self.inner.tasks(run)
     }
+
+    fn timed(&self, run: &RunHandle) -> Result<Vec<TaskProgress>> {
+        self.inner.timed(run)
+    }
 }
 
 /// The branch, with every move it made counted.

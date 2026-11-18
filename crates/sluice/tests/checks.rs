@@ -12,7 +12,7 @@ use sluice::instance::{HostCache, Instance};
 use sluice::profiles::checks::{docker_host, Checks, Endpoint, EngineTls};
 use sluice_seams::{
     Equip, EquipStep, Limits, Network, Outcome, Place, Progress, Refusals, RunHandle, RunKind,
-    RunReport, RunRequest, Setting, Settings, Source, Tests, Through,
+    RunReport, RunRequest, Setting, Settings, Source, TaskState, Tests, Through,
 };
 use support::{Repo, Scratch};
 
@@ -121,6 +121,36 @@ fn a_command_passes_or_fails_by_its_exit() {
     assert!((250..10_000).contains(&took), "{took}");
     assert_eq!(slow.tasks[0].attempts, None);
     assert_eq!(slow.detail, None);
+}
+
+/// 153 (design D6): a finished run of the `command` runner is timed as its
+/// one check, from the run's own start to its end, with its outcome; a
+/// command that fails is timed the same.
+#[test]
+fn a_finished_command_run_is_timed_by_its_start_and_end() {
+    let repo = Repo::new("checks-timed");
+    let c = checks(&repo);
+    for (name, cmd, state, exit) in [
+        ("p1", "sleep 0.3", TaskState::Passed, 0),
+        ("p2", "exit 3", TaskState::Failed, 3),
+    ] {
+        let (run, report) = ran(&c, &request(&repo, name, command(cmd)));
+        let timed = c.timed(&run).unwrap();
+        assert_eq!(timed.len(), 1, "{timed:?}");
+        let t = &timed[0];
+        assert_eq!(
+            (t.target.as_str(), t.state, t.exit),
+            (cmd, state, Some(exit))
+        );
+        let at = |s: &Option<String>| {
+            chrono::DateTime::parse_from_rfc3339(s.as_deref().expect("a time")).unwrap()
+        };
+        let (started, ended) = (at(&t.started), at(&t.ended));
+        // The run's own start and end, which its report's time is taken
+        // from.
+        let took = u64::try_from((ended - started).num_milliseconds()).unwrap();
+        assert_eq!(Some(took), report.tasks[0].took_ms, "{t:?}");
+    }
 }
 
 /// 60: a run whose folder is gone, its place released or the folder

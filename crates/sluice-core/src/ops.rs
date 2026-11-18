@@ -2271,6 +2271,10 @@ mod tests {
         fn tasks(&self, _: &RunHandle) -> Result<Vec<TaskProgress>> {
             unreachable!("a submit runs nothing")
         }
+
+        fn timed(&self, _: &RunHandle) -> Result<Vec<TaskProgress>> {
+            unreachable!("a submit runs nothing")
+        }
     }
 
     fn line(h: &Host) -> Line {
