@@ -11733,6 +11733,87 @@ fn pool_check_names_a_key_the_policy_does_not_list() {
     assert_eq!(said.matches("failed").count(), 1, "{said}");
 }
 
+/// The deployed run project's buildspec with `lines` between its
+/// `# sluice:` lines.
+fn run_buildspec_with(aws: &support::aws::FakeAws, lines: &str) {
+    use sluice::profiles::codebuild::template;
+    let mut held = aws.held.lock().unwrap();
+    let project = held
+        .projects
+        .iter_mut()
+        .find(|p| p["name"] == "sluice-run-linux-x64")
+        .unwrap();
+    let had = project["source"]["buildspec"].as_str().unwrap().to_string();
+    let open = format!("      {}\n", template::ROOM_OPEN);
+    assert_eq!(had.matches(&open).count(), 1, "{had}");
+    project["source"]["buildspec"] =
+        serde_json::Value::String(had.replacen(&open, &format!("{open}{lines}"), 1));
+}
+
+/// satisfies: record 0119 as amended 2026-11-18 (design D3); the
+/// repository-steps spec's "A run project's buildspec": a run project's
+/// buildspec as sluice writes it but for a command of the repository's
+/// between its `# sluice:` lines passes, said so
+#[test]
+fn pool_check_reads_a_buildspec_with_the_repositorys_own_commands() {
+    if !alone("pool_check_reads_a_buildspec_with_the_repositorys_own_commands") {
+        return;
+    }
+    let (aws, key) = fleet_deployed();
+    run_buildspec_with(&aws, "      - ./push \"$SLUICE_CHECKOUT\"\n");
+    let f = Fakes::new();
+    let policy = fleet_policy(
+        &support::aws::public(&key),
+        "batch = false\nparallel = 10\n",
+    );
+    f.world.init("main", &[(POLICY_PATH, policy.as_str())]);
+    let (code, said) = sluice(&f, &["pool", "check", "main"]);
+    assert_eq!(code, 0, "{said}");
+    assert!(
+        said.contains(&format!(
+            "ok      sluice-run-linux-x64's buildspec is as sluice {} writes it, cloning acme/widgets, with the repository's own commands",
+            sluice::VERSION
+        )),
+        "{said}"
+    );
+    assert!(!said.contains("failed"), "{said}");
+}
+
+/// satisfies: record 0119 as amended 2026-11-18 (design D3; rule
+/// core.62); the repository-steps spec's "A command that leaves the
+/// buildspec's commands": a line between a run project's `# sluice:` lines
+/// at the buildspec's top level fails, naming the run project and the line
+#[test]
+fn pool_check_names_own_commands_that_leave_the_buildspec() {
+    if !alone("pool_check_names_own_commands_that_leave_the_buildspec") {
+        return;
+    }
+    let (aws, key) = fleet_deployed();
+    run_buildspec_with(&aws, "      - ./push\nartifacts:\n");
+    let line = aws.held.lock().unwrap().projects[0]["source"]["buildspec"]
+        .as_str()
+        .unwrap()
+        .lines()
+        .position(|l| l == "artifacts:")
+        .unwrap()
+        + 1;
+    let f = Fakes::new();
+    let policy = fleet_policy(
+        &support::aws::public(&key),
+        "batch = false\nparallel = 10\n",
+    );
+    f.world.init("main", &[(POLICY_PATH, policy.as_str())]);
+    let (code, said) = sluice(&f, &["pool", "check", "main"]);
+    assert_eq!(code, FAILED, "{said}");
+    assert!(
+        said.contains(&format!(
+            "failed  sluice-run-linux-x64's buildspec: its line {line}, \"artifacts:\" leaves its post_build commands"
+        )),
+        "{said}"
+    );
+    assert_eq!(said.matches("failed").count(), 1, "{said}");
+}
+
 /// satisfies: record 0119 (design D14); the actions-pool spec's "A pool the
 /// policy names is kept"
 #[test]
