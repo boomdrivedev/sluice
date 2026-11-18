@@ -345,6 +345,43 @@ impl Caller {
     }
 }
 
+/// Run a command named by `words`, as `sluice --help` lists them, in its
+/// `caller`'s trace (153; design D2): started under a caller's context, a
+/// span, `sluice.command` named by its words, whose parent is set to the
+/// caller's span before anything beneath it starts, entered for the
+/// command's whole run, and holding `sluice.exit`, the command's exit, as
+/// it returns, `INTERNAL` where it fails. It is sent only while telemetry
+/// sends traces; started under none, the command makes no span of its
+/// own. An `exec` records `sluice.branch`, `sluice.ran` and
+/// `sluice.replayed` on it (design D6).
+pub fn command(
+    caller: Option<&Caller>,
+    words: &str,
+    run: impl FnOnce() -> Result<i32>,
+) -> Result<i32> {
+    let Some(caller) = caller else {
+        return run();
+    };
+    let span = tracing::info_span!(
+        parent: None,
+        "sluice.command",
+        otel.name = words,
+        sluice.exit = tracing::field::Empty,
+        sluice.branch = tracing::field::Empty,
+        sluice.ran = tracing::field::Empty,
+        sluice.replayed = tracing::field::Empty,
+    );
+    let _ = span
+        .set_parent(opentelemetry::Context::new().with_remote_span_context(caller.context.clone()));
+    let ran = span.in_scope(run);
+    let exit = match &ran {
+        Ok(code) => *code,
+        Err(_) => crate::INTERNAL,
+    };
+    span.record("sluice.exit", exit);
+    ran
+}
+
 /// The span a `TRACEPARENT` kept as text names, read as [`Caller::read`]
 /// reads one, with no trace state; `None` where it does not read (design
 /// D5).

@@ -258,6 +258,11 @@ pub struct Cli {
     /// else 8192.
     #[arg(long, global = true, hide = true, env = "SLUICE_OTEL_LOGS_LIMIT")]
     pub otel_logs_limit: Option<usize>,
+    /// 153: the trace context the command was started under, which `main`
+    /// reads from the environment it started with and clap never parses;
+    /// it names only where the command's span nests (design D1, D7).
+    #[arg(skip)]
+    pub caller: Option<telemetry::Caller>,
 }
 
 #[derive(Subcommand, Debug)]
@@ -1581,6 +1586,60 @@ impl Cli {
         }
     }
 
+    /// The command's words as `sluice --help` lists them: `sluice exec`,
+    /// `sluice job run`, and `sluice` for the home view, which name its
+    /// span in its caller's trace (153; design D2).
+    pub fn words(&self) -> String {
+        let words = match &self.command {
+            None => return "sluice".into(),
+            Some(command) => match command {
+                Command::Submit { .. } => "submit",
+                Command::Wait { .. } => "wait",
+                Command::Inbox { .. } => "inbox",
+                Command::Confirm { .. } => "confirm",
+                Command::Push { .. } => "push",
+                Command::Step { .. } => "step",
+                Command::Run { .. } => "run",
+                Command::Status { .. } => "status",
+                Command::Overview { .. } => "overview",
+                Command::Amend { .. } => "amend",
+                Command::Withdraw { .. } => "withdraw",
+                Command::SetAside { .. } => "set-aside",
+                Command::Exec { .. } => "exec",
+                Command::Equip { .. } => "equip",
+                Command::Preview { .. } => "preview",
+                Command::Previews { .. } => "previews",
+                Command::Release { .. } => "release",
+                Command::Supervise { .. } => "supervise",
+                Command::Host => "host",
+                Command::Protect { .. } => "protect",
+                Command::Hook { .. } => "hook",
+                Command::Branch { command } => match command {
+                    BranchCommand::Create { .. } => "branch create",
+                    BranchCommand::Delete { .. } => "branch delete",
+                    BranchCommand::Accept { .. } => "branch accept",
+                },
+                Command::Forge { command } => match command {
+                    ForgeCommand::Check { .. } => "forge check",
+                },
+                Command::Init { command } => match command {
+                    InitCommand::Actions { .. } => "init actions",
+                    InitCommand::Codebuild { .. } => "init codebuild",
+                },
+                Command::Pool { command } => match command {
+                    PoolCommand::Check { .. } => "pool check",
+                },
+                Command::Job { command } => match command {
+                    JobCommand::Run { .. } => "job run",
+                    JobCommand::Sign { .. } => "job sign",
+                    JobCommand::Record { .. } => "job record",
+                },
+                Command::Credential { .. } => "credential",
+            },
+        };
+        format!("sluice {words}")
+    }
+
     /// Whether the command was asked for JSON, so that even a failure
     /// before or outside it is said as JSON.
     pub fn json(&self) -> bool {
@@ -1732,8 +1791,28 @@ pub enum Driven {
     Ended(i32),
 }
 
-/// Run one command; returns its exit code.
+/// Run one command; returns its exit code. Started under a caller's trace
+/// context, its whole run is one span in the caller's trace (153; design
+/// D2).
 pub fn run(
+    cli: Cli,
+    seams: Seams<'_>,
+    host: &dyn exec::Host,
+    pushers: &dyn Pushers,
+    pulls: &dyn PullRequests,
+    clock: &dyn Clock,
+    pause: &dyn Pause,
+    out: &mut dyn Write,
+) -> Result<i32> {
+    let words = cli.words();
+    let caller = cli.caller.clone();
+    telemetry::command(caller.as_ref(), &words, || {
+        dispatch(cli, seams, host, pushers, pulls, clock, pause, out)
+    })
+}
+
+/// The command `cli` names, run.
+fn dispatch(
     cli: Cli,
     seams: Seams<'_>,
     host: &dyn exec::Host,

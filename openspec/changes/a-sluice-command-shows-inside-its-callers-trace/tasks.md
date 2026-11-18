@@ -20,8 +20,8 @@ it.
 
 ## 3. A command nests under its caller
 
-- [ ] 3.1 Give `Cli` the caller's context, `#[arg(skip)] caller: Option<Caller>`; add the one function of `telemetry` that makes a command's span, `sluice.command` with `otel.name` the command's words as `sluice --help` lists them, its parent set to the caller's context before anything beneath it starts, and records `sluice.exit` as the command returns, making none where `caller` is none; call it from `run` for every command it dispatches; and make `sluice.round` with no parent in `crates/sluice-core/src/step.rs` (design D2, D3). True when `sluice exec bolt/sluice-reports-its-work-plainly -- cargo test -p sluice --test telemetry_logs a_command_nests_under_its_caller_s_trace` passes.
-- [ ] 3.2 Hold that sluice's host process keeps no `TRACEPARENT` or `TRACESTATE` of the command that starts it (design D3). True when `cargo test -p sluice --lib the_host_process_keeps_no_caller_s_trace_context` passes.
+- [x] 3.1 Give `Cli` the caller's context, `#[arg(skip)] caller: Option<Caller>`; add the one function of `telemetry` that makes a command's span, `sluice.command` with `otel.name` the command's words as `sluice --help` lists them, its parent set to the caller's context before anything beneath it starts, and records `sluice.exit` as the command returns, making none where `caller` is none; call it from `run` for every command it dispatches; and make `sluice.round` with no parent in `crates/sluice-core/src/step.rs` (design D2, D3). True when `sluice exec bolt/sluice-reports-its-work-plainly -- cargo test -p sluice --test telemetry_logs a_command_nests_under_its_caller_s_trace` passes.
+- [x] 3.2 Hold that sluice's host process keeps no `TRACEPARENT` or `TRACESTATE` of the command that starts it (design D3). True when `cargo test -p sluice --lib the_host_process_keeps_no_caller_s_trace_context` passes.
 
 ## 4. A submission keeps the trace it was submitted under
 

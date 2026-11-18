@@ -25,7 +25,7 @@ use opentelemetry_sdk::logs::{InMemoryLogExporter, SdkLogRecord};
 use opentelemetry_sdk::trace::{InMemorySpanExporter, SpanData};
 use sluice::instance::{HostTelemetry, Instance};
 use sluice::profiles::checks::Checks;
-use sluice::telemetry::{Choices, Logs, Settings as Chosen, Telemetry};
+use sluice::telemetry::{Caller, Choices, Logs, Settings as Chosen, Telemetry};
 use sluice::{run, Cli, Followed, Opened, Pause, PullRequests, FAILED, LANDED};
 use sluice_core::{Clock, Seams, SubmitHead, SubmitRefusal, OUTPUT};
 use sluice_fakes::Fakes;
@@ -125,7 +125,13 @@ fn setup() -> Fakes {
 
 /// `sluice <args>` over the fakes, its pull requests from `pulls`.
 fn sluice(f: &Fakes, pulls: &dyn PullRequests, args: &[&str]) -> i32 {
+    under(f, pulls, args, None)
+}
+
+/// `sluice <args>` over the fakes, started under `caller`'s trace context.
+fn under(f: &Fakes, pulls: &dyn PullRequests, args: &[&str], caller: Option<Caller>) -> i32 {
     let cli = Cli::try_parse_from(std::iter::once("sluice").chain(args.iter().copied())).unwrap();
+    let cli = Cli { caller, ..cli };
     run(
         cli,
         f.seams(),
@@ -141,9 +147,29 @@ fn sluice(f: &Fakes, pulls: &dyn PullRequests, args: &[&str]) -> i32 {
 
 /// `changes` on the branch's tip, submitted from `worktree`: its exit.
 fn submit(f: &Fakes, worktree: &str, changes: &[(&str, Option<&str>)]) -> i32 {
+    submit_under(f, worktree, changes, None)
+}
+
+/// `changes` on the branch's tip, submitted from `worktree` under
+/// `caller`'s trace context: its exit.
+fn submit_under(
+    f: &Fakes,
+    worktree: &str,
+    changes: &[(&str, Option<&str>)],
+    caller: Option<Caller>,
+) -> i32 {
     let head = f.world.work(&f.world.tip(BRANCH), changes);
     f.world.session(worktree, "agent-a", &head);
-    sluice(f, &(), &["submit", BRANCH, "--worktree", worktree])
+    under(f, &(), &["submit", BRANCH, "--worktree", worktree], caller)
+}
+
+/// The trace and span a caller's context names.
+const TRACE: &str = "4bf92f3577b34da6a3ce929d0e0e4736";
+const PARENT: &str = "00f067aa0ba902b7";
+
+/// A caller's context, `TRACEPARENT` `00-<TRACE>-<PARENT>-01`.
+fn caller() -> Caller {
+    Caller::read([("TRACEPARENT", format!("00-{TRACE}-{PARENT}-01"))]).unwrap()
 }
 
 /// Pull requests whose forge cannot be read: a round says so as a
@@ -481,6 +507,56 @@ fn a_round_is_one_trace_rooted_at_sluice_round() {
             let p = parent(s);
             assert!(phases.contains(&p.as_str()), "{step} is beneath {p}");
         }
+    }
+    telemetry.finish();
+}
+
+/// 153 (design D2, D3): a submit started under a caller's context sends
+/// one `sluice submit` span in the caller's trace, beneath the caller's
+/// span and holding its exit; one started under none sends none. Each
+/// round it waits on is a trace of its own, nested under no command.
+#[test]
+fn a_command_nests_under_its_caller_s_trace() {
+    if !alone("a_command_nests_under_its_caller_s_trace") {
+        return;
+    }
+    let (telemetry, spans, _) = start(Logs::Off);
+    let f = setup();
+    assert_eq!(
+        submit_under(
+            &f,
+            "unit/a",
+            &[("tests/t_a.py", Some("broken"))],
+            Some(caller())
+        ),
+        FAILED
+    );
+    assert_eq!(
+        submit(&f, "unit/b", &[("lib/a.py", Some("changed"))]),
+        LANDED
+    );
+    telemetry.flush();
+
+    let all = spans.get_finished_spans().unwrap();
+    let named: Vec<&SpanData> = all.iter().filter(|s| s.name == "sluice submit").collect();
+    assert_eq!(named.len(), 1, "{all:?}");
+    let command = named[0];
+    assert_eq!(command.span_context.trace_id().to_string(), TRACE);
+    assert_eq!(command.parent_span_id.to_string(), PARENT);
+    assert_eq!(
+        value(command, "sluice.exit"),
+        Some(Value::I64(FAILED.into()))
+    );
+    assert!(!all.iter().any(|s| s.name == "sluice.command"), "{all:?}");
+
+    let rounds: Vec<&SpanData> = all.iter().filter(|s| s.name == "sluice.round").collect();
+    assert!(rounds.len() >= 2, "{rounds:?}");
+    let mut traces = HashSet::new();
+    for round in &rounds {
+        assert_eq!(round.parent_span_id, SpanId::INVALID, "{round:?}");
+        let trace = round.span_context.trace_id();
+        assert_ne!(trace.to_string(), TRACE, "{round:?}");
+        assert!(traces.insert(trace), "two rounds share a trace");
     }
     telemetry.finish();
 }

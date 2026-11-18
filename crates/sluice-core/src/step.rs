@@ -245,7 +245,15 @@ impl Sluice<'_> {
         if self.held {
             bail!("a round of {branch} never reads its records as held");
         }
-        let round = info_span!("sluice.round", sluice.branch = branch, sluice.step = "");
+        // 153 (design D3): a round is a trace of its own wherever it runs,
+        // nested under no command's span; it reaches the work's callers by
+        // links alone.
+        let round = info_span!(
+            parent: None,
+            "sluice.round",
+            sluice.branch = branch,
+            sluice.step = ""
+        );
         let _round = round.enter();
         let released = info_span!("sluice.abandoned").in_scope(|| self.release_abandoned())?;
         let previews =
