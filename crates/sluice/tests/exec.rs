@@ -1044,12 +1044,15 @@ fn an_unheld_release_with_nothing_to_free_makes_nothing() {
     let scratch = user.path().join("sluice-user");
     let sluice = s.repo.dir().join(".git/sluice");
     let before = kept(&sluice);
+    let state_before = kept(s.state.path());
 
     let out = s.sluice_with(&[("SLUICE_USER_SCRATCH", &scratch)], &["release"]);
     assert_eq!(out.status.code(), Some(0), "{}", text(&out));
     assert_eq!(String::from_utf8_lossy(&out.stdout), "nothing to release\n");
     assert!(!scratch.exists(), "{:?}", kept(&scratch));
     assert_eq!(kept(&sluice), before);
+    // No host process was told, so none was started (135; D10).
+    assert_eq!(kept(s.state.path()), state_before);
 }
 
 /// Session-runs-1 clauses 92, 97, rule core.18: each run leaves on the
