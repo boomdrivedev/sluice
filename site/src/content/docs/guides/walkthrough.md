@@ -25,12 +25,12 @@ code that passed.
 ## 1. Install
 
 ```sh
-nix profile install github:agentplot/sluice
+nix profile install github:boomdrivedev/sluice
 ```
 
 That installs `sluice`, and beside it `wt-submit`, which matters only to
 a team on [worktrunk](/sluice/guides/worktrunk/). (`cargo install --git
-https://github.com/agentplot/sluice sluice` does the same without nix.)
+https://github.com/boomdrivedev/sluice sluice` does the same without nix.)
 
 ## 2. The config: `.config/sluice.toml`
 

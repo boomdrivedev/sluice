@@ -1,6 +1,6 @@
 # The documentation site
 
-The developer documentation at https://agentplot.github.io/sluice, an
+The developer documentation at https://boomdrivedev.github.io/sluice, an
 [Astro](https://astro.build) site with [Starlight](https://starlight.astro.build),
 published by `.github/workflows/pages.yml` on every push to `main` that
 touches `site/`, `docs/` or the README.
