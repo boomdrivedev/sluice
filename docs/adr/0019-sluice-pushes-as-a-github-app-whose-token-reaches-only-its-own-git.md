@@ -38,3 +38,18 @@ Option 1 is what lets an agent's push through: the agents hold the operator's cr
 - A token that cannot be bought, GitHub down or the key revoked, fails the round as a failed fetch does: it lands nothing and says why.
 - The tests sign with a key made for them, run git through the helper against a fake HTTP remote, and check the app against a fake of GitHub's API on a port the system picks; no test reaches the user's git config or credentials.
 - The live test against a scratch app and repository is the operator's, run once by hand; it has not been run.
+
+## Amendment of 2026-11-18: a landing names the App, and the check covers every permission sluice uses
+
+Decider: the design agent, on the open list of `docs/plans/phase-1-pass-2.md` (piece 25 and its follow-ups), as the review of 2026-11-18 sent it, and on boomdrivedev/boomdrive record 0007, whose one App the family lands with and which counts "GitHub shows the product's name on every landing" among its consequences.
+
+Landing commits are written as `sluice <sluice@localhost>`, fixed in the code, so GitHub links no landing to the App that pushed it, whatever record 0007 expects.
+
+1. **A landing names the App.** Where a branch's records are on a forge that sluice reaches as a GitHub App, every commit sluice writes for it, a landing's and a records commit alike, has the App's own bot account as its author and committer: the App's name followed by `[bot]`, at `<bot user id>+<app slug>[bot]@users.noreply.github.com`, read from GitHub with the App's own credential and kept on the host. GitHub then shows the App on every landing. A branch with no App keeps `sluice <sluice@localhost>`.
+2. **One App for every organization a host lands for.** A host's one `[forge]` App, installed on each organization it lands for, buys each repository's token from that repository's own installation, as record 0007 has it. Piece 25's entry per organization, each with its own App and author, is not taken: each organization already revokes the App by uninstalling it.
+3. **The check covers every permission sluice uses.** `sluice forge check` reports each permission sluice uses of the App on the branch: contents, workflows, checks and pull requests to write, as it does, and commit statuses to read where the branch takes pull requests, since a request's conditions read other systems' statuses (record 0071).
+
+**Options not taken.**
+
+- *An organization's official name and address as a landing's author.* That is a person's or a company's identity on a commit no person wrote, and GitHub links it to no App.
+- *An App per organization (piece 25).* Each organization would make and hold its own App and key, which record 0007's one App replaces.
