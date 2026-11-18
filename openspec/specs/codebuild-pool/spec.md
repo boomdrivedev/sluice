@@ -77,20 +77,32 @@ app's key and no start of the sign project (record 0119, C.8).
 ### Requirement: The run build holds no key
 
 The run build SHALL run the combination's checks under a role that may
-write only its own artifact and its logs, with no use of the signing
-key, no read of the app's key and no start of any build. The only
-credential it is given SHALL be a token of sluice's app that reads the
-branch's repository and nothing else, which the lead mints for its start
-and which lapses within the hour (79, 109; record 0119; core.62).
+write its own artifact and its logs, and whatever else the managed
+policies the repository gives it for its own commands allow, and that
+denies itself the signing key, the app's key and every CodeBuild and
+IAM action. The only credential sluice gives it SHALL be a token of
+sluice's app that reads the branch's repository alone, lapsing within
+the hour (79, 109; timber 135; record 0119; core.62).
 
 #### Scenario: The run role in the template
 
 - **WHEN** `sluice init codebuild` writes its template
-- **THEN** each run project's role names no `kms:`, no
+- **THEN** each run project's role allows no `kms:`, no
   `secretsmanager:` and no `codebuild:` action, and its buildspec runs
   `sluice job run` and nothing that signs
   (`the_run_build_holds_no_key_and_the_sign_build_runs_no_check` in
   `crates/sluice/src/profiles/codebuild/template.rs`)
+
+#### Scenario: The repository's own policies
+
+- **WHEN** the template is read with `RunPolicies` naming one managed
+  policy, and with it empty
+- **THEN** the run role is given that policy in the first and none in
+  the second, and in both its own policy denies every `kms:` action on
+  the signing key, every `secretsmanager:` action on the app's key, and
+  every `codebuild:` and `iam:` action
+  (`the_run_role_takes_the_repositorys_policies_and_its_denies_stand`
+  in `crates/sluice/src/profiles/codebuild/template.rs`)
 
 #### Scenario: The read token
 
@@ -242,10 +254,10 @@ SHALL be kept between calls (record 0119; timber record 0017).
 `sluice init codebuild` SHALL write `.config/sluice-codebuild.yml`, a
 CloudFormation template of a reserved-capacity fleet and a run project
 for each Linux system it is given, the sign project, the hand-over
-bucket, the KMS key, the secret for the app's key, the rule and the
-roles, naming the release of sluice that wrote it, leaving a differing
-file unless `--force`, and SHALL print how to deploy it (C.8; record
-0119).
+bucket, the KMS key, the secret, the rule and the roles, taking the
+repository's own policies for the run role, naming the release that
+wrote it, leaving a file differing outside the repository's own commands
+unless `--force`, and SHALL print how to deploy it (C.8; record 0119).
 
 #### Scenario: A repository with no pool
 
@@ -289,9 +301,9 @@ neither, leaving the file's own lines as they were (record 0119).
 `sluice pool check <branch>` SHALL report, for each CodeBuild pool the
 policy at the branch's revision names, the identity the host reaches
 AWS as; each run project on a reserved-capacity fleet of its system,
-its buildspec as `sluice init codebuild` writes it and its timeout
-longer than the branch's `timeout`; the sign project's buildspec; and
-the key's spec, usage and public half against the policy's; and SHALL
+its buildspec as `sluice init codebuild` writes it, the repository's own
+commands aside, and its timeout longer than the branch's `timeout`; the
+sign project's buildspec; and the key against the policy's; and SHALL
 exit non-zero naming each that fails (record 0119).
 
 #### Scenario: A key the policy does not list

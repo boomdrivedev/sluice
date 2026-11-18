@@ -8,8 +8,19 @@
 //! The template's one system's resources stand between `# system` and
 //! `# end system`, written again for each system given.
 
+use anyhow::Result;
+
+use crate::own_steps::{self, Carry, Layout, Reading, Seg};
+
 /// Where the template lives in a repository.
 pub const PATH: &str = ".config/sluice-codebuild.yml";
+
+/// The lines that open and close a run buildspec's room for the
+/// repository's own commands, among its `post_build` phase's commands
+/// (record 0119 as amended 2026-11-18; design D1 of the change
+/// `a-pools-run-job-runs-the-repositorys-own-steps`).
+pub const ROOM_OPEN: &str = "# sluice: your own commands, after the checks, in $SLUICE_CHECKOUT";
+pub const ROOM_CLOSE: &str = "# sluice: end of your own commands";
 
 const TEMPLATE: &str = include_str!("templates/stack.yml");
 
@@ -50,16 +61,7 @@ impl System {
     /// Its name as a CloudFormation logical id's part: `linux-x64` is
     /// `LinuxX64`.
     fn logical(&self) -> String {
-        self.name
-            .split(|c: char| !c.is_ascii_alphanumeric())
-            .filter(|w| !w.is_empty())
-            .map(|w| {
-                let mut c = w.chars();
-                c.next()
-                    .map(|f| f.to_ascii_uppercase().to_string() + c.as_str())
-                    .unwrap_or_default()
-            })
-            .collect()
+        logical(&self.name)
     }
 
     /// The template's one system's resources, written for this one.
@@ -75,6 +77,109 @@ impl System {
             .replace("LINUX_EC2", environment)
             .replace("x86_64-linux", release)
             .replace("amazonlinux-x86_64-base", image)
+    }
+}
+
+/// A system's name as a CloudFormation logical id's part: `linux-x64` is
+/// `LinuxX64`.
+fn logical(name: &str) -> String {
+    name.split(|c: char| !c.is_ascii_alphanumeric())
+        .filter(|w| !w.is_empty())
+        .map(|w| {
+            let mut c = w.chars();
+            c.next()
+                .map(|f| f.to_ascii_uppercase().to_string() + c.as_str())
+                .unwrap_or_default()
+        })
+        .collect()
+}
+
+/// The system a template's line at `at` is of: the nearest `# system`
+/// line above it.
+fn system_of(lines: &[&str], at: usize) -> String {
+    lines[..at]
+        .iter()
+        .rev()
+        .find_map(|l| {
+            l.trim()
+                .strip_prefix("# system ")
+                .map(|n| n.trim().to_string())
+        })
+        .unwrap_or_default()
+}
+
+/// The commands of `system`'s run project's `post_build` phase, which its
+/// room's entries join: in its buildspec, read as YAML of its own.
+fn post_build_of(system: &str) -> Vec<Seg> {
+    let mut path = own_steps::keys(&[
+        "Resources",
+        &format!("Run{}", logical(system)),
+        "Properties",
+        "Source",
+        "BuildSpec",
+    ]);
+    path.push(Seg::Text);
+    path.extend(own_steps::keys(&["phases", "post_build", "commands"]));
+    path
+}
+
+/// The commands of a buildspec's `post_build` phase.
+fn post_build(_: &str) -> Vec<Seg> {
+    own_steps::keys(&["phases", "post_build", "commands"])
+}
+
+/// What a template's rooms are: one in each run project's buildspec, by
+/// its system.
+fn layout() -> Layout<'static> {
+    Layout {
+        open: ROOM_OPEN,
+        close: ROOM_CLOSE,
+        key: &system_of,
+        list: &post_build_of,
+        own_line: None,
+    }
+}
+
+/// `had`, a template, read against `wants`, what this sluice writes it as
+/// (design D3): as sluice writes it, with or without the repository's own
+/// commands; differing; or a run project's own commands leaving its
+/// buildspec's `post_build` commands, by its system.
+pub fn read(had: &str, wants: &str) -> Result<Reading> {
+    own_steps::read(had, wants, &layout())
+}
+
+/// `wants` with each run project's own commands in `had` carried into the
+/// room of the run project of its system; a system `wants` writes none for
+/// said in `dropped` (design D3).
+pub fn carry(had: &str, wants: &str) -> Result<Carry> {
+    own_steps::carry(had, wants, &layout())
+}
+
+/// `had`, the buildspec of `system`'s run project as CodeBuild holds it,
+/// read against `wants`, as this sluice writes it (design D3).
+pub fn read_buildspec(had: &str, wants: &str, system: &str) -> Result<Reading> {
+    let key = |_: &[&str], _: usize| system.to_string();
+    own_steps::read(
+        had,
+        wants,
+        &Layout {
+            open: ROOM_OPEN,
+            close: ROOM_CLOSE,
+            key: &key,
+            list: &post_build,
+            own_line: None,
+        },
+    )
+}
+
+/// What a template or a buildspec as sluice writes it holds of the
+/// repository's own, as said after "as sluice writes it" or "written".
+pub fn holds(reading: &Reading) -> &'static str {
+    match reading {
+        Reading::AsWritten { rooms, .. } if !rooms.is_empty() => {
+            ", with the repository's own commands"
+        }
+        _ => "",
     }
 }
 
@@ -311,9 +416,21 @@ mod tests {
     #[test]
     fn the_run_build_holds_no_key_and_the_sign_build_runs_no_check() {
         let stack = stack();
-        let run = said(resource(&stack, "RunRole"));
-        for forbidden in ["kms:", "secretsmanager:", "codebuild:"] {
-            assert!(!run.contains(forbidden), "the run role names {forbidden}");
+        // Record 0119 as amended 2026-11-18 (design D5): the run role
+        // allows none of them; its denies are read in
+        // `the_run_role_takes_the_repositorys_policies_and_its_denies_stand`.
+        let allowed: Vec<Yaml> = statements(resource(&stack, "RunRole"))
+            .into_iter()
+            .filter(|s| s["Effect"].as_str() == Some("Allow"))
+            .collect();
+        for forbidden in ["kms:", "secretsmanager:", "codebuild:", "iam:"] {
+            for s in &allowed {
+                assert!(
+                    !said(s).contains(forbidden),
+                    "the run role allows {forbidden}: {}",
+                    said(s)
+                );
+            }
         }
         for system in ["RunLinuxX64", "RunLinuxArm64"] {
             let project = resource(&stack, system);
@@ -428,6 +545,169 @@ mod tests {
         assert!(events.contains("codebuild:StartBuild") && events.contains("Sign"));
     }
 
+    /// Record 0119 as amended 2026-11-18 (design D1 and D2 of the change
+    /// `a-pools-run-job-runs-the-repositorys-own-steps`; timber 135; rule
+    /// core.63): each run buildspec runs `sluice job run` naming its
+    /// checkout as its build phase's last command; its `post_build` phase
+    /// exports sluice's `PATH` and `SLUICE_CHECKOUT`, then leaves its room,
+    /// the two `# sluice:` lines with nothing between at the commands'
+    /// indentation; and its `finally` block releases the checkout in the
+    /// clone, whatever the room's commands came to.
+    #[test]
+    fn each_run_build_leaves_room_for_the_repositorys_own_commands() {
+        let stack = stack();
+        for system in ["RunLinuxX64", "RunLinuxArm64"] {
+            let (spec, text) = buildspec(&stack, system);
+            let last = commands(&spec).last().cloned().unwrap_or_default();
+            assert_eq!(
+                last.lines().map(str::trim).rfind(|l| !l.is_empty()),
+                Some(
+                    "sluice job run --claim \"$SLUICE_CLAIM\" --branch \"$SLUICE_BRANCH\" \
+                     --out \"$CODEBUILD_SRC_DIR/sluice-run\" --checkout \
+                     \"$CODEBUILD_SRC_DIR/sluice-checkout\""
+                ),
+                "{system}: {text}"
+            );
+            let post = &spec["phases"]["post_build"];
+            let first = post["commands"][0].as_str().unwrap_or_default();
+            assert!(
+                first.contains("export PATH=\"$HOME/.local/bin:$PATH\"")
+                    && first.contains(
+                        "export SLUICE_CHECKOUT=\"$(head -n 1 \"$CODEBUILD_SRC_DIR/sluice-checkout\")\""
+                    ),
+                "{system}: {first}"
+            );
+            assert_eq!(
+                post["commands"].as_vec().map(Vec::len),
+                Some(1),
+                "{system}: nothing of sluice's in the room"
+            );
+            let lines: Vec<&str> = text.lines().collect();
+            let open = lines
+                .iter()
+                .position(|l| {
+                    *l == "      # sluice: your own commands, after the checks, in $SLUICE_CHECKOUT"
+                })
+                .unwrap_or_else(|| panic!("{system} has no room: {text}"));
+            assert_eq!(lines[open + 1], "      # sluice: end of your own commands");
+            let exported = lines
+                .iter()
+                .position(|l| l.contains("export SLUICE_CHECKOUT="))
+                .unwrap();
+            let finally = lines
+                .iter()
+                .position(|l| *l == "    finally:")
+                .unwrap_or_else(|| panic!("{system} has no finally: {text}"));
+            assert!(exported < open && open + 1 < finally, "{system}: {text}");
+            let released = post["finally"][0].as_str().unwrap_or_default();
+            assert!(
+                released.contains("cd \"$CODEBUILD_SRC_DIR/repository\"")
+                    && released.contains(
+                        "sluice job release --checkout \"$CODEBUILD_SRC_DIR/sluice-checkout\" \
+                         --out \"$CODEBUILD_SRC_DIR/sluice-run\""
+                    ),
+                "{system}: {released}"
+            );
+        }
+    }
+
+    /// The value `y` of a template takes where its parameters are
+    /// `params`: `Ref`, `Fn::Join`, `Fn::Equals`, `Fn::Not` and `Fn::If`
+    /// as CloudFormation reads them, enough for the run role's policies.
+    fn resolved(stack: &Yaml, y: &Yaml, params: &[(&str, Vec<&str>)]) -> Option<Yaml> {
+        let h = y.as_hash()?;
+        let one = |k: &str| h.get(&Yaml::String(k.into()));
+        if let Some(name) = one("Ref").and_then(Yaml::as_str) {
+            if name == "AWS::NoValue" {
+                return None;
+            }
+            let (_, v) = params.iter().find(|(p, _)| *p == name)?;
+            return Some(Yaml::Array(
+                v.iter().map(|s| Yaml::String((*s).into())).collect(),
+            ));
+        }
+        let strings = |y: Option<Yaml>| match y {
+            Some(Yaml::Array(a)) => a
+                .iter()
+                .filter_map(|s| s.as_str().map(String::from))
+                .collect::<Vec<_>>(),
+            Some(Yaml::String(s)) => vec![s],
+            _ => Vec::new(),
+        };
+        if let Some(args) = one("Fn::Join").and_then(Yaml::as_vec) {
+            let joined = strings(resolved(stack, &args[1], params)).join(args[0].as_str()?);
+            return Some(Yaml::String(joined));
+        }
+        if let Some(args) = one("Fn::Equals").and_then(Yaml::as_vec) {
+            let side = |y: &Yaml| match y {
+                Yaml::String(s) => Some(s.clone()),
+                _ => resolved(stack, y, params)?.as_str().map(String::from),
+            };
+            return Some(Yaml::Boolean(side(&args[0]) == side(&args[1])));
+        }
+        if let Some(args) = one("Fn::Not").and_then(Yaml::as_vec) {
+            return Some(Yaml::Boolean(
+                !resolved(stack, &args[0], params)?.as_bool()?,
+            ));
+        }
+        if let Some(args) = one("Fn::If").and_then(Yaml::as_vec) {
+            let condition = &stack["Conditions"][args[0].as_str()?];
+            let chosen = if resolved(stack, condition, params)?.as_bool()? {
+                &args[1]
+            } else {
+                &args[2]
+            };
+            return resolved(stack, chosen, params);
+        }
+        Some(y.clone())
+    }
+
+    /// Record 0119 as amended 2026-11-18 (design D5; timber 135; rule
+    /// core.62): the run role is given the managed policies `RunPolicies`
+    /// names, none where it names none, and its own policy denies every
+    /// `kms:` action on the signing key, every `secretsmanager:` action on
+    /// the app's key and every `codebuild:` and `iam:` action, whichever.
+    #[test]
+    fn the_run_role_takes_the_repositorys_policies_and_its_denies_stand() {
+        let stack = stack();
+        let parameter = &stack["Parameters"]["RunPolicies"];
+        assert_eq!(parameter["Type"].as_str(), Some("CommaDelimitedList"));
+        assert_eq!(parameter["Default"].as_str(), Some(""));
+        let role = resource(&stack, "RunRole");
+        let managed = &role["Properties"]["ManagedPolicyArns"];
+        let store = "arn:aws:iam::111122223333:policy/write-the-cache";
+        assert_eq!(
+            resolved(&stack, managed, &[("RunPolicies", vec![store])]),
+            Some(Yaml::Array(vec![Yaml::String(store.into())])),
+            "one policy named, given"
+        );
+        assert_eq!(
+            resolved(&stack, managed, &[("RunPolicies", vec![""])]),
+            None,
+            "none named, none given"
+        );
+        let denied: Vec<(String, Yaml)> = statements(role)
+            .iter()
+            .filter(|s| s["Effect"].as_str() == Some("Deny"))
+            .flat_map(|s| {
+                let on = s["Resource"].clone();
+                actions(s).into_iter().map(move |a| (a, on.clone()))
+            })
+            .collect();
+        for (action, on) in [
+            ("kms:*", "Fn::GetAtt: [SignKey, Arn]"),
+            ("secretsmanager:*", "Ref: AppKey"),
+            ("codebuild:*", "\"*\""),
+            ("iam:*", "\"*\""),
+        ] {
+            let on = YamlLoader::load_from_str(on).unwrap().remove(0);
+            assert!(
+                denied.iter().any(|(a, r)| a == action && *r == on),
+                "the run role denies {action} on {on:?}: {denied:?}"
+            );
+        }
+    }
+
     /// Record 0119 (design D8; rule core.10): each run buildspec, before
     /// `sluice job run`, ends every container the instance's engine runs and
     /// removes the build user's sluice scratch directory and the state an
@@ -471,6 +751,13 @@ mod tests {
             assert!(at("docker ps --all --quiet") < run);
             assert!(at("rm -rf \"/tmp/sluice-$(id -u)\"") < run);
             assert!(lines[at("rm -rf \"/tmp/sluice-$(id -u)\"")].contains("/sluice\""));
+            // Record 0119 as amended 2026-11-18 (design D2): the file
+            // naming a checkout an earlier build kept goes too.
+            assert!(
+                lines[at("rm -rf \"/tmp/sluice-$(id -u)\"")]
+                    .contains("\"$CODEBUILD_SRC_DIR/sluice-checkout\""),
+                "{text}"
+            );
             assert!(
                 !text.contains("rmi") && !text.contains("image prune"),
                 "images stay"

@@ -22,6 +22,7 @@ use serde_json::Value;
 
 use super::app::{App, Bearer, Repo};
 use crate::identity::CredentialCommand;
+use crate::own_steps::Reading;
 
 /// One thing checked, and whether it holds.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -279,14 +280,24 @@ pub fn pool(
         Ok(None) => failed(format!(
             "{branch} holds no {workflow}: sluice init actions writes it, to land on {branch}"
         )),
-        Ok(Some(v)) => match content_of(&v) {
-            Some(had) if had == wants => ok(format!(
-                "{workflow} on {branch} is as sluice init actions writes it"
+        // Record 0119 as amended 2026-11-18 (design D3): read as `sluice
+        // init actions` reads it, the repository's own steps and its run
+        // job's `packages: write` aside, and failed where they leave the run
+        // job's steps (rule core.62).
+        Ok(Some(v)) => match content_of(&v).map(|had| super::workflows::read(&had, wants)) {
+            Some(Ok(reading @ Reading::AsWritten { .. })) => ok(format!(
+                "{workflow} on {branch} is as sluice init actions writes it{}",
+                super::workflows::holds(&reading)
             )),
-            Some(_) => failed(format!(
+            Some(Ok(Reading::Leaves(l))) => failed(format!(
+                "{workflow} on {branch}: {l} leaves the run job's steps, where the \
+                 repository's own steps go: move it between the run job's `# sluice:` lines"
+            )),
+            Some(Ok(Reading::Differs(_))) => failed(format!(
                 "{workflow} on {branch} is not as this sluice's init actions writes it: \
                  sluice init actions --force writes it again"
             )),
+            Some(Err(e)) => failed(format!("reading {workflow} on {branch}: {e:#}")),
             None => failed(format!("GitHub gave {workflow} on {branch} as no file")),
         },
         Err(e) => failed(format!("reading {workflow} on {branch}: {e:#}")),
