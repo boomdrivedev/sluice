@@ -382,6 +382,22 @@ pub fn command(
     ran
 }
 
+/// 153 (design D5; rule core.53): `span` linked to the span `trace`, a
+/// `TRACEPARENT` a submission kept, names, the link holding
+/// `sluice.submission`, its number; a text that does not read adds
+/// nothing.
+fn link(span: &tracing::Span, trace: &str, submission: u64) {
+    if let Some(context) = traceparent(trace) {
+        span.add_link_with_attributes(
+            context,
+            vec![opentelemetry::KeyValue::new(
+                "sluice.submission",
+                submission as i64,
+            )],
+        );
+    }
+}
+
 /// The span a `TRACEPARENT` kept as text names, read as [`Caller::read`]
 /// reads one, with no trace state; `None` where it does not read (design
 /// D5).
@@ -565,6 +581,11 @@ impl Telemetry {
             .with(metrics.clone().map(MetricsLayer::new))
             .with(bridge);
         tracing::subscriber::set_global_default(subscriber)?;
+        // 153 (design D5): while traces go, the spans that test a
+        // combination link to the context each of its submissions kept.
+        if traces.is_some() {
+            sluice_core::links::set(link);
+        }
         let _ = SENT.set(settings.clone());
         ON.store(true, Ordering::SeqCst);
         Ok(Telemetry {

@@ -561,6 +561,74 @@ fn a_command_nests_under_its_caller_s_trace() {
     telemetry.finish();
 }
 
+/// 153 (design D5; rule core.53): each `sluice.start` and `sluice.verdict`
+/// span of a combination links to the context each of its submissions
+/// kept, naming the submission; a submission that kept none gets no link.
+#[test]
+fn a_round_links_to_the_trace_its_work_was_submitted_under() {
+    if !alone("a_round_links_to_the_trace_its_work_was_submitted_under") {
+        return;
+    }
+    let (telemetry, spans, _) = start(Logs::Off);
+    let f = setup();
+    let tip = f.world.tip(BRANCH);
+    let one = f.world.work(&tip, &[("tests/t_a.py", Some("one"))]);
+    f.world.session("unit/a", "agent-a", &one);
+    let args = ["submit", BRANCH, "--worktree", "unit/a", "--no-wait"];
+    assert_eq!(under(&f, &(), &args, Some(caller())), LANDED);
+    let two = f.world.work(&tip, &[("tests/t_b.py", Some("two"))]);
+    f.world.session("unit/b", "agent-b", &two);
+    let args = ["submit", BRANCH, "--worktree", "unit/b"];
+    assert_eq!(under(&f, &(), &args, None), LANDED);
+    telemetry.flush();
+
+    let all = spans.get_finished_spans().unwrap();
+    let mut seen = 0;
+    for s in all
+        .iter()
+        .filter(|s| s.name == "sluice.start" || s.name == "sluice.verdict")
+    {
+        let holds = |id: u64| {
+            value(s, "sluice.submissions").is_some_and(|v| v.to_string().contains(&id.to_string()))
+        };
+        assert!(holds(1), "{s:?}");
+        let links: Vec<(String, String, Vec<String>)> = s
+            .links
+            .iter()
+            .map(|l| {
+                (
+                    l.span_context.trace_id().to_string(),
+                    l.span_context.span_id().to_string(),
+                    l.attributes
+                        .iter()
+                        .map(|kv| format!("{}={}", kv.key, kv.value))
+                        .collect(),
+                )
+            })
+            .collect();
+        assert_eq!(
+            links,
+            [(
+                TRACE.to_string(),
+                PARENT.to_string(),
+                vec!["sluice.submission=1".to_string()]
+            )],
+            "{} of {:?}",
+            s.name,
+            value(s, "sluice.submissions")
+        );
+        seen += 1;
+    }
+    // A combination holding both was started and read.
+    let both = all.iter().any(|s| {
+        s.name == "sluice.verdict"
+            && value(s, "sluice.submissions").is_some_and(|v| v.to_string() == "[1, 2]")
+    });
+    assert!(both, "{all:?}");
+    assert!(seen >= 2, "{all:?}");
+    telemetry.finish();
+}
+
 /// A command run's environment, the run started under a `sluice.start`
 /// span at a place named `p 1`, and the revision it ran at.
 fn a_run_s_environment() -> (String, String) {

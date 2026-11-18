@@ -29,7 +29,7 @@ it.
 
 ## 5. A round links to the trace its work kept
 
-- [ ] 5.1 Add `sluice_core::links`, a hook set once that does nothing until set, `set(fn(&tracing::Span, &str, u64))` and `link(&span, trace, submission)`; in `step.rs`, call it on each `sluice.start` and `sluice.verdict` span for each submission the combination holds that kept a `trace`; and in `Telemetry::begin`, while traces go, set it to read the text as 2.1 reads a `TRACEPARENT` and add the link with `sluice.submission` (design D5; rule core.53). True when `sluice exec bolt/sluice-reports-its-work-plainly -- cargo test -p sluice --test telemetry_logs a_round_links_to_the_trace_its_work_was_submitted_under` passes.
+- [x] 5.1 Add `sluice_core::links`, a hook set once that does nothing until set, `set(fn(&tracing::Span, &str, u64))` and `link(&span, trace, submission)`; in `step.rs`, call it on each `sluice.start` and `sluice.verdict` span for each submission the combination holds that kept a `trace`; and in `Telemetry::begin`, while traces go, set it to read the text as 2.1 reads a `TRACEPARENT` and add the link with `sluice.submission` (design D5; rule core.53). True when `sluice exec bolt/sluice-reports-its-work-plainly -- cargo test -p sluice --test telemetry_logs a_round_links_to_the_trace_its_work_was_submitted_under` passes.
 
 ## 6. An exec's span holds each check it ran
 
