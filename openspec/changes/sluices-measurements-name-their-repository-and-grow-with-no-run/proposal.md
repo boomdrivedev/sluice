@@ -26,7 +26,7 @@ showed five things, sent as signals on the user's word of 2026-11-18
   `OTEL_METRICS_EXPORTER=none` while telemetry is on, with a table or
   without. The run's ids stay on its resource, so every span and log its
   checks send still names the round that started them, and no metric
-  does, since none is sent (D1).
+  does, since none is sent (151 as amended 2026-11-18; D1).
 - **sluice's own metrics carry only what grows with branches.** A metric
   sluice sends carries `sluice.repository`, `sluice.branch` and, where it
   has one, `sluice.outcome`, and nothing else: the core lists them, and
@@ -44,7 +44,8 @@ showed five things, sent as signals on the user's word of 2026-11-18
 - **sluice names no other tool's service.** It already hands a run no
   `service.name`; nothing changes, and moon names itself (D6).
 - **Rule core.66** says what a metric may carry, citing record 0014 as
-  amended 2026-11-18.
+  amended 2026-11-18; rule core.53 hands a run's checks the traces and
+  logs sluice sends, as 151 now does.
 
 ## Capabilities
 
@@ -67,15 +68,16 @@ None.
 - **Flume's hand-over to its agents.** It gives an agent its place's
   facts, `flume.place` and `flume.start` among them, in
   `OTEL_RESOURCE_ATTRIBUTES`, so an agent program's metrics carry them
-  as moon's carried sluice's ids. That is Flume's to settle under its
-  own statement (flume 219), told to its design beside this change.
+  as moon's carried sluice's ids. That is Flume's own design's (flume
+  219; signal 2026-11-18-boomdrive-design-5ab9d968/01).
 
-## Waits on
+## Sources
 
-- Record 0014's amendment of 2026-11-18, on
-  `design/what-a-metric-carries`, landing.
-- The statement's clause 151 amended to hand a run's checks the traces
-  and logs sluice sends and no metrics, which D1 needs (rule core.12).
+- The statement's clause 151 as amended 2026-11-18 (boomdrivedev/blueprints
+  c6bf590): a run's checks are handed the traces and logs sluice sends,
+  never metrics.
+- Record 0014 as amended 2026-11-18, on main at d4dde8f66 (#103), which
+  this change's base takes up when main reaches it.
 
 ## Impact
 
@@ -87,7 +89,8 @@ None.
   run `OTEL_METRICS_EXPORTER=none`; the tests in `tests/telemetry.rs`
   and `tests/telemetry_logs.rs`.
 - `docs/telemetry.md`, `site/src/content/docs/reference/telemetry.md`.
-- `docs/architecture/core.md`: rule core.66.
+- `docs/architecture/core.md`: rule core.66, and core.53's hand-over to
+  a run.
 
 ## Touches
 

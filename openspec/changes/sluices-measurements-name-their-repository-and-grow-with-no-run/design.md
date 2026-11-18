@@ -59,7 +59,8 @@ the two tools, and one shape of a metric's keys. Flume's hand-over to
 its agents gives `flume.place`, `flume.intent`, `flume.mark` and
 `flume.start` in `OTEL_RESOURCE_ATTRIBUTES` (flume 219), which an agent
 program's metrics carry as moon's carried sluice's ids; that is Flume's
-own to settle, and out of scope here.
+own design's (signal 2026-11-18-boomdrive-design-5ab9d968/01), and out
+of scope here.
 
 ## Goals
 
@@ -91,10 +92,11 @@ The cost: moon's own metrics (`moon.task.duration` and the rest) no
 longer arrive from sluice's runs. A run's spans hold the same times, by
 task, under the round that started them.
 
-This departs from the statement's clause 151 as written, "A run's checks
-are handed the collector and the signals sluice sends": they are handed
-the traces and logs sluice sends, and never metrics. The change waits on
-151's amendment (rule core.12), asked of the design with it.
+The statement's clause 151 as amended 2026-11-18 (boomdrivedev/blueprints
+c6bf590) says so: a run's checks are handed the collector and the traces
+and logs sluice sends, never metrics; record 0014's amendment of that
+day names this decision (d4dde8f66). Rule core.53 is brought to the same
+words.
 
 Not taken:
 
@@ -203,8 +205,7 @@ the caller set them. moon reports as moon sets itself.
 ## Risks
 
 - **A person who reads moon's metrics loses them** (D1). They read the
-  run's spans instead. The statement's amendment is the place to weigh
-  it.
+  run's spans instead, as 151 and record 0014 now have it.
 - **A repository with no origin, or a path origin, is named by its
   folder,** which two repositories may share. The branch still tells
   their queues apart on one host, and the host's name across hosts.
@@ -215,8 +216,9 @@ the caller set them. moon reports as moon sets itself.
 ## Rules
 
 - core.66, new: what a metric carries (D1 to D4).
-- core.53: a run's checks are handed the collector and the signals
-  sluice sends; D1 departs from it until 151 is amended, as said.
+- core.53, amended: a run's checks are handed the collector and the
+  traces and logs sluice sends, never metrics (151 as amended
+  2026-11-18; D1).
 - core.1: the repository's name names no forge (D3).
 - core.9, core.34: a replay's time is read from the pass that proves it
   (D5).

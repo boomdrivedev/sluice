@@ -121,8 +121,8 @@ holding `host.name` where sluice named the host itself.
 While telemetry is on, a run's environment SHALL hold
 `OTEL_METRICS_EXPORTER=none`, with a table or without, whether or not
 sluice sends metrics and whatever the caller's environment holds, so the
-run's ids on its resource ride on no metric (record 0014 as amended
-2026-11-18; rule core.66).
+run's ids on its resource ride on no metric (151 and record 0014, each
+as amended 2026-11-18; rule core.66).
 
 #### Scenario: A run's tools send no metrics
 
