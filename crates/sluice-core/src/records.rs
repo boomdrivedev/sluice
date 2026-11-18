@@ -324,6 +324,14 @@ pub struct Submission {
     /// gave several; `None` for a submission made alone.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub act: Option<u64>,
+    /// 153: the `TRACEPARENT` of the trace context its submit was started
+    /// under, as W3C writes it, kept whether or not the submit sent
+    /// telemetry; `None` for one submitted under none, a pull request's
+    /// taken in from the forge, and records written before it. Nothing
+    /// sluice decides reads it: a round's spans link to it alone (design
+    /// D4, D5 of `a-sluice-command-shows-inside-its-callers-trace`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub trace: Option<String>,
 }
 
 /// 140: what a submission's work was read as at the first round that

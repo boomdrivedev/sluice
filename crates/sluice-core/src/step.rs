@@ -5697,6 +5697,7 @@ mod tests {
             after: Vec::new(),
             priority: 0,
             subject: None,
+            trace: None,
         };
         s.submit(&req).unwrap().unwrap().id
     }

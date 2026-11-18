@@ -434,6 +434,7 @@ fn a_branch_whose_limits_the_host_cannot_hold_ends_no_round() {
             after: vec![],
             priority: 0,
             subject: None,
+            trace: None,
         })
         .unwrap()
         .unwrap()

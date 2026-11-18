@@ -1878,6 +1878,9 @@ fn dispatch(
     let Some(command) = cli.command else {
         return home::run(&s, host, &cli.worktree, cli.json, documented, out);
     };
+    // 153 (design D4): the context the command was started under, which
+    // each submission it makes keeps, whether or not it sends telemetry.
+    let trace = cli.caller.as_ref().map(|c| c.traceparent.clone());
     // 135 (design D4): the repository, where it has sluice, listed for the
     // host process to find again.
     if matches!(
@@ -1981,6 +1984,7 @@ fn dispatch(
                     after,
                     priority,
                     subjects: subject,
+                    trace,
                 };
                 if takes_pulls(&s, &req.branch)? {
                     return submit_pull_group(
@@ -2030,6 +2034,7 @@ fn dispatch(
                         after,
                         priority,
                         subject,
+                        trace,
                     },
                     no_wait,
                     json,
@@ -2067,6 +2072,7 @@ fn dispatch(
                     after,
                     priority,
                     subject,
+                    trace,
                 },
                 no_wait,
                 json,

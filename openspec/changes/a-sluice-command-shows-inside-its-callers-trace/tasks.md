@@ -25,7 +25,7 @@ it.
 
 ## 4. A submission keeps the trace it was submitted under
 
-- [ ] 4.1 In `crates/sluice-core`, give `SubmitRequest` and `GroupRequest` `trace: Option<String>` and `Submission` `trace` (`#[serde(default, skip_serializing_if = "Option::is_none")]`), written on every submission the act writes and read by nothing the core decides; and have the CLI's submit, from a worktree, by name or of several worktrees, pass `cli.caller`'s `TRACEPARENT` (design D4). True when `sluice exec bolt/sluice-reports-its-work-plainly -- cargo test -p sluice --test cli a_submission_keeps_the_trace_it_was_submitted_under` passes.
+- [x] 4.1 In `crates/sluice-core`, give `SubmitRequest` and `GroupRequest` `trace: Option<String>` and `Submission` `trace` (`#[serde(default, skip_serializing_if = "Option::is_none")]`), written on every submission the act writes and read by nothing the core decides; and have the CLI's submit, from a worktree, by name or of several worktrees, pass `cli.caller`'s `TRACEPARENT` (design D4). True when `sluice exec bolt/sluice-reports-its-work-plainly -- cargo test -p sluice --test cli a_submission_keeps_the_trace_it_was_submitted_under` passes.
 
 ## 5. A round links to the trace its work kept
 

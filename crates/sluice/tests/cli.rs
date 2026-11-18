@@ -47,7 +47,18 @@ fn setup() -> Fakes {
 }
 
 fn sluice(f: &Fakes, args: &[&str]) -> (i32, String) {
+    sluice_under(f, None, args)
+}
+
+/// `sluice <args>` over the fakes, started under `caller`'s trace context
+/// (153): its exit and what it said.
+fn sluice_under(
+    f: &Fakes,
+    caller: Option<sluice::telemetry::Caller>,
+    args: &[&str],
+) -> (i32, String) {
     let cli = Cli::try_parse_from(std::iter::once("sluice").chain(args.iter().copied())).unwrap();
+    let cli = Cli { caller, ..cli };
     let mut out = Vec::new();
     let code = settled(|| {
         run(
@@ -7590,6 +7601,52 @@ fn queued(f: &Fakes) -> Vec<serde_json::Value> {
         .unwrap_or_default()
 }
 
+/// 153 (design D4): with telemetry off, a submit started under a caller's
+/// context keeps its `TRACEPARENT` as the submission's `trace`, each
+/// submission of an act of two worktrees keeps the same, and a submit
+/// started under none keeps none.
+#[test]
+fn a_submission_keeps_the_trace_it_was_submitted_under() {
+    let f = setup();
+    work(&f, "unit/a", "agent-1", &[("plugin/one", Some("1"))]);
+    work(&f, "unit/b1", "agent-2", &[("plugin/two", Some("2"))]);
+    work(&f, "unit/b2", "agent-3", &[("tests/three", Some("3"))]);
+    work(&f, "unit/c", "agent-4", &[("plugin/four", Some("4"))]);
+    let traceparent = "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01";
+    let caller = sluice::telemetry::Caller::read([("TRACEPARENT", traceparent)]);
+    assert!(caller.is_some());
+    for (caller, worktrees) in [
+        (caller.clone(), &["--worktree", "unit/a"][..]),
+        (
+            caller,
+            &["--worktree", "unit/b1", "--worktree", "unit/b2"][..],
+        ),
+        (None, &["--worktree", "unit/c"][..]),
+    ] {
+        let args = [&["submit", BRANCH, "--no-wait"][..], worktrees].concat();
+        let (code, out) = sluice_under(&f, caller, &args);
+        assert_eq!(code, LANDED, "{args:?}: {out}");
+    }
+    let s = sluice_core::Sluice::new(f.seams(), &f.clock);
+    let kept: Vec<(u64, Option<String>)> = s
+        .status(BRANCH)
+        .unwrap()
+        .submissions
+        .into_iter()
+        .map(|sub| (sub.id, sub.trace))
+        .collect();
+    let given = Some(traceparent.to_string());
+    assert_eq!(
+        kept,
+        [
+            (1, given.clone()),
+            (2, given.clone()),
+            (3, given),
+            (4, None)
+        ]
+    );
+}
+
 /// Three worktrees: three submissions numbered in the order given, each
 /// named with its worktree, and nothing run; one worktree answers as a
 /// submit always has; under `--json`, one document of them all.
@@ -9155,6 +9212,7 @@ mod read_once {
             after: vec![],
             priority: 0,
             subject: None,
+            trace: None,
         })
         .unwrap()
         .unwrap();
@@ -9954,6 +10012,7 @@ fn pooled_as(f: &Fakes, policy: &str, projects: &[&str]) -> String {
         after: Vec::new(),
         priority: 0,
         subject: None,
+        trace: None,
     })
     .unwrap()
     .expect("accepted");
