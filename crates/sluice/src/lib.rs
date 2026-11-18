@@ -650,7 +650,7 @@ pub enum Command {
     /// run, its signature and its record (record 0119).
     #[command(
         hide = true,
-        after_help = "Example:\n  $ sluice job run --claim pool/forge/3 --branch main --out \"$RUNNER_TEMP/sluice-run\""
+        after_help = "Example:\n  $ sluice job run --claim pool/forge/3 --branch main --out \"$RUNNER_TEMP/sluice-run\" --checkout \"$RUNNER_TEMP/sluice-checkout\""
     )]
     Job {
         #[command(subcommand)]
@@ -1345,11 +1345,16 @@ pub enum InitCommand {
 pub enum JobCommand {
     /// Start the run a claim holds, or a pull request's head, and keep its
     /// report and what proves its keys in --out; records nothing, writes
-    /// no state and holds no key. Releases the checkout it made before it
-    /// exits, whatever its run came to and when it is stopped. Exits 0 once
-    /// the report is kept, and 3 with why where the run reported nothing.
+    /// no state and holds no key. Keeps the checkout it made, with its
+    /// ports and scratch, whatever its run came to, for the job's own steps
+    /// after it, and names it in --checkout's file: the checkout's path on
+    /// its first line, its place's name on its second; `sluice job release`
+    /// releases it after those steps. Where it made no checkout it writes
+    /// no file; stopped, by Ctrl-C or SIGTERM, it releases the checkout at
+    /// once and writes none. Exits 0 once the report is kept, and 3 with
+    /// why where the run reported nothing.
     #[command(
-        after_help = "Examples:\n  $ sluice job run --claim pool/forge/3 --branch main --out run\n  $ sluice job run --head 4f2c9e1 --branch main --system linux-x64 --out run"
+        after_help = "Examples:\n  $ sluice job run --claim pool/forge/3 --branch main --out run --checkout checkout\n  $ sluice job run --head 4f2c9e1 --branch main --system linux-x64 --out run --checkout checkout"
     )]
     Run {
         /// The claim the pool's job runs under, `pool/<pool>/<n>`.
@@ -1367,6 +1372,10 @@ pub enum JobCommand {
         /// The directory the run's report and proof are kept in.
         #[arg(long)]
         out: PathBuf,
+        /// The file that names the checkout kept for the job's own steps,
+        /// which `sluice job release --checkout` reads.
+        #[arg(long)]
+        checkout: PathBuf,
     },
     /// Keep of a run job's report only the keys the combination's tree
     /// bears out, running nothing of it, and write the subjects and the

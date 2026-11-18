@@ -55,9 +55,11 @@ pub fn run(
             branch,
             system,
             out: dir,
+            checkout: kept,
         } => {
             let unwritten = Unwritten::over(seams.state);
             let (tests, checkout) = (seams.tests, seams.checkout);
+            let stopped = std::cell::Cell::new(false);
             let s = Sluice::new(
                 Seams {
                     state: &unwritten,
@@ -93,6 +95,7 @@ pub fn run(
                 match tests.progress(&run)? {
                     Progress::Running => {
                         if !pause.pause() {
+                            stopped.set(true);
                             no_report(&dir, "the job was stopped before its run ended", out)?;
                             return Ok(STOPPED);
                         }
@@ -109,13 +112,15 @@ pub fn run(
                     }
                 }
             })();
-            // Record 0016, 123; rule core.10 (design D8 of the change
-            // `a-codebuild-fleet-runs-a-queues-checks`): the checkout the job
-            // made is released before it exits, whatever its run came to and
-            // when it is stopped, everything started in it ended first, by
-            // the release the policy names, its ports and scratch let go. A
-            // release that fails is said, and decides nothing of the run's
-            // outcome.
+            // Record 0119 as amended 2026-11-18; rule core.63 (design D2 of
+            // the change `a-pools-run-job-runs-the-repositorys-own-steps`):
+            // the checkout the job made is kept, with its ports and scratch,
+            // whatever its run came to, for the job's own steps, and named in
+            // `kept` for `sluice job release`. Stopped, it is released at
+            // once, everything started in it ended first, by the release the
+            // policy names (record 0016, 123; rule core.10), and no file is
+            // written. A release that fails is said, and decides nothing of
+            // the run's outcome.
             let place = match (&claim, &head) {
                 (Some(claim), _) => s
                     .seams()
@@ -132,7 +137,10 @@ pub fn run(
                 (None, None) => None,
             };
             if let Some(place) = place {
-                release_checkout(checkout, &place, &dir, out)?;
+                match checkout.path(&place)? {
+                    Some(path) if !stopped.get() => keep_checkout(&kept, &path, &place, out)?,
+                    _ => release_checkout(checkout, &place, &dir, out)?,
+                }
             }
             ended
         }
@@ -672,6 +680,25 @@ fn hand_over(
         dir.join(REPORT).display()
     )?;
     Ok(0)
+}
+
+/// Record 0119 as amended 2026-11-18 (design D2 of the change
+/// `a-pools-run-job-runs-the-repositorys-own-steps`): the checkout `place`
+/// at `path`, kept for the job's own steps, named in `file`, its path on
+/// the first line and its place's name on the second.
+fn keep_checkout(file: &Path, path: &Path, place: &str, out: &mut dyn Write) -> Result<()> {
+    if let Some(parent) = file.parent().filter(|p| !p.as_os_str().is_empty()) {
+        std::fs::create_dir_all(parent).with_context(|| format!("making {}", parent.display()))?;
+    }
+    std::fs::write(file, format!("{}\n{place}\n", path.display()))
+        .with_context(|| format!("writing {}", file.display()))?;
+    writeln!(
+        out,
+        "kept its checkout {place} at {} for the job's own steps; `sluice job release --checkout {}` releases it",
+        path.display(),
+        file.display()
+    )?;
+    Ok(())
 }
 
 /// Record 0016, 123 (design D8 of the change

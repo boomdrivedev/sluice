@@ -10019,6 +10019,8 @@ fn job_run_writes_its_report_and_records_nothing() {
             "main",
             "--out",
             dir.to_str().unwrap(),
+            "--checkout",
+            out.path().join("sluice-checkout").to_str().unwrap(),
         ],
     );
     assert_eq!(code, 0, "{said}");
@@ -10047,6 +10049,8 @@ fn job_run_writes_its_report_and_records_nothing() {
             "main",
             "--out",
             none.to_str().unwrap(),
+            "--checkout",
+            out.path().join("none-checkout").to_str().unwrap(),
         ],
     );
     assert_eq!(code, sluice::INTERNAL, "{said}");
@@ -10056,19 +10060,25 @@ fn job_run_writes_its_report_and_records_nothing() {
         "{why}"
     );
     assert!(!none.join("report.json").exists());
+    assert!(
+        !out.path().join("none-checkout").exists(),
+        "no checkout made, no file"
+    );
 }
 
-/// satisfies: record 0016, 123; rule core.10; the place-release spec's "A
-/// run that passed": `sluice job run` releases the checkout it made before
-/// it exits, by the release the policy names, the checkout gone with its
-/// ports and scratch; a release that fails is said in its output and its
-/// hand-over, deciding nothing of the run's outcome
+/// satisfies: record 0119 as amended 2026-11-18; rule core.63; the
+/// place-release spec's "A run that passed" and repository-steps' "A kept
+/// checkout": `sluice job run` keeps the checkout it made for the job's own
+/// steps, with its ports and scratch, its release not run, and names it in
+/// `--checkout`'s file, the checkout's path then its place's name; a run
+/// whose checks failed keeps its checkout the same
 #[test]
-fn job_run_releases_its_checkout_before_it_exits() {
+fn job_run_keeps_its_checkout_for_the_jobs_own_steps() {
     let f = Fakes::new();
     let claim = pooled(&f, &["a"]);
-    let out = support::Scratch::new("job-run-release");
+    let out = support::Scratch::new("job-run-keep");
     let dir = out.path().join("sluice-run");
+    let file = out.path().join("sluice-checkout");
     let args = [
         "job",
         "run",
@@ -10078,6 +10088,8 @@ fn job_run_releases_its_checkout_before_it_exits() {
         "main",
         "--out",
         dir.to_str().unwrap(),
+        "--checkout",
+        file.to_str().unwrap(),
     ];
     let (code, said) = sluice(&f, &args);
     assert_eq!(code, 0, "{said}");
@@ -10087,30 +10099,34 @@ fn job_run_releases_its_checkout_before_it_exits() {
         .last()
         .cloned()
         .expect("a checkout made");
+    let path = format!("/fake/places/{place}");
+    assert_eq!(
+        std::fs::read_to_string(&file).unwrap(),
+        format!("{path}\n{place}\n"),
+        "the file names the checkout and its place"
+    );
     assert!(
-        said.contains(&format!("released its checkout {place}")),
+        said.contains(&format!("kept its checkout {place} at {path}")),
         "{said}"
     );
-    assert_eq!(
-        f.world.release_attempts(),
-        std::slice::from_ref(&place),
-        "its release ran"
-    );
-    assert!(f.world.released_places().contains(&place));
+    assert!(f.world.release_attempts().is_empty(), "its release not run");
     assert!(
-        !f.world.live_places().contains(&place),
-        "gone, ports and all"
+        f.world.live_places().contains(&place),
+        "the checkout stands, with its ports and scratch"
     );
-    assert_eq!(f.world.live_runs(), 0);
-    assert!(dir.join("report.json").exists());
+    assert!(!f.world.released_places().contains(&place));
+    assert!(
+        dir.join("report.json").exists(),
+        "what the run wrote is kept"
+    );
     assert!(!dir.join("why").exists());
 
-    // A release that fails: said, beside the report, and the run's outcome
-    // stands.
+    // A run whose check failed keeps its checkout too.
     let f = Fakes::new();
     let claim = pooled(&f, &["a"]);
-    f.world.release_fails(Some("the stack would not stop"));
-    let dir = out.path().join("failed-release");
+    f.world.fails_with("a:test", "a/lib", "a2");
+    let dir = out.path().join("failed-run");
+    let file = out.path().join("failed-checkout");
     let args = [
         "job",
         "run",
@@ -10120,25 +10136,24 @@ fn job_run_releases_its_checkout_before_it_exits() {
         "main",
         "--out",
         dir.to_str().unwrap(),
+        "--checkout",
+        file.to_str().unwrap(),
     ];
     let (code, said) = sluice(&f, &args);
     assert_eq!(code, 0, "{said}");
-    assert!(said.contains("1 passed, 0 failed"), "{said}");
-    assert!(
-        said.contains("was not released") && said.contains("the stack would not stop"),
-        "{said}"
-    );
-    assert!(dir.join("report.json").exists(), "the report stands");
-    let why = std::fs::read_to_string(dir.join("why")).unwrap();
-    assert!(
-        why.contains("was not released") && why.contains("the stack would not stop"),
-        "{why}"
-    );
+    assert!(said.contains("0 passed, 1 failed"), "{said}");
+    let place = f.world.made_places().last().cloned().unwrap();
+    assert!(std::fs::read_to_string(&file)
+        .unwrap()
+        .ends_with(&format!("\n{place}\n")));
+    assert!(f.world.live_places().contains(&place));
+    assert!(f.world.release_attempts().is_empty());
 }
 
-/// satisfies: record 0016, 123; rule core.10; the place-release spec's "A
-/// job stopped while its run goes": it ends the run's process group, runs
-/// the release, says it kept no report, and exits
+/// satisfies: record 0016, 123; rules core.10, core.63; the place-release
+/// spec's "A job stopped while its run goes": it ends the run's process
+/// group, runs the release, says it kept no report, writes no `--checkout`
+/// file, and exits
 #[test]
 fn job_run_stopped_releases_its_checkout() {
     struct Stop;
@@ -10164,6 +10179,8 @@ fn job_run_stopped_releases_its_checkout() {
             "main",
             "--out",
             dir.to_str().unwrap(),
+            "--checkout",
+            out.path().join("sluice-checkout").to_str().unwrap(),
         ],
     );
     assert_eq!(code, sluice::STOPPED, "{said}");
@@ -10190,6 +10207,10 @@ fn job_run_stopped_releases_its_checkout() {
     assert!(
         why.contains("the job was stopped before its run ended"),
         "{why}"
+    );
+    assert!(
+        !out.path().join("sluice-checkout").exists(),
+        "stopped, it names no checkout"
     );
 }
 
@@ -10512,6 +10533,8 @@ fn job_run(f: &Fakes, claim: &str, out: &std::path::Path) -> std::path::PathBuf 
             "main",
             "--out",
             dir.to_str().unwrap(),
+            "--checkout",
+            out.join("sluice-checkout").to_str().unwrap(),
         ],
     );
     assert_eq!(code, 0, "{said}");
@@ -11401,6 +11424,7 @@ fn job_record_of_a_head_adds_its_bundle_with_no_claim() {
     let out = support::Scratch::new("job-head");
     let ran = out.path().join("sluice-run");
     let sign = out.path().join("sluice-sign");
+    let checkout = out.path().join("sluice-checkout");
     let version = f.world.version("main");
     for args in [
         vec![
@@ -11414,6 +11438,8 @@ fn job_record_of_a_head_adds_its_bundle_with_no_claim() {
             "macos-arm64",
             "--out",
             ran.to_str().unwrap(),
+            "--checkout",
+            checkout.to_str().unwrap(),
         ],
         vec![
             "job",

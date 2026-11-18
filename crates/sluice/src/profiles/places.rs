@@ -1986,6 +1986,10 @@ impl Checkout for Places {
         self.let_go(name, made.as_ref())
     }
 
+    fn path(&self, name: &str) -> Result<Option<PathBuf>> {
+        Ok(self.read_record(name)?.and_then(|made| made.path))
+    }
+
     fn gone(&self, name: &str) -> Result<bool> {
         let Some(made) = self.read_record(name)? else {
             return Ok(false);
