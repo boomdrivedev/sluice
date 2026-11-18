@@ -3,6 +3,13 @@
 //! expected revision; the git command forms candidates and answers
 //! ancestry, so a conflict is exactly what `git merge` would report (ADR
 //! 0009). `docs/plans/phase-1-integrations.md` section 1 is the reference.
+//!
+//! Every commit is written by a fixed name, never read from git's
+//! configuration: a combination as [`Author::sluice`] at the time 0, so one
+//! combination forms one commit on every host, and a landing as
+//! [`Author::sluice`] here, or as the author its caller gives through
+//! [`LocalRefs::commit_as`], the one its remote is pushed as (record 0019
+//! as amended 2026-11-18; rules core.6, core.17, core.43, core.58).
 
 use std::cell::RefCell;
 use std::collections::BTreeMap;
@@ -16,9 +23,7 @@ use gix::refs::Target;
 use gix::ObjectId;
 use sluice_seams::{Branch, Formed, HostCopy, LandingCommit, Moved, Rev};
 
-/// Who sluice's commits are by: fixed, never read from git config.
-const NAME: &str = "sluice";
-const EMAIL: &str = "sluice@localhost";
+use crate::identity::Author;
 
 pub struct LocalRefs {
     repo: gix::Repository,
@@ -396,7 +401,8 @@ impl LocalRefs {
             deref: false,
         };
         let branch = name;
-        let who = Self::signature(
+        let who = signature(
+            &Author::sluice(),
             std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
                 .context("the clock is before 1970")?
@@ -438,12 +444,24 @@ impl LocalRefs {
         Ok(id)
     }
 
-    fn signature(seconds: i64) -> gix::actor::Signature {
-        gix::actor::Signature {
-            name: NAME.into(),
-            email: EMAIL.into(),
-            time: gix::date::Time { seconds, offset: 0 },
-        }
+    /// The landing `commit` written as `author`, its author and its
+    /// committer, at the time now: the one the branch's remote is pushed as
+    /// (record 0019 as amended 2026-11-18; rule core.43).
+    pub fn commit_as(&self, commit: &LandingCommit, author: &Author) -> Result<Rev> {
+        let tested = self.id(&commit.tree_of)?;
+        let tree = self
+            .repo
+            .find_commit(tested)
+            .map_err(|e| anyhow!("{} is not a commit: {e}", commit.tree_of))?
+            .tree_id()
+            .map_err(|e| anyhow!("{e}"))?
+            .detach();
+        let parents = [self.id(&commit.parent)?, self.id(&commit.head)?];
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .context("the clock is before 1970")?
+            .as_secs() as i64;
+        self.write_commit(tree, parents, &commit.message, author, now)
     }
 
     fn write_commit(
@@ -451,9 +469,10 @@ impl LocalRefs {
         tree: ObjectId,
         parents: [ObjectId; 2],
         message: &str,
+        author: &Author,
         seconds: i64,
     ) -> Result<Rev> {
-        let who = Self::signature(seconds);
+        let who = signature(author, seconds);
         let commit = gix::objs::Commit {
             tree,
             parents: parents.into_iter().collect(),
@@ -471,10 +490,12 @@ impl LocalRefs {
         Ok(Rev::new(id.to_string()))
     }
 
-    /// The git command, for what gix has no equivalent of. Its identity and
-    /// configuration are pinned, nothing it inherits from a hook or a
+    /// The git command, for what gix has no equivalent of. Its identity,
+    /// [`Author::sluice`], since no command it runs writes a commit, and
+    /// its configuration are pinned, nothing it inherits from a hook or a
     /// session points it elsewhere, and it reads nothing from stdin.
     fn git(&self, args: &[&str]) -> Result<Output> {
+        let sluice = Author::sluice();
         Command::new("git")
             .arg("--git-dir")
             .arg(&self.git_dir)
@@ -485,13 +506,22 @@ impl LocalRefs {
             .env_remove("GIT_OBJECT_DIRECTORY")
             .env_remove("GIT_ALTERNATE_OBJECT_DIRECTORIES")
             .env("GIT_CONFIG_NOSYSTEM", "1")
-            .env("GIT_AUTHOR_NAME", NAME)
-            .env("GIT_AUTHOR_EMAIL", EMAIL)
-            .env("GIT_COMMITTER_NAME", NAME)
-            .env("GIT_COMMITTER_EMAIL", EMAIL)
+            .env("GIT_AUTHOR_NAME", &sluice.name)
+            .env("GIT_AUTHOR_EMAIL", &sluice.email)
+            .env("GIT_COMMITTER_NAME", &sluice.name)
+            .env("GIT_COMMITTER_EMAIL", &sluice.email)
             .stdin(Stdio::null())
             .output()
             .with_context(|| format!("running git {}", args.join(" ")))
+    }
+}
+
+/// `author` at `seconds` since the epoch, in UTC.
+fn signature(author: &Author, seconds: i64) -> gix::actor::Signature {
+    gix::actor::Signature {
+        name: author.name.as_str().into(),
+        email: author.email.as_str().into(),
+        time: gix::date::Time { seconds, offset: 0 },
     }
 }
 
@@ -574,9 +604,17 @@ impl Branch for LocalRefs {
         match out.status.code() {
             Some(0) => {
                 let tree = ObjectId::from_hex(first).map_err(|e| anyhow!("{e}"))?;
-                // A candidate's time is fixed, so one combination forms one
-                // commit whenever it is formed.
-                let rev = self.write_commit(tree, [base, top], "sluice candidate\n", 0)?;
+                // A candidate's name and time are fixed, whatever the
+                // remote is pushed as, so one combination forms one commit
+                // wherever and whenever it is formed (rules core.6,
+                // core.17, core.58).
+                let rev = self.write_commit(
+                    tree,
+                    [base, top],
+                    "sluice candidate\n",
+                    &Author::sluice(),
+                    0,
+                )?;
                 Ok(Formed::Revision(rev))
             }
             Some(1) => {
@@ -593,21 +631,10 @@ impl Branch for LocalRefs {
         }
     }
 
+    /// The landing written as [`Author::sluice`]: a branch in the host's
+    /// own refs is pushed as no identity.
     fn commit(&self, commit: &LandingCommit) -> Result<Rev> {
-        let tested = self.id(&commit.tree_of)?;
-        let tree = self
-            .repo
-            .find_commit(tested)
-            .map_err(|e| anyhow!("{} is not a commit: {e}", commit.tree_of))?
-            .tree_id()
-            .map_err(|e| anyhow!("{e}"))?
-            .detach();
-        let parents = [self.id(&commit.parent)?, self.id(&commit.head)?];
-        let now = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .context("the clock is before 1970")?
-            .as_secs() as i64;
-        self.write_commit(tree, parents, &commit.message, now)
+        self.commit_as(commit, &Author::sluice())
     }
 
     fn contains(&self, tip: &Rev, rev: &Rev) -> Result<bool> {
