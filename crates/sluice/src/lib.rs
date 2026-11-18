@@ -1377,6 +1377,25 @@ pub enum JobCommand {
         #[arg(long)]
         checkout: PathBuf,
     },
+    /// Release the checkout `sluice job run` kept, named in --checkout's
+    /// file, after the job's own steps, whatever they came to: by the
+    /// release the policy names, its ports and scratch freed, and the file
+    /// removed. Run in the clone `sluice job run` ran in. A release that
+    /// fails is said, and appended to --out's `why` where it is given,
+    /// exiting 1, deciding nothing of the run's outcome. Where the file
+    /// does not exist it releases nothing, says so and exits 0.
+    #[command(
+        after_help = "Example:\n  $ sluice job release --checkout \"$RUNNER_TEMP/sluice-checkout\" --out \"$RUNNER_TEMP/sluice-run\""
+    )]
+    Release {
+        /// The file `sluice job run --checkout` named its checkout in.
+        #[arg(long)]
+        checkout: PathBuf,
+        /// The run job's directory, whose `why` a release that fails is
+        /// appended to.
+        #[arg(long)]
+        out: Option<PathBuf>,
+    },
     /// Keep of a run job's report only the keys the combination's tree
     /// bears out, running nothing of it, and write the subjects and the
     /// predicate `actions/attest` signs to --out; where none is borne out,

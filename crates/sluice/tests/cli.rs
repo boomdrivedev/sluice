@@ -10214,6 +10214,125 @@ fn job_run_stopped_releases_its_checkout() {
     );
 }
 
+/// `sluice job run` under `claim` on `main`, keeping its report in
+/// `dir` and naming its checkout in `file`.
+fn job_run_keeping(f: &Fakes, claim: &str, dir: &std::path::Path, file: &std::path::Path) {
+    let (code, said) = sluice(
+        f,
+        &[
+            "job",
+            "run",
+            "--claim",
+            claim,
+            "--branch",
+            "main",
+            "--out",
+            dir.to_str().unwrap(),
+            "--checkout",
+            file.to_str().unwrap(),
+        ],
+    );
+    assert_eq!(code, 0, "{said}");
+}
+
+/// satisfies: record 0119 as amended 2026-11-18; rules core.10, core.63;
+/// the place-release spec's "The release after the repository's own
+/// steps": `sluice job release` releases the checkout `sluice job run`
+/// kept, by the release the policy names, its ports and scratch freed, and
+/// removes the file; a release that fails is said in its output and in
+/// the hand-over's `why` beside the report, keeps the file, and exits 1
+#[test]
+fn job_release_releases_the_kept_checkout() {
+    let f = Fakes::new();
+    let claim = pooled(&f, &["a"]);
+    let out = support::Scratch::new("job-release");
+    let dir = out.path().join("sluice-run");
+    let file = out.path().join("sluice-checkout");
+    job_run_keeping(&f, &claim, &dir, &file);
+    let place = f.world.made_places().last().cloned().unwrap();
+    assert!(f.world.live_places().contains(&place));
+    let (code, said) = sluice(
+        &f,
+        &[
+            "job",
+            "release",
+            "--checkout",
+            file.to_str().unwrap(),
+            "--out",
+            dir.to_str().unwrap(),
+        ],
+    );
+    assert_eq!(code, 0, "{said}");
+    assert!(
+        said.contains(&format!("released its checkout {place}")),
+        "{said}"
+    );
+    assert_eq!(
+        f.world.release_attempts(),
+        std::slice::from_ref(&place),
+        "its release ran"
+    );
+    assert!(f.world.released_places().contains(&place));
+    assert!(
+        !f.world.live_places().contains(&place),
+        "gone, ports and scratch freed"
+    );
+    assert_eq!(f.world.live_runs(), 0);
+    assert!(!file.exists(), "the file is removed");
+    assert!(dir.join("report.json").exists());
+    assert!(!dir.join("why").exists());
+
+    // A release that fails: said, beside the report, the file kept, and
+    // the run's outcome stands.
+    let f = Fakes::new();
+    let claim = pooled(&f, &["a"]);
+    let dir = out.path().join("failed-run");
+    let file = out.path().join("failed-checkout");
+    job_run_keeping(&f, &claim, &dir, &file);
+    f.world.release_fails(Some("the stack would not stop"));
+    let (code, said) = sluice(
+        &f,
+        &[
+            "job",
+            "release",
+            "--checkout",
+            file.to_str().unwrap(),
+            "--out",
+            dir.to_str().unwrap(),
+        ],
+    );
+    assert_eq!(code, FAILED, "{said}");
+    assert!(
+        said.contains("was not released") && said.contains("the stack would not stop"),
+        "{said}"
+    );
+    assert!(dir.join("report.json").exists(), "the report stands");
+    let why = std::fs::read_to_string(dir.join("why")).unwrap();
+    assert!(
+        why.contains("was not released") && why.contains("the stack would not stop"),
+        "{why}"
+    );
+    assert!(file.exists(), "kept for another try");
+}
+
+/// satisfies: record 0119 as amended 2026-11-18; the place-release spec's
+/// "Nothing kept": `sluice job release` with no file releases nothing,
+/// says so and exits 0
+#[test]
+fn job_release_with_nothing_kept_releases_nothing() {
+    let f = Fakes::new();
+    pooled(&f, &["a"]);
+    let out = support::Scratch::new("job-release-none");
+    let file = out.path().join("sluice-checkout");
+    let (code, said) = sluice(
+        &f,
+        &["job", "release", "--checkout", file.to_str().unwrap()],
+    );
+    assert_eq!(code, 0, "{said}");
+    assert!(said.contains("nothing is released"), "{said}");
+    assert!(f.world.release_attempts().is_empty());
+}
+
 /// Whether this is the child `test` runs alone in, where it may set the
 /// process's environment, as pointing the AWS SDK at a fake; outside it,
 /// that child is run, and must pass.
