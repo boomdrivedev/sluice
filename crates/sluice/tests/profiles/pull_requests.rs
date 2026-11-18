@@ -5188,14 +5188,20 @@ fn a_queued_pull_request_that_stands_is_read_by_the_list_alone() {
 
 /// forge-reads, "The state moves": the pull request's submission goes
 /// from queued to testing, and its check is posted once, saying testing,
-/// with no read of GitHub's copy first.
+/// with no read of GitHub's copy first. Its check goes on until the test
+/// ends it, so it is under test at the second round however long a round
+/// takes on a loaded host. A check of five seconds left room for it to
+/// land between them: deneb, 2026-11-18, main at 15b5cf173, the second
+/// round posting its check as a success.
 #[test]
 fn the_state_moves_and_is_posted_unread() {
     let g = OnGitHub::new("pr-discovery-moves", "");
-    let (n, head) = g.by_hand("unit/moves", &[("slow", Some("x\n"))], false);
+    let hang = Hang::in_repo(&g);
+    let (n, head) = g.by_hand("unit/moves", &[("hang", Some(&hang.file()))], false);
     g.discovery_passes();
     let out = g.sluice(&["step", "main"]);
     assert!(out.status.success(), "{}", text(&out));
+    started(&hang.pid);
     assert_eq!(g.of(n).len(), 1, "{:?}", g.subs());
     let (read_back, posts) = (g.posted_reads(&head), g.posts());
     // The round started its test: the records moved, and the next pass
@@ -5286,7 +5292,12 @@ fn a_new_head_is_read_again() {
 /// minute of a clock its pauses move, its twenty rounds three seconds
 /// apart, nothing on the host moving, reads the request from GitHub no
 /// more often than once in a quarter of the host's interval: four times,
-/// at most.
+/// at most. The host's interval has passed as it begins, so its first
+/// pass asks for main's pull requests at the wait's own time, and its
+/// last, fifty-seven seconds on, finds nothing due however long the
+/// commands before it took. Asked last by the step before it, at that
+/// step's time, it had three seconds of the host's minute to begin in:
+/// deneb, 2026-11-18, main at 15b5cf173, its last passes asking again.
 #[test]
 fn a_wait_reads_its_pull_request_once_in_a_quarter_of_the_interval() {
     let g = OnGitHub::new("pr-discovery-follow", "reviews = 1");
@@ -5297,12 +5308,14 @@ fn a_wait_reads_its_pull_request_once_in_a_quarter_of_the_interval() {
     g.settle();
     let before = g.pull_reads(n);
     let lists = g.lists();
+    g.discovery_passes();
     let out = g.skipping(&w, &["wait", "main", "--timeout", "57s"]);
     assert_eq!(out.status.code(), Some(sluice::WAITING), "{}", text(&out));
     let reads = g.pull_reads(n) - before;
     assert!((1..=4).contains(&reads), "{reads} reads: {}", text(&out));
-    // Its own asking found nothing due: only the wait's finding of it.
-    assert_eq!(g.lists(), lists + 1, "{}", text(&out));
+    // Its own asking asked at its first pass and found nothing due after
+    // it; beside that, only the wait's finding of it.
+    assert_eq!(g.lists(), lists + 2, "{}", text(&out));
 }
 
 /// Another host over `main`'s remote and GitHub: its own clone, config and
