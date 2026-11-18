@@ -157,12 +157,15 @@ jobs:
 
   # Each platform's binaries, built from the tree the release's tag will
   # name: the pushed commit with the release's version written
-  # (set-version.sh). The flake's source is the checkout's tracked files, so
-  # the build is the one any builder of the tag makes, given nothing, and it
-  # fails unless the binary says the release's version (record 0111). A
-  # landing's tests were skipped, its tree passed already; any other push's
-  # must each have passed. A skipped job skips what needs it unless the
-  # condition says otherwise, hence !cancelled().
+  # (set-version.sh), given nothing (record 0111). They run on a host with
+  # no Nix and no Rust, as Flume's do: cargo builds them by the Rust
+  # rust-toolchain.toml names, Linux's static against musl and macOS's
+  # linking only the system's libraries. The job installs no Nix, so its
+  # run of the binary, which fails unless it says the release's version,
+  # is on a runner with nothing in /nix/store (record 0111 as amended
+  # 2026-11-18). A landing's tests were skipped, its tree passed already;
+  # any other push's must each have passed. A skipped job skips what needs
+  # it unless the condition says otherwise, hence !cancelled().
   binaries:
     if: |-
       !cancelled() && needs.version.outputs.tag != '' &&
@@ -175,21 +178,34 @@ jobs:
         include:
           - os: ubuntu-latest
             system: x86_64-linux
+            target: x86_64-unknown-linux-musl
           - os: ubuntu-24.04-arm
             system: aarch64-linux
+            target: aarch64-unknown-linux-musl
           - os: macos-latest
             system: aarch64-darwin
+            target: aarch64-apple-darwin
     runs-on: ${{ matrix.os }}
+    env:
+      TARGET: ${{ matrix.target }}
+      TAG: ${{ needs.version.outputs.tag }}
     steps:
       - uses: actions/checkout@v5
-      - uses: cachix/install-nix-action@v31
+      - if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y musl-tools
+      - run: |
+          if ! command -v rustup >/dev/null; then
+            curl -sSf https://sh.rustup.rs | sh -s -- -y --default-toolchain none
+            echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
+            PATH="$HOME/.cargo/bin:$PATH"
+          fi
+          rustup toolchain install
+          rustup target add "$TARGET"
       - run: |
           sh set-version.sh "${TAG#v}"
-          nix build .#default --print-build-logs
-          test "$(./result/bin/sluice --version)" = "sluice ${TAG#v}"
-        env:
-          TAG: ${{ needs.version.outputs.tag }}
-      - run: tar -czf "sluice-${{ matrix.system }}.tar.gz" -C result/bin sluice wt-submit
+          cargo build --release --locked -p sluice --target "$TARGET"
+          test "$("target/$TARGET/release/sluice" --version)" = "sluice ${TAG#v}"
+      - run: tar -czf "sluice-${{ matrix.system }}.tar.gz" -C "target/$TARGET/release" sluice wt-submit
       - uses: actions/upload-artifact@v4
         with:
           name: sluice-${{ matrix.system }}

@@ -64,7 +64,8 @@ tasks:
     tags: [check-fast]
     options: {runFromWorkspaceRoot: true}
   # The workflow releases as record 0111 has it: the binaries built from
-  # the release's tree with nothing given, the release commit and its tag
+  # the release's tree with nothing given, by cargo, and run on a runner
+  # with no Nix, Linux's against musl; the release commit and its tag
   # pushed alone, and the next version reckoned from the newest tag
   # (check-release.sh; core.55). actionlint, under format, reads the
   # workflow's keys and shell; this reads what a release's steps must be.
