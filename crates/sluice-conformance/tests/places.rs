@@ -283,6 +283,7 @@ fn on<'a>(h: &'a Harness, name: &str, signer: Option<&str>) -> Sluice<'a> {
     h.w().be_host(name);
     h.sluice().as_peer(Peer {
         name: name.into(),
+        repository: "this-repository".into(),
         lease: Duration::from_secs(300),
         alive: Duration::from_secs(120),
         signer: signer.map(str::to_string),

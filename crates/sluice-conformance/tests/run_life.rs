@@ -44,6 +44,7 @@ fn on<'a>(h: &'a Harness, name: &str) -> Sluice<'a> {
     h.w().be_host(name);
     h.sluice().as_peer(Peer {
         name: name.into(),
+        repository: "this-repository".into(),
         lease: Duration::from_secs(300),
         alive: Duration::from_secs(120),
         signer: Some("box".into()),
@@ -812,6 +813,7 @@ fn taking<'a>(h: &'a Harness, name: &str, systems: &[&str]) -> Sluice<'a> {
     h.w().be_host(name);
     h.sluice().as_peer(Peer {
         name: name.into(),
+        repository: "this-repository".into(),
         lease: Duration::from_secs(300),
         alive: Duration::from_secs(120),
         signer: Some("box".into()),
@@ -1228,6 +1230,7 @@ fn leading<'a>(h: &'a Harness, name: &str) -> Sluice<'a> {
     h.w().be_host(name);
     h.sluice().as_peer(Peer {
         name: name.into(),
+        repository: "this-repository".into(),
         lease: Duration::from_secs(300),
         alive: Duration::from_secs(120),
         signer: Some("lead".into()),
