@@ -50,3 +50,17 @@ The statement already has the ending option 3 needs: a run with no outcome is ne
   - In a deployment across hosts it is to be signed as a run record is, which waits on those records being built.
 - sluice's own policy declares `ready = ["docker", "info"]`.
 - `sluice exec` is again how agents run sluice's own suites, sharing the host's bound.
+
+## Amendment of 2026-11-18: a run whose claim lapsed counts toward the runs in a row
+
+Decider: the design agent, from this record's own bound and clauses 60, 77, 88 and 115, on the question of the fix `forge-check-reads-the-pool`.
+
+On 0.97.1, at `boomdrivedev/sluice-actions-trial`, a pool's job ended with no record of its run (`pool/forge/1`): the run job started, and the program it ran could not start on the runner. Its claim lapsed (88, 77), the run had no outcome (60), and its checks were dispatched again as `pool/forge/3`, `4` and `5`, with no end until the submission was withdrawn. Only 114's causes counted toward the runs in a row (115), and the time limit (66) counts from each run's own start, so nothing bounded it. Each of those dispatches spends the pool's minutes.
+
+**Decision.** A run whose claim lapsed, whether its standing executor stopped before reporting or its pool lost, cancelled or timed out its job before the run's record was written, counts toward the runs in a row whose checks could not run, as a run with no outcome for 114's causes does (115). Its checks still run again until that count is reached, and nothing of the lapsed run is recorded under a key. At the count the combination reads as not passed, and the culprit's session is told each check and why: for a pool's job, the job and where its log is kept (155). A run whose place could not be made still counts toward nothing, as core.58 says, since the host saw it never began.
+
+**Options not taken.**
+
+- *Count the time limit over a run and its follow-ups.* A job lost in seconds would be dispatched dozens of times inside one limit, and an honest run with follow-ups would be cut short.
+- *A bound for pools alone.* A standing host that dies on the same run each time loops the same way, and the two are one case (77).
+- *Treat a lost job as a run that never began (core.58).* sluice cannot see why a pool lost a job. core.58's case is one the host saw before anything ran, and any other host may take it.
