@@ -70,8 +70,8 @@ and for where it goes, the host's own `[telemetry]`,
   | `sluice.culprits` | counter | submissions blamed for a failure |
   | `sluice.conflicts` | counter | submissions removed for a conflict |
   | `sluice.landed`, `sluice.refused` | counter | submissions landed; landings refused because the branch moved |
-  | `sluice.submission.landed_after` | histogram, seconds | submit to landed |
-  | `sluice.candidate.tested_for` | histogram, seconds | a candidate's time under test, by `sluice.outcome` |
+  | `sluice.submission.landed_after` | histogram, seconds, declared in `s` | submit to landed |
+  | `sluice.candidate.tested_for` | histogram, seconds, declared in `s` | a candidate's time under test, by `sluice.outcome` |
 
 - **Logs**: one record for each failed task, sent by the round that
   reads its verdict, under that round's `sluice.verdict` span, with

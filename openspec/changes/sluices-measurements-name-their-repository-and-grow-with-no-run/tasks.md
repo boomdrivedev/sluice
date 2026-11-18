@@ -25,7 +25,7 @@ decisions by D-number.
 
 ## 3. Every time declares seconds
 
-- [ ] 3.1 In `crates/sluice-core/src/lib.rs`, add `SECONDS`, `sluice.submission.landed_after`, `sluice.candidate.tested_for` and `sluice.tasks.time_saved` (D4); in `crates/sluice/src/telemetry.rs`, build the meter provider through `meter_provider(exporter, resource)`, which adds a view giving each instrument `SECONDS` names the unit `s`, and call it from `Telemetry::begin`; and a unit test `a_time_is_sent_in_seconds` that builds it on an `InMemoryMetricExporter`, emits the four metrics of the spec's scenario through `MetricsLayer` under a scoped subscriber, flushes, and reads each exported metric's unit. Mark the two histograms' rows as declared in `s` in both telemetry pages. True when `cargo test -p sluice --lib a_time_is_sent_in_seconds` passes.
+- [x] 3.1 In `crates/sluice-core/src/lib.rs`, add `SECONDS`, `sluice.submission.landed_after`, `sluice.candidate.tested_for` and `sluice.tasks.time_saved` (D4); in `crates/sluice/src/telemetry.rs`, build the meter provider through `meter_provider(exporter, resource)`, which adds a view giving each instrument `SECONDS` names the unit `s`, and call it from `Telemetry::begin`; and a unit test `a_time_is_sent_in_seconds` that builds it on an `InMemoryMetricExporter`, emits the four metrics of the spec's scenario through `MetricsLayer` under a scoped subscriber, flushes, and reads each exported metric's unit. Mark the two histograms' rows as declared in `s` in both telemetry pages. True when `cargo test -p sluice --lib a_time_is_sent_in_seconds` passes.
 
 ## 4. What a replay saved is counted
 

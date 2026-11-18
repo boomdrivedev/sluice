@@ -70,8 +70,8 @@ back: the queue never depends on it
   | `sluice.culprits` | counter | submissions blamed for a failure |
   | `sluice.conflicts` | counter | submissions removed for a conflict |
   | `sluice.landed`, `sluice.refused` | counter | submissions landed; landings refused because the branch moved |
-  | `sluice.submission.landed_after` | histogram, seconds | submit to landed |
-  | `sluice.candidate.tested_for` | histogram, seconds | a combination's time under test, by `sluice.outcome` |
+  | `sluice.submission.landed_after` | histogram, seconds, declared in `s` | submit to landed |
+  | `sluice.candidate.tested_for` | histogram, seconds, declared in `s` | a combination's time under test, by `sluice.outcome` |
 
 - **Logs**: a failed check's output, and sluice's own warnings and
   errors, under the span they were emitted in. The table's `logs`, or a

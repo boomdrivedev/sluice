@@ -41,10 +41,11 @@ use opentelemetry_appender_tracing::layer::OpenTelemetryTracingBridge;
 use opentelemetry_otlp::{LogExporter, MetricExporter, Protocol, SpanExporter, WithExportConfig};
 use opentelemetry_sdk::error::OTelSdkResult;
 use opentelemetry_sdk::logs::{self, LogProcessor, SdkLogRecord, SdkLoggerProvider};
-use opentelemetry_sdk::metrics::SdkMeterProvider;
+use opentelemetry_sdk::metrics::exporter::PushMetricExporter;
+use opentelemetry_sdk::metrics::{Instrument, SdkMeterProvider, Stream};
 use opentelemetry_sdk::trace::SdkTracerProvider;
 use opentelemetry_sdk::Resource;
-use sluice_core::OUTPUT;
+use sluice_core::{OUTPUT, SECONDS};
 use sluice_seams::LOG_LIMIT;
 use tracing_opentelemetry::{MetricsLayer, OpenTelemetrySpanExt};
 use tracing_subscriber::filter::filter_fn;
@@ -296,6 +297,24 @@ impl Settings {
     }
 }
 
+/// The meter provider sluice's metrics are sent through, to `exporter`
+/// with `resource`: each instrument [`SECONDS`] names declared with the
+/// unit `s`, OpenTelemetry's own name for seconds, by a view, since the
+/// core's metric events are `tracing`'s and name no unit (rule core.66;
+/// record 0014 as amended 2026-11-18; design D4).
+pub fn meter_provider<E: PushMetricExporter>(exporter: E, resource: Resource) -> SdkMeterProvider {
+    SdkMeterProvider::builder()
+        .with_periodic_exporter(exporter)
+        .with_resource(resource)
+        .with_view(|i: &Instrument| {
+            SECONDS
+                .contains(&i.name())
+                .then(|| Stream::builder().with_unit("s").build().ok())
+                .flatten()
+        })
+        .build()
+}
+
 /// The exporters, flushed by [`Telemetry::finish`] before sluice exits:
 /// a provider for each signal left on, and none for a signal turned off.
 pub struct Telemetry {
@@ -414,12 +433,7 @@ impl Telemetry {
                 .with_resource(resource.clone())
                 .build()
         });
-        let metrics = metrics.map(|metrics| {
-            SdkMeterProvider::builder()
-                .with_periodic_exporter(metrics)
-                .with_resource(resource.clone())
-                .build()
-        });
+        let metrics = metrics.map(|metrics| meter_provider(metrics, resource.clone()));
         let logs = exporter.map(|e| {
             SdkLoggerProvider::builder()
                 .with_log_processor(Scrub::new(
@@ -681,6 +695,63 @@ fn encode(v: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Rule core.66 (design D4): every time the core gives in seconds is
+    /// sent declared in `s`, and a count with no unit.
+    #[test]
+    fn a_time_is_sent_in_seconds() {
+        use opentelemetry_sdk::metrics::InMemoryMetricExporter;
+        let exporter = InMemoryMetricExporter::default();
+        let provider = meter_provider(exporter.clone(), Resource::builder_empty().build());
+        let subscriber = tracing_subscriber::registry().with(MetricsLayer::new(provider.clone()));
+        tracing::subscriber::with_default(subscriber, || {
+            let (repository, branch) = ("acme/app", "main");
+            tracing::info!(
+                histogram.sluice.submission.landed_after = 3.5f64,
+                sluice.repository = repository,
+                sluice.branch = branch,
+            );
+            tracing::info!(
+                histogram.sluice.candidate.tested_for = 2.0f64,
+                sluice.repository = repository,
+                sluice.branch = branch,
+                sluice.outcome = "passed",
+            );
+            tracing::info!(
+                monotonic_counter.sluice.tasks.time_saved = 4.0f64,
+                sluice.repository = repository,
+                sluice.branch = branch,
+            );
+            tracing::info!(
+                monotonic_counter.sluice.landed = 1u64,
+                sluice.repository = repository,
+                sluice.branch = branch,
+            );
+        });
+        provider.force_flush().unwrap();
+        let mut units: Vec<(String, String)> = exporter
+            .get_finished_metrics()
+            .unwrap()
+            .iter()
+            .flat_map(|r| r.scope_metrics())
+            .flat_map(|s| s.metrics())
+            .map(|m| (m.name().to_string(), m.unit().to_string()))
+            .collect();
+        units.sort();
+        units.dedup();
+        assert_eq!(
+            units,
+            [
+                ("sluice.candidate.tested_for".to_string(), "s".to_string()),
+                ("sluice.landed".to_string(), String::new()),
+                (
+                    "sluice.submission.landed_after".to_string(),
+                    "s".to_string()
+                ),
+                ("sluice.tasks.time_saved".to_string(), "s".to_string()),
+            ]
+        );
+    }
 
     #[test]
     fn values_are_encoded_where_the_syntax_would_read_them() {
