@@ -53,7 +53,13 @@ back: the queue never depends on it
   `sluice.submissions`, `sluice.candidate` (the revision tested),
   `sluice.executor`, `sluice.confined`, `sluice.outcome`, `sluice.ran`,
   `sluice.replayed`.
-- **Metrics**, each with `sluice.branch`:
+- **Metrics**, each with `sluice.repository` and `sluice.branch`, and
+  `sluice.outcome` where the table names it, and nothing else, so no
+  metric carries a value that grows with each run. `sluice.repository`
+  is the owner and name of the repository's `origin`, `acme/app` for
+  `git@github.com:acme/app.git` or `https://github.com/acme/app`, else
+  the repository's folder's name, `.git` dropped; nothing else of the
+  origin's address is kept:
 
   | Metric | Kind | What |
   |---|---|---|

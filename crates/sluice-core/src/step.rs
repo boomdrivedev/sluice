@@ -762,11 +762,13 @@ impl Sluice<'_> {
                             .and_then(|s| seconds_between(&s.submitted, &now));
                         info!(
                             monotonic_counter.sluice.landed = 1u64,
+                            sluice.repository = self.peer.repository.as_str(),
                             sluice.branch = branch,
                         );
                         if let Some(secs) = waited {
                             info!(
                                 histogram.sluice.submission.landed_after = secs,
+                                sluice.repository = self.peer.repository.as_str(),
                                 sluice.branch = branch,
                             );
                         }
@@ -820,6 +822,7 @@ impl Sluice<'_> {
                 span.record("sluice.outcome", "refused");
                 info!(
                     monotonic_counter.sluice.refused = 1u64,
+                    sluice.repository = self.peer.repository.as_str(),
                     sluice.branch = branch
                 );
                 self.update(branch, |l| {
@@ -1981,9 +1984,14 @@ impl Sluice<'_> {
         let queued = line.subs.values().filter(|s| !s.state.is_out()).count() as u64;
         let written = matches!(self.write(&line)?, Written::Written(_));
         if written {
-            info!(gauge.sluice.queue.depth = queued, sluice.branch = branch);
+            info!(
+                gauge.sluice.queue.depth = queued,
+                sluice.repository = self.peer.repository.as_str(),
+                sluice.branch = branch
+            );
             info!(
                 gauge.sluice.window = line.doc.window as u64,
+                sluice.repository = self.peer.repository.as_str(),
                 sluice.branch = branch
             );
         }
@@ -2811,10 +2819,12 @@ impl Sluice<'_> {
         let branch = line.branch.clone();
         info!(
             monotonic_counter.sluice.tasks.ran = v.ran as u64,
+            sluice.repository = self.peer.repository.as_str(),
             sluice.branch = branch.as_str()
         );
         info!(
             monotonic_counter.sluice.tasks.replayed = v.replayed as u64,
+            sluice.repository = self.peer.repository.as_str(),
             sluice.branch = branch.as_str(),
         );
         let ended = Ended {
@@ -2881,6 +2891,7 @@ impl Sluice<'_> {
         let branch = branch.as_str();
         info!(
             monotonic_counter.sluice.verdicts = 1u64,
+            sluice.repository = self.peer.repository.as_str(),
             sluice.branch = branch,
             sluice.outcome = word.as_str(),
         );
@@ -2888,6 +2899,7 @@ impl Sluice<'_> {
             if let Some(secs) = self.tested_for(branch, &c.revision, now)? {
                 info!(
                     histogram.sluice.candidate.tested_for = secs,
+                    sluice.repository = self.peer.repository.as_str(),
                     sluice.branch = branch,
                     sluice.outcome = word.as_str(),
                 );
@@ -3141,7 +3153,11 @@ impl Sluice<'_> {
         with: Vec<Contested>,
         now: &str,
     ) -> Result<()> {
-        info!(monotonic_counter.sluice.conflicts = 1u64, sluice.branch = %line.branch);
+        info!(
+            monotonic_counter.sluice.conflicts = 1u64,
+            sluice.repository = self.peer.repository.as_str(),
+            sluice.branch = %line.branch,
+        );
         let s = line.sub_mut(id);
         s.state = State::Conflict;
         s.conflict = Some(ConflictRecord {
@@ -3178,7 +3194,11 @@ impl Sluice<'_> {
             sluice.candidate = %c.revision,
         )
         .entered();
-        info!(monotonic_counter.sluice.culprits = 1u64, sluice.branch = %line.branch);
+        info!(
+            monotonic_counter.sluice.culprits = 1u64,
+            sluice.repository = self.peer.repository.as_str(),
+            sluice.branch = %line.branch,
+        );
         let s = line.sub_mut(id);
         s.state = State::Failed;
         s.tested = Some(Tested {

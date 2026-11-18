@@ -54,6 +54,13 @@ pub use step::{Round, SignedResult, Started, Step};
 /// and nothing reads it back (ADR 0022). The kept copy is the record (20).
 pub const OUTPUT: &str = "sluice::output";
 
+/// The attributes a metric sluice sends may carry, and nothing else: its
+/// repository, its branch and, where it has one, its outcome, so no metric
+/// carries a value that grows with each run (rule core.66; record 0014 as
+/// amended 2026-11-18; design D2). The round's tests hold every metric
+/// event to the list.
+pub const METRIC_KEYS: [&str; 3] = ["sluice.repository", "sluice.branch", "sluice.outcome"];
+
 /// The time, for the records' timestamps. Not a seam: the environment.
 pub trait Clock {
     fn now(&self) -> DateTime<Utc>;
