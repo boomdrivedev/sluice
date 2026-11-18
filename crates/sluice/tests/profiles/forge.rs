@@ -24,6 +24,8 @@ use support::http::{json, Answer, Fake, Request};
 const KEY: &[u8] = include_bytes!("forge/test-key.pem");
 const APP: u64 = 4242;
 const INSTALLATION: u64 = 7;
+/// The user id GitHub gives the app's bot.
+const BOT: u64 = 900042;
 
 fn repo() -> Repo {
     Repo::from_url("https://github.com/o/r.git").unwrap()
@@ -117,6 +119,13 @@ impl Forge {
         }
         if path == "/apps/sluice-test" && r.method == "GET" {
             return json(200, json!({ "id": self.app, "slug": "sluice-test" }));
+        }
+        // The app's bot, as GitHub answers a token of the app's.
+        if path == "/users/sluice-test%5Bbot%5D" && r.method == "GET" {
+            return json(
+                200,
+                json!({ "login": "sluice-test[bot]", "id": BOT, "type": "Bot" }),
+            );
         }
         // git's first ask of a push: its answer to any token sent as git
         // sends one.
@@ -315,6 +324,49 @@ fn the_bot_under_a_command_is_the_viewers() {
         "{:?}",
         fake.requests()
     );
+}
+
+/// The author a commit pushed as the fake's app names.
+const AUTHOR: &str = "sluice-test[bot] <900042+sluice-test[bot]@users.noreply.github.com>";
+
+/// The calls the fake took to `path` by `method`.
+fn took(fake: &Fake, method: &str, path: &str) -> usize {
+    fake.requests()
+        .iter()
+        .filter(|r| r.method == method && r.path == path)
+        .count()
+}
+
+/// The app on `fake` under its key, its clock `clock`, keeping its answers
+/// in `state` as each process on one host does.
+fn kept_on(fake: &Fake, clock: &Clock, state: &std::path::Path) -> App {
+    app(fake, clock).keeping(sluice::profiles::github::kept::Kept::new(state))
+}
+
+/// The forge-identity spec's "Read once for the host": the app's author is
+/// its bot, the slug GitHub gives its JWT followed by `[bot]` at the
+/// address GitHub links to the bot's user, read once for every process on
+/// the host and read again a day after (record 0019 as amended
+/// 2026-11-18; rule core.43).
+#[test]
+fn the_apps_author_is_its_bot_kept_on_the_host() {
+    let clock = Clock::new();
+    let fake = Forge::new(&clock).start();
+    let state = support::Scratch::new("author-kept");
+    let first = kept_on(&fake, &clock, state.path());
+    let second = kept_on(&fake, &clock, state.path());
+    assert_eq!(first.author(&repo()).unwrap().to_string(), AUTHOR);
+    assert_eq!(second.author(&repo()).unwrap().to_string(), AUTHOR);
+    let user = "/users/sluice-test%5Bbot%5D";
+    assert_eq!(took(&fake, "GET", "/app"), 1);
+    assert_eq!(took(&fake, "GET", user), 1);
+    assert!(state.path().join("forge/authors/4242.json").is_file());
+
+    clock.set(clock.now() + TimeDelta::days(1) + TimeDelta::minutes(1));
+    let third = kept_on(&fake, &clock, state.path());
+    assert_eq!(third.author(&repo()).unwrap().to_string(), AUTHOR);
+    assert_eq!(took(&fake, "GET", "/app"), 2);
+    assert_eq!(took(&fake, "GET", user), 2);
 }
 
 /// A token is bought once and kept until five minutes before its hour

@@ -12,7 +12,7 @@ use std::process::Stdio;
 use std::rc::Rc;
 use std::time::{Duration, Instant};
 
-use sluice::identity::{Credentials, Identity, Withheld};
+use sluice::identity::{Author, Credentials, Identity, Withheld};
 use sluice::profiles::branches::Branches;
 use sluice::profiles::pushed_refs::PushedRefs;
 use sluice::retry;
@@ -891,7 +891,9 @@ fn made_from_and_policy_of_read_a_refused_copy_as_remote_does() {
 /// An identity whose remote is a fake HTTP server, with a token of its
 /// own: `token`, then `token-1`, `token-2` and on as it is renewed, unless
 /// its forge refuses to make another, saying `refuses`, or gives none at
-/// all, as `withholds` says.
+/// all, as `withholds` says. A commit pushed as it names
+/// `a fake <fake@identity.invalid>`, unless it cannot say who it is, as
+/// `unnamed` says.
 struct FakeIdentity {
     /// The URL it reaches every remote by; `None`, each remote's own.
     url: Option<String>,
@@ -899,8 +901,17 @@ struct FakeIdentity {
     renewed: Cell<usize>,
     refuses: Option<String>,
     withholds: Option<Withheld>,
+    unnamed: Option<String>,
     /// The URL each credential was asked for, in order.
     asked: RefCell<Vec<String>>,
+}
+
+/// The author a commit pushed as [`FakeIdentity`] names.
+fn fake_author() -> Author {
+    Author {
+        name: "a fake".into(),
+        email: "fake@identity.invalid".into(),
+    }
 }
 
 impl FakeIdentity {
@@ -919,7 +930,17 @@ impl FakeIdentity {
             renewed: Cell::new(0),
             refuses: None,
             withholds: None,
+            unnamed: None,
             asked: RefCell::default(),
+        }
+    }
+
+    /// The identity that cannot give its author, saying `why`.
+    #[allow(dead_code)]
+    fn unnamed(self, why: &str) -> FakeIdentity {
+        FakeIdentity {
+            unnamed: Some(why.into()),
+            ..self
         }
     }
 
@@ -979,6 +1000,16 @@ impl Identity for FakeIdentity {
         }
         self.renewed.set(self.renewed.get() + 1);
         self.credentials(url)
+    }
+
+    fn author(&self, url: &str) -> anyhow::Result<Author> {
+        if let Some(own) = &self.url {
+            assert_eq!(url, own);
+        }
+        match &self.unnamed {
+            Some(why) => anyhow::bail!("{why}"),
+            None => Ok(fake_author()),
+        }
     }
 }
 
