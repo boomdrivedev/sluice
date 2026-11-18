@@ -41,3 +41,23 @@ Option 3. A served endpoint binds a port and needs a process that outlives a ste
 - A sandboxed run reaches a collector only on localhost, which `network = "localhost"` allows.
 - The exporter speaks plain HTTP, not TLS: it sends to a collector on the host, which forwards to the backend over TLS itself.
 - sluice's binary carries the OpenTelemetry SDK and an HTTP client; the core depends only on `tracing`.
+
+## Amendment of 2026-11-18: what a metric carries
+
+Decider: the design agent, on five findings from a week of sluice's telemetry in Datadog (2026-10-27, on the Willdan build host), held by the user on 2026-11-03 and sent as signals on their word of 2026-11-18 (`2026-11-18-boomdrive-ops-e12883fa/01` to `05`).
+
+A run's ids rode on `OTEL_RESOURCE_ATTRIBUTES`, and a resource attribute goes on every signal a process sends, metrics among them. After one week moon's metrics carried about 700 values each of `sluice.trace_id`, `sluice.span_id`, `sluice.revision` and `sluice.place`, a count that grows with every run. A metrics backend bills each combination of a metric's tags, so the join this record chose for spans made the metrics' cost grow without limit.
+
+**Decision.**
+
+1. **No metric carries a value that grows with each run.** No metric sluice sends, or hands a run's tool the means to send, carries a run's trace id, span id, revision or place. A run's checks still join the round on their spans and logs, as this record decided: every span and log they send names the round that started them. A run's tools are handed sluice's traces and logs and never metrics: moon 2.6.1 reads no `TRACEPARENT` and takes the ids only on its resource, which OpenTelemetry puts on every signal, so its metrics are off in a run, and its spans keep the same times. Clause 151 says so (the construct of `sluices-measurements-name-their-repository-and-grow-with-no-run`, D1).
+2. **Every metric names its repository.** Each metric sluice sends names the repository it is about, by the owner and name its remote gives, or the folder's name where it has none, beside `sluice.branch`. A host holds few repositories, so the count stays small.
+3. **Every duration declares its unit.** A metric that measures time declares its unit, seconds, in OpenTelemetry's own way (`s`). `sluice.submission.landed_after` and `sluice.candidate.tested_for` are among them.
+4. **What a replay saved is measured.** Tasks replayed are counted with the time each took when it last ran, so the time replays save sums to hours.
+5. **sluice names no other tool's service.** A run's tool names itself, as record 0106 and core.53 have it. moon reporting as `unknown_service:moon` is moon's own setting, not sluice's to fill.
+
+**Options not taken.**
+
+- *Keep the ids on the resource and drop them at the collector.* That works only where someone configures the collector, and every other backend still bills the growth.
+- *Turn a run's tools' telemetry off whole.* That loses the join of the checks' spans to the round, which this record exists for.
+- *Take the ids off the resource and keep the tools' metrics.* moon's spans then name no round.
