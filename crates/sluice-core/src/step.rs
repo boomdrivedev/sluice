@@ -2271,7 +2271,13 @@ impl Sluice<'_> {
                             })
                             .collect();
                         line.candidate_mut(&c.id).expect("polled candidate").runs[i].place = None;
-                        end_run(line, &c.id, i, with_none(&none, now), now);
+                        // 115 (as amended 2026-11-18; record 0031 as amended
+                        // 2026-11-18): the lapse counts toward the runs in a
+                        // row, its follow-up holding its checks under the
+                        // bound and past it each named with why.
+                        let system = r.system.as_deref().or(home);
+                        let ended = lapsed_end(line, &c, i, &none, system, &host, now);
+                        end_run(line, &c.id, i, ended, now);
                     }
                     continue;
                 }
@@ -2289,7 +2295,10 @@ impl Sluice<'_> {
                     Progress::Lost => {
                         // 60, record 0122 (design D7): no outcome: the run
                         // ends with none for its checks, its checkout
-                        // released after, and its follow-up runs them again.
+                        // released after, and its follow-up runs them again;
+                        // it counts toward the runs in a row, past whose
+                        // bound each check is named with why (115 as amended
+                        // 2026-11-18; record 0031 as amended 2026-11-18).
                         line.log(
                             now,
                             Event::Lost {
@@ -2297,7 +2306,10 @@ impl Sluice<'_> {
                                 not_run: Vec::new(),
                             },
                         );
-                        let ended = with_none(&lost(&given_checks(r, rules)), now);
+                        let system = r.system.as_deref().or(home);
+                        let none = lost(&given_checks(r, rules));
+                        let host = self.peer.name.clone();
+                        let ended = lapsed_end(line, &c, i, &none, system, &host, now);
                         end_run(line, &c.id, i, ended, now);
                     }
                     Progress::Finished(report) => {
@@ -4972,6 +4984,35 @@ fn read_not_run(
     host: &str,
     now: &str,
 ) -> Option<Vec<FailedTask>> {
+    let named = count_not_run(line, c, i, not_run, judged, system, host);
+    if named.is_none() {
+        line.log(
+            now,
+            Event::Lost {
+                combination: c.revision.clone(),
+                not_run: not_run.to_vec(),
+            },
+        );
+    }
+    named
+}
+
+/// [`read_not_run`]'s count alone, for a run whose own line says how it
+/// was lost: a claim that lapsed, its executor stopping before it reported
+/// or its pool losing its job before the run's record was written, counts
+/// toward the runs in a row as 114's causes do (115 as amended 2026-11-18;
+/// record 0031 as amended 2026-11-18). Under the bound, `None`, the run
+/// keeping that `host` had no outcome of it, each check with why; past
+/// it, each check named with why, to be read as failed.
+fn count_not_run(
+    line: &mut Line,
+    c: &Candidate,
+    i: usize,
+    not_run: &[NotRun],
+    judged: bool,
+    system: Option<&str>,
+    host: &str,
+) -> Option<Vec<FailedTask>> {
     let x = line.candidate_mut(&c.id).expect("a read candidate");
     if !judged {
         x.not_run_runs += 1;
@@ -4982,13 +5023,6 @@ fn read_not_run(
                 system: xr.system.clone(),
                 not_run: not_run.to_vec(),
             });
-            line.log(
-                now,
-                Event::Lost {
-                    combination: c.revision.clone(),
-                    not_run: not_run.to_vec(),
-                },
-            );
             return None;
         }
     }
@@ -5212,6 +5246,34 @@ fn lost(checks: &[String]) -> Vec<NotRun> {
             key: None,
         })
         .collect()
+}
+
+/// 115 (as amended 2026-11-18; record 0031 as amended 2026-11-18): the end
+/// of run `i` of `c` whose claim lapsed on `host`, each of its checks in
+/// `none` with why: counted toward the runs in a row, with no outcome
+/// under the bound, its follow-up holding them, and past it each named
+/// failed with why, as a run whose checks could not run is
+/// ([`Sluice::not_started`]). Nothing of it is recorded under a key.
+fn lapsed_end(
+    line: &mut Line,
+    c: &Candidate,
+    i: usize,
+    none: &[NotRun],
+    system: Option<&str>,
+    host: &str,
+    now: &str,
+) -> Ended {
+    match count_not_run(line, c, i, none, false, system, host) {
+        Some(named) => {
+            let ended = failing(&named, now);
+            line.candidate_mut(&c.id)
+                .expect("a read candidate")
+                .failed
+                .extend(named);
+            ended
+        }
+        None => with_none(none, now),
+    }
 }
 
 /// Record 0122 (design D7): the end of a run with no outcome for each
