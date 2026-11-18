@@ -629,6 +629,126 @@ fn a_round_links_to_the_trace_its_work_was_submitted_under() {
     telemetry.finish();
 }
 
+/// A branch with three checks, `tests:t-a`, `tests:t-b` and `tests:t-c`,
+/// each reading its own folder, and a worktree `unit/a` whose head
+/// changes each, `tests:t-b`'s so it fails; the runner answers
+/// `tests:t-c` from an earlier run and times each.
+fn three_checks() -> Fakes {
+    let f = Fakes::new();
+    f.world.init(
+        BRANCH,
+        &[
+            (".config/sluice.toml", POLICY),
+            ("tests/a/t.py", "a"),
+            ("tests/b/t.py", "b"),
+            ("tests/c/t.py", "c"),
+        ],
+    );
+    for (task, path) in [
+        ("tests:t-a", "tests/a/"),
+        ("tests:t-b", "tests/b/"),
+        ("tests:t-c", "tests/c/"),
+    ] {
+        f.world.task(task, path);
+    }
+    f.world.fails_with("tests:t-b", "tests/b/t.py", "broken");
+    f.world.replays("tests:t-c");
+    f.world
+        .times("tests:t-a", "2026-11-18T12:00:01Z", "2026-11-18T12:00:04Z");
+    f.world
+        .times("tests:t-b", "2026-11-18T12:00:02Z", "2026-11-18T12:00:06Z");
+    f.world
+        .times("tests:t-c", "2026-11-18T12:00:00Z", "2026-11-18T12:00:01Z");
+    let head = f.world.work(
+        &f.world.tip(BRANCH),
+        &[
+            ("tests/a/t.py", Some("a2")),
+            ("tests/b/t.py", Some("broken")),
+            ("tests/c/t.py", Some("c2")),
+        ],
+    );
+    f.world.session("unit/a", "agent-a", &head);
+    f
+}
+
+/// An RFC 3339 time as the system's.
+fn time(time: &str) -> std::time::SystemTime {
+    chrono::DateTime::parse_from_rfc3339(time).unwrap().into()
+}
+
+/// The value of `key` among `attributes`.
+fn named(attributes: &[opentelemetry::KeyValue], key: &str) -> Option<String> {
+    attributes
+        .iter()
+        .find(|kv| kv.key.as_str() == key)
+        .map(|kv| kv.value.to_string())
+}
+
+/// 153 (design D6): an exec started under a caller's context holds, under
+/// its `sluice exec` span, a `sluice.check` span for each check its run
+/// ran, over the times its runner gave and with the report's outcome, and
+/// none for a check answered from an earlier run; its span holds the
+/// branch and how many ran and were replayed.
+#[test]
+fn an_exec_s_span_holds_each_check_it_ran() {
+    if !alone("an_exec_s_span_holds_each_check_it_ran") {
+        return;
+    }
+    let (telemetry, spans, _) = start(Logs::Off);
+    let f = three_checks();
+    let args = ["exec", BRANCH, "--worktree", "unit/a"];
+    assert_eq!(under(&f, &(), &args, Some(caller())), FAILED);
+    telemetry.flush();
+
+    let exec = span(&spans, "sluice exec");
+    assert_eq!(exec.span_context.trace_id().to_string(), TRACE);
+    assert_eq!(exec.parent_span_id.to_string(), PARENT);
+    assert_eq!(value(&exec, "sluice.branch"), Some(BRANCH.into()));
+    let count = |key| value(&exec, key).map(|v| v.to_string());
+    assert_eq!(count("sluice.ran").as_deref(), Some("2"));
+    assert_eq!(count("sluice.replayed").as_deref(), Some("1"));
+
+    let mut checks: Vec<_> = spans
+        .get_finished_spans()
+        .unwrap()
+        .into_iter()
+        .filter(|s| s.name == "sluice.check")
+        .map(|s| {
+            assert_eq!(s.parent_span_id, exec.span_context.span_id(), "{s:?}");
+            assert_eq!(
+                s.span_context.trace_id(),
+                exec.span_context.trace_id(),
+                "{s:?}"
+            );
+            (
+                named(&s.attributes, "sluice.task").unwrap_or_default(),
+                named(&s.attributes, "sluice.outcome").unwrap_or_default(),
+                s.start_time,
+                s.end_time,
+            )
+        })
+        .collect();
+    checks.sort_by(|a, b| a.0.cmp(&b.0));
+    assert_eq!(
+        checks,
+        [
+            (
+                "tests:t-a".to_string(),
+                "pass".to_string(),
+                time("2026-11-18T12:00:01Z"),
+                time("2026-11-18T12:00:04Z")
+            ),
+            (
+                "tests:t-b".to_string(),
+                "fail".to_string(),
+                time("2026-11-18T12:00:02Z"),
+                time("2026-11-18T12:00:06Z")
+            ),
+        ]
+    );
+    telemetry.finish();
+}
+
 /// A command run's environment, the run started under a `sluice.start`
 /// span at a place named `p 1`, and the revision it ran at.
 fn a_run_s_environment() -> (String, String) {

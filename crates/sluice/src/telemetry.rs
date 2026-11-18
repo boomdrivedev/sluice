@@ -45,7 +45,7 @@ use opentelemetry_sdk::error::OTelSdkResult;
 use opentelemetry_sdk::logs::{self, LogProcessor, SdkLogRecord, SdkLoggerProvider};
 use opentelemetry_sdk::metrics::SdkMeterProvider;
 use opentelemetry_sdk::propagation::TraceContextPropagator;
-use opentelemetry_sdk::trace::SdkTracerProvider;
+use opentelemetry_sdk::trace::{SdkTracer, SdkTracerProvider};
 use opentelemetry_sdk::Resource;
 use sluice_core::OUTPUT;
 use sluice_seams::LOG_LIMIT;
@@ -61,6 +61,11 @@ static ON: AtomicBool = AtomicBool::new(false);
 /// The settings telemetry started under, which a run's environment is
 /// built from (design D6).
 static SENT: OnceLock<Settings> = OnceLock::new();
+
+/// 153: the tracer telemetry started, while traces go, which an exec's
+/// check spans are built with, over the times their runner gave (design
+/// D6 of `a-sluice-command-shows-inside-its-callers-trace`).
+static TRACER: OnceLock<SdkTracer> = OnceLock::new();
 
 /// How much of a failed check's output is sent (ADR 0022): the flag and
 /// the host's `[telemetry] logs` read one set of words (design D1).
@@ -382,6 +387,46 @@ pub fn command(
     ran
 }
 
+/// 153 (design D6): a check an exec's run ran, with its outcome and the
+/// times its runner gave it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Check {
+    /// The check, as the run's report names it.
+    pub task: String,
+    /// `pass` or `fail`, the report's.
+    pub outcome: &'static str,
+    pub started: std::time::SystemTime,
+    pub ended: std::time::SystemTime,
+}
+
+/// 153 (design D6): beneath `parent`, an exec's span, a `sluice.check`
+/// span for each of `checks`, from its start to its end, with
+/// `sluice.task` and `sluice.outcome`. They carry times sluice did not
+/// see, so they are built with the tracer telemetry started, under
+/// `parent`'s context; nothing is sent while traces do not go, or where
+/// `parent` is no span of a trace.
+pub fn checks(parent: &tracing::Span, checks: &[Check]) {
+    use opentelemetry::trace::{Span as _, Tracer as _};
+    let Some(tracer) = TRACER.get() else {
+        return;
+    };
+    let cx = parent.context();
+    if !cx.span().span_context().is_valid() {
+        return;
+    }
+    for check in checks {
+        let mut span = tracer
+            .span_builder("sluice.check")
+            .with_start_time(check.started)
+            .with_attributes(vec![
+                opentelemetry::KeyValue::new("sluice.task", check.task.clone()),
+                opentelemetry::KeyValue::new("sluice.outcome", check.outcome),
+            ])
+            .start_with_context(tracer, &cx);
+        span.end_with_timestamp(check.ended);
+    }
+}
+
 /// 153 (design D5; rule core.53): `span` linked to the span `trace`, a
 /// `TRACEPARENT` a submission kept, names, the link holding
 /// `sluice.submission`, its number; a text that does not read adds
@@ -581,10 +626,12 @@ impl Telemetry {
             .with(metrics.clone().map(MetricsLayer::new))
             .with(bridge);
         tracing::subscriber::set_global_default(subscriber)?;
-        // 153 (design D5): while traces go, the spans that test a
-        // combination link to the context each of its submissions kept.
-        if traces.is_some() {
+        // 153 (design D5, D6): while traces go, the spans that test a
+        // combination link to the context each of its submissions kept,
+        // and an exec's check spans are built with the tracer kept.
+        if let Some(t) = &traces {
             sluice_core::links::set(link);
+            let _ = TRACER.set(t.tracer("sluice"));
         }
         let _ = SENT.set(settings.clone());
         ON.store(true, Ordering::SeqCst);

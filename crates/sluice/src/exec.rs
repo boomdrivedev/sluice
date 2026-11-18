@@ -14,10 +14,12 @@ use sluice_core::release::{ReleaseOutcome, Releasing};
 use sluice_core::session::{Abandoned, Recorded, SessionPlan, SessionRefusal, SessionStart};
 use sluice_core::{Clock, Forecast, Sluice};
 use sluice_seams::{
-    AtBound, Outcome, Progress, Released, Rev, RunHandle, RunOutcome, RunReport, TaskProgress,
+    AtBound, Outcome, Progress, Released, Rev, RunHandle, RunOutcome, RunReport, Source,
+    TaskProgress,
 };
 
 use crate::sessions::SessionRun;
+use crate::telemetry;
 use crate::told::{self, Kind};
 use crate::words;
 use crate::{Pause, Pushers, CONFLICT, FAILED, LANDED, STOPPED};
@@ -251,6 +253,52 @@ pub fn shell_line(argv: &[String]) -> String {
         })
         .collect::<Vec<_>>()
         .join(" ")
+}
+
+/// 153 (design D6, D8): on the exec's span, the command's in its caller's
+/// trace, the branch and how many of the report's checks ran and were
+/// replayed, as a verdict's holds them; and beneath it a `sluice.check`
+/// span for each check the run ran whose runner gave its start and end,
+/// over those times. A check answered from an earlier run ran nothing
+/// and has none. Telemetry decides nothing: an exec under no span asks
+/// nothing, and times that cannot be read send no span.
+fn spans(tests: &dyn sluice_seams::Tests, run: &RunHandle, branch: &str, report: &RunReport) {
+    let span = tracing::Span::current();
+    if span.is_disabled() {
+        return;
+    }
+    let ran: Vec<&sluice_seams::TaskResult> = report
+        .tasks
+        .iter()
+        .filter(|t| matches!(t.source, Source::Ran { .. }))
+        .collect();
+    span.record("sluice.branch", branch);
+    span.record("sluice.ran", ran.len() as u64);
+    span.record("sluice.replayed", (report.tasks.len() - ran.len()) as u64);
+    let Ok(timed) = tests.timed(run) else {
+        return;
+    };
+    let at = |time: &Option<String>| {
+        chrono::DateTime::parse_from_rfc3339(time.as_deref()?)
+            .ok()
+            .map(std::time::SystemTime::from)
+    };
+    let checks: Vec<telemetry::Check> = ran
+        .iter()
+        .filter_map(|t| {
+            let timed = timed.iter().find(|x| x.target == t.task)?;
+            Some(telemetry::Check {
+                task: t.task.clone(),
+                outcome: match t.outcome {
+                    Outcome::Pass => "pass",
+                    Outcome::Fail => "fail",
+                },
+                started: at(&timed.started)?,
+                ended: at(&timed.ended)?,
+            })
+        })
+        .collect();
+    telemetry::checks(&span, &checks);
 }
 
 impl Exec<'_> {
@@ -503,6 +551,9 @@ impl Exec<'_> {
         };
         let finished = s.finish_session(&plan, &session, &started, command.is_some(), &report)?;
         let report = finished.report;
+        // 153 (design D6): told before the place can be released, while
+        // the runner's records in it stand.
+        spans(seams.tests, &run, &self.branch, &report);
         self.summary(out, &report, command.is_some())?;
         unkept(finished.unkept.map_or(Ok(()), |e| Err(anyhow::anyhow!(e))));
         let recorded = match finished.recorded {

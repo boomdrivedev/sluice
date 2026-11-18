@@ -241,6 +241,9 @@ struct Inner {
     /// fetched it, its branch and its id, in order (record 0118).
     candidate_fetches: Vec<(String, String, String)>,
     took: BTreeMap<String, (u64, u32)>,
+    /// Tasks the runner answers from an earlier run, whatever the request
+    /// asks (38).
+    replays: BTreeSet<String>,
     /// Checks a run leaves not run, with why (could-not-run-1 114).
     cannot_run: BTreeMap<String, String>,
     /// 149: the tasks each task depends on, which a run runs first.
@@ -909,6 +912,12 @@ impl World {
     /// took the sum against an estimate of twice it (119).
     pub fn takes(&self, task: &str, ms: u64, attempts: u32) {
         self.0.borrow_mut().took.insert(task.into(), (ms, attempts));
+    }
+
+    /// The runner answers `task` from an earlier run, a pass, whatever the
+    /// request asks of replays, as a runner's own cache may (38).
+    pub fn replays(&self, task: &str) {
+        self.0.borrow_mut().replays.insert(task.into());
     }
 
     /// Runs leave `task` not run, for `reason` (could-not-run-1 114);
@@ -1766,6 +1775,16 @@ impl World {
         let hash = Self::task_hash(&t, tree);
         let key = (t.name.clone(), hash.clone());
         let scripted = inner.flaky.get_mut(&t.name).and_then(|q| q.pop_front());
+        if scripted.is_none() && inner.replays.contains(&t.name) {
+            return TaskResult {
+                took_ms: None,
+                attempts: None,
+                task: t.name.clone(),
+                hash,
+                outcome: Outcome::Pass,
+                source: Source::Replayed { from_run_at: None },
+            };
+        }
         if scripted.is_none() && request.replay {
             if let Some(at) = inner.cache.get(&key) {
                 return TaskResult {
