@@ -81,17 +81,20 @@ back: the queue never depends on it
   kept. `tail` sends the output's end, scrubbed of what reads as a
   secret, at most `logs_tail_bytes` of it.
 - **The checks inside a run**: with telemetry on, a run gets the
-  collector sluice sends to and the signals it sends, and moon runs with
-  `--otel`, so moon's own traces and metrics arrive as service `moon`.
-  With a `[telemetry]`, a run gets the table's collector, or the
+  collector sluice sends to and the traces and logs it sends, and no
+  metrics: its environment holds `OTEL_METRICS_EXPORTER=none`, with a
+  table or without, so a run's tools send their spans and logs, which
+  name the round that started them, and no metric names a run. moon runs
+  with `--otel`, so its own traces arrive under the service it names
+  itself. With a `[telemetry]`, a run gets the table's collector, or the
   caller's where the table names none, and none of the caller's other
-  `OTEL_*`. Each signal sluice does not send goes to it as
+  `OTEL_*`. Each other signal sluice does not send goes to it as
   `OTEL_<SIGNAL>_EXPORTER=none`. With no table, a run gets sluice's
-  `OTEL_*` as they are. moon does
-  not nest its spans under sluice's: each carries `host.name`, the
-  table's attributes, `sluice.trace_id`, `sluice.span_id`,
-  `sluice.place` and `sluice.revision` as resource attributes, so a
-  search for the round's trace id finds them.
+  `OTEL_*` as they are, but for metrics. moon does not nest its spans
+  under sluice's: each carries `host.name`, the table's attributes,
+  `sluice.trace_id`, `sluice.span_id`, `sluice.place` and
+  `sluice.revision` as resource attributes, so a search for the round's
+  trace id finds them.
 
 ## What a host needs
 

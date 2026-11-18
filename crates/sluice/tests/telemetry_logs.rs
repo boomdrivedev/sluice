@@ -560,11 +560,12 @@ fn var(env: &str, k: &str) -> Option<String> {
         .map(str::to_string)
 }
 
-/// With no `[telemetry]`, a run's checks get sluice's `OTEL_*`, its
-/// resource attributes extended with the host's name, which sluice names
-/// itself, the round's trace and span, the place and the revision, each
-/// value encoded where the variable's syntax would read it, and the span
-/// that started the run as `TRACEPARENT`.
+/// With no `[telemetry]`, a run's checks get sluice's `OTEL_*`, but for
+/// metrics, which they never send (151 as amended 2026-11-18; rule
+/// core.66), its resource attributes extended with the host's name, which
+/// sluice names itself, the round's trace and span, the place and the
+/// revision, each value encoded where the variable's syntax would read
+/// it, and the span that started the run as `TRACEPARENT`.
 #[test]
 fn a_run_s_checks_join_the_round() {
     if !alone("a_run_s_checks_join_the_round") {
@@ -580,6 +581,7 @@ fn a_run_s_checks_join_the_round() {
     let (trace, span) = (ids.trace_id().to_string(), ids.span_id().to_string());
     let var = |k: &str| var(&env, k).unwrap_or_else(|| panic!("no {k} in {env}"));
     assert_eq!(var("OTEL_EXPORTER_OTLP_ENDPOINT"), endpoint);
+    assert_eq!(var("OTEL_METRICS_EXPORTER"), "none");
     assert_eq!(var("TRACEPARENT"), format!("00-{trace}-{span}-01"));
     assert_eq!(
         var("OTEL_RESOURCE_ATTRIBUTES"),
@@ -653,9 +655,9 @@ fn with_the_tables_collector_a_run_gets_it_and_none_of_the_callers() {
 }
 
 /// With traces off a run's checks join no trace: they get sluice's
-/// `OTEL_*`, the setting among them, and the host's name, the place and
-/// the revision as resource attributes, with no `TRACEPARENT` and no
-/// trace or span id.
+/// `OTEL_*`, the setting among them, metrics off as ever (rule core.66),
+/// and the host's name, the place and the revision as resource
+/// attributes, with no `TRACEPARENT` and no trace or span id.
 #[test]
 fn with_traces_off_a_run_s_checks_join_no_trace() {
     if !alone("with_traces_off_a_run_s_checks_join_no_trace") {
@@ -670,6 +672,7 @@ fn with_traces_off_a_run_s_checks_join_no_trace() {
     let made = spans.get_finished_spans().unwrap();
     assert!(made.is_empty(), "{made:?}");
     assert_eq!(var(&env, "OTEL_TRACES_EXPORTER").as_deref(), Some("none"));
+    assert_eq!(var(&env, "OTEL_METRICS_EXPORTER").as_deref(), Some("none"));
     assert_eq!(var(&env, "TRACEPARENT"), None, "{env}");
     assert_eq!(
         var(&env, "OTEL_RESOURCE_ATTRIBUTES"),
