@@ -50,7 +50,7 @@ A run's ids rode on `OTEL_RESOURCE_ATTRIBUTES`, and a resource attribute goes on
 
 **Decision.**
 
-1. **No metric carries a value that grows with each run.** No metric sluice sends, or hands a run's tool the means to send, carries a run's trace id, span id, revision or place. A run's checks still join the round on their spans and logs, as this record decided: every span and log they send names the round that started them. The way a run's tool is handed those ids is the construct's to choose within that.
+1. **No metric carries a value that grows with each run.** No metric sluice sends, or hands a run's tool the means to send, carries a run's trace id, span id, revision or place. A run's checks still join the round on their spans and logs, as this record decided: every span and log they send names the round that started them. A run's tools are handed sluice's traces and logs and never metrics: moon 2.6.1 reads no `TRACEPARENT` and takes the ids only on its resource, which OpenTelemetry puts on every signal, so its metrics are off in a run, and its spans keep the same times. Clause 151 says so (the construct of `sluices-measurements-name-their-repository-and-grow-with-no-run`, D1).
 2. **Every metric names its repository.** Each metric sluice sends names the repository it is about, by the owner and name its remote gives, or the folder's name where it has none, beside `sluice.branch`. A host holds few repositories, so the count stays small.
 3. **Every duration declares its unit.** A metric that measures time declares its unit, seconds, in OpenTelemetry's own way (`s`). `sluice.submission.landed_after` and `sluice.candidate.tested_for` are among them.
 4. **What a replay saved is measured.** Tasks replayed are counted with the time each took when it last ran, so the time replays save sums to hours.
@@ -59,4 +59,5 @@ A run's ids rode on `OTEL_RESOURCE_ATTRIBUTES`, and a resource attribute goes on
 **Options not taken.**
 
 - *Keep the ids on the resource and drop them at the collector.* That works only where someone configures the collector, and every other backend still bills the growth.
-- *Turn a run's tools' telemetry off.* That loses the join of the checks' spans to the round, which this record exists for.
+- *Turn a run's tools' telemetry off whole.* That loses the join of the checks' spans to the round, which this record exists for.
+- *Take the ids off the resource and keep the tools' metrics.* moon's spans then name no round.
