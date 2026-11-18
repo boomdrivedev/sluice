@@ -24,6 +24,15 @@
 //! each call begins, never kept from the profile's opening: a driver that
 //! runs for days reaches a remote pointed elsewhere since, as at a
 //! repository renamed on its forge, at its next call.
+//!
+//! A landing commit names whoever pushes it, read as the commit is
+//! written: the author the identity names through its own interface, where
+//! sluice reaches the remote as one, and `sluice <sluice@localhost>` where
+//! it reaches it with the host's own credentials. An author the identity
+//! cannot give is the commit's failure, and nothing is written. A
+//! combination is written as sluice on every host, so one combination
+//! forms one commit wherever it is formed (record 0019 as amended
+//! 2026-11-18; rules core.1, core.2, core.6, core.43).
 
 use std::fs::TryLockError;
 use std::path::{Path, PathBuf};
@@ -36,7 +45,7 @@ use sluice_seams::{Branch, Formed, HostCopy, LandingCommit, Moved, ReadRefused, 
 use weir_bounded::span;
 
 use super::local_refs::LocalRefs;
-use crate::identity::{withheld, Credentials, Identity, PASSWORD_VAR, USERNAME_VAR};
+use crate::identity::{withheld, Author, Credentials, Identity, PASSWORD_VAR, USERNAME_VAR};
 use crate::retry::{Failed, Judged, Kind, Policy};
 
 pub struct PushedRefs {
@@ -101,6 +110,18 @@ impl PushedRefs {
     /// `None` for the host's own credentials.
     pub fn identity(&self) -> Result<Option<String>> {
         Ok(self.speaker()?.map(|s| s.identity.name()))
+    }
+
+    /// Who a commit pushed to the remote at its address now names as its
+    /// author and committer: the identity's author where sluice reaches
+    /// the remote as one, else [`Author::sluice`] (record 0019 as amended
+    /// 2026-11-18; rule core.43). The identity's failure to give one is
+    /// this one's.
+    pub fn author(&self) -> Result<Author> {
+        match self.speaker()? {
+            Some(s) => s.identity.author(&s.url),
+            None => Ok(Author::sluice()),
+        }
     }
 
     /// sluice's identity on the remote at its address as the host's
@@ -815,8 +836,11 @@ impl Branch for PushedRefs {
         self.local.form(onto, head)
     }
 
+    /// The landing written as whoever pushes it, [`PushedRefs::author`]:
+    /// nothing is written where that cannot be read.
     fn commit(&self, commit: &LandingCommit) -> Result<Rev> {
-        self.local.commit(commit)
+        let author = self.author()?;
+        self.local.commit_as(commit, &author)
     }
 
     fn contains(&self, tip: &Rev, rev: &Rev) -> Result<bool> {

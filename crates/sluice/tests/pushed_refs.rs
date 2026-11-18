@@ -1013,6 +1013,40 @@ impl Identity for FakeIdentity {
     }
 }
 
+/// The `author` and `committer` lines of the commit `rev` in `repo`, each
+/// without its time.
+fn signed_by(repo: &Repo, rev: &Rev) -> (String, String) {
+    let raw = repo.git(&["cat-file", "-p", rev.as_str()]);
+    let who = |field: &str| {
+        let line = raw
+            .lines()
+            .find_map(|l| l.strip_prefix(&format!("{field} ")))
+            .unwrap_or_else(|| panic!("no {field} in {raw}"));
+        line[..=line.rfind('>').unwrap()].to_string()
+    };
+    (who("author"), who("committer"))
+}
+
+/// The forge-identity spec's "A landing pushed with the host's
+/// credentials": a landing commit names whoever pushes it, the identity's
+/// author where sluice reaches the remote as one, and sluice where it
+/// reaches it with the host's own credentials (record 0019 as amended
+/// 2026-11-18; rule core.43).
+#[test]
+fn a_landing_names_whoever_pushes_it() {
+    let repo = Repo::new("landing-author");
+    let _bare = repo.bare_origin();
+    let onto = rev(repo.rev("main"));
+    let head = rev(repo.branch("unit/u", "main", &[("u", Some("1"))]));
+    let fake = fake_author().to_string();
+    let identity = Rc::new(FakeIdentity::following("tok"));
+    let landed = landing(&as_identity(&repo, &identity), &onto, &head);
+    assert_eq!(signed_by(&repo, &landed), (fake.clone(), fake));
+    let landed = landing(&open(&repo), &onto, &head);
+    let sluice = "sluice <sluice@localhost>".to_string();
+    assert_eq!(signed_by(&repo, &landed), (sluice.clone(), sluice));
+}
+
 /// The `Authorization` header git sends with the fake's `token`.
 fn basic(token: &str) -> String {
     format!("Basic {}", base64(format!("x-fake:{token}").as_bytes()))
