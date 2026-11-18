@@ -192,9 +192,12 @@ impl Bound {
             checkout: {
                 let places =
                     places::Places::new(&common, crate::runs::Runs::new(&common, program.clone()))
-                        .with_release(Box::new(move |place, tests, limits, dir| {
-                            checks::release_request(place, tests, limits, jobs, &caches, dir)
-                        }))
+                        .with_release(
+                            Box::new(checks::names_release),
+                            Box::new(move |place, tests, limits, dir| {
+                                checks::release_request(place, tests, limits, jobs, &caches, dir)
+                            }),
+                        )
                         .with_containers(Box::new(|place| {
                             checks::end_containers(&checks::engine_endpoints(), place)
                         }));

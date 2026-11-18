@@ -1652,6 +1652,13 @@ fn release_argv(tests: &Settings) -> Result<Option<Vec<String>>> {
     command_setting(tests, "release")
 }
 
+/// Session-runs-1 clause 95, record 0120 as amended 2026-11-17: whether
+/// the policy's `[tests]` name a release command, read from them alone,
+/// so a release that has none makes and runs nothing.
+pub fn names_release(tests: &Settings) -> Result<bool> {
+    Ok(release_argv(tests)?.is_some())
+}
+
 /// A command `[tests]` names under `key`: a list, the command first, or a
 /// string run by `sh -c`.
 fn command_setting(tests: &Settings, key: &str) -> Result<Option<Vec<String>>> {

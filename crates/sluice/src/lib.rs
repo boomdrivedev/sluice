@@ -2638,7 +2638,13 @@ pub fn run(
             json,
         } => {
             let released = exec::release(&s, host, &worktree, accept_failure, json, out)?;
-            serve();
+            // 135, record 0120 as amended 2026-11-17 (D10): only a release
+            // that freed something can move a queue, so one that freed
+            // nothing, or failed, tells no host process and starts none,
+            // and a release with nothing to free makes nothing (core.10).
+            if released.released {
+                serve();
+            }
             if json {
                 let mut doc = serde_json::json!({
                     "worktree": released.worktree,

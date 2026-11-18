@@ -9,7 +9,8 @@
 #                                             the scene holds; the driver
 #                                             keeps running, its pid in
 #                                             <dir>/driver.pid
-#   screenshots-scene.sh --teardown <dir>     stop the driver, remove <dir>
+#   screenshots-scene.sh --teardown <dir>     stop the driver and sluice's
+#                                             host process, remove <dir>
 #   screenshots-scene.sh --check              the gate's check: the sluice
 #                                             built from this tree, --fast in
 #                                             a scratch directory, the scene
@@ -24,6 +25,14 @@ die() {
   exit 1
 }
 
+ended() { # ended <pid>: wait for the process to end, up to 30 seconds
+  local n=0
+  while kill -0 "$1" 2>/dev/null && [ $n -lt 300 ]; do
+    sleep 0.1
+    n=$((n + 1))
+  done
+}
+
 teardown() {
   local dir=$1 p
   for p in driver check; do
@@ -32,22 +41,27 @@ teardown() {
     kill "$(cat "$dir/$p.pid")" 2>/dev/null || true
     rm -f "$dir/$p.pid"
   done
+  # sluice's host process for the scene's state (135), which the commands
+  # above started: while the queue has work in play it lives on, starting
+  # runs and writing its reader's document under state/sluice/readers, so
+  # it ends before anything is removed. Its pid is in its version file.
+  local pid
+  pid=$(jq -r '.pid // empty' "$dir/state/sluice/host/version" 2>/dev/null || true)
+  if [ -n "$pid" ]; then
+    kill "$pid" 2>/dev/null || true
+    ended "$pid"
+  fi
   # The candidates' runs and the agent's, each its own process group.
   for g in "$dir"/shop/.git/sluice/.runs/*/pgid "$dir"/shop/.git/sluice/.runs/*/*/pgid; do
     [ -f "$g" ] && kill -TERM -- "-$(cat "$g")" 2>/dev/null || true
   done
   # Each run's supervisor writes the run's result once its group has
-  # ended: wait for it, up to 30 seconds, before removing where it writes.
-  local lock pid n
+  # ended: wait for it before removing where it writes.
+  local lock
   for lock in "$dir"/shop/.git/sluice/.runs/*/lock "$dir"/shop/.git/sluice/.runs/*/*/lock; do
     [ -f "$lock" ] || continue
     pid=$(tr -dc 0-9 <"$lock")
-    [ -n "$pid" ] || continue
-    n=0
-    while kill -0 "$pid" 2>/dev/null && [ $n -lt 300 ]; do
-      sleep 0.1
-      n=$((n + 1))
-    done
+    if [ -n "$pid" ]; then ended "$pid"; fi
   done
   rm -rf "$dir"
 }

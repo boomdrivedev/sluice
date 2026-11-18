@@ -138,6 +138,12 @@ use crate::runs::{dir_name, flat_name, ReleaseWith, Request, Runs, SESSION};
 /// seam's, handed to this profile by the binding (rule core.2).
 pub type ReleaseBuilder = Box<dyn Fn(&Place, &Settings, &Limits, &Path) -> Result<Option<Request>>>;
 
+/// Whether the policy's `[tests]` name a release command, read from them
+/// alone, with nothing made: the check seam's, handed to this profile by
+/// the binding beside its [`ReleaseBuilder`] (rule core.2; record 0120 as
+/// amended 2026-11-17).
+pub type ReleaseNamed = Box<dyn Fn(&Settings) -> Result<bool>>;
+
 /// Ends what the engine holds for a place: the check seam's, handed to
 /// this profile by the binding (rule core.2; record 0121).
 pub type ContainerEnd = Box<dyn Fn(&Place) -> Result<()>>;
@@ -673,8 +679,9 @@ pub struct Places {
     /// The directory standing for the user's, [`user_scratch`] when
     /// `None`.
     scratch_root: Option<PathBuf>,
-    /// How a session's place's release command is built from its policy.
-    release: Option<ReleaseBuilder>,
+    /// Whether a policy names a session's place's release command, and
+    /// how that command is built from it.
+    release: Option<(ReleaseNamed, ReleaseBuilder)>,
     /// How a preview's containers are ended (record 0121); none ended when
     /// `None`.
     containers: Option<ContainerEnd>,
@@ -710,9 +717,10 @@ impl Places {
         Ok(self.repo.get_or_init(|| r))
     }
 
-    /// Build a session's place's release command with `builder`.
-    pub fn with_release(mut self, builder: ReleaseBuilder) -> Self {
-        self.release = Some(builder);
+    /// Read whether a policy names a session's place's release command
+    /// with `named`, and build it with `builder`.
+    pub fn with_release(mut self, named: ReleaseNamed, builder: ReleaseBuilder) -> Self {
+        self.release = Some((named, builder));
         self
     }
 
@@ -982,8 +990,13 @@ impl Places {
     /// passed or failed, so nothing is kept for the worktree and a release
     /// asked again runs again. A policy that names no release command, a
     /// folder that has gone and one that is no worktree of the repository,
-    /// another repository's among them, have nothing to release.
+    /// another repository's among them, have nothing to release, and the
+    /// release reads only: no record, lock, scratch or folder is made for
+    /// it (record 0120 as amended 2026-11-17).
     fn release_unheld(&self, name: &str, policy: &ReleasePolicy) -> Result<Released> {
+        if !self.names_release(&policy.tests)? {
+            return Ok(Released::Nothing);
+        }
         let Some(folder) = name.strip_prefix(SESSION) else {
             return Ok(Released::Nothing);
         };
@@ -1042,6 +1055,16 @@ impl Places {
         }
     }
 
+    /// Record 0120 as amended 2026-11-17: whether `tests` name a release
+    /// command, read by the check seam's binding with nothing made.
+    fn names_release(&self, tests: &Settings) -> Result<bool> {
+        let (named, _) = self
+            .release
+            .as_ref()
+            .ok_or_else(|| anyhow!("no release command builder is bound"))?;
+        named(tests)
+    }
+
     /// 95: the release of `place`, the session's place `name`, as `policy`
     /// states it, built by the check seam's builder; `None` where the
     /// policy names no release command.
@@ -1051,7 +1074,7 @@ impl Places {
         policy: &ReleasePolicy,
         name: &str,
     ) -> Result<Option<Request>> {
-        let build = self
+        let (_, build) = self
             .release
             .as_ref()
             .ok_or_else(|| anyhow!("no release command builder is bound"))?;

@@ -818,9 +818,12 @@ fn a_sessions_place_is_released_under_the_policy_read_now() {
     let jobs = 2;
     let p = places(&repo)
         .with_ports(blocks.path().to_path_buf())
-        .with_release(Box::new(move |place, tests, limits, dir| {
-            sluice::profiles::checks::release_request(place, tests, limits, jobs, &[], dir)
-        }));
+        .with_release(
+            Box::new(sluice::profiles::checks::names_release),
+            Box::new(move |place, tests, limits, dir| {
+                sluice::profiles::checks::release_request(place, tests, limits, jobs, &[], dir)
+            }),
+        );
     let session = repo.dir().with_extension("session");
     let settings = ported(&["web"], &ports(1).to_string());
     let log = repo.dir().with_extension("release-now.log");
