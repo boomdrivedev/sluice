@@ -29,7 +29,7 @@ run by hand.
 ## 3. A daemon takes the host's place
 
 - [x] 3.1 Where a host process that is no daemon holds the host, whatever its version, have it hand over, wait for it as long as `HAND_OVER_WAIT`, and take its place (D2). True when `sluice exec bolt/sluice-keeps-a-gates-queues-moving -- cargo test -p sluice --test host_process a_daemon_takes_the_place_of_a_host_process_that_ends_when_idle` passes.
-- [ ] 3.2 Exit 3 naming the host process's log where the holder has not ended by then (D2). True when `sluice exec bolt/sluice-keeps-a-gates-queues-moving -- cargo test -p sluice --test host_process a_daemon_whose_host_process_does_not_hand_over_exits_3` passes.
+- [x] 3.2 Exit 3 naming the host process's log where the holder has not ended by then (D2). True when `sluice exec bolt/sluice-keeps-a-gates-queues-moving -- cargo test -p sluice --test host_process a_daemon_whose_host_process_does_not_hand_over_exits_3` passes.
 - [ ] 3.3 Where another daemon holds the host, ask it nothing, say once on stderr which daemon it waits for, its pid and version, and take the host's place once its lock goes (D2). True when `sluice exec bolt/sluice-keeps-a-gates-queues-moving -- cargo test -p sluice --test host_process a_second_daemon_waits_and_takes_the_place_of_the_first` passes.
 
 ## 4. A daemon hands over in place
