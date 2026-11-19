@@ -2841,7 +2841,7 @@ impl Tests for FakeTests {
     /// 71 (record 0087): a part while the parts held and the runs going
     /// on the host, other repositories' and sessions' among them, are
     /// under its bound.
-    fn hold(&self, kind: RunKind) -> Result<Option<Part>> {
+    fn hold(&self, kind: RunKind, _branch: &str) -> Result<Option<Part>> {
         let mut inner = self.0 .0.borrow_mut();
         if std::mem::take(&mut inner.refuse_hold) {
             return Ok(None);
@@ -5073,7 +5073,7 @@ mod tests {
     /// A part of the fakes' host's bound for a combination's run.
     fn queue_part(f: &Fakes) -> Part {
         f.tests
-            .hold(RunKind::Queue)
+            .hold(RunKind::Queue, "main")
             .unwrap()
             .expect("room on the host")
     }
@@ -5103,12 +5103,16 @@ mod tests {
         f.world.host_limit(3);
         f.world.hold_runs(true);
         f.world.other_runs(1);
-        let first = f.tests.hold(RunKind::Queue).unwrap().expect("room");
+        let first = f.tests.hold(RunKind::Queue, "main").unwrap().expect("room");
         assert_eq!(first.kind(), RunKind::Queue);
         f.tests
             .start(&a_request(&f, "sluice/try/main/1", &rev), first)
             .unwrap();
-        let second = f.tests.hold(RunKind::Session).unwrap().expect("room");
+        let second = f
+            .tests
+            .hold(RunKind::Session, "main")
+            .unwrap()
+            .expect("room");
         assert_eq!(
             f.tests.running().unwrap(),
             Running {
@@ -5117,11 +5121,11 @@ mod tests {
             },
             "the part counts while it is held"
         );
-        assert!(f.tests.hold(RunKind::Queue).unwrap().is_none());
-        assert!(f.tests.hold(RunKind::Session).unwrap().is_none());
+        assert!(f.tests.hold(RunKind::Queue, "main").unwrap().is_none());
+        assert!(f.tests.hold(RunKind::Session, "main").unwrap().is_none());
         drop(second);
         f.world.complete(&rev);
-        assert!(f.tests.hold(RunKind::Queue).unwrap().is_some());
+        assert!(f.tests.hold(RunKind::Queue, "main").unwrap().is_some());
     }
 
     /// 71 (record 0087): a part dropped unstarted, or one whose start
@@ -5132,19 +5136,19 @@ mod tests {
         let rev = f.world.init("main", &[("x", "1")]);
         f.world.host_limit(1);
         f.world.hold_runs(true);
-        let part = f.tests.hold(RunKind::Queue).unwrap().expect("room");
+        let part = f.tests.hold(RunKind::Queue, "main").unwrap().expect("room");
         assert_eq!(f.world.parts_held(), 1);
-        assert!(f.tests.hold(RunKind::Session).unwrap().is_none());
+        assert!(f.tests.hold(RunKind::Session, "main").unwrap().is_none());
         drop(part);
         assert_eq!(f.world.parts_held(), 0);
         assert_eq!(f.tests.running().unwrap(), Running::default());
         // A start that fails gives its part back.
-        let part = f.tests.hold(RunKind::Queue).unwrap().expect("room");
+        let part = f.tests.hold(RunKind::Queue, "main").unwrap().expect("room");
         f.world.start_fails(Some("the toolchain did not enter"));
         let request = a_request(&f, "sluice/try/main/1", &rev);
         assert!(f.tests.start(&request, part).is_err());
         assert_eq!(f.tests.running().unwrap(), Running::default());
-        assert!(f.tests.hold(RunKind::Queue).unwrap().is_some());
+        assert!(f.tests.hold(RunKind::Queue, "main").unwrap().is_some());
     }
 
     /// 71: the host's count holds other repositories' runs beside its own,
@@ -5183,7 +5187,7 @@ mod tests {
             .unwrap();
         assert_eq!(f.tests.running().unwrap().queue, 2);
         let second = request("sluice/try/main/2");
-        assert!(f.tests.hold(RunKind::Queue).unwrap().is_none());
+        assert!(f.tests.hold(RunKind::Queue, "main").unwrap().is_none());
         assert_eq!(f.world.requests().len(), 1, "nothing of it ran");
         // Another host's count is its own.
         f.world.be_host("other");

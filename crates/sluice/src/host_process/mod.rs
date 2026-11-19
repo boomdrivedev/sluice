@@ -1008,7 +1008,7 @@ fn hold(
     // a profile beside the host process (task 3.4), is answered once, held
     // or refused, as a round's own ask is, and counts as no session's wait.
     let waiter = match kind {
-        sluice_seams::RunKind::Session => Some(hosting.room.lock().wait(repository)),
+        sluice_seams::RunKind::Session => Some(hosting.room.lock().wait(repository, None)),
         sluice_seams::RunKind::Queue => None,
     };
     let let_go = || {
@@ -1026,7 +1026,10 @@ fn hold(
             let_go();
             return Ok(());
         }
-        let asked = hosting.room.lock().ask(&asker, repository, Instant::now());
+        let asked = hosting
+            .room
+            .lock()
+            .ask(&asker, repository, None, Instant::now());
         match asked {
             Ok(Asked::Held(id)) => break id,
             Ok(Asked::Refused(why)) => {

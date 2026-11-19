@@ -404,14 +404,14 @@ pub enum RoomHandle {
 }
 
 impl RoomHandle {
-    /// A part of `kind` for a run of `repository`; `None` where the room
-    /// refuses it. Over the socket, the room's first answer decides: held,
+    /// A part of `kind` for a run of `repository` on `branch`; `None` where
+    /// the room refuses it. Over the socket, the room's first answer decides: held,
     /// the part is the connection, given back as it closes; waiting, the
     /// room refuses it now and the ask is let go (71).
-    fn hold(&self, kind: RunKind, repository: &Path) -> Result<Option<Part>> {
+    fn hold(&self, kind: RunKind, repository: &Path, branch: &str) -> Result<Option<Part>> {
         use crate::host_process::protocol::Answer;
         match self {
-            RoomHandle::Here(shared) => shared.hold(kind, repository),
+            RoomHandle::Here(shared) => shared.hold(kind, repository, branch),
             RoomHandle::Socket(client) => {
                 let mut c = match client {
                     Some(client) => client.hold(kind, repository, "")?,
@@ -2237,8 +2237,8 @@ impl Tests for Checks {
         }))
     }
 
-    fn hold(&self, kind: RunKind) -> Result<Option<Part>> {
-        self.room()?.hold(kind, &self.common)
+    fn hold(&self, kind: RunKind, branch: &str) -> Result<Option<Part>> {
+        self.room()?.hold(kind, &self.common, branch)
     }
 
     fn bound(&self) -> Result<usize> {

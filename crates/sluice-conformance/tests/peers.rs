@@ -927,10 +927,10 @@ fn a_pools_launch_holds_no_part() {
         1,
         "only the other repository's run counts"
     );
-    assert!(tests.hold(RunKind::Queue).unwrap().is_none());
+    assert!(tests.hold(RunKind::Queue, BRANCH).unwrap().is_none());
     // The other repository's run ends: its next takes the host's run.
     h.w().other_runs(0);
-    assert!(tests.hold(RunKind::Queue).unwrap().is_some());
+    assert!(tests.hold(RunKind::Queue, BRANCH).unwrap().is_some());
 }
 
 /// Each claim in the branch's log, with the forge's words when its

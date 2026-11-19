@@ -1083,7 +1083,7 @@ impl Sluice<'_> {
                     if full {
                         continue;
                     }
-                    match self.seams.tests.hold(RunKind::Queue)? {
+                    match self.seams.tests.hold(RunKind::Queue, branch)? {
                         Some(part) => held = Some(part),
                         None => {
                             full = true;
@@ -1117,7 +1117,7 @@ impl Sluice<'_> {
                 // 88, S19: a run a lead marked starting under the claim it
                 // gave this pool's job holds its room at the job's start, as
                 // `start_claimed` holds it (rule core.49).
-                None => match self.seams.tests.hold(RunKind::Queue)? {
+                None => match self.seams.tests.hold(RunKind::Queue, branch)? {
                     Some(part) => part,
                     None => {
                         self.reopen_made(branch, &c.id, i, &name, &given, releases)?;
@@ -1220,7 +1220,7 @@ impl Sluice<'_> {
             return Ok(None);
         };
         from.claim = Some(claim.to_string());
-        let Some(part) = self.seams.tests.hold(RunKind::Queue)? else {
+        let Some(part) = self.seams.tests.hold(RunKind::Queue, branch)? else {
             let name = c.runs[i].place.clone().expect("a starting run has a place");
             let given = given_checks(&c.runs[i], &from.rules);
             self.reopen_made(branch, &c.id, i, &name, &given, releases)?;
@@ -1335,7 +1335,7 @@ impl Sluice<'_> {
             .policy_at(&base)?
             .ok_or_else(|| anyhow!("{branch}'s revision {base} has no {POLICY_PATH}"))?;
         let rules = self.gate(branch, &base)?;
-        let Some(part) = self.seams.tests.hold(RunKind::Queue)? else {
+        let Some(part) = self.seams.tests.hold(RunKind::Queue, branch)? else {
             return Ok(Started::AtBound);
         };
         let name = head_place(head);
@@ -3751,6 +3751,9 @@ impl Sluice<'_> {
         chain: &[String],
         now: &str,
     ) -> Result<Parts> {
+        // 154 (design D6 of `each-submission-shows-its-wait-and-its-test`):
+        // each part is held for the line's branch.
+        let branch = &line.branch.clone();
         let mut parts = Parts::new();
         let mut full = false;
         let reopened: Vec<(String, usize)> = chain
@@ -3767,7 +3770,7 @@ impl Sluice<'_> {
             })
             .collect();
         for (id, i) in reopened {
-            let Some(part) = self.seams.tests.hold(RunKind::Queue)? else {
+            let Some(part) = self.seams.tests.hold(RunKind::Queue, branch)? else {
                 full = true;
                 break;
             };
@@ -3859,7 +3862,7 @@ impl Sluice<'_> {
             let part = match mine {
                 Some(_) if full && rules.signed => None,
                 Some(_) if full => break,
-                Some(_) => match self.seams.tests.hold(RunKind::Queue)? {
+                Some(_) => match self.seams.tests.hold(RunKind::Queue, branch)? {
                     Some(part) => Some(part),
                     None if rules.signed => {
                         full = true;
@@ -4751,7 +4754,7 @@ impl Sluice<'_> {
         // first, and none is made once the host holds none.
         self.seams.state.fetch_candidates(branch)?;
         let mut parts = Parts::new();
-        while let Some(part) = self.seams.tests.hold(RunKind::Queue)? {
+        while let Some(part) = self.seams.tests.hold(RunKind::Queue, branch)? {
             let mut part = Some(part);
             let claimed = self.update(branch, |l| {
                 let now = self.now();

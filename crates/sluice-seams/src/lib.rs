@@ -1038,8 +1038,10 @@ pub trait Tests {
     /// none: the run's wait is recorded for the host, and nothing is held.
     /// The part is held until [`Tests::start`] takes it, or is dropped,
     /// which gives it back at once. The profile names its own repository
-    /// to the host's room, so the core names none.
-    fn hold(&self, kind: RunKind) -> Result<Option<Part>>;
+    /// to the host's room, so the core names none; the round names the
+    /// branch the run is for, which the room holds it for (154; design D6
+    /// of `each-submission-shows-its-wait-and-its-test`).
+    fn hold(&self, kind: RunKind, branch: &str) -> Result<Option<Part>>;
 
     /// 37: a started run's progress; once finished, every check's key,
     /// outcome, executor and whether it was replayed.

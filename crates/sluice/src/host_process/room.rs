@@ -144,6 +144,9 @@ pub enum Asked {
 struct Held {
     kind: RunKind,
     repository: PathBuf,
+    /// 154: the branch it is held for; `None` for an ask that names none
+    /// (design D6 of `each-submission-shows-its-wait-and-its-test`).
+    branch: Option<String>,
     /// Its entry in the host's registry, where the room keeps one.
     admission: Option<Admission>,
 }
@@ -162,12 +165,15 @@ struct QueueWait {
 struct SessionWait {
     id: u64,
     repository: PathBuf,
+    /// 154: the branch its run is held to, where its ask names one.
+    branch: Option<String>,
 }
 
 /// How a room counts the runs going on the host.
 enum Count {
-    /// Its own: each run started from a part, until it ends.
-    Own(BTreeMap<u64, (RunKind, PathBuf)>),
+    /// Its own: each run started from a part, until it ends, with the
+    /// repository and the branch it was held for.
+    Own(BTreeMap<u64, (RunKind, PathBuf, Option<String>)>),
     /// The host's registry of running checks: every live entry, an older
     /// sluice's and the parts it holds among them.
     Registry(HostCount),
@@ -280,7 +286,7 @@ impl Room {
             Count::Registry(r) => return r.under_test(),
             Count::Own(going) => {
                 let mut out = BTreeMap::new();
-                for (_, repository) in going.values() {
+                for (_, repository, _) in going.values() {
                     *out.entry(repository.clone()).or_default() += 1;
                 }
                 out
@@ -302,6 +308,35 @@ impl Room {
         }
     }
 
+    /// 154: the runs the room counts against the bound, by repository and
+    /// branch: the registry's live entries, or the room's own count, and
+    /// the parts it holds. An ask or an entry naming no branch counts
+    /// toward the bound and in no branch's row (design D6 of
+    /// `each-submission-shows-its-wait-and-its-test`).
+    pub fn running_by_branch(&self) -> Result<BTreeMap<(PathBuf, String), usize>> {
+        let mut out = match &self.count {
+            // The registry holds the room's own parts among its entries.
+            Count::Registry(r) => return r.by_branch(),
+            Count::Own(going) => {
+                let mut out = BTreeMap::new();
+                for (_, repository, branch) in going.values() {
+                    if let Some(branch) = branch {
+                        *out.entry((repository.clone(), branch.clone())).or_default() += 1;
+                    }
+                }
+                out
+            }
+            Count::Seen(_) => BTreeMap::new(),
+        };
+        for h in self.held.values() {
+            if let Some(branch) = &h.branch {
+                *out.entry((h.repository.clone(), branch.clone()))
+                    .or_default() += 1;
+            }
+        }
+        Ok(out)
+    }
+
     /// Each repository with a run under test or waiting, and its share, at
     /// `now` (record 0123; D13).
     pub fn repositories(&mut self, now: Instant) -> Result<BTreeMap<PathBuf, Share>> {
@@ -319,14 +354,15 @@ impl Room {
         Ok(out)
     }
 
-    /// A session's or a preview's wait for a run of `repository`, from
-    /// now, behind every one before it: its asker's id, which it asks with
-    /// and lets go of.
-    pub fn wait(&mut self, repository: &Path) -> u64 {
+    /// A session's or a preview's wait for a run of `repository` on
+    /// `branch`, where it names one, from now, behind every one before it:
+    /// its asker's id, which it asks with and lets go of.
+    pub fn wait(&mut self, repository: &Path, branch: Option<&str>) -> u64 {
         let id = self.id();
         self.session_waits.push(SessionWait {
             id,
             repository: repository.to_path_buf(),
+            branch: branch.map(str::to_string),
         });
         id
     }
@@ -372,10 +408,27 @@ impl Room {
     }
 
     /// Ask for a part for `asker`'s run at `now`, the run's repository
-    /// named for the share and the registry's entry: held, or refused with
-    /// its wait recorded or renewed (records 0087, 0123).
-    pub fn ask(&mut self, asker: &Asker, repository: &Path, now: Instant) -> Result<Asked> {
+    /// named for the share and the registry's entry, and its branch, where
+    /// the ask names one, for its row (154): held, or refused with its wait
+    /// recorded or renewed (records 0087, 0123).
+    pub fn ask(
+        &mut self,
+        asker: &Asker,
+        repository: &Path,
+        branch: Option<&str>,
+        now: Instant,
+    ) -> Result<Asked> {
         self.lapse(now);
+        // A session's or a preview's run is held for the branch its wait
+        // named where its ask names none.
+        let branch: Option<String> = branch.map(str::to_string).or_else(|| match asker {
+            Asker::Session(id) => self
+                .session_waits
+                .iter()
+                .find(|w| w.id == *id)
+                .and_then(|w| w.branch.clone()),
+            Asker::Queue(_) => None,
+        });
         let count = self.running()?.total();
         let free = self.bound.saturating_sub(count);
         let for_sessions = self
@@ -409,6 +462,7 @@ impl Room {
                     self.session_waits.push(SessionWait {
                         id: *id,
                         repository: repository.to_path_buf(),
+                        branch: branch.clone(),
                     });
                 }
                 let first = self.session_waits.first().map(|w| w.id) == Some(*id);
@@ -446,6 +500,7 @@ impl Room {
                     run_dir: PathBuf::new(),
                     pid: std::process::id(),
                     admitted: chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
+                    branch: branch.clone(),
                 };
                 match r.admit(&entry, limit)? {
                     Some(a) => Some(a),
@@ -467,6 +522,7 @@ impl Room {
             Held {
                 kind,
                 repository: repository.to_path_buf(),
+                branch,
                 admission,
             },
         );
@@ -504,7 +560,7 @@ impl Room {
                 a.started();
             }
             if let Count::Own(going) = &mut self.count {
-                going.insert(id, (held.kind, held.repository));
+                going.insert(id, (held.kind, held.repository, held.branch));
             }
         }
     }
@@ -595,21 +651,28 @@ impl Shared {
         }
     }
 
-    /// A part of `kind` for a run of `repository`, as the check seam's
-    /// `hold` gives it; `None` where the room refuses it, a combination's
-    /// wait recorded (71; rule core.49). A session's or a preview's ask
-    /// here waits for nothing: its wait is let go as it is refused.
-    pub fn hold(&self, kind: RunKind, repository: &Path) -> Result<Option<Part>> {
+    /// A part of `kind` for a run of `repository` on `branch`, as the check
+    /// seam's `hold` gives it; `None` where the room refuses it, a
+    /// combination's wait recorded (71; rule core.49). A session's or a
+    /// preview's ask here waits for nothing: its wait is let go as it is
+    /// refused.
+    pub fn hold(&self, kind: RunKind, repository: &Path, branch: &str) -> Result<Option<Part>> {
         let mut room = self.lock();
         let asked = match kind {
             RunKind::Queue => room.ask(
                 &Asker::Queue(repository.to_path_buf()),
                 repository,
+                Some(branch),
                 Instant::now(),
             )?,
             RunKind::Session => {
-                let waiter = room.wait(repository);
-                let asked = room.ask(&Asker::Session(waiter), repository, Instant::now());
+                let waiter = room.wait(repository, Some(branch));
+                let asked = room.ask(
+                    &Asker::Session(waiter),
+                    repository,
+                    Some(branch),
+                    Instant::now(),
+                );
                 room.let_go(waiter);
                 asked?
             }
@@ -678,12 +741,13 @@ pub struct Roomed<'a> {
 }
 
 impl Roomed<'_> {
-    /// Ask for a part for `asker` now: held, or refused with why.
-    pub fn ask(&self, asker: &Asker) -> Result<Asked> {
+    /// Ask for a part for `asker` now, for `branch` where it names one:
+    /// held, or refused with why.
+    pub fn ask(&self, asker: &Asker, branch: Option<&str>) -> Result<Asked> {
         let running = self.inner.running()?;
         let mut room = self.room.lock();
         room.see(running);
-        room.ask(asker, &self.repository, Instant::now())
+        room.ask(asker, &self.repository, branch, Instant::now())
     }
 }
 
@@ -700,12 +764,12 @@ impl Tests for Roomed<'_> {
         Ok(run)
     }
 
-    fn hold(&self, kind: RunKind) -> Result<Option<Part>> {
+    fn hold(&self, kind: RunKind, branch: &str) -> Result<Option<Part>> {
         let asked = match kind {
-            RunKind::Queue => self.ask(&Asker::Queue(self.repository.clone()))?,
+            RunKind::Queue => self.ask(&Asker::Queue(self.repository.clone()), Some(branch))?,
             RunKind::Session => {
-                let waiter = self.room.lock().wait(&self.repository);
-                let asked = self.ask(&Asker::Session(waiter));
+                let waiter = self.room.lock().wait(&self.repository, Some(branch));
+                let asked = self.ask(&Asker::Session(waiter), Some(branch));
                 self.room.lock().let_go(waiter);
                 asked?
             }
@@ -835,7 +899,7 @@ mod tests {
 
     /// Hold a part of `asker` at `now`, for `repository`, its id.
     fn held_for(room: &mut Room, asker: &Asker, repository: &Path, now: Instant) -> u64 {
-        match room.ask(asker, repository, now).unwrap() {
+        match room.ask(asker, repository, None, now).unwrap() {
             Asked::Held(id) => id,
             Asked::Refused(why) => panic!("{asker:?} refused: {why:?}"),
         }
@@ -846,7 +910,7 @@ mod tests {
     }
 
     fn refused_for(room: &mut Room, asker: &Asker, repository: &Path, now: Instant) -> Why {
-        match room.ask(asker, repository, now).unwrap() {
+        match room.ask(asker, repository, None, now).unwrap() {
             Asked::Held(id) => panic!("{asker:?} held {id}"),
             Asked::Refused(why) => why,
         }
@@ -870,7 +934,7 @@ mod tests {
         let now = Instant::now();
         let mut room = Room::new(1, 0);
         let going = go(&mut room, &queue(), now);
-        let agent = room.wait(&repo());
+        let agent = room.wait(&repo(), None);
         assert_eq!(
             refused(&mut room, &Asker::Session(agent), now),
             Why::AtBound
@@ -893,7 +957,7 @@ mod tests {
         let now = Instant::now();
         let mut room = Room::new(1, 0);
         let going = go(&mut room, &queue(), now);
-        let agent = room.wait(&repo());
+        let agent = room.wait(&repo(), None);
         assert_eq!(
             refused(&mut room, &Asker::Session(agent), now),
             Why::AtBound
@@ -917,10 +981,10 @@ mod tests {
     fn s75_turns_on_a_bound_of_two() {
         let now = Instant::now();
         let mut room = Room::new(2, 0);
-        let (one, two) = (room.wait(&repo()), room.wait(&repo()));
+        let (one, two) = (room.wait(&repo(), None), room.wait(&repo(), None));
         let first = go(&mut room, &Asker::Session(one), now);
         let second = go(&mut room, &Asker::Session(two), now);
-        let third = room.wait(&repo());
+        let third = room.wait(&repo(), None);
         assert_eq!(
             refused(&mut room, &Asker::Session(third), now),
             Why::AtBound
@@ -960,7 +1024,7 @@ mod tests {
         let mut room = Room::new(1, 0);
         let going = go(&mut room, &queue(), now);
         let other = PathBuf::from("/host/other.git");
-        let (a, b) = (room.wait(&repo()), room.wait(&other));
+        let (a, b) = (room.wait(&repo(), None), room.wait(&other, None));
         room.ended(going);
         assert_eq!(
             refused_for(&mut room, &Asker::Session(b), &other, now),
@@ -1004,9 +1068,9 @@ mod tests {
     fn the_reserve_is_never_a_sessions() {
         let now = Instant::now();
         let mut room = Room::new(2, 1);
-        let first = room.wait(&repo());
+        let first = room.wait(&repo(), None);
         go(&mut room, &Asker::Session(first), now);
-        let second = room.wait(&repo());
+        let second = room.wait(&repo(), None);
         assert_eq!(
             refused(&mut room, &Asker::Session(second), now),
             Why::AtBound
@@ -1023,7 +1087,7 @@ mod tests {
         let going = go(&mut room, &queue(), now);
         refused(&mut room, &queue(), now);
         room.ended(going);
-        let agent = room.wait(&repo());
+        let agent = room.wait(&repo(), None);
         let later = now + Duration::from_secs(29);
         assert_eq!(
             refused(&mut room, &Asker::Session(agent), later),
@@ -1038,12 +1102,67 @@ mod tests {
     #[test]
     fn a_part_dropped_unstarted_frees_its_run_at_once() {
         let shared = Shared::new(Room::new(1, 0));
-        let part = shared.hold(RunKind::Queue, &repo()).unwrap().expect("room");
+        let part = shared
+            .hold(RunKind::Queue, &repo(), "main")
+            .unwrap()
+            .expect("room");
         assert_eq!(shared.lock().running().unwrap().queue, 1);
-        assert!(shared.hold(RunKind::Queue, &repo()).unwrap().is_none());
+        assert!(shared
+            .hold(RunKind::Queue, &repo(), "main")
+            .unwrap()
+            .is_none());
         drop(part);
         assert_eq!(shared.lock().running().unwrap(), Running::default());
-        assert!(shared.hold(RunKind::Queue, &repo()).unwrap().is_some());
+        assert!(shared
+            .hold(RunKind::Queue, &repo(), "main")
+            .unwrap()
+            .is_some());
+    }
+
+    /// 154, design D6 of `each-submission-shows-its-wait-and-its-test`: a
+    /// room over the host's registry holds two parts for `main` and one for
+    /// `bolt/x` of one repository, beside an older sluice's entry naming no
+    /// branch; each branch counts its own, and all four count against the
+    /// bound.
+    #[test]
+    fn the_host_s_running_checks_are_counted_by_branch() {
+        let dir =
+            std::env::temp_dir().join(format!("sluice-room-by-branch-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let registry = HostCount::new(dir.join("running"));
+        let older = registry
+            .admit(
+                &host_count::Entry {
+                    kind: host_count::Kind::Session,
+                    repository: repo(),
+                    place: String::new(),
+                    run_dir: PathBuf::new(),
+                    pid: std::process::id(),
+                    admitted: "2026-11-18T12:00:00Z".into(),
+                    branch: None,
+                },
+                4,
+            )
+            .unwrap()
+            .expect("room for the older sluice's run");
+        let now = Instant::now();
+        let mut room = Room::over(registry, 4, 0);
+        for branch in ["main", "main", "bolt/x"] {
+            match room.ask(&queue(), &repo(), Some(branch), now).unwrap() {
+                Asked::Held(_) => {}
+                Asked::Refused(why) => panic!("{branch} refused: {why:?}"),
+            }
+        }
+        assert_eq!(
+            room.running_by_branch().unwrap(),
+            BTreeMap::from([
+                ((repo(), "bolt/x".to_string()), 1),
+                ((repo(), "main".to_string()), 2),
+            ])
+        );
+        assert_eq!(room.running().unwrap().total(), 4);
+        drop(older);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// Two repositories beside this one's.
@@ -1068,7 +1187,7 @@ mod tests {
         for _ in 0..2 {
             ids.push(held_for(&mut room, &Asker::Queue(busy.clone()), &busy, now));
         }
-        let agent = room.wait(&busy);
+        let agent = room.wait(&busy, None);
         ids.push(held_for(&mut room, &Asker::Session(agent), &busy, now));
         for id in &ids {
             room.started(*id);

@@ -1012,16 +1012,16 @@ fn a_profile_beside_the_host_process_holds_through_its_socket() {
     };
     let (first, second) = (at(d.repo.dir()), at(b.dir()));
     let part = first
-        .hold(RunKind::Queue)
+        .hold(RunKind::Queue, "main")
         .unwrap()
         .expect("the host's one run");
     assert!(
-        second.hold(RunKind::Queue).unwrap().is_none(),
+        second.hold(RunKind::Queue, "main").unwrap().is_none(),
         "the host's one run is the first repository's"
     );
     drop(part);
     within(10, "the run given back is the second repository's", || {
-        second.hold(RunKind::Queue).unwrap().is_some()
+        second.hold(RunKind::Queue, "main").unwrap().is_some()
     });
     let (_, room) = client.room().unwrap().expect("it answers");
     assert_eq!(room.waiting.sessions, 0, "no session waits: {room:?}");

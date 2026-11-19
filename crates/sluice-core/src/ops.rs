@@ -2223,7 +2223,7 @@ mod tests {
             unreachable!("a submit runs nothing")
         }
 
-        fn hold(&self, _: sluice_seams::RunKind) -> Result<Option<sluice_seams::Part>> {
+        fn hold(&self, _: sluice_seams::RunKind, _: &str) -> Result<Option<sluice_seams::Part>> {
             unreachable!("a submit runs nothing")
         }
 
