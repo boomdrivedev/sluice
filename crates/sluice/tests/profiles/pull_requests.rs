@@ -4076,6 +4076,47 @@ fn a_group_act_names_each_pull_requests_wait() {
     }
 }
 
+/// group-submit, "Stopped while both are open": a waiting act of two pull
+/// requests, every condition holding, one combination at a time, the
+/// first's check going on until the test ends it. Stopped with Ctrl-C
+/// before either is decided, it says each one still open with the wait
+/// that follows it by its number, and exits 130 (record 0130 D4).
+#[test]
+fn a_group_act_stopped_names_each_open_pull_requests_wait() {
+    let g = OnGitHub::checked("pr-group-stopped", "", "1m", "parallel = 1\n");
+    let hang = Hang::in_repo(&g);
+    let ws = [
+        g.session("o1", &[("hang", hang.file().as_str())]),
+        g.session("o2", &[("o2.txt", "x\n")]),
+    ];
+    let mut args = vec!["submit", "main"];
+    for w in &ws {
+        args.extend(["--worktree", w.to_str().unwrap()]);
+    }
+    let act = g
+        .command(env!("CARGO_BIN_EXE_sluice"), g.repo.dir())
+        .args(&args)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    started(&hang.pid);
+    nix::sys::signal::kill(
+        nix::unistd::Pid::from_raw(act.id() as i32),
+        nix::sys::signal::Signal::SIGINT,
+    )
+    .unwrap();
+    let out = act.wait_with_output().unwrap();
+    let said = text(&out);
+    assert_eq!(out.status.code(), Some(sluice::STOPPED), "{said}");
+    let lines: Vec<&str> = said.lines().collect();
+    for name in ["o1", "o2"] {
+        let n = g.pull_of(name).number;
+        let still = format!("still open: #{n}; sluice wait main --pull-request {n}");
+        assert!(lines.contains(&still.as_str()), "{still:?} in {said}");
+    }
+}
+
 /// One short of a review: the pull requests of `s1` and `s3` are open at
 /// the heads their worktrees hold, ready and approved there, and `s2`'s is
 /// not open. The act queues nothing and exits 2, naming `s2`'s pull

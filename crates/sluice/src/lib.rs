@@ -6255,8 +6255,9 @@ fn submit_pull_group(
                 FAILED
             }
             _ => {
+                // Record 0130 D4: the wait that follows it by its number.
                 if !json {
-                    writeln!(out, "still open: #{n}; sluice wait {branch}")?;
+                    writeln!(out, "still open: #{n}; {}", pull_wait(branch, n))?;
                 }
                 LANDED
             }
