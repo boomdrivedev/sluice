@@ -25,12 +25,19 @@ pub struct Hello {
 pub struct Named {
     pub version: String,
     pub pid: u32,
-    /// When it started, RFC 3339.
+    /// When it started, RFC 3339, to the millisecond, so an image started
+    /// afresh in place within the second its pid's last image started is
+    /// told apart (design D4 of `sluice-runs-as-a-daemon`).
     pub since: String,
     /// Whether it passes only when asked (design D14): a follower of it
     /// asks a pass at each of its own ticks, whatever its own setting.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub asked_only: bool,
+    /// Whether it is `sluice daemon`, which never ends for being idle and
+    /// hands over by starting afresh in place (137; design D1 of
+    /// `sluice-runs-as-a-daemon`). An older process says nothing of it.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub daemon: bool,
 }
 
 /// What follows the host process's passes of a repository (D7, D11).
@@ -94,8 +101,14 @@ pub enum Request {
     /// The bound, what counts against it, the runs waiting and whose turn
     /// is next.
     Room,
-    /// End, for a newer sluice (D8).
-    HandOver,
+    /// End, for a newer sluice (D8). `program` is the asker's executable,
+    /// resolved through every link, which a daemon starts afresh in place
+    /// as; an older command sends none, and a host process that is no
+    /// daemon ends on it as before (design D3 of `sluice-runs-as-a-daemon`).
+    HandOver {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        program: Option<PathBuf>,
+    },
 }
 
 /// A repository's reading, as the host process answers a `read` (129;
@@ -179,4 +192,56 @@ pub fn receive<T: for<'de> Deserialize<'de>>(from: &mut impl BufRead) -> Result<
         bail!("the host process closed the connection");
     }
     serde_json::from_str(line.trim_end()).with_context(|| format!("reading {:?}", line.trim_end()))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The request as an older sluice's host process knows it: `hand-over`
+    /// with no field.
+    #[derive(Debug, PartialEq, Deserialize)]
+    #[serde(tag = "ask", rename_all = "kebab-case")]
+    enum Older {
+        Room,
+        HandOver,
+    }
+
+    /// host-daemon, "A newer sluice's command has a daemon start afresh in
+    /// place" (design D3 of `sluice-runs-as-a-daemon`): a `hand-over`
+    /// naming the asker's executable reads as a hand-over naming it; one
+    /// from an older command, which names none, reads as one naming none;
+    /// and a host process of an older sluice reads the one naming it as its
+    /// own bare `hand-over`, so it ends on it as before.
+    #[test]
+    fn a_hand_over_naming_a_program_reads_as_a_hand_over() {
+        let named = Request::HandOver {
+            program: Some(PathBuf::from("/x/sluice")),
+        };
+        let line = serde_json::to_string(&named).unwrap();
+        assert_eq!(line, r#"{"ask":"hand-over","program":"/x/sluice"}"#);
+        assert_eq!(serde_json::from_str::<Request>(&line).unwrap(), named);
+        assert_eq!(
+            serde_json::from_str::<Request>(r#"{"ask":"hand-over"}"#).unwrap(),
+            Request::HandOver { program: None }
+        );
+        assert_eq!(
+            serde_json::to_string(&Request::HandOver { program: None }).unwrap(),
+            r#"{"ask":"hand-over"}"#
+        );
+        assert_eq!(
+            serde_json::from_str::<Older>(&line).unwrap(),
+            Older::HandOver
+        );
+    }
+
+    /// A process's `hello` from before a daemon says nothing of one, and
+    /// reads as no daemon (design D1 of `sluice-runs-as-a-daemon`).
+    #[test]
+    fn a_hello_that_names_no_daemon_is_no_daemon() {
+        let named: Named =
+            serde_json::from_str(r#"{"version":"0.71.0","pid":7,"since":"2026-11-07T00:00:00Z"}"#)
+                .unwrap();
+        assert!(!named.daemon);
+    }
 }

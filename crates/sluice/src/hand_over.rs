@@ -111,7 +111,7 @@ impl HandOver {
 /// command's, or memory freed once the start failed, and it sets
 /// `SIGPIPE` back to its default, which a run whose start failed would
 /// keep.
-fn replace(cmd: &Command) -> anyhow::Error {
+pub(crate) fn replace(cmd: &Command) -> anyhow::Error {
     let c = |s: &OsStr| {
         CString::new(s.as_bytes()).map_err(|_| anyhow!("{} holds a NUL", s.to_string_lossy()))
     };

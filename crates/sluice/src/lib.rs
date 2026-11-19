@@ -603,6 +603,17 @@ pub enum Command {
     /// it (135).
     #[command(hide = true)]
     Host,
+    /// Keep this user's sluice host process running, on a machine that
+    /// chooses to; nothing needs it.
+    ///
+    /// sluice starts its own host process when work arrives and lets it end
+    /// once nothing is in play, so nothing needs `sluice daemon`. A machine
+    /// that runs queues for others, and runs no sluice command itself, may
+    /// keep it running under its service manager: it is the host process,
+    /// in the foreground, and never ends for being idle (135, 137). It
+    /// stops on SIGTERM or SIGINT, its runs going on.
+    #[command(after_help = "Example:\n  $ sluice daemon")]
+    Daemon,
     /// Install the hook that refuses updates to protected branches by
     /// anything but sluice; `submit`, `step` and `run` install it too.
     #[command(after_help = "Examples:\n  $ sluice protect\n  $ sluice protect --remove")]
@@ -1458,6 +1469,11 @@ extern "C" fn interrupted(_: nix::libc::c_int) {
     INTERRUPTED.store(true, Ordering::SeqCst);
 }
 
+/// Whether Ctrl-C, or a stop where [`stop_on_terminate`] is in force, came.
+pub(crate) fn stopped() -> bool {
+    INTERRUPTED.load(Ordering::SeqCst)
+}
+
 /// Ctrl-C ends a wait and nothing else: the submission stays queued (5)
 /// and its run, in a session of its own, goes on.
 pub fn stop_on_interrupt() -> Result<()> {
@@ -1670,8 +1686,11 @@ impl Following {
     pub fn start(&mut self, s: &Sluice<'_>) -> Result<()> {
         s.check_host_systems()?;
         if !self.told {
+            // D13 of `sluice-runs-as-a-daemon`: a machine that chooses to
+            // keep the host process running keeps `sluice daemon`.
             telemetry::warn(
-                "sluice: sluice starts its own host process; nothing needs `sluice run`",
+                "sluice: sluice starts its own host process; nothing needs `sluice run`, and \
+                 `sluice daemon` keeps it running on a machine that chooses to",
             );
             self.told = true;
         }
@@ -2669,6 +2688,7 @@ pub fn run(
             Ok(0)
         }
         Command::Host => host_process::run(telemetry::Choices::default()),
+        Command::Daemon => host_process::daemon(telemetry::Choices::default(), None),
         Command::Protect { remove, json } => {
             let dir = std::env::current_dir()?;
             if remove {

@@ -15,6 +15,7 @@ sidebar:
 | `sluice status <branch>` | The queue: each submission still in it, by its number and its subject, its agent, its worktree and its state, with how many are in it. Each combination under test says how far it has got. `--all` for every submission the branch has had. It asks sluice's host process for a reading of the repository, starting it where none answers, and answers from the host process's last reading: every branch, its state and its policy as this host holds them since, with nothing fetched by the status itself ([below](#one-shot-reads)). It reads the queue where the branch's state last saw it, and the policy at the branch's revision as this host holds it: this host's own branch, or for a branch on a remote what the host process last fetched of it. For a branch on a remote, a round sets this host's own branch of that name to each landing. When it couldn't, status says above the queue which revision this host's branch holds, the landing it lacks and why, until a round sets it. `--json` carries the same under `copy`. While this host's rounds can't read the branch or its state from its remote, status says so above the queue. It says what they couldn't read, from which remote, since when and for how many rounds. Below that is what git said, on as many lines as git said it. It says so until a round reads the remote again. `--json` carries the same under `refused`: `remote`, `asked`, `said`, `since` and `rounds`. Above the queue it also lists the writes sluice's protection refused in the last day, by command, with the host, how many times, the first and the last. A command shows until a day passes with none of its writes refused. `--json` carries them under `refused_writes`, as the overview's fields give them. While this host can't take in the branch's pull requests, status says so above the queue: `this host could not take in <branch>'s pull requests since <time>, <n> rounds: <asked>: <what GitHub said>`, until a pass asks GitHub and meets nothing. `--json` carries the same under `intake_refused`: `remote`, `asked`, `said`, `since` and `rounds`. When another host keeps the branch on its remote, and so takes its pull requests in, status lists after the queue each one this host follows. It follows those a submit here opened or updated, and those a wait or status here asked about. Their heading names the host that keeps the branch, as its state names it, or says that no host keeps it yet. Each row names the pull request's number and title. Then it gives the submission that sluice's check on its head names, and where it stands on that host, or what it waits for there: `#41 Add the export · submission 1406 there · queued behind #38`. Whichever process on the host asks, each is read from GitHub at most once in a quarter of `[forge] discovery`. One found merged or closed shows once, as `landed` or `closed without landing`, and then leaves the list. `--json` carries the same under `taken_in_by`, `{"host"}`, the host that keeps the branch, or `null` where none does yet, as a wait gives it, and `pull_requests`, each row with `pull_request`, `title`, `from` (the branch it's opened from), `head`, `draft`, `state` (the check's title, or `waiting` where none stands), `queue` (the check's [`sluice:queue` block](/sluice/guides/pull-requests/#what-sluice-posts), or `null`) and `read_at`. A branch [deleted](#sluice-branch) whose state stays still answers: its first line says `<branch> is gone`, with the revision its state last saw it at, and `--json` gives `gone`, `true` there and `false` otherwise. A branch with no state and no such branch exits 1. It lists the checkouts held because their release failed, each with what failed and how many times it was tried. After the queue, an `OWED` section lists what the branch's outcomes still owe: each worktree or pull request owed one, marked `never confirmed` where nothing has been confirmed under its name, and under it each outcome by its key and submission, owed until or expired at its expiry, with each time it was handed over and how. Nothing is listed where nothing is owed. `--json` carries the same under `owed`, `[]` where nothing is owed: each `reader`, `known`, and `deliveries`, each with `key`, `id`, `state` (`owed` or `expired`), `expires_at` and `handed`. Below the queue's first line, status says where its queue lives: `its queue is on origin`, `its queue is in this host's own files`, or, while a move is written, `its queue is moving to origin since <time>, waiting for <n> combinations under test` ([state](/sluice/reference/state/#where-a-branchs-queue-lives)). `--json` carries the same under `home`: `at`, and `moving` with `to`, `since` and `waiting`. `sluice status <id>` for one; for a number a move carried under another, it names the number the submission has now, and for one left in a closed remote home it says it waits for the host that made it to take it home. Under `--json`, each submission is its record, and a landed, failed or conflicting one carries `notice`, the one line [`sluice inbox`](#sluice-inbox) prints for it; `sluice status <id> --json` adds its `delivery`, and `checks`, a row for each check of the combination it was last tested in, read from that combination's results alone. `sluice status` alone lists every worktree sluice holds ports or runs for. `--json` for tools. |
 | `sluice overview` | Every branch's queue at a glance: the combinations under test, the submissions still queued, the latest landings, blames and conflicts, and the worktrees and previews held. `--json` for tools: it also gives each branch's `revision`, as the read found it, and `after_landed`, the landed submissions a queued one's `--after` names, and each combination's `on`, the branch's revision it was formed on. `--json --watch` prints it again each time it changes. A read of the queue it couldn't make is printed as one line, the error document with what it was refused. The watch reads again a second later. It ends only when it's stopped, when its repository is gone, or where the repository has no sluice: no state, and no branch here or a remote's as last fetched holding `.config/sluice.toml`. Its last line is then the overview with `"set_up": false`, and it exits `0`; nothing is fetched to tell. sluice's host process reads the queue for every watch and wait, which follow what it read. `sluice overview` alone asks it for a reading and prints from the host process's last reading, fetching nothing itself ([below](#one-shot-reads)). |
 | `sluice step <branch>` | One round of a branch's work, then exit: for cron, CI or a hook. sluice's host process runs it between its passes, as it runs every round, and the step prints what it did ([below](#who-runs-the-rounds)). Says `led` when another host keeps the branch, and `held` when the revision it reads lacks the branch's last landing ([below](#sluice-branch)). Each thing its intake couldn't ask GitHub is said on stderr, every step: `sluice: warning: taking in <branch>'s pull requests: <asked>: <what GitHub said>`, where `asked` is the branch's pull requests or `pull/<n>`. `--json` for scripts. |
+| `sluice daemon` | Keep sluice's host process running, on a machine that chooses to; nothing needs it. It runs in the foreground and never ends for being idle, for a machine that runs queues for other hosts and no sluice command itself ([below](#sluice-daemon)). |
 | `sluice amend <id>` | Reorder a queued submission (`--after`, `--priority`) until it is under test. `--branch <branch>` names the branch its number is on, where more than one branch holds it ([below](#sluice-wait)). `--json` for scripts. |
 | `sluice withdraw <id>` | Take a submission out of the queue. One already withdrawn is said so, and exits `0`; one landed is refused. `--branch <branch>` names the branch its number is on, where more than one branch holds it ([below](#sluice-wait)). `--json` for scripts. |
 | `sluice protect` | Install the branch-protection hook; `--remove` takes it out. Warns of a worktree that has checked out a protected branch. `--json` for scripts. |
@@ -675,7 +676,7 @@ line or a script. Fields are only ever added to it.
 | `previews[]` | the previews on the host, as `sluice previews --json` lists them |
 | `set_up` | `false` on a watch's last line, where the repository has no sluice: no branch has state, and no branch here or a remote's as last fetched holds `.config/sluice.toml`. Left out otherwise |
 | `room` | the host's runs: `bound`, `queue` (the combinations under test, and those about to start), `sessions` (every `sluice exec` and preview command running on the host) and `reserve` (the part of the bound `[runs] reserved` keeps from `sluice exec`). `waiting` gives the runs waiting for room by kind, as sluice's host process holds them: `queue`, combinations whose round asked for room within thirty seconds, and `sessions`, every `sluice exec` and preview command waiting. `turn` is whose the next run a combination and an agent's check both want is: `queue` or `sessions`. `repositories` gives each repository on the host with a run under test or waiting, by its git directory: `under_test`, its runs holding a part of the bound of any kind, and `waiting`, its runs waiting. A run that frees goes to the repository with a combination waiting and the fewest under test. Where no host process answers, nothing waits, `turn` is `queue` and `repositories` is empty |
-| `host_process` | sluice's host process that answers, which runs the rounds and holds the room: its `version`, `pid` and `since`, when it started. `null` where none answers. `host` stays the host's name |
+| `host_process` | sluice's host process that answers, which runs the rounds and holds the room: its `version`, `pid` and `since`, when it started, and `daemon`, `true` where it is [`sluice daemon`](#sluice-daemon). `null` where none answers. `host` stays the host's name |
 
 A combination's `tasks` say how far its tests have got and decide
 nothing: its result is still read from the finished run. Each round
@@ -1634,6 +1635,34 @@ Under `--json`, it prints one document, `confirmed`, each key's `key`,
 it. A key refused or not found gives the error document, with its
 `kind` and `next`.
 
+## `sluice daemon`
+
+sluice starts its own host process when work arrives and lets it end
+once nothing is in play, so nothing needs `sluice daemon`. A machine
+that runs queues for other hosts, and runs no sluice command itself,
+may keep it running instead. `sluice daemon` is that host process, in
+the foreground, and it never ends for being idle. It moves every
+repository in the host's index, the work other hosts write to a
+branch's state on its remote among them. Started in a repository that
+has sluice, it adds that repository to the index, as every command
+does.
+
+- Started while a host process that ends when idle runs, it has that
+  process hand over and takes its place. Where that process hasn't
+  ended within the time a hand-over is given, seventy seconds, it exits
+  `3` naming the host process's log.
+- Started while another `sluice daemon` runs, it says once on stderr
+  which one it waits for, and takes its place once that one ends.
+- A newer sluice's command has it start afresh in its own process as
+  that command's sluice, keeping its process ID, so whatever keeps it
+  running keeps the new one.
+- `SIGTERM` or `SIGINT` stops it: each repository's round finishes, and
+  it exits `0`. The tests it started go on, and the next host process
+  reads them.
+
+Once it holds the host, what it says goes to `host/log` in
+[sluice's state](/sluice/reference/state/), as the host process's does.
+
 ## Exit codes
 
 | exit | meaning |
@@ -1793,14 +1822,18 @@ branch.
 - **On one machine**, sluice's own host process runs them. The first
   command that needs the host's queues moved, a submit among them,
   starts it, and it ends once no repository it holds has work in play
-  and nothing follows it: nothing is installed or kept running
-  ([ADR 0093](/sluice/decisions/0093/)). It holds every repository on
+  and nothing follows it: nothing needs to be installed or kept running
+  ([ADR 0093](/sluice/decisions/0093/)). A machine may keep
+  [`sluice daemon`](#sluice-daemon) running instead, the same host
+  process, which never ends for being idle. It holds every repository on
   the host that has sluice, each in a task of its own, so a branch one
   repository cannot read holds up no round of another, and it holds the
   host's bound on runs in one place. It takes up a change of the host's
   settings file between its passes, and hands a change of `[telemetry]`
   to a fresh host process it starts itself, so nothing restarts it
-  ([configuration](/sluice/reference/configuration/)). A waiting `sluice submit`,
+  ([configuration](/sluice/reference/configuration/)). `sluice daemon`
+  starts afresh in its own process instead, keeping its process ID, and
+  keeps running. A waiting `sluice submit`,
   `wt submit` or `sluice wait` follows it and runs no round, and
   `sluice step` asks it for one round of a branch. A command that finds
   work in play and no host process answering starts it again, so a

@@ -3,7 +3,8 @@
 # beside the evaluated ones: each runs nix/modules/activate.sh by sh in a
 # scratch folder of its own, with a scratch HOME and the module's file in
 # a store of its own, so no case reads or writes the host's own
-# ~/.config/sluice. It prints each failure as one line,
+# ~/.config/sluice, and keep's with systemctl and ps stood in for. It
+# prints each failure as one line,
 # nix: activate: <case>: <what>, and nothing where every case holds.
 set -eu
 
@@ -127,3 +128,77 @@ expect "$named" "link with no file exits $status, not 2" [ "$status" -eq 2 ]
 run keep "$file"
 expect "$named" "keep exits $status, not 2" [ "$status" -eq 2 ]
 expect "$named" "a refused call made $home/.config" missing "$home/.config"
+
+# keep's cases (design D10 of `sluice-runs-as-a-daemon`): systemctl and ps
+# stood in for on its PATH, systemctl naming `$main` as the unit's main
+# process and writing each call to `calls`, and ps answering `$running`.
+me=$(id -un)
+program=$dir/store/sluice
+stand() {
+  mkdir -p "$dir/bin"
+  cat >"$dir/bin/systemctl" <<'STUB'
+#!/bin/sh
+echo "$*" >>"$CALLS"
+case $* in *show*) echo "$MAIN" ;; esac
+STUB
+  cat >"$dir/bin/ps" <<'STUB'
+#!/bin/sh
+echo "$RUNNING"
+STUB
+  chmod +x "$dir/bin/systemctl" "$dir/bin/ps"
+  calls=$dir/calls
+  : >"$calls"
+}
+# keep with `$@` in the case's folder, the unit's main process `$1` and
+# its command line `$2`.
+kept() {
+  main=$1
+  running=$2
+  shift 2
+  status=0
+  PATH=$dir/bin:$PATH CALLS=$calls MAIN=$main RUNNING=$running \
+    sh "$activate" keep "$@" >"$dir/out" 2>"$dir/err" || status=$?
+  out=$(cat "$dir/out")
+  err=$(cat "$dir/err")
+  said=$(cat "$dir/out" "$dir/err" | paste -s -d ';' -)
+}
+called() {
+  grep -Fxq -- "$1" "$calls"
+}
+
+named="keep: not running"
+fresh
+stand
+kept 0 "" "$me" "$program" daemon
+expect "$named" "keep exits $status: $said" [ "$status" -eq 0 ]
+expect "$named" "keep did not start sluice.service without waiting: $(cat "$calls")" \
+  called "--user --no-block start sluice.service"
+expect "$named" "keep says \"$said\", not that it started sluice.service" \
+  [ "$out" = "sluice: started sluice.service" ]
+
+named="keep: another command line"
+fresh
+stand
+kept 42 "/nix/store/older-sluice/bin/sluice daemon" "$me" "$program" daemon
+expect "$named" "keep exits $status: $said" [ "$status" -eq 0 ]
+expect "$named" "keep did not restart sluice.service without waiting: $(cat "$calls")" \
+  called "--user --no-block restart sluice.service"
+expect "$named" "keep says \"$said\", not the command line that ran" \
+  [ "$out" = "sluice: restarted sluice.service, which ran /nix/store/older-sluice/bin/sluice daemon" ]
+
+named="keep: the unit's command line"
+fresh
+stand
+kept 42 "$program daemon" "$me" "$program" daemon
+expect "$named" "keep exits $status: $said" [ "$status" -eq 0 ]
+expect "$named" "keep started or restarted the unit: $(cat "$calls")" \
+  [ "$(cat "$calls")" = "--user show --property=MainPID --value sluice.service" ]
+expect "$named" "keep says \"$said\"" [ -z "$out$err" ]
+
+named="keep: another user"
+fresh
+stand
+kept 0 "" "not-$me" "$program" daemon
+expect "$named" "keep exits $status: $said" [ "$status" -eq 0 ]
+expect "$named" "keep asked the service manager $(cat "$calls")" [ ! -s "$calls" ]
+expect "$named" "keep says \"$said\"" [ -z "$out$err" ]

@@ -102,8 +102,10 @@ A round is one pass of sluice's work on a branch: read the queue, start
 tests if there is room, read finished tests, blame a failure, land what
 passed. sluice's own host process runs them, for every repository on the
 host: a submit, waiting or not, tells it of the submission, starting it
-where none runs, and it ends once no queue has work. Nothing is installed
-or kept running for it.
+where none runs, and it ends once no queue has work. Nothing needs to be
+installed or kept running for it, though a machine that runs queues for
+other hosts may keep `sluice daemon` running, which never ends for being
+idle.
 
 - A waiting `sluice submit` / `wt submit` follows the host process to the
   outcome, and runs no round.

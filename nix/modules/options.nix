@@ -14,7 +14,10 @@
 # app's token in place of its key, is a list of its program and then each
 # argument, and an argument that holds a GitHub token's text fails
 # evaluation for the same reason; a program in the store is no secret
-# (record 0108, core.51).
+# (record 0108, core.51). `daemon.enable`, off unless the host sets it,
+# has each platform's module keep `sluice daemon` running for the user
+# who runs sluice, which nothing needs (137; record 0093 as amended
+# 2026-11-18; design D12 of `sluice-runs-as-a-daemon`).
 { packages }:
 {
   config,
@@ -103,6 +106,18 @@ in
 {
   options.services.sluice = {
     enable = lib.mkEnableOption "sluice's host settings, linked for the user who runs sluice, and its package";
+
+    daemon.enable = lib.mkEnableOption ''
+      the service that keeps `sluice daemon` running for the user who runs
+      sluice: on nix-darwin a launchd agent of the primary user, on NixOS a
+      systemd user unit of `services.sluice.user`, who lingers. Nothing
+      needs it: sluice starts its own host process when work arrives and
+      lets it end once nothing is in play. A machine that runs queues for
+      other hosts, and runs no sluice command itself, turns it on. It takes
+      effect only with `services.sluice.enable`. A host that moves sluice's
+      state folder with `XDG_STATE_HOME` gives the service the same
+      variable through the service's own options, so the daemon and the
+      user's commands reach one host process (137)'';
 
     package = mkOption {
       type = types.nullOr types.package;
