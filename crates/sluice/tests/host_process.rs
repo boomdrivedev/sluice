@@ -364,12 +364,11 @@ fn the_host_process_ends_once_its_queues_are_empty() {
 
 /// reader-tick, "An idle tick starts no process" (129, 135; design D4): a
 /// host process that lives on, here for an agent's held room, looks at
-/// each repository in its index every three seconds as an idle tick
-/// reads it, and starts no task for one with nothing in play. On a host
-/// whose config names a system it is not, a task's start is refused and
-/// logged: nothing is logged while the repository is idle, and once work
-/// is in play there the refusal is logged once, however many looks pass
-/// the repository by.
+/// each repository in its index as an idle tick reads it, and starts no
+/// task for one with nothing in play. On a host whose config names a
+/// system it is not, a task's start is refused and logged: nothing is
+/// logged while the repository is idle, and once work is in play there
+/// the refusal is logged once, however many looks pass the repository by.
 #[test]
 fn the_host_processs_look_at_an_idle_repository_starts_nothing() {
     let policy = format!("{POLICY}\n[systems.elsewhere]\nos = \"windows\"\narch = \"x86_64\"\n");
@@ -414,6 +413,56 @@ fn the_host_processs_look_at_an_idle_repository_starts_nothing() {
     within(10, "the start refused", || refused() == 1);
     std::thread::sleep(Duration::from_secs(7));
     assert_eq!(refused(), 1, "two looks pass it by");
+    drop(held);
+}
+
+/// reader-tick, "A remote's records are asked for once a minute where
+/// nothing is in play" (129 as amended 2026-11-19): a host process that
+/// lives on, here for an agent's held room, asks origin for the records of
+/// a repository with nothing in play once as it starts, and not again
+/// within the minute, however many times it goes through its index; a
+/// watch's opening asks origin at once, and the watch's passes, a second
+/// apart, ask nothing more within the minute.
+#[test]
+fn an_idle_repositorys_remote_is_asked_once_a_minute() {
+    let (d, _origin) = on_origin("host-idle-asks");
+    let repository = d.repository(d.repo.dir());
+    within(15, "the host process ends once idle", || {
+        answering(&d).is_none()
+    });
+    let before = d.git.count();
+    let client = d.client(d.repo.dir());
+    let mut held = client
+        .hold(
+            sluice_seams::RunKind::Session,
+            Path::new(&repository),
+            "an-agent",
+            None,
+        )
+        .expect("the host process starts");
+    let answer = held.next(Some(Duration::from_secs(10))).unwrap();
+    assert!(
+        matches!(answer, Some(sluice::host_process::protocol::Answer::Held)),
+        "{answer:?}"
+    );
+    let pid = answering(&d).expect("the host process answers");
+    let asks = || {
+        d.git.parented()[before..]
+            .iter()
+            .filter(|(p, args)| *p == pid && asks_a_remote(args))
+            .count()
+    };
+    within(10, "its first look asks origin", || asks() == 1);
+    std::thread::sleep(Duration::from_secs(7));
+    assert_eq!(asks(), 1, "a look within the minute asked origin");
+
+    let watch = client
+        .follow(Path::new(&repository), FollowKind::Watch)
+        .expect("the watch follows");
+    within(10, "the watch's opening asks origin", || asks() == 2);
+    std::thread::sleep(Duration::from_secs(4));
+    assert_eq!(asks(), 2, "a watched pass within the minute asked origin");
+    drop(watch);
     drop(held);
 }
 
