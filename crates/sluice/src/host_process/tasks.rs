@@ -28,7 +28,7 @@ use super::room::Shared;
 use crate::exec::Host;
 use crate::instance::Instance;
 use crate::profiles::checks::RoomHandle;
-use crate::profiles::Bound;
+use crate::profiles::{Bound, Tokens};
 use crate::reader::{Driver, Drives, Reader};
 use crate::{Pause, Skipped};
 
@@ -688,14 +688,16 @@ impl Settings {
 }
 
 /// The body of a repository's task in the host process: its own binding,
-/// of the host's settings as `settings` holds them, holding its parts of
-/// `room`, passing at its tick or, when `asked_only`, at each ask (design
-/// D5, D14, D19).
+/// of the host's settings as `settings` holds them, its identity's tokens
+/// held in the host process's `tokens`, holding its parts of `room`,
+/// passing at its tick or, when `asked_only`, at each ask (design D5, D14,
+/// D19; record 0108 as amended 2026-11-19).
 pub fn repository_body(
     room: Shared,
     asked_only: bool,
     named: Named,
     settings: Arc<Settings>,
+    tokens: Tokens,
 ) -> Body {
     Arc::new(move |inbox: Inbox| {
         repository(
@@ -704,6 +706,7 @@ pub fn repository_body(
             asked_only,
             named.clone(),
             settings.clone(),
+            tokens.clone(),
         )
     })
 }
@@ -724,17 +727,26 @@ fn tick(watched: bool) -> Duration {
     Duration::from_secs(if watched { 1 } else { 3 })
 }
 
-fn repository(inbox: Inbox, room: Shared, asked_only: bool, named: Named, settings: Arc<Settings>) {
+fn repository(
+    inbox: Inbox,
+    room: Shared,
+    asked_only: bool,
+    named: Named,
+    settings: Arc<Settings>,
+    tokens: Tokens,
+) {
     let common = inbox.repository.clone();
     // Its binding, of the settings `instance`: its parts held of the
-    // host's room, its results from the host process's index (design D12,
-    // D17).
+    // host's room, its results from the host process's index, its tokens
+    // the host process's (design D12, D17; record 0108 as amended
+    // 2026-11-19).
     let bind = |instance: Instance| -> anyhow::Result<Bound> {
-        let bound = Bound::open_with(
+        let bound = Bound::open_holding(
             &open_dir(&common),
             std::env::current_exe()?,
             instance,
             Rc::new(crate::retry::Policy::round().recording_where_set()),
+            &tokens,
         )?;
         Ok(Bound {
             tests: bound.tests.with_room(RoomHandle::Here(room.clone())),

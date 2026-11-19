@@ -973,7 +973,10 @@ impl Identity for FakeIdentity {
         })
     }
 
-    fn renew(&self, url: &str) -> anyhow::Result<Credentials> {
+    /// Renewed in place of the token it gave last, which is the one the
+    /// remote refused.
+    fn renew(&self, url: &str, refused: &str) -> anyhow::Result<Credentials> {
+        assert_eq!(refused, self.token(self.renewed.get()));
         if let Some(why) = &self.refuses {
             anyhow::bail!("{why}");
         }

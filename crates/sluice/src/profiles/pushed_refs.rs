@@ -168,6 +168,9 @@ impl PushedRefs {
         let mut fault = None;
         let mut unrenewed = None;
         let mut refused: Vec<String> = Vec::new();
+        // The password of the credentials the remote refused last, which a
+        // renewal replaces.
+        let mut refused_password = String::new();
         // What the remote refused where git never asked for the speaker's
         // credentials.
         let mut unasked = None;
@@ -177,7 +180,7 @@ impl PushedRefs {
         let ran = self.policy.run(kind, |t| {
             let given = match &speaker {
                 None => None,
-                Some(s) if t.renew() => match s.identity.renew(&s.url) {
+                Some(s) if t.renew() => match s.identity.renew(&s.url, &refused_password) {
                     Ok(c) => Some(c),
                     Err(e) => {
                         unrenewed = Some(e);
@@ -244,7 +247,10 @@ impl PushedRefs {
             };
             let mut judged = judged(&out, kind, speaker.is_some());
             match (judged, &speaker, given) {
-                (Judged::Credential, Some(_), Some(c)) if asked => refused.push(c.about),
+                (Judged::Credential, Some(_), Some(c)) if asked => {
+                    refused.push(c.about);
+                    refused_password = c.password;
+                }
                 // The remote refused what git sent of its own, or nothing
                 // sluice gave: its answer, which no credential bought
                 // afresh changes, since git sends the same again (134;

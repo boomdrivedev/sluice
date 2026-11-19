@@ -47,9 +47,10 @@ pub trait Identity {
     /// Credentials for `url`, one [`Identity::url`] gave.
     fn credentials(&self, url: &str) -> Result<Credentials>;
 
-    /// Credentials for `url` made afresh, never ones given before: for a
-    /// call the remote refused the last ones on.
-    fn renew(&self, url: &str) -> Result<Credentials>;
+    /// Credentials for `url` in place of those whose password the remote
+    /// `refused`, never those: ones another call got since, or ones made
+    /// afresh.
+    fn renew(&self, url: &str, refused: &str) -> Result<Credentials>;
 }
 
 /// The forge's answer refusing an identity credentials for a remote: a

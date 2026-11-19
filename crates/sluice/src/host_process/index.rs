@@ -161,15 +161,17 @@ pub fn has_sluice(repository: &Path) -> Result<bool> {
 pub fn in_play(
     repository: &Path,
     instance: crate::instance::Instance,
+    tokens: &crate::profiles::Tokens,
 ) -> Result<super::tasks::Looked> {
     if !repository.is_dir() {
         return Ok(super::tasks::Looked::default());
     }
-    let bound = Bound::open_with(
+    let bound = Bound::open_holding(
         repository,
         std::env::current_exe()?,
         instance,
         Rc::new(crate::retry::Policy::round().recording_where_set()),
+        tokens,
     )?;
     // A refusal leaves the branches as last fetched, as a pass's ask does,
     // and is the reading's words (D16).
