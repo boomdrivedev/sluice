@@ -4601,10 +4601,18 @@ fn exec_runs_the_affected_checks_against_the_branch() {
     assert_eq!(lines[n - 2], "passed: 1 task");
     assert!(lines[n - 1].starts_with("recorded 1 result under its key for "));
 
+    // A new edit the check fails on: no pass is recorded for these files,
+    // so nothing is replayed, the check runs, and its fail is the exit.
+    work(
+        &f,
+        "unit/a",
+        "agent-a",
+        &[("plugin/lib/plan.py", Some("p3"))],
+    );
     f.world
-        .fails_with("plugin:test", "plugin/lib/plan.py", "p2");
+        .fails_with("plugin:test", "plugin/lib/plan.py", "p3");
     let (code, out) = exec(&f, &[BRANCH, "--worktree", "unit/a"]);
-    assert_eq!(code, FAILED);
+    assert_eq!(code, FAILED, "{out}");
     assert!(out.contains("failed: plugin:test\n"), "{out}");
 }
 
