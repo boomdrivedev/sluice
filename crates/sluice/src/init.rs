@@ -394,8 +394,8 @@ pub fn codebuild(dir: &Path, systems: &[String], force: bool, out: &mut dyn Writ
         out,
         "  - deploy it, as `sluice` or a name of your own:\n    aws cloudformation deploy \
          --template-file {shown} --stack-name sluice --capabilities CAPABILITY_IAM \
-         --parameter-overrides LeadPrincipal=<the ARN the hosts that lead the branch reach AWS \
-         as> AppId=<sluice's app id> MaxCapacity=<the branch's parallel>"
+         --parameter-overrides StartPrincipal=<the ARN the hosts that may run the branch's queue \
+         reach AWS as> AppId=<sluice's app id> MaxCapacity=<the branch's parallel>"
     )?;
     writeln!(
         out,
@@ -405,8 +405,8 @@ pub fn codebuild(dir: &Path, systems: &[String], force: bool, out: &mut dyn Writ
     )?;
     writeln!(
         out,
-        "  - name the profile that assumes the stack's lead role as [aws] profile on each \
-         host that leads the branch"
+        "  - name the profile that assumes the stack's start role as [aws] profile on each \
+         host that may run the branch's queue"
     )?;
     writeln!(
         out,

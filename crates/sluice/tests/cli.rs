@@ -11067,6 +11067,27 @@ fn init_codebuild_writes_the_stack() {
         said.contains("sluice init codebuild --stack sluice"),
         "{said}"
     );
+    assert!(
+        said.contains(
+            "--parameter-overrides StartPrincipal=<the ARN the hosts that may run the branch's \
+             queue reach AWS as>"
+        ),
+        "{said}"
+    );
+    assert!(
+        said.contains(
+            "name the profile that assumes the stack's start role as [aws] profile on each host \
+             that may run the branch's queue"
+        ),
+        "{said}"
+    );
+    assert!(
+        !said
+            .to_lowercase()
+            .split(|c: char| !c.is_alphanumeric())
+            .any(|w| ["lead", "leads", "leading", "led"].contains(&w)),
+        "{said}"
+    );
     assert_eq!(
         std::fs::read_to_string(dir.path().join(POLICY_PATH)).unwrap(),
         INIT_POLICY,
