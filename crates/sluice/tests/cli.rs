@@ -6532,7 +6532,10 @@ fn following_a_pull_request_the_forge_could_not_answer_says_it_could_not_read() 
     let f = pulls_setup();
     let (code, out) = sluice_pulls(&f, &Pull7::new(0, 1), &Unpaused, &["wait", BRANCH]);
     assert_eq!(code, sluice::INTERNAL, "{out}");
-    assert_eq!(out, format!("could not read #7: sluice wait {BRANCH}\n"));
+    assert_eq!(
+        out,
+        format!("could not read #7: sluice wait {BRANCH} --pull-request 7\n")
+    );
     let (code, out) = sluice_pulls(
         &f,
         &Pull7::new(0, 1),
@@ -6544,7 +6547,7 @@ fn following_a_pull_request_the_forge_could_not_answer_says_it_could_not_read() 
     assert_eq!(v["error"]["kind"], "internal");
     assert_eq!(
         v["error"]["next"],
-        serde_json::json!([format!("sluice wait {BRANCH}")])
+        serde_json::json!([format!("sluice wait {BRANCH} --pull-request 7")])
     );
     let message = v["error"]["message"].as_str().unwrap();
     assert_eq!(
@@ -6563,7 +6566,7 @@ fn following_a_pull_request_the_forge_could_not_answer_says_it_could_not_read() 
     assert_eq!(code, sluice::INTERNAL, "{out}");
     assert_eq!(
         out,
-        format!("opened #7\ncould not read #7: sluice wait {BRANCH}\n")
+        format!("opened #7\ncould not read #7: sluice wait {BRANCH} --pull-request 7\n")
     );
 
     let (code, out) = sluice_pulls(
@@ -6578,6 +6581,32 @@ fn following_a_pull_request_the_forge_could_not_answer_says_it_could_not_read() 
         format!(
             "could not read the pull request from unit/a into {BRANCH}: sluice wait {BRANCH}\n"
         )
+    );
+}
+
+/// submission-wait, "A wait that could not read its pull request names
+/// itself again": `sluice wait <branch> --json` in a worktree whose request
+/// it finds, every follow of it answered as a forge that could not answer,
+/// names as the command to run again the wait that follows the request by
+/// its number, never `sluice wait <branch>`, which reads the folder it runs
+/// in (record 0130 D4).
+#[test]
+fn a_pull_requests_wait_that_could_not_read_names_itself_again() {
+    let f = pulls_setup();
+    work(&f, "unit/a", "agent-a", &[("plugin/a", Some("b"))]);
+    let (code, out) = sluice_pulls(
+        &f,
+        &Pull7::new(0, usize::MAX),
+        &Unpaused,
+        &["wait", BRANCH, "--worktree", "unit/a", "--json"],
+    );
+    assert_eq!(code, sluice::INTERNAL, "{out}");
+    let v = json(&out);
+    assert_eq!(v["error"]["kind"], "internal", "{out}");
+    assert_eq!(
+        v["error"]["next"],
+        serde_json::json!([format!("sluice wait {BRANCH} --pull-request 7")]),
+        "{out}"
     );
 }
 

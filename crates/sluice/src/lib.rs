@@ -5492,6 +5492,8 @@ fn submit_pull(
         PullMode::Follow { own, .. } => Some(own),
         _ => None,
     };
+    // Before a request is found, the wait that finds it again; record 0130
+    // D4 names it by its number once it is known, below.
     let again = match follows_for {
         Some(own) => format!("sluice wait {}", own.id),
         None => format!("sluice wait {branch}"),
@@ -5573,6 +5575,13 @@ fn submit_pull(
                 return Ok(CONFLICT);
             }
         }
+    };
+    // Record 0130 D4: the request known, the wait that follows it by its
+    // number, from any folder; `sluice wait <id>` for a wait that follows
+    // it for submission `<id>`.
+    let again = match follows_for {
+        Some(_) => again,
+        None => pull_wait(branch, number),
     };
     let mut last: Option<(String, Vec<String>)> = None;
     // 137: where the pull request stands on the host that takes it in, as
