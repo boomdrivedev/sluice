@@ -145,11 +145,13 @@ Examples:
   $ sluice wait 12
   $ sluice wait 12 --timeout 9m --json   an agent's loop: again while it exits 5
   $ sluice wait main                     this worktree's last submission to main
+  $ sluice wait main --pull-request 41   pull request 41 into main, from any folder
 
 Exit codes:
   0    landed, whatever failed after the landing (said on stderr)
   1    failed: it was blamed, or its pull request closed; or no such
-       submission on any branch, every branch read
+       submission on any branch, every branch read; or no such pull
+       request into the branch
   2    a conflict
   3    sluice itself failed, or it could not read the forge for 5m and
        whether it landed is not known: the cause is on stderr; or the
@@ -159,7 +161,8 @@ Exit codes:
   5    still waiting: --timeout ran out, and the submission stays queued
   6    held: the forge refused its landing; its words are on stdout
   64   a command line sluice cannot read; or the number is on more than
-       one branch and no --branch names one: each branch is named
+       one branch and no --branch names one: each branch is named; or
+       --pull-request with a submission's number
   130  stopped with Ctrl-C; the submission stays queued";
 
 /// `sluice inbox --help`'s examples and exits (51, 135).

@@ -1236,6 +1236,18 @@ whatever the round failed after it. A submission already decided is
 reported at once, and nothing runs. `sluice wait <branch>` waits for this worktree's last submission
 to that branch, the one `sluice submit <branch> --status` reports.
 
+`sluice wait <branch> --pull-request <n>` follows pull request `<n>`
+into the branch, from any folder of the repository and on any host. It
+follows the pull request as `sluice wait <branch>` follows the one its
+worktree opened, with the same outcomes, exits and documents, and its
+number is the same on every host from the submit to the landing. Where
+the branch takes no pull requests, or GitHub holds no pull request `<n>`
+into it, the wait follows nothing, says `no pull request #<n> into
+<branch>` and exits `1`. Given a submission's number in place of a
+branch, it exits `64`. A wait by pull request run anywhere but the
+worktree that opened the request hands nothing over: its outcome stays
+owed there, and `sluice inbox` in that worktree collects it.
+
 sluice finds a submission by its number on any branch it can read,
 whatever other branch it cannot. A branch whose policy, revision or
 state sluice cannot read holds up no wait on another branch. When the
@@ -1467,8 +1479,8 @@ there, so it hands the outcome over once its report is written, as
 it is confirmed. `--confirm` confirms it on receipt, for a caller that
 keeps what it is given. Under `--json`, the record it prints carries its
 `delivery` as the wait leaves it. A wait on another worktree's
-submission hands nothing over, and nor does one that ends out of time
-or stopped. A submission by name came from no worktree, and nor did a
+submission or pull request hands nothing over, and nor does one that
+ends out of time or stopped. A submission by name came from no worktree, and nor did a
 pull request from a branch sluice lands on, so a wait on either hands
 nothing over, wherever it runs. In a bare repository or a git directory,
 which has no files checked out, a wait hands over only what one in a

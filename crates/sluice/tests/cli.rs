@@ -6663,6 +6663,23 @@ fn a_wait_by_pull_request_that_could_not_read_names_itself_again() {
     assert_eq!(v["error"]["next"], serde_json::json!([again]), "{out}");
 }
 
+/// Record 0130: `sluice wait --help` gives the wait by pull request among
+/// its examples, exit 1 for no such pull request into the branch, and
+/// exit 64 for `--pull-request` with a submission's number.
+#[test]
+fn wait_help_names_a_wait_by_pull_request() {
+    let help = Cli::try_parse_from(["sluice", "wait", "--help"])
+        .unwrap_err()
+        .to_string();
+    for said in [
+        "$ sluice wait main --pull-request 41   pull request 41 into main, from any folder",
+        "every branch read; or no such pull\n       request into the branch",
+        "each branch is named; or\n       --pull-request with a submission's number",
+    ] {
+        assert!(help.contains(said), "{said:?} in {help}");
+    }
+}
+
 /// ADR 0042: a waiting command says its combination's progress each time
 /// the count ended or the tasks running move, never at every round.
 #[test]
