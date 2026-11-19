@@ -405,7 +405,7 @@ branch.
 Before committing it, read it back to the user by
 [read-back](references/read-back.md): each branch pattern, what it matches,
 what must pass there and what a pull request into it waits for. A branch
-on which no test will run leads its part with the warning, in that page's
+on which no test will run opens its part with the warning, in that page's
 words; stop there until the user names a check for it or says it is meant
 to land untested.
 

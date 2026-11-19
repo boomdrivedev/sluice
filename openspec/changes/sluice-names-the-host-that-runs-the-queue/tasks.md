@@ -43,7 +43,7 @@ use left behind.
 ## 6. The rest of the pages and skills
 
 - [x] 6.1 `pools.md`'s opening, its claim paragraph, "What a run does" and "With every host off", `configuration.md`'s `[peers]` `name` row, `state.md`'s `no_executor` line and `parallel-and-batch.md`'s "the ones at its front" say the host that runs the queue by design D1, and design D7's sweep over `site/src/content/docs` finds the word in no page but `decisions/` and `architecture/rules.md`; check, by hand for record 0127's reason: `devenv shell -- vale site/src/content/docs/guides/pools.md site/src/content/docs/reference/configuration.md site/src/content/docs/reference/state.md site/src/content/docs/guides/parallel-and-batch.md` raises no `Sluice.Terms` warning
-- [ ] 6.2 `setting-up-sluice/references/profiles/peers.md`'s `lease` comment and "Two hosts both think they run the queue" say the host that runs the queue, and design D7's sweep over `plugins/sluice/skills` finds the word only in `read-back.md`'s other sense; check: `sluice exec bolt/sluice-reports-its-work-plainly -- moon run plugin-sluice:validate`
+- [x] 6.2 `setting-up-sluice/references/profiles/peers.md`'s `lease` comment and "Two hosts both think they run the queue" say the host that runs the queue, and design D7's sweep over `plugins/sluice/skills` finds the word only in `read-back.md`'s other sense; check: `sluice exec bolt/sluice-reports-its-work-plainly -- moon run plugin-sluice:validate`
 
 ## Workflow follow-up
 
