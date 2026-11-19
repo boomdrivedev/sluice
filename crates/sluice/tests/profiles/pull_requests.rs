@@ -3147,6 +3147,42 @@ fn a_wait_on_a_request_taken_in_here_out_of_time_prints_its_record() {
     );
 }
 
+/// submission-wait, "Into another branch" and "A branch that takes no
+/// pull requests": pull request `#n` is into `bolt/x`, which takes none.
+/// `sluice wait main --pull-request <n> --json` prints the not-found
+/// document, `no pull request #<n> into main`, and `sluice wait bolt/x
+/// --pull-request <n>` says `no pull request #<n> into bolt/x`; each exits
+/// 1 and follows nothing (record 0130 D3).
+#[test]
+fn a_wait_by_pull_request_into_another_branch_is_not_found() {
+    let g = OnGitHub::with_bolt("pr-wait-by-number-elsewhere");
+    let head = g.push_branch("unit/into-bolt", &[("x.txt", Some("x\n"))]);
+    let n =
+        g.gh.forge
+            .open_by("person", "bolt/x", "unit/into-bolt", &head, false, None)
+            .unwrap();
+    let number = n.to_string();
+    let out = g.sluice(&["wait", "main", "--pull-request", &number, "--json"]);
+    assert_eq!(out.status.code(), Some(sluice::FAILED), "{}", text(&out));
+    let doc: Value =
+        serde_json::from_slice(&out.stdout).unwrap_or_else(|e| panic!("{e}: {}", text(&out)));
+    assert_eq!(doc["error"]["kind"], "not_found", "{doc}");
+    assert_eq!(
+        doc["error"]["message"],
+        format!("no pull request #{n} into main").as_str(),
+        "{doc}"
+    );
+    let out = g.sluice(&["wait", "bolt/x", "--pull-request", &number]);
+    assert_eq!(out.status.code(), Some(sluice::FAILED), "{}", text(&out));
+    assert_eq!(
+        String::from_utf8_lossy(&out.stdout),
+        format!("no pull request #{n} into bolt/x\n"),
+        "{}",
+        text(&out)
+    );
+    assert!(g.subs().is_empty(), "{:?}", g.subs());
+}
+
 /// 135: beside a live driver, `sluice wait <branch>` takes no pull request
 /// in and runs no round: a request ready to be taken in is still not, out
 /// of time.

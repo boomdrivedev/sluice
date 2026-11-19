@@ -6362,6 +6362,17 @@ impl sluice::PullRequests for Pull7 {
         Ok(Some(7))
     }
 
+    /// Pull request 7 is into the branch, and no other is.
+    fn holds(
+        &self,
+        _: sluice_core::Seams<'_>,
+        _: &dyn sluice_core::Clock,
+        branch: &str,
+        n: u64,
+    ) -> anyhow::Result<bool> {
+        Ok(branch == BRANCH && n == 7)
+    }
+
     fn follow(
         &self,
         _: sluice_core::Seams<'_>,

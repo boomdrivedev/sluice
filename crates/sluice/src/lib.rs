@@ -1000,6 +1000,12 @@ pub trait PullRequests {
         worktree: &str,
     ) -> Result<Option<u64>>;
 
+    /// Whether the forge holds pull request `number`, open or closed, into
+    /// `branch`: what a wait by pull request reads before it follows one
+    /// (record 0130 D3).
+    fn holds(&self, seams: Seams<'_>, clock: &dyn Clock, branch: &str, number: u64)
+        -> Result<bool>;
+
     /// Where pull request `number` into `branch` stands, as the last
     /// intake read it.
     fn follow(
@@ -1074,6 +1080,11 @@ impl PullRequests for () {
 
     fn find(&self, _: Seams<'_>, _: &dyn Clock, _: &str, _: &str) -> Result<Option<u64>> {
         Ok(None)
+    }
+
+    /// With no forge, no pull request exists.
+    fn holds(&self, _: Seams<'_>, _: &dyn Clock, _: &str, _: u64) -> Result<bool> {
+        Ok(false)
     }
 
     fn follow(&self, _: Seams<'_>, _: &dyn Clock, branch: &str, _: u64) -> Result<Followed> {
@@ -2040,6 +2051,42 @@ pub fn run(
                         return refuse_several(id, "sluice wait", &several, json, USAGE, out)
                     }
                 },
+                Err(_) if pull_request.is_some() => {
+                    let n = pull_request.expect("a pull request named");
+                    // Record 0130 D3: a branch that takes no pull requests,
+                    // or a forge that holds no such one into it, follows
+                    // nothing.
+                    let held = match takes_pulls(&s, &target)? {
+                        false => false,
+                        true => match pulls.holds(s.seams(), clock, &target, n) {
+                            Ok(held) => held,
+                            Err(e) => {
+                                if waited_out(&e) && !INTERRUPTED.load(Ordering::SeqCst) {
+                                    return Ok(WAITING);
+                                }
+                                let what = format!("#{n}");
+                                let again = pull_wait(&target, n);
+                                let code = could_not_read(&unread(e)?, &what, &again, json, out)?;
+                                // Ctrl-C ended the retry policy's pauses.
+                                if INTERRUPTED.load(Ordering::SeqCst) {
+                                    return Ok(STOPPED);
+                                }
+                                return Ok(code);
+                            }
+                        },
+                    };
+                    if !held {
+                        let text = format!("no pull request #{n} into {target}");
+                        told::tell(out, json, Kind::NotFound, &text, &[])?;
+                        return Ok(FAILED);
+                    }
+                    let mode = PullMode::Wait { deadline };
+                    let worktree = SubmitHead::Worktree(worktree);
+                    return submit_pull(
+                        &s, host, pulls, clock, &worktree, &target, mode, json, confirms, pause,
+                        out,
+                    );
+                }
                 Err(_) if takes_pulls(&s, &target)? => {
                     let mode = PullMode::Wait { deadline };
                     let worktree = SubmitHead::Worktree(worktree);
