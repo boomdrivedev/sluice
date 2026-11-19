@@ -5890,6 +5890,7 @@ fn submit_pull(
                             "submission {} to {branch} from #{number} · {ahead}",
                             sub.id
                         )?;
+                        writeln!(out, "wait: {}", pull_wait(branch, number))?;
                     }
                     return Ok(0);
                 }

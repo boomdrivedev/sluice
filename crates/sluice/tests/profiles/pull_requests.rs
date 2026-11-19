@@ -2991,7 +2991,8 @@ fn no_wait_waiting_for_a_review_answers_with_the_pull_request() {
 }
 
 /// No wait, in words: after the line naming the pull request opened, the
-/// submission it was taken in as and what is queued ahead of it.
+/// submission it was taken in as and what is queued ahead of it, then the
+/// wait that follows the pull request (record 0130).
 #[test]
 fn no_wait_says_its_submission() {
     let g = OnGitHub::new("pr-no-wait-words", "");
@@ -3007,6 +3008,11 @@ fn no_wait_says_its_submission() {
     assert_eq!(
         lines.get(at + 1).copied(),
         Some(format!("submission {id} to main from #{n} · nothing queued ahead").as_str()),
+        "{stdout}"
+    );
+    assert_eq!(
+        lines.get(at + 2).copied(),
+        Some(format!("wait: sluice wait main --pull-request {n}").as_str()),
         "{stdout}"
     );
 }
