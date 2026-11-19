@@ -93,6 +93,22 @@ mod tests {
         assert_eq!(of(&vars), Vec::<String>::new());
     }
 
+    /// 153 (design D3 of `a-sluice-command-shows-inside-its-callers-trace`):
+    /// no caller's trace context, so a round the host process runs nests
+    /// under no command that started it.
+    #[test]
+    fn the_host_process_keeps_no_caller_s_trace_context() {
+        let started_from = [
+            (
+                "TRACEPARENT",
+                "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01",
+            ),
+            ("TRACESTATE", "agent=a1"),
+            ("OTEL_EXPORTER_OTLP_ENDPOINT", "http://localhost:4318"),
+        ];
+        assert_eq!(of(&started_from), vec!["OTEL_EXPORTER_OTLP_ENDPOINT"]);
+    }
+
     /// 135 (design D3): the host's own: what a run keeps, the locale,
     /// the user's settings and state, the agent of their keys, telemetry,
     /// the container engine, sluice's settings and git's configuration.

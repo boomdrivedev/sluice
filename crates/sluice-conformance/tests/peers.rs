@@ -32,6 +32,7 @@ fn on<'a>(h: &'a Harness, name: &str) -> Sluice<'a> {
     h.w().be_host(name);
     h.sluice().as_peer(Peer {
         name: name.into(),
+        repository: "this-repository".into(),
         lease: Duration::from_secs(300),
         alive: Duration::from_secs(120),
         signer: Some("box".into()),
@@ -150,6 +151,7 @@ fn as_signer<'a>(h: &'a Harness, name: &str, signer: Option<&str>) -> Sluice<'a>
     h.w().be_host(name);
     h.sluice().as_peer(Peer {
         name: name.into(),
+        repository: "this-repository".into(),
         lease: Duration::from_secs(300),
         alive: Duration::from_secs(120),
         signer: signer.map(str::to_string),
@@ -427,6 +429,7 @@ fn with_systems<'a>(h: &'a Harness, name: &str, systems: &[&str]) -> Sluice<'a> 
     h.w().be_host(name);
     h.sluice().as_peer(Peer {
         name: name.into(),
+        repository: "this-repository".into(),
         lease: Duration::from_secs(300),
         alive: Duration::from_secs(120),
         signer: Some("box".into()),
@@ -735,6 +738,7 @@ fn s42_a_replay_no_trusted_signer_proved_runs_again() {
     h.w().session("unit/y", "agent-y", &head);
     let sessions = Sluice::new(h.sluice().seams(), &h.f.clock).as_peer(Peer {
         name: "s".into(),
+        repository: "this-repository".into(),
         lease: Duration::from_secs(300),
         alive: Duration::from_secs(120),
         signer: Some("sessions".into()),
@@ -748,6 +752,7 @@ fn s42_a_replay_no_trusted_signer_proved_runs_again() {
             after: vec![],
             priority: 0,
             subject: None,
+            trace: None,
         })
         .unwrap()
         .unwrap()
@@ -802,6 +807,7 @@ fn signer<'a>(h: &'a Harness, name: &str, signer: &str) -> Sluice<'a> {
     h.w().signs_as(signer);
     h.sluice().as_peer(Peer {
         name: name.into(),
+        repository: "this-repository".into(),
         lease: Duration::from_secs(300),
         alive: Duration::from_secs(120),
         signer: Some(signer.into()),
@@ -921,10 +927,10 @@ fn a_pools_launch_holds_no_part() {
         1,
         "only the other repository's run counts"
     );
-    assert!(tests.hold(RunKind::Queue).unwrap().is_none());
+    assert!(tests.hold(RunKind::Queue, BRANCH).unwrap().is_none());
     // The other repository's run ends: its next takes the host's run.
     h.w().other_runs(0);
-    assert!(tests.hold(RunKind::Queue).unwrap().is_some());
+    assert!(tests.hold(RunKind::Queue, BRANCH).unwrap().is_some());
 }
 
 /// Each claim in the branch's log, with the forge's words when its
@@ -1065,6 +1071,7 @@ fn s18_a_signer_the_gate_does_not_trust_settles_nothing() {
         h.w().be_host("s");
         h.sluice().as_peer(Peer {
             name: "s".into(),
+            repository: "this-repository".into(),
             lease: Duration::from_secs(300),
             alive: Duration::from_secs(120),
             signer: Some("sessions".into()),
@@ -1091,6 +1098,7 @@ fn s18_a_signer_the_gate_does_not_trust_settles_nothing() {
             after: vec![],
             priority: 0,
             subject: None,
+            trace: None,
         })
         .unwrap()
         .unwrap()

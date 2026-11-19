@@ -1134,9 +1134,12 @@ mod tests {
             let room = Shared::new(Room::new(1, 0));
             let told = tasks.clone();
             room.on_free(move |r| told.owed(r));
-            let part = room.hold(RunKind::Queue, &busy).unwrap().expect("room");
+            let part = room
+                .hold(RunKind::Queue, &busy, "main")
+                .unwrap()
+                .expect("room");
             assert!(
-                room.hold(RunKind::Queue, &idle).unwrap().is_none(),
+                room.hold(RunKind::Queue, &idle, "main").unwrap().is_none(),
                 "the idle repository waits"
             );
             drop(part);

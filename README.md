@@ -111,17 +111,19 @@ combination passes.
   keeps it until it is released: one per landing, with nothing kept
   checked out by hand. It is a cheap environment on the tests' own fakes,
   not a deployment ([previews](https://boomdrivedev.github.io/sluice/guides/previews/)).
-- **Nothing to install.** sluice is one binary, and no service is kept
-  for it. A submit queues its head and tells sluice's own host process,
+- **Nothing to install.** sluice is one binary, and nothing needs a
+  service kept for it. A submit queues its head and tells sluice's own host process,
   which the first command that needs the host's queues moved starts; it
   moves every repository's queues on the host, each apart, and ends once
   none has work and nothing follows it. A submit waits for the outcome,
   or returns at once with `--no-wait`; waits and watches follow the host
   process. A crash or a sleeping laptop loses nothing: the next command
   that finds work in play starts it again, and it carries on from the
-  records. What a preview leaves up, the repository's own tools keep
-  until its release. Every decision is written to plain files before it
-  is acted on, so a crash at any point resumes cleanly.
+  records. A machine that runs queues for other hosts may keep `sluice
+  daemon` running, the same host process, which never ends for being
+  idle; nothing needs it. What a preview leaves up, the repository's own
+  tools keep until its release. Every decision is written to plain files
+  before it is acted on, so a crash at any point resumes cleanly.
 
 ## Install
 
@@ -168,6 +170,11 @@ the package and write the host's own settings from
 imports = [ inputs.sluice.nixosModules.sluice ];
 services.sluice = { enable = true; user = "alice"; settings.runs.max = 3; };
 ```
+
+`services.sluice.daemon.enable = true` also keeps `sluice daemon`
+running for that user, for a machine that runs queues for other hosts:
+a launchd agent on nix-darwin, a lingering user's systemd unit on NixOS.
+Nothing needs it, and it's off unless you set it.
 
 </details>
 
@@ -264,6 +271,7 @@ sets it up.
 | `sluice` | Where this worktree stands: its submission, each branch's queue, its place and what to run next. `--json` for a status line. |
 | `sluice overview` | Every branch's queue at a glance, with the latest landings and blames. `--json` for tools; `--json --watch` prints it again on each change. |
 | `sluice step <branch>` | One round of a branch's work, run by sluice's host process, then exit: for cron, CI or a hook. `--json` for scripts. |
+| `sluice daemon` | Keep sluice's host process running, on a machine that chooses to; nothing needs it. It never ends for being idle; `SIGTERM` stops it. |
 | `sluice amend <id>` | Reorder a queued submission (`--after`, `--priority`) until it is under test. `--json` for scripts. |
 | `sluice withdraw <id>` | Take a submission out of the queue; one already withdrawn exits `0` and says so. `--json` for scripts. |
 | `sluice protect` | Install the branch-protection hook; `--remove` takes it out. Warns of a worktree that has checked out a protected branch. `--json` for scripts. |

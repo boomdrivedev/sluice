@@ -11,7 +11,7 @@ use sluice::host_settings::{HostSettings, Look};
 use sluice::instance::{Instance, AFRESH};
 use sluice::profiles::Bound;
 use sluice::retry::Policy;
-use sluice::telemetry::{Settings, Telemetry};
+use sluice::telemetry::{Caller, Settings, Telemetry};
 use sluice::{run, Cli, Command, Driven, Following, Pause, Skipped, Sleep};
 use sluice_core::{Clock, Sluice, SystemClock};
 
@@ -23,6 +23,11 @@ fn main() {
         eprintln!("sluice: {e:#}");
         std::process::exit(3);
     });
+    // 135: the start lock a `sluice daemon` this process started afresh
+    // from in place handed it, its variable taken out of the environment
+    // beside the hand-over's, so no child inherits it (design D6 of
+    // `sluice-runs-as-a-daemon`).
+    let start_lock = sluice::host_process::take_start_lock();
     raise_open_files();
     // The run as it started, which a `sluice run` starts afresh as: its
     // environment before telemetry takes anything out of it, its
@@ -42,6 +47,13 @@ fn main() {
         let _ = e.print();
         std::process::exit(code);
     });
+    // 153 (design D1): the trace context the command was started under,
+    // read once from the environment it started with, which names only
+    // where its span nests.
+    let cli = Cli {
+        caller: Caller::read(started.env.iter().map(|(k, v)| (k, v))),
+        ..cli
+    };
     let json = cli.json();
     // A supervisor needs no repository: its run directory says everything.
     if let Some(Command::Supervise { dir }) = &cli.command {
@@ -62,6 +74,18 @@ fn main() {
             }
         }
     }
+    // `sluice daemon` is the host process kept running, and needs no
+    // repository either (137; design D1 of `sluice-runs-as-a-daemon`).
+    if let Some(Command::Daemon) = &cli.command {
+        match sluice::host_process::daemon(cli.choices(), start_lock) {
+            Ok(code) => std::process::exit(code),
+            Err(e) => {
+                eprintln!("sluice daemon: {e:#}");
+                std::process::exit(3);
+            }
+        }
+    }
+    drop(start_lock);
     // git's credential helper needs no repository: what it gives is in
     // its environment.
     if let Some(Command::Credential { operation }) = &cli.command {
@@ -262,15 +286,21 @@ fn main() {
         _ => (&SystemClock, &Sleep(every)),
     };
     let ran = match (kept, &cli.command) {
-        (Some(kept), Some(Command::Run { rounds })) => keep_running(
-            kept,
-            bound,
-            *rounds,
-            telemetry.as_ref(),
-            clock,
-            pause,
-            &mut out,
-        ),
+        // 153 (design D2): a kept `sluice run`, which goes through no
+        // `run`, is one span in its caller's trace all the same.
+        (Some(kept), Some(Command::Run { rounds })) => {
+            sluice::telemetry::command(cli.caller.as_ref(), &cli.words(), || {
+                keep_running(
+                    kept,
+                    bound,
+                    *rounds,
+                    telemetry.as_ref(),
+                    clock,
+                    pause,
+                    &mut out,
+                )
+            })
+        }
         _ => run(
             cli,
             bound.seams(),

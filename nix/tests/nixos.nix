@@ -20,6 +20,7 @@ let
   none = t.nixosSystem { services.sluice.package = null; };
   off = t.nixosSystem { services.sluice.enable = lib.mkForce false; };
   noUser = t.nixosSystem { services.sluice.user = lib.mkForce "carol"; };
+  daemon = t.nixosSystem { services.sluice.daemon.enable = true; };
   # Imported again under another module, as another flake's module that
   # imports it does.
   twice = t.nixosSystem { imports = [ { imports = [ t.outputs.nixosModules.sluice ]; } ]; };
@@ -64,6 +65,49 @@ let
   activationNamesOf = evaluated: builtins.attrNames (activationsOf evaluated);
 in
 {
+  # daemon-service, "Unset on NixOS" (record 0093 as amended 2026-11-18;
+  # design D12 of `sluice-runs-as-a-daemon`).
+  "The daemon is off unless turned on" =
+    t.expect (!base.config.services.sluice.daemon.enable) "services.sluice.daemon.enable is true unset"
+    ++ t.expect (
+      !(base.config.systemd.user.services ? sluice)
+    ) "systemd.user.services names sluice with the daemon unset"
+    ++ t.expect (
+      (lingerOf base).alice == (lingerOf off).alice
+    ) "alice's linger changes with the module, the daemon unset";
+
+  # daemon-service, "The unit", and the user's activation keeping it (137;
+  # record 0093 as amended 2026-11-18; design D10, D11 of
+  # `sluice-runs-as-a-daemon`).
+  "The daemon on NixOS" =
+    let
+      unit = daemon.config.systemd.user.services.sluice;
+      program = "${flakes}/bin/sluice";
+      keeps = "activate.sh keep alice ${program} daemon";
+    in
+    t.expect (t.failures daemon == [ ]) "the system fails: ${toString (t.failures daemon)}"
+    ++ t.expect (
+      plain unit.serviceConfig.ExecStart == plain ''"${program}" "daemon"''
+    ) "the unit runs ${plain unit.serviceConfig.ExecStart}, not ${plain program} daemon"
+    ++ t.expect (
+      unit.serviceConfig.Restart == "always"
+    ) "the unit restarts ${unit.serviceConfig.Restart}"
+    ++ t.expect (
+      unit.serviceConfig.KillMode == "process"
+    ) "the unit's stop kills ${unit.serviceConfig.KillMode}"
+    ++ t.expect (
+      unit.unitConfig.ConditionUser == "alice"
+    ) "the unit runs for ${unit.unitConfig.ConditionUser}"
+    ++ t.expect (
+      unit.startLimitIntervalSec == 0
+    ) "the unit is given up on after ${toString unit.startLimitIntervalSec}"
+    ++ t.expect (
+      unit.wantedBy == [ "default.target" ]
+    ) "the unit is wanted by ${toString unit.wantedBy}"
+    ++ t.expect daemon.config.users.users.alice.linger "alice does not linger"
+    ++ t.expect (lib.hasInfix (plain keeps) (activationOf daemon)) "alice's activation runs no `${plain keeps}`: ${activationOf daemon}"
+    ++ links daemon (lib.removeSuffix "; fi" (linkOf daemon (builtins.readFile ./files/empty.toml)));
+
   "On NixOS" =
     t.expect (t.failures every == [ ]) "every key fails: ${toString (t.failures every)}"
     ++ links every (linkOf every (builtins.readFile ./files/every.toml));
