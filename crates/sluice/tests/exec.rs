@@ -435,6 +435,37 @@ fn exec_opens_with_where_the_worktree_left_its_branch() {
     assert_eq!(checks_of(&out), ["a:test", "b:test"], "{}", text(&out));
 }
 
+/// The exec-checks spec's "The same files again" (16, 108; design D4): a
+/// clean worktree's second run on the files its first passed and recorded
+/// replays both checks, counts them, and records nothing more.
+#[test]
+fn a_second_run_on_the_same_files_replays_and_records_nothing() {
+    let s = moon_at_branch("exec-same-files", "true\n");
+    s.commit(&[("a/lib", "2"), ("b/lib", "2")]);
+    let out = s.sluice(&["exec", "bolt/x"]);
+    assert!(out.status.success(), "{}", text(&out));
+    assert!(text(&out).contains("passed: 2 tasks\n"), "{}", text(&out));
+    let mut first = recorded(&s);
+    first.sort();
+    assert_eq!(
+        first,
+        [
+            ("a:test".to_string(), "pass".to_string()),
+            ("b:test".to_string(), "pass".to_string())
+        ]
+    );
+    let results = s.results();
+
+    let out = s.sluice(&["exec", "bolt/x"]);
+    assert!(out.status.success(), "{}", text(&out));
+    assert!(
+        text(&out).contains("passed: 2 tasks (2 replayed)"),
+        "{}",
+        text(&out)
+    );
+    assert_eq!(s.results(), results, "a replay is never recorded as a run");
+}
+
 /// Each result `sluice exec` recorded: `(task, outcome)`.
 fn recorded(s: &Setup) -> Vec<(String, String)> {
     s.results()

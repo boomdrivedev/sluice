@@ -4581,7 +4581,7 @@ fn exec_runs_the_affected_checks_against_the_branch() {
     let req = f.world.requests().pop().unwrap();
     assert_eq!(req.place.name, "session/unit/a");
     assert_eq!(req.since, Some(base.clone()));
-    assert!(!req.replay);
+    assert!(req.replay, "a check sluice passed is replayed");
     assert_eq!(f.world.observed().len(), 1, "only the affected check ran");
     assert_eq!(f.world.adopted_places(), ["session/unit/a"]);
     assert_eq!(

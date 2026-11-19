@@ -590,7 +590,16 @@ impl Exec<'_> {
         if passed(report) {
             let n = report.tasks.len();
             let tasks = if n == 1 { "task" } else { "tasks" };
-            say(out, json, &format!("passed: {n} {tasks}"))?;
+            // Design D6: the replays among them, counted where there are any.
+            let replayed = report
+                .tasks
+                .iter()
+                .filter(|t| matches!(t.source, sluice_seams::Source::Replayed { .. }))
+                .count();
+            match replayed {
+                0 => say(out, json, &format!("passed: {n} {tasks}"))?,
+                k => say(out, json, &format!("passed: {n} {tasks} ({k} replayed)"))?,
+            }
         }
         if !report.not_run.is_empty() {
             say(
