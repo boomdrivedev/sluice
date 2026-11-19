@@ -159,10 +159,10 @@ $ sluice init codebuild
 
 Then, in AWS:
   - deploy it, as `sluice` or a name of your own:
-    aws cloudformation deploy --template-file .config/sluice-codebuild.yml --stack-name sluice --capabilities CAPABILITY_IAM --parameter-overrides LeadPrincipal=<the ARN the hosts that lead the branch reach AWS as> AppId=<sluice's app id> MaxCapacity=<the branch's parallel>
+    aws cloudformation deploy --template-file .config/sluice-codebuild.yml --stack-name sluice --capabilities CAPABILITY_IAM --parameter-overrides StartPrincipal=<the ARN the hosts that may run the branch's queue reach AWS as> AppId=<sluice's app id> MaxCapacity=<the branch's parallel>
   - fill the secret sluice-app-key with the app's private key:
     aws secretsmanager put-secret-value --secret-id sluice-app-key --secret-string file://<the app's key>
-  - name the profile that assumes the stack's lead role as [aws] profile on each host that leads the branch
+  - name the profile that assumes the stack's start role as [aws] profile on each host that may run the branch's queue
   - then `sluice init codebuild --stack sluice`, which names the pool in .config/sluice.toml
 ```
 
@@ -184,22 +184,23 @@ The template holds:
   `alias/<stack>-sign`, which only the sign build's role may sign with;
 - the **secret** for the app's private key, empty until you fill it;
 - the **rule** that starts the sign build when a run build ends;
-- the **lead role**, which the hosts that lead the branch assume.
+- the **start role**, which the hosts that may run the branch's queue
+  assume to start run builds.
 
 ### Deploy it
 
-Deploy the template with the command it printed. `LeadPrincipal` is the
-ARN the hosts that lead the branch reach AWS as, which may assume the
-lead role. `AppId` is sluice's app's id. `MaxCapacity` is the most
+Deploy the template with the command it printed. `StartPrincipal` is
+the ARN the hosts that may run the branch's queue reach AWS as, which
+may assume the start role. `AppId` is sluice's app's id. `MaxCapacity` is the most
 instances a fleet grows to, and `BaseCapacity` the instances it keeps
 warm. Fill the secret with the app's private key.
 
-On each host that leads the branch, name the AWS profile that assumes
-the lead role in the host's settings:
+On each host that may run the branch's queue, name the AWS profile that
+assumes the start role in the host's settings:
 
 ```toml
 [aws]
-profile = "sluice-lead"
+profile = "sluice-start"
 ```
 
 Every call sluice makes to the fleet uses that profile, whatever profile
@@ -212,7 +213,7 @@ Then name the pool in the policy, from the stack you deployed:
 
 ```console
 $ sluice init codebuild --stack sluice --region us-east-1
-.config/sluice.toml: [signers.codebuild], naming the key arn:aws:kms:us-east-1:111122223333:key/1234abcd-12ab-34cd-56ef-1234567890ab, and [pools.codebuild] appended; a branch's `trust` names codebuild and the signer its leading hosts sign as, that signer's `systems = []` so it claims no run, and the branch's `systems` the systems its runs need
+.config/sluice.toml: [signers.codebuild], naming the key arn:aws:kms:us-east-1:111122223333:key/1234abcd-12ab-34cd-56ef-1234567890ab, and [pools.codebuild] appended; a branch's `trust` names codebuild and the signer the hosts that may run its queue sign as, that signer's `systems = []` so it claims no run, and the branch's `systems` the systems its runs need
 ```
 
 It reads the stack's key with your own AWS credentials, `--profile`

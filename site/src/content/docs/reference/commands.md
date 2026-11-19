@@ -1111,10 +1111,10 @@ $ sluice init codebuild
 
 Then, in AWS:
   - deploy it, as `sluice` or a name of your own:
-    aws cloudformation deploy --template-file .config/sluice-codebuild.yml --stack-name sluice --capabilities CAPABILITY_IAM --parameter-overrides LeadPrincipal=<the ARN the hosts that lead the branch reach AWS as> AppId=<sluice's app id> MaxCapacity=<the branch's parallel>
+    aws cloudformation deploy --template-file .config/sluice-codebuild.yml --stack-name sluice --capabilities CAPABILITY_IAM --parameter-overrides StartPrincipal=<the ARN the hosts that may run the branch's queue reach AWS as> AppId=<sluice's app id> MaxCapacity=<the branch's parallel>
   - fill the secret sluice-app-key with the app's private key:
     aws secretsmanager put-secret-value --secret-id sluice-app-key --secret-string file://<the app's key>
-  - name the profile that assumes the stack's lead role as [aws] profile on each host that leads the branch
+  - name the profile that assumes the stack's start role as [aws] profile on each host that may run the branch's queue
   - then `sluice init codebuild --stack sluice`, which names the pool in .config/sluice.toml
 ```
 

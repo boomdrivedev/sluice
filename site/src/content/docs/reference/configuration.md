@@ -639,7 +639,7 @@ signer = "box"                   # the policy's name for this host's key
 key = "~/.config/sluice/signing" # an SSH private key on this host
 
 [aws]
-profile = "sluice-lead"          # the AWS profile a CodeBuild pool is reached as
+profile = "sluice-start"         # the AWS profile a CodeBuild pool is reached as
 
 [peers]
 lease = "5m"   # how long a quiet host keeps a branch
@@ -665,7 +665,7 @@ collector = "http://localhost:4318"  # a receiver on the host; needed where send
 | [`[runs] systems`](#runs-systems) | The systems the host runs. | It runs only some of the systems a policy names. |
 | [`[forge]`](#forge) | The GitHub App sluice pushes as, its key or a command that gives its token, and how often sluice asks GitHub for a branch's pull requests. | It lands on a branch whose remote is on GitHub. |
 | [`[signing]`](#signing) | The signer the host signs its results as, and its key. | It runs checks for a branch whose state is on its remote. |
-| [`[aws]`](#aws) | The AWS profile sluice reaches a CodeBuild pool as. | It leads a branch whose runs go to a CodeBuild pool. |
+| [`[aws]`](#aws) | The AWS profile sluice reaches a CodeBuild pool as. | It may run the queue of a branch whose runs go to a CodeBuild pool. |
 | [`[peers]`](#peers) | How long a quiet host keeps a branch, how often this host shows it is alive, and its name among the hosts. | It shares a branch's remote with other hosts. |
 | [`[deliveries]`](#deliveries) | How long an outcome is owed to its worktree before it shows as expired. | Its agents confirm their outcomes sooner or later than in a week. |
 | [`[[caches]]`](#caches) | The caches every run on the host shares. | Its builds share a cache, a compile server's or the task runner's. |
@@ -901,8 +901,8 @@ The AWS profile, `profile`, every call sluice makes to a CodeBuild pool
 on this host uses, as the AWS tools read it: its credentials, and its
 SSO session or credential command, from your AWS config. sluice uses it
 whatever profile the command that started sluice names, so a host that
-leads a branch on a fleet always reaches AWS as the role you gave it,
-the stack's lead role. Without `[aws]`, sluice finds credentials as the
+runs the queue of a branch on a fleet always reaches AWS as the role you
+gave it, the stack's start role. Without `[aws]`, sluice finds credentials as the
 AWS tools do, from the environment or the profile it names. sluice keeps
 no credential between calls.
 
