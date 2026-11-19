@@ -882,14 +882,17 @@ beside it:
 $ wt submit main --no-wait --subject "Batch review cards"
 pushed batch-review · opened #41: Batch review cards
 submission 12 to main from #41 · nothing queued ahead
+wait: sluice wait main --pull-request 41
 $ wt submit main --no-wait --json
-{"id":12,"branch":"main","ahead":[],"pull_request":41}
+{"id":12,"branch":"main","ahead":[],"pull_request":41,"wait":"sluice wait main --pull-request 41"}
 ```
 
 Otherwise it answers with the pull request and what it waits for, as
 `wt submit main --status` reports it later: under `--json`,
-`{"pull_request":41,"branch":"main","state":"waiting: needs 1 review"}`,
-with no `id`.
+`{"pull_request":41,"branch":"main","state":"waiting: needs 1 review","wait":"sluice wait main --pull-request 41"}`,
+with no `id`. Either way, `wait` is the command that follows the pull
+request by its number, from any folder and on any host, and the words
+end with it: `wait: sluice wait main --pull-request 41`.
 
 A pull request a submit opened is the agent's. When its submission
 leaves the queue without landing, blamed, in conflict, withdrawn, or on
