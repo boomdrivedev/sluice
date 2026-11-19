@@ -104,9 +104,9 @@ pub fn check(
         .collect();
     match (rules.signed, hosts.as_slice()) {
         (true, []) => lines.push(Line::Failed(format!(
-            "{branch}'s trust names no signer a host signs as, so no host can lead it and it \
-             forms nothing: trust the signer its leading hosts sign as beside the pool's, \
-             with systems = [] so it claims no run"
+            "{branch}'s trust names no signer a host signs as, so no host can run its queue and \
+             it forms nothing: trust the signer the hosts that run its queue sign as beside the \
+             pool's, with systems = [] so it claims no run"
         ))),
         (true, signers) => {
             let names: Vec<&str> = signers.iter().map(|s| s.as_str()).collect();

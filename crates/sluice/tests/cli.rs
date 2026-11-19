@@ -11372,11 +11372,12 @@ fn pool_check_says_a_fleet_tests_side_by_side() {
 }
 
 /// satisfies: record 0119 (design D11); rule core.60; the codebuild-pool
-/// spec's "A branch no host can lead": `main` trusting the pool's signer
-/// alone, `sluice pool check main` says no host can lead it and exits 1
+/// spec's "A gate that trusts only the pool's signer": `main` trusting the
+/// pool's signer alone, `sluice pool check main` says no host can run its
+/// queue and exits 1
 #[test]
-fn pool_check_names_a_branch_no_host_can_lead() {
-    if !alone("pool_check_names_a_branch_no_host_can_lead") {
+fn pool_check_names_a_branch_whose_queue_no_host_can_run() {
+    if !alone("pool_check_names_a_branch_whose_queue_no_host_can_run") {
         return;
     }
     let (_aws, key) = fleet_deployed();
@@ -11394,9 +11395,9 @@ fn pool_check_names_a_branch_no_host_can_lead() {
     assert_eq!(code, FAILED, "{said}");
     assert!(
         said.contains(
-            "failed  main's trust names no signer a host signs as, so no host can lead it and it \
-             forms nothing: trust the signer its leading hosts sign as beside the pool's, with \
-             systems = [] so it claims no run"
+            "failed  main's trust names no signer a host signs as, so no host can run its queue \
+             and it forms nothing: trust the signer the hosts that run its queue sign as beside \
+             the pool's, with systems = [] so it claims no run"
         ),
         "{said}"
     );
