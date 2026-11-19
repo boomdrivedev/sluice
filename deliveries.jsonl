@@ -1,0 +1,7 @@
+{"format": "weir-known/1", "reader": "change/sluices-measurements-name-their-repository-and-grow-with-no-run", "known_at": "2026-11-18T22:38:37Z"}
+{"format": "weir-known/1", "reader": "change/a-sluice-command-shows-inside-its-callers-trace", "known_at": "2026-11-19T01:39:26Z"}
+{"format": "weir-delivery/1", "key": "110:landed", "readers": ["change/sluice-names-the-host-that-runs-the-queue"], "message": "[sluice] #110 landed on bolt/sluice-reports-its-work-plainly as f71e833.", "recorded_at": "2026-11-19T02:20:48Z", "expires_at": "2026-11-26T02:20:48Z"}
+{"format": "weir-delivery/1", "key": "113:landed", "readers": ["change/each-submission-shows-its-wait-and-its-test"], "message": "[sluice] #113 landed on bolt/sluice-reports-its-work-plainly as cf3cb41.", "recorded_at": "2026-11-19T04:27:53Z", "expires_at": "2026-11-26T04:27:53Z"}
+{"format": "weir-handover/1", "key": "113:landed", "reader": "change/each-submission-shows-its-wait-and-its-test", "by": "inbox", "at": "2026-11-19T04:42:07Z"}
+{"format": "weir-confirmation/1", "key": "113:landed", "reader": "change/each-submission-shows-its-wait-and-its-test", "at": "2026-11-19T04:42:19Z"}
+{"format": "weir-known/1", "reader": "change/each-submission-shows-its-wait-and-its-test", "known_at": "2026-11-19T04:42:19Z"}

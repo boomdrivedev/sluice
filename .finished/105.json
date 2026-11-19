@@ -1,0 +1,26 @@
+{
+  "schema": "sluice/submission@1",
+  "id": 105,
+  "branch": "bolt/sluice-reports-its-work-plainly",
+  "head": "4be9a21faffc3afa7d90f86f5ed588557caa40da",
+  "from": {
+    "agent": "change/sluices-measurements-name-their-repository-and-grow-with-no-run",
+    "worktree": "change/sluices-measurements-name-their-repository-and-grow-with-no-run",
+    "path": "/Users/chuck/.local/share/flume/places/2db1db6f889b/change--sluices-measurements-name-their-repository-and-grow-with-no-run",
+    "host": "deneb"
+  },
+  "submitted": "2026-11-18T22:22:00Z",
+  "after": [],
+  "priority": 0,
+  "attempt": 1,
+  "state": "landed",
+  "tested": {
+    "combination": "2ba18982a72538a13e9bb22856aa6043ec3bca04",
+    "on": "5d7d1c3d0866db732382828379110e8ee89fe1d1",
+    "submissions": [
+      105
+    ]
+  },
+  "result": "passed",
+  "landed_as": "ba58c01d464f1cbe356e9237839388fd36b6b1a3"
+}

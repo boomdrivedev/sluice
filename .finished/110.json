@@ -1,0 +1,26 @@
+{
+  "schema": "sluice/submission@1",
+  "id": 110,
+  "branch": "bolt/sluice-reports-its-work-plainly",
+  "head": "d0453e230d0f2fad02beef52aeb4af2c28a03371",
+  "from": {
+    "agent": "change/sluice-names-the-host-that-runs-the-queue",
+    "worktree": "change/sluice-names-the-host-that-runs-the-queue",
+    "path": "/Users/chuck/.local/share/flume/places/2db1db6f889b/change--sluice-names-the-host-that-runs-the-queue",
+    "host": "deneb"
+  },
+  "submitted": "2026-11-19T02:12:56Z",
+  "after": [],
+  "priority": 0,
+  "attempt": 1,
+  "state": "landed",
+  "tested": {
+    "combination": "6b693899c7b1cea7d9f5622e6125d1f2e802bbd5",
+    "on": "b865b53686b5849f15683144e809c044bf2d102d",
+    "submissions": [
+      110
+    ]
+  },
+  "result": "passed",
+  "landed_as": "f71e833ff12351ab4e34e7a0aae7e8207742b76a"
+}
