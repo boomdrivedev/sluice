@@ -288,9 +288,23 @@ $ sluice exec feature/concurrent-units
 running the checks the worktree's own changes affect since 1a2b3c4 on feature/concurrent-units, now at c41e8f2
 ports: SLUICE_PORT_DB=20001 SLUICE_PORT_WEB=20000
 …what the tests print…
-passed: 2 tasks
-recorded 2 results under their keys for 8d41b6c
+passed: 2 tasks (1 replayed)
+recorded 1 result under its key for 8d41b6c
 ```
+
+The runner may answer a test from its cache, as it may in a
+combination's run. Such a replay stands only where sluice holds a pass
+the branch's gate counts for the test's key, held to the run's limits,
+grant and system, as a combination's replay is. A test sluice passed on
+the same files is so replayed, and the pass line counts it: `passed: 2
+tasks (1 replayed)`. Where the runner replays a test sluice holds no
+such pass for, as one a run of an unclean worktree passed, exec says
+`replayed with no result sluice recorded: <test>, …; running them
+again`. It then runs those tests again in the worktree, with no replay,
+waiting for room in the host's bound as the first run did. Their
+results stand in place of the replays, recorded as the first run's are,
+and the summary, the exit and `--json` are of the two runs together. A
+replay is never recorded as a run.
 
 When the worktree holds exactly its head, with nothing modified, staged
 or untracked, each test's result is recorded under its key as an open
@@ -331,11 +345,14 @@ failed: api:integration
 recorded 1 result under its key for 8d41b6c
 ```
 
-Under `--json`, `dependencies` gives each task that failed a test as
-`tasks` gives a test, `{task, hash, outcome, recorded}`, and
-`failed_by` gives each test a task failed, `{task, by}`, `by` naming
-the tasks. Neither is in `missing`, which lists only the required tests the
-run left without a result.
+Under `--json`, `since` is the full revision the worktree's own changes
+are read from, or `null` for a head that shares no history with the
+branch, and for a command. `tasks` gives each test as `{task, hash,
+outcome, recorded, replayed}`, `replayed` true for a test the runner
+answered from its cache. `dependencies` gives each task that failed a
+test as `tasks` gives a test, and `failed_by` gives each test a task
+failed, `{task, by}`, `by` naming the tasks. Neither is in `missing`,
+which lists only the required tests the run left without a result.
 
 `sluice exec <branch> -- <command>` runs any command the same way, with
 `SLUICE_CHECKOUT`, `SLUICE_TMP` and the ports in its environment, and
