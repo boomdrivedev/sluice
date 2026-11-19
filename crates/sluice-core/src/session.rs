@@ -40,6 +40,10 @@ pub enum SessionWork {
     },
     /// A command, in place of the runner's checks (89).
     Command(String),
+    /// Design D5: these checks again, each run with no replay and nothing
+    /// read beyond the worktree's head: the replays of the run before it
+    /// that no pass the gate counts proved (108).
+    Again(Vec<String>),
 }
 
 impl SessionWork {
@@ -55,7 +59,7 @@ impl SessionWork {
     pub fn command(&self) -> Option<&str> {
         match self {
             SessionWork::Command(c) => Some(c),
-            SessionWork::Checks { .. } => None,
+            SessionWork::Checks { .. } | SessionWork::Again(_) => None,
         }
     }
 }
@@ -261,6 +265,7 @@ impl Sluice<'_> {
                 tests.remove("not_run");
                 (Vec::new(), Some(plan.base.clone()), Vec::new())
             }
+            SessionWork::Again(checks) => (checks.clone(), None, Vec::new()),
         };
         RunRequest {
             place,
@@ -325,6 +330,33 @@ impl Sluice<'_> {
         command: bool,
         report: &RunReport,
     ) -> Result<Finished> {
+        self.finish_session_run(plan, session, started, command, report, None)
+    }
+
+    /// Design D5: a run again of `first`'s unproven replays, finished as
+    /// [`Sluice::finish_session`] finishes a run, read and recorded on its
+    /// own (92); what the session is told and left on its place is the two
+    /// runs joined, this run's checks in place of the replays they ran.
+    pub fn finish_again(
+        &self,
+        plan: &SessionPlan,
+        session: &Session,
+        started: &SessionStart,
+        report: &RunReport,
+        first: &Finished,
+    ) -> Result<Finished> {
+        self.finish_session_run(plan, session, started, false, report, Some(first))
+    }
+
+    fn finish_session_run(
+        &self,
+        plan: &SessionPlan,
+        session: &Session,
+        started: &SessionStart,
+        command: bool,
+        report: &RunReport,
+        first: Option<&Finished>,
+    ) -> Result<Finished> {
         let report = &match command {
             true => report.clone(),
             false => self.after_run(&started.run, &plan.policy.limits, report.clone())?,
@@ -334,6 +366,14 @@ impl Sluice<'_> {
             true => (report.clone(), Vec::new()),
             false => self.read_replays(plan, report.clone())?,
         };
+        let (report, recorded) = &match first {
+            None => (report.clone(), recorded),
+            Some(f) => (
+                joined(&f.report, report),
+                joined_recorded(&f.recorded, recorded),
+            ),
+        };
+        let recorded = recorded.clone();
         let outcome = if report.timed_out {
             RunOutcome::TimedOut
         } else if passed(report) {
@@ -552,6 +592,44 @@ impl Sluice<'_> {
             self.seams.state.record_results(&bytes)?;
         }
         Ok(n)
+    }
+}
+
+/// Design D5: `first`'s report with the checks `again` ran in place of the
+/// replays it ran them for.
+fn joined(first: &RunReport, again: &RunReport) -> RunReport {
+    let ran = |t: &sluice_seams::TaskResult| {
+        again
+            .tasks
+            .iter()
+            .chain(&again.dependencies)
+            .any(|a| a.task == t.task)
+    };
+    let mut report = first.clone();
+    report.tasks.retain(|t| !ran(t));
+    report.tasks.extend(again.tasks.iter().cloned());
+    report.dependencies.retain(|t| !ran(t));
+    report
+        .dependencies
+        .extend(again.dependencies.iter().cloned());
+    report.failed_by.extend(again.failed_by.iter().cloned());
+    report.missing.extend(again.missing.iter().cloned());
+    report.not_run.extend(again.not_run.iter().cloned());
+    report.kept_out.extend(again.kept_out.iter().cloned());
+    report.timed_out |= again.timed_out;
+    if report.refusals_unread.is_none() {
+        report.refusals_unread = again.refusals_unread.clone();
+    }
+    report
+}
+
+/// Design D5: what two runs recorded, as one: their results written,
+/// counted together, or why the one that wrote none did not.
+fn joined_recorded(first: &Recorded, again: Recorded) -> Recorded {
+    match (first, again) {
+        (Recorded::Written(a), Recorded::Written(b)) => Recorded::Written(a + b),
+        (Recorded::Written(_), again) => again,
+        (first, _) => first.clone(),
     }
 }
 

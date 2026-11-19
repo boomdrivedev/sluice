@@ -504,6 +504,42 @@ fn after_a_fix_exec_runs_the_fixed_check_and_replays_the_rest() {
     );
 }
 
+/// The exec-checks spec's "A pass sluice never recorded" (92, 108;
+/// design D5): a check passed with its change unstaged records nothing, so
+/// once the change is committed as it was, the next run's replay of it is
+/// proven by nothing; exec says so, runs it again and records its pass.
+#[test]
+fn a_pass_sluice_never_recorded_runs_again_and_is_recorded() {
+    let s = moon_at_branch("exec-never-recorded", "true\n");
+    std::fs::write(s.worktree.join("a/lib"), "2").unwrap();
+    let out = s.sluice(&["exec", "bolt/x"]);
+    assert!(out.status.success(), "{}", text(&out));
+    assert!(
+        text(&out).contains("not recorded: worktree is not clean"),
+        "{}",
+        text(&out)
+    );
+    assert_eq!(s.results(), "", "nothing is recorded");
+
+    let head = s.commit(&[]);
+    let out = s.sluice(&["exec", "bolt/x"]);
+    let said = text(&out);
+    assert!(out.status.success(), "{said}");
+    assert!(
+        said.contains("replayed with no result sluice recorded: a:test; running them again\n"),
+        "{said}"
+    );
+    assert!(said.contains("passed: 1 task\n"), "{said}");
+    assert!(
+        said.contains(&format!(
+            "recorded 1 result under its key for {}",
+            &head[..7]
+        )),
+        "{said}"
+    );
+    assert_eq!(recorded(&s), [("a:test".to_string(), "pass".to_string())]);
+}
+
 /// Each result `sluice exec` recorded: `(task, outcome)`.
 fn recorded(s: &Setup) -> Vec<(String, String)> {
     s.results()
