@@ -1887,3 +1887,45 @@ fn an_idle_daemon_keeps_running() {
     );
     assert_eq!(answering(&d), Some(daemon.pid()));
 }
+
+/// The lines of the host process's log and the one before it that say a
+/// host process started, or that one found the host held and ended.
+fn starts_in_log(d: &OnDisk) -> Vec<String> {
+    let paths = d.client(d.repo.dir()).paths().clone();
+    [paths.previous_log(), paths.log()]
+        .iter()
+        .flat_map(|p| {
+            std::fs::read_to_string(p)
+                .unwrap_or_default()
+                .lines()
+                .map(str::to_string)
+                .collect::<Vec<_>>()
+        })
+        .filter(|l| l.contains(" started") || l.contains("another host process holds"))
+        .collect()
+}
+
+/// host-daemon, "A submission to an idle daemon" (135, 137; design D1 of
+/// `sluice-runs-as-a-daemon`): a submit that does not wait, in a repository
+/// whose `main` holds a policy, reaches the idle daemon, which lands it,
+/// and no other host process starts.
+#[test]
+fn a_daemon_lands_a_submission_with_no_other_host_process() {
+    let d = OnDisk::new("daemon-lands", POLICY);
+    let dir = d.session("a");
+    let mut daemon = Daemon::start(&d, d.repo.dir());
+    answers(&d, &daemon);
+    std::thread::sleep(TICK);
+    let id = queued_live(&d, &dir);
+    within(60, "the submission lands", || {
+        state(&d, d.repo.dir(), id) == "landed"
+    });
+    assert!(daemon.runs(), "{}", daemon.said());
+    assert_eq!(answering(&d), Some(daemon.pid()));
+    let starts = starts_in_log(&d);
+    assert_eq!(starts.len(), 1, "one host process started: {starts:#?}");
+    assert!(
+        starts[0].contains(&format!("sluice daemon {} started", sluice::VERSION)),
+        "{starts:#?}"
+    );
+}
