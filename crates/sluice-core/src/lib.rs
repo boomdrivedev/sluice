@@ -355,20 +355,31 @@ impl<'a> Sluice<'a> {
     /// even when `line` changes nothing else, and no cause of refused
     /// writes is ended unless it does.
     fn carry(&self, line: &Line, always: bool) -> Result<Written> {
+        // The write's time, asked of the clock once and only where the
+        // write needs one.
+        let at = std::cell::OnceCell::new();
+        let now = || at.get_or_init(|| self.now()).clone();
+        let mut kept: Option<Line> = None;
+        // 154 (design D2 of `each-submission-shows-its-wait-and-its-test`):
+        // every write keeps each submission's time under test, where it
+        // moved, before the line's changes are read.
+        if line.under_test_moved() {
+            let mut l = line.clone();
+            l.keep_under_test(&now());
+            kept = Some(l);
+        }
         // 72, record 0122 (design D9): every write the lead makes sets
         // `kept`, its own time of its last write.
-        let led;
-        let line = match line.doc.lead.as_deref() == Some(self.peer.name.as_str())
-            && !line.changes().is_empty()
-        {
-            true => {
-                let mut l = line.clone();
-                l.doc.kept = Some(self.now());
-                led = l;
-                &led
-            }
-            false => line,
+        let leads = {
+            let read = kept.as_ref().unwrap_or(line);
+            read.doc.lead.as_deref() == Some(self.peer.name.as_str()) && !read.changes().is_empty()
         };
+        if leads {
+            let mut l = kept.take().unwrap_or_else(|| line.clone());
+            l.doc.kept = Some(now());
+            kept = Some(l);
+        }
+        let line = kept.as_ref().unwrap_or(line);
         let own = line.changes();
         if own.is_empty() && !always {
             return Ok(Written::Written(line.version));
@@ -377,7 +388,7 @@ impl<'a> Sluice<'a> {
         // branch with none reads no clock.
         let ending = match own.is_empty() || line.doc.refused_writes.is_empty() {
             true => None,
-            false => Some(self.now()).filter(|now| {
+            false => Some(now()).filter(|now| {
                 line.doc
                     .refused_writes
                     .iter()

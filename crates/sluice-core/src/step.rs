@@ -5766,6 +5766,69 @@ mod tests {
             .cloned()
     }
 
+    /// A clock a test moves on.
+    struct Moving(std::cell::Cell<chrono::DateTime<Utc>>);
+
+    impl Moving {
+        fn at_noon() -> Moving {
+            Moving(std::cell::Cell::new(Noon.now()))
+        }
+
+        fn advance(&self, minutes: i64) {
+            self.0
+                .set(self.0.get() + chrono::Duration::minutes(minutes));
+        }
+    }
+
+    impl Clock for Moving {
+        fn now(&self) -> chrono::DateTime<Utc> {
+            self.0.get()
+        }
+    }
+
+    /// 154, design D2 of `each-submission-shows-its-wait-and-its-test`: a
+    /// submission's combination goes under test, the clock moves four
+    /// minutes, and the round that reads its verdict keeps four minutes on
+    /// its record.
+    #[test]
+    fn every_write_keeps_a_submission_s_time_under_test() {
+        let f = Fakes::new();
+        let tip = f
+            .world
+            .init("main", &[(POLICY_PATH, POLICY), ("a/lib", "1")]);
+        f.world.task("a:test", "a/");
+        let head = f.world.work(&tip, &[("a/lib", Some("2"))]);
+        f.world.session("unit/a", "agent", &head);
+        f.world.hold_runs(true);
+        let clock = Moving::at_noon();
+        let seams = Seams {
+            checkout: &f.checkout,
+            tests: &f.tests,
+            branch: &f.branch,
+            driver: &f.driver,
+            state: &f.state,
+        };
+        let s = Sluice::new(seams, &clock);
+        let one = submit(&s, "unit/a");
+        s.step("main").unwrap();
+        let line = s.read_line("main").unwrap();
+        let held = holding(&line, &[one]).expect("#1 under test");
+        assert!(held.state.under_test());
+        let record = line.sub(one).unwrap();
+        assert_eq!(
+            record.under_test_since.as_deref(),
+            Some("2026-10-30T12:00:00Z")
+        );
+        assert_eq!(record.under_test_ms, 0);
+        clock.advance(4);
+        f.world.complete(&held.revision);
+        s.step("main").unwrap();
+        let record = s.state(one).unwrap().unwrap();
+        assert_eq!(record.state, State::Landed);
+        assert_eq!(record.under_test_ms, 240_000);
+        assert_eq!(record.under_test_since, None);
+    }
+
     /// Design D1, D2 (25, 81; rules core.7, core.17): a round drops the
     /// combination holding a withdrawn submission before it reads any run,
     /// its place listed to release and its finished run read for nothing,
