@@ -3103,6 +3103,50 @@ fn wait_follows_a_pull_requests_submission() {
     assert!(record.get("pull_request").is_none(), "{record}");
 }
 
+/// submission-wait, "Taken in here, out of time": this host took the
+/// agent's pull request in as submission `<id>`, whose check goes on until
+/// the test ends it. `sluice wait main --timeout 2s --json` in the agent's
+/// worktree exits 5 with `<id>`'s record, which gains no `wait`; in words
+/// it says `still waiting: sluice wait <id>` (record 0130 D5).
+#[test]
+fn a_wait_on_a_request_taken_in_here_out_of_time_prints_its_record() {
+    let g = OnGitHub::new("pr-wait-taken-record", "");
+    let hang = Hang::in_repo(&g);
+    let w = g.session("record", &[("hang", hang.file().as_str())]);
+    let out = g.wt_submit(&w, &["--no-wait", "--json"]);
+    assert_eq!(out.status.code(), Some(0), "{}", text(&out));
+    let doc: Value =
+        serde_json::from_slice(&out.stdout).unwrap_or_else(|e| panic!("{e}: {}", text(&out)));
+    let id = doc["id"].as_u64().unwrap_or_else(|| panic!("{doc}"));
+    let wait = |args: &[&str]| {
+        g.command(env!("CARGO_BIN_EXE_sluice"), &w)
+            .args(["wait", "main", "--timeout", "2s"])
+            .args(args)
+            .output()
+            .unwrap()
+    };
+    let out = wait(&["--json"]);
+    assert_eq!(out.status.code(), Some(sluice::WAITING), "{}", text(&out));
+    let record: Value =
+        serde_json::from_slice(&out.stdout).unwrap_or_else(|e| panic!("{e}: {}", text(&out)));
+    assert_eq!(record["id"], id, "{record}");
+    assert!(
+        record["state"] == "queued" || record["state"] == "testing",
+        "{record}"
+    );
+    assert!(record.get("wait").is_none(), "{record}");
+    let out = wait(&[]);
+    assert_eq!(out.status.code(), Some(sluice::WAITING), "{}", text(&out));
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let last = stdout.lines().rfind(|l| !l.trim().is_empty());
+    assert_eq!(
+        last,
+        Some(format!("still waiting: sluice wait {id}").as_str()),
+        "{}",
+        text(&out)
+    );
+}
+
 /// 135: beside a live driver, `sluice wait <branch>` takes no pull request
 /// in and runs no round: a request ready to be taken in is still not, out
 /// of time.
