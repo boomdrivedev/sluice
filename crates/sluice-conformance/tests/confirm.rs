@@ -137,6 +137,7 @@ fn two_keys_are_confirmed_each_on_its_own_branch() {
             after: Vec::new(),
             priority: 0,
             subject: None,
+            trace: None,
         })
         .unwrap()
         .unwrap()

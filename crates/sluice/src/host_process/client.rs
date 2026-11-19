@@ -353,9 +353,16 @@ impl Client {
         Ok(c)
     }
 
-    /// Ask for a session's or a preview's room (D12), the connection kept
-    /// while it waits and while it is held.
-    pub fn hold(&self, kind: RunKind, repository: &Path, place: &str) -> Result<Connection> {
+    /// Ask for a session's or a preview's room (D12), for the branch its
+    /// run is held to where it names one (154), the connection kept while
+    /// it waits and while it is held.
+    pub fn hold(
+        &self,
+        kind: RunKind,
+        repository: &Path,
+        place: &str,
+        branch: Option<&str>,
+    ) -> Result<Connection> {
         let mut c = self.reach()?;
         send(
             &mut c.writer,
@@ -363,6 +370,7 @@ impl Client {
                 kind,
                 repository: repository.to_path_buf(),
                 place: place.to_string(),
+                branch: branch.map(str::to_string),
             },
         )?;
         Ok(c)

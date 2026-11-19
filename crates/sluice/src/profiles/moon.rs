@@ -165,7 +165,9 @@ impl Moon {
         let jobs = cx.jobs.to_string();
         let mut argv: Vec<&str> = vec!["moon"];
         // ADR 0014: moon exports beside sluice; it reads no parent trace,
-        // so the run's resource attributes tie its spans to the round.
+        // so the run's resource attributes tie its spans to the round. It
+        // sends its spans and no metrics, since the run's environment
+        // turns them off (151 as amended 2026-11-18; rule core.66).
         if crate::telemetry::on() {
             argv.push("--otel");
         }

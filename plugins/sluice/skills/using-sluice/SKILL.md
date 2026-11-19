@@ -210,8 +210,8 @@ or end the session. Another host or a box kept running
 lands it, and `sluice status <id>` reads the outcome from the remote
 whenever you look.
 
-- `sluice step <branch>` printing `led` means another host keeps the branch:
-  nothing is wrong, and stepping again does not help.
+- `sluice step <branch>` printing `elsewhere` means another host runs the
+  branch's queue: nothing is wrong, and stepping again does not help.
 - A failure names its system when the branch requires more than one:
   `failed: cli:build (macos-arm64)`. Reproduce it on a host of that system,
   or read its log; `sluice exec` here runs this host's system only.

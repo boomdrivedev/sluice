@@ -770,8 +770,8 @@ impl App {
             bail!(
                 "a run build reads {repo} with a token of contents: read on it alone, which \
                  sluice buys with the app's key; [forge] credential {command} gives tokens \
-                 sluice cannot narrow, so name the app's key as [forge] key on a host that \
-                 leads a branch on a CodeBuild pool"
+                 sluice cannot narrow, so name the app's key as [forge] key on a host that runs \
+                 the queue of a branch on a CodeBuild pool"
             );
         }
         let installation = self.installation(repo)?;
@@ -1520,6 +1520,32 @@ mod tests {
         wider.store(true, std::sync::atomic::Ordering::SeqCst);
         let e = format!("{:#}", app.reading(&repo).unwrap_err());
         assert!(e.contains("also holds contents"), "{e}");
+    }
+
+    /// Record 0119 (design D4; core.26): a host whose `[forge]` names a
+    /// credential command buys no reading token, since it cannot narrow
+    /// what the command gives, and says to name the app's key on a host
+    /// that runs the queue of a branch on a CodeBuild pool; nothing is
+    /// asked of the command or of GitHub.
+    #[test]
+    fn a_credential_command_buys_no_reading_token() {
+        let command = CredentialCommand::new(
+            "/opt/forge/bin/token-helper",
+            vec!["--app".into(), "sluice".into()],
+        );
+        let policy = Rc::new(Policy::command());
+        let app = App::commanded(4242, command, API, Box::new(Utc::now), policy);
+        let repo = Repo {
+            owner: "acme".into(),
+            name: "widgets".into(),
+        };
+        assert_eq!(
+            format!("{:#}", app.reading(&repo).unwrap_err()),
+            "a run build reads acme/widgets with a token of contents: read on it alone, which \
+             sluice buys with the app's key; [forge] credential /opt/forge/bin/token-helper \
+             --app sluice gives tokens sluice cannot narrow, so name the app's key as [forge] \
+             key on a host that runs the queue of a branch on a CodeBuild pool"
+        );
     }
 
     /// A 5xx is GitHub unable to answer just then, told apart from any
