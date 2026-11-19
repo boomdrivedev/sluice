@@ -721,6 +721,7 @@ imports = [ inputs.sluice.darwinModules.sluice ]; # nixosModules.sluice on NixOS
 services.sluice = {
   enable = true;
   # user = "alice";  # on NixOS: the user who runs sluice
+  # daemon.enable = true;  # keep `sluice daemon` running, which nothing needs
   settings = {
     runs = { max = 3; cores = 12; };
     forge = { app_id = 123456; key = "~/.config/sluice/app.pem"; };
@@ -748,7 +749,21 @@ A file already there that is no link moves once, to
 `config.toml.before-nix`. The module puts sluice in the system profile:
 set `services.sluice.package` to install your own build, or to `null`
 to install none. It writes nothing else and installs no service, since
-sluice needs none. A configuration may import the module twice, itself
+sluice needs none, unless you turn the daemon on.
+
+`services.sluice.daemon.enable = true` keeps
+[`sluice daemon`](/sluice/reference/commands/#sluice-daemon) running for
+the same user, for a machine that runs queues for other hosts and runs
+no sluice command itself. On nix-darwin it's a launchd agent of the
+primary user, and what it says before it holds the host goes to
+`~/Library/Logs/sluice-daemon.log`. On NixOS it's a systemd user unit of
+`services.sluice.user`, who lingers, so it runs from boot with no one
+logged in. A new package restarts it. It's off unless you set it, and
+nothing needs it. A host that moves sluice's state folder with
+`XDG_STATE_HOME` in its users' shells gives the service the same
+variable, in `launchd.user.agents.sluice.serviceConfig.EnvironmentVariables`
+or `systemd.user.services.sluice.environment`, so the daemon and the
+user's commands reach one host process. A configuration may import the module twice, itself
 and through another flake's module that imports it: it declares
 `services.sluice` once.
 

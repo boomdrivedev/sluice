@@ -170,6 +170,11 @@ imports = [ inputs.sluice.nixosModules.sluice ];
 services.sluice = { enable = true; user = "alice"; settings.runs.max = 3; };
 ```
 
+`services.sluice.daemon.enable = true` also keeps `sluice daemon`
+running for that user, for a machine that runs queues for other hosts:
+a launchd agent on nix-darwin, a lingering user's systemd unit on NixOS.
+Nothing needs it, and it's off unless you set it.
+
 </details>
 
 Each installs two executables: `sluice`, and `wt-submit`, which
