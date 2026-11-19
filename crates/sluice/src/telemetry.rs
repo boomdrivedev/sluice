@@ -1024,6 +1024,78 @@ mod tests {
         );
     }
 
+    /// 154, design D4, D8 of `each-submission-shows-its-wait-and-its-test`
+    /// (rule core.66): a submission's times and a run's wait for room are
+    /// declared in seconds, and its end, the host's running checks and its
+    /// bound with no unit, each sent as the core and the host process emit
+    /// it.
+    #[test]
+    fn a_submission_s_times_are_sent_in_seconds() {
+        use opentelemetry_sdk::metrics::InMemoryMetricExporter;
+        let exporter = InMemoryMetricExporter::default();
+        let provider = meter_provider(exporter.clone(), Resource::builder_empty().build());
+        let subscriber = tracing_subscriber::registry().with(MetricsLayer::new(provider.clone()));
+        tracing::subscriber::with_default(subscriber, || {
+            let (repository, branch, outcome) = ("acme/app", "main", "landed");
+            tracing::info!(
+                monotonic_counter.sluice.submissions.ended = 1u64,
+                sluice.repository = repository,
+                sluice.branch = branch,
+                sluice.outcome = outcome,
+            );
+            tracing::info!(
+                histogram.sluice.submission.waited = 360.0f64,
+                sluice.repository = repository,
+                sluice.branch = branch,
+                sluice.outcome = outcome,
+            );
+            tracing::info!(
+                histogram.sluice.submission.tested = 240.0f64,
+                sluice.repository = repository,
+                sluice.branch = branch,
+                sluice.outcome = outcome,
+            );
+            tracing::info!(
+                gauge.sluice.host.running = 2u64,
+                sluice.repository = repository,
+                sluice.branch = branch,
+            );
+            tracing::info!(
+                gauge.sluice.host.bound = 4u64,
+                sluice.repository = repository,
+                sluice.branch = branch,
+            );
+            tracing::info!(
+                histogram.sluice.run.waited_for_room = 20.0f64,
+                sluice.repository = repository,
+                sluice.branch = branch,
+            );
+        });
+        provider.force_flush().unwrap();
+        let mut units: Vec<(String, String)> = exporter
+            .get_finished_metrics()
+            .unwrap()
+            .iter()
+            .flat_map(|r| r.scope_metrics())
+            .flat_map(|s| s.metrics())
+            .map(|m| (m.name().to_string(), m.unit().to_string()))
+            .collect();
+        units.sort();
+        units.dedup();
+        let unit = |name: &str, unit: &str| (name.to_string(), unit.to_string());
+        assert_eq!(
+            units,
+            [
+                unit("sluice.host.bound", ""),
+                unit("sluice.host.running", ""),
+                unit("sluice.run.waited_for_room", "s"),
+                unit("sluice.submission.tested", "s"),
+                unit("sluice.submission.waited", "s"),
+                unit("sluice.submissions.ended", ""),
+            ]
+        );
+    }
+
     /// A life of submission `n` that ended `outcome`, with `no_outcome`
     /// runs that decided nothing, submitted under `trace`.
     fn life(
