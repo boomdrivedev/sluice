@@ -87,9 +87,18 @@ pub fn withheld(e: &anyhow::Error) -> Option<&Withheld> {
 pub const USERNAME_VAR: &str = "SLUICE_CREDENTIAL_USERNAME";
 pub const PASSWORD_VAR: &str = "SLUICE_CREDENTIAL_PASSWORD";
 
+/// The variable naming the file a git call of sluice's made for its
+/// helper to mark once it gives git the credentials: git asks a helper
+/// only when the remote asks for credentials, and sends one of its own
+/// configuration's without asking, so a call the remote refused is told
+/// as refusing sluice's credentials only where git asked for them (record
+/// 0019 as amended 2026-11-18). The file holds no secret.
+pub const ASKED_VAR: &str = "SLUICE_CREDENTIAL_ASKED";
+
 /// `sluice credential <operation>`, git's credential helper protocol: a
 /// `get` answers with the credentials in its environment, when it has
-/// any; `store` and `erase` keep and remove nothing. What git sends is
+/// any, and marks the file [`ASKED_VAR`] names, which it opens and never
+/// makes; `store` and `erase` keep and remove nothing. What git sends is
 /// read to its end either way.
 pub fn helper(operation: &str, input: &mut dyn BufRead, out: &mut dyn Write) -> Result<()> {
     let mut line = String::new();
@@ -101,6 +110,18 @@ pub fn helper(operation: &str, input: &mut dyn BufRead, out: &mut dyn Write) -> 
     }
     if let (Ok(username), Ok(password)) = (std::env::var(USERNAME_VAR), std::env::var(PASSWORD_VAR))
     {
+        if let Some(asked) = std::env::var_os(ASKED_VAR) {
+            std::fs::OpenOptions::new()
+                .append(true)
+                .open(&asked)
+                .and_then(|mut f| f.write_all(b"get\n"))
+                .map_err(|e| {
+                    anyhow!(
+                        "marking {} as asked: {e}",
+                        std::path::Path::new(&asked).display()
+                    )
+                })?;
+        }
         write!(out, "username={username}\npassword={password}\n")?;
     }
     Ok(())
