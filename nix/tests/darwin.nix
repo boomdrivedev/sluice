@@ -20,6 +20,14 @@ let
   none = t.darwinSystem { services.sluice.package = null; };
   off = t.darwinSystem { services.sluice.enable = lib.mkForce false; };
   noHome = t.darwinSystem { users.users.alice.home = lib.mkForce null; };
+  daemon = t.darwinSystem { services.sluice.daemon.enable = true; };
+  daemonNone = t.darwinSystem {
+    services.sluice = {
+      package = null;
+      daemon.enable = true;
+    };
+  };
+  agentOf = evaluated: evaluated.config.launchd.user.agents.sluice.serviceConfig;
   # Imported again under another module, as another flake's module that
   # imports it does.
   twice = t.darwinSystem { imports = [ { imports = [ t.outputs.darwinModules.sluice ]; } ]; };
@@ -56,6 +64,11 @@ let
     path:
     t.expect (namesOf base path == namesOf off path)
       "${lib.concatStringsSep "." path} names ${toString (namesOf base path)} with the module, and ${toString (namesOf off path)} without";
+  # The names under `path` with the daemon on, against the module alone.
+  sameWithDaemon =
+    path:
+    t.expect (namesOf daemon path == namesOf base path)
+      "${lib.concatStringsSep "." path} names ${toString (namesOf daemon path)} with the daemon, and ${toString (namesOf base path)} without";
 in
 {
   # daemon-service, "Unset on nix-darwin" (record 0093 as amended
@@ -65,6 +78,103 @@ in
     ++ t.expect (
       !(base.config.launchd.user.agents ? sluice)
     ) "launchd.user.agents names sluice with the daemon unset";
+
+  # daemon-service, "The agent" (137; record 0093 as amended 2026-11-18;
+  # design D9, D11 of `sluice-runs-as-a-daemon`).
+  "The daemon on nix-darwin" =
+    let
+      agent = agentOf daemon;
+      line = "/bin/wait4path /nix/store && exec ${flakes}/bin/sluice daemon";
+      path = agent.EnvironmentVariables.PATH or "";
+    in
+    t.expect (t.failures daemon == [ ]) "the system fails: ${toString (t.failures daemon)}"
+    ++ t.expect (
+      map plain agent.ProgramArguments == [
+        "/bin/sh"
+        "-c"
+        (plain line)
+      ]
+    ) "the agent runs ${toString (map plain agent.ProgramArguments)}, not /bin/sh -c ${plain line}"
+    ++ t.expect (agent.RunAtLoad == true) "the agent does not run at load"
+    ++ t.expect (agent.KeepAlive == true) "the agent is not kept alive"
+    ++ t.expect (agent.AbandonProcessGroup == true) "a stop ends the agent's process group"
+    ++ t.expect (
+      agent.ThrottleInterval == 30
+    ) "the agent's throttle is ${toString agent.ThrottleInterval}, not 30"
+    ++ t.expect (
+      agent.ExitTimeOut == 75
+    ) "the agent's exit time out is ${toString agent.ExitTimeOut}, not 75"
+    ++ t.expect (
+      agent.EnvironmentVariables.HOME == "/Users/alice"
+    ) "the agent's HOME is ${toString agent.EnvironmentVariables.HOME}"
+    ++ t.expect (lib.hasPrefix "/etc/profiles/per-user/alice/bin:" path) "the agent's PATH is ${path}"
+    ++ t.expect (
+      agent.StandardErrorPath == "/Users/alice/Library/Logs/sluice-daemon.log"
+    ) "the agent's errors go to ${toString agent.StandardErrorPath}";
+
+  # daemon-service, "No package" (design D11 of `sluice-runs-as-a-daemon`).
+  "The daemon with no package" =
+    let
+      line = "/bin/wait4path /nix/store && exec sluice daemon";
+    in
+    t.expect (t.failures daemonNone == [ ]) "the system fails: ${toString (t.failures daemonNone)}"
+    ++ t.expect (
+      lib.last (agentOf daemonNone).ProgramArguments == line
+    ) "the agent's line is ${lib.last (agentOf daemonNone).ProgramArguments}, not ${line}";
+
+  # host-settings-module, "Only the daemon's service with the daemon on"
+  # (design D12 of `sluice-runs-as-a-daemon`).
+  "Only the daemon's service" =
+    t.expect
+      (
+        namesOf daemon [
+          "launchd"
+          "user"
+          "agents"
+        ] == lib.sort lib.lessThan (
+          namesOf base [
+            "launchd"
+            "user"
+            "agents"
+          ]
+          ++ [ "sluice" ]
+        )
+      )
+      "launchd.user.agents names ${
+        toString (
+          namesOf daemon [
+            "launchd"
+            "user"
+            "agents"
+          ]
+        )
+      } with the daemon, and ${
+        toString (
+          namesOf base [
+            "launchd"
+            "user"
+            "agents"
+          ]
+        )
+      } without"
+    ++ lib.concatMap sameWithDaemon [
+      [
+        "environment"
+        "etc"
+      ]
+      [
+        "launchd"
+        "agents"
+      ]
+      [
+        "launchd"
+        "daemons"
+      ]
+      [
+        "users"
+        "users"
+      ]
+    ];
 
   "On nix-darwin" =
     t.expect (t.failures every == [ ]) "every key fails: ${toString (t.failures every)}"
