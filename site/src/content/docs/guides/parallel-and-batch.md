@@ -87,7 +87,7 @@ $ sluice status 15
 #15 queued · waits behind #13: its checks read this change
 ```
 
-Of several worktrees submitted as one act, the leading ones whose
+Of several worktrees submitted as one act, the ones at its front whose
 changes no check reads land this way, in the act's order; from the
 first that a check reads, the rest take the queue.
 
