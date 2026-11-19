@@ -1,0 +1,22 @@
+{
+  "schema": "sluice/branch@1",
+  "branch": "bolt/sluice-is-tested-against-worktrunk-0-82-0",
+  "log": "sluice/log@1",
+  "base": "c931033b6cc7bdeba7130becea9ae683d54ba787",
+  "verified": true,
+  "covered_by": {
+    "at": "c931033b6cc7bdeba7130becea9ae683d54ba787",
+    "result": "passed",
+    "ran": 27,
+    "replayed": 0
+  },
+  "window": 4,
+  "next_place": 2,
+  "next_candidate": 2,
+  "candidates": [],
+  "landing": null,
+  "release": [],
+  "outbox": [],
+  "lead": "deneb",
+  "landed": "c931033b6cc7bdeba7130becea9ae683d54ba787"
+}

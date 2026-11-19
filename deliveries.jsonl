@@ -1,0 +1,4 @@
+{"format": "weir-delivery/1", "key": "112:landed", "readers": ["chore/sluice-checks-worktrunk-0-82-0"], "message": "[sluice] #112 landed on bolt/sluice-is-tested-against-worktrunk-0-82-0 as c931033.", "recorded_at": "2026-11-19T04:24:14Z", "expires_at": "2026-11-26T04:24:14Z"}
+{"format": "weir-handover/1", "key": "112:landed", "reader": "chore/sluice-checks-worktrunk-0-82-0", "by": "inbox", "at": "2026-11-19T04:26:38Z"}
+{"format": "weir-confirmation/1", "key": "112:landed", "reader": "chore/sluice-checks-worktrunk-0-82-0", "at": "2026-11-19T04:26:56Z"}
+{"format": "weir-known/1", "reader": "chore/sluice-checks-worktrunk-0-82-0", "known_at": "2026-11-19T04:26:56Z"}
