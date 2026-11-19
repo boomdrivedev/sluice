@@ -94,7 +94,12 @@ claims only runs of branches that trust its signer.
 
 A standing executor is a host whose sluice is moving its queues: its own
 process starts when any command of sluice's there finds work, or when
-whatever wakes the host runs one. Its build cache stays warm between
+whatever wakes the host runs one. A box that runs no sluice command of
+its own keeps [`sluice daemon`](/sluice/reference/commands/#sluice-daemon)
+running instead, the same process, which never ends for being idle. On
+nix-darwin and NixOS, sluice's module keeps it running where you set
+`services.sluice.daemon.enable = true`
+([who writes the host's config](/sluice/reference/configuration/#who-writes-it)). Its build cache stays warm between
 runs, so it is the cheapest place for a check. Its config says what it
 signs as, how many runs it holds, and which systems it runs:
 

@@ -84,7 +84,9 @@ Run the command it names, which reads the submission's record again.
 
 sluice's own host process moves the queue: a submit tells it of the
 submission, starting it where none runs, and it ends once the host's
-queues are empty. Nothing is installed or kept running for it. A verdict
+queues are empty. Nothing needs to be installed or kept running for it,
+though a machine that runs queues for other hosts may keep `sluice daemon`
+running. A verdict
 takes from a minute to most of an hour, and an agent whose submission
 holds its session hears nothing meanwhile: no message, no word from the
 user. So an agent submits with `--no-wait` and waits with `sluice wait`,
@@ -206,8 +208,8 @@ user.
 When the policy has `[signers]`, a branch with a `remote` keeps its queue on
 the remote, shared by every host that submits to it. There, a `--no-wait`
 submission goes on without you: push it and you may stop, close the laptop
-or end the session. Another host or a box kept running
-lands it, and `sluice status <id>` reads the outcome from the remote
+or end the session. Another host, or a machine that keeps `sluice daemon`
+running, lands it, and `sluice status <id>` reads the outcome from the remote
 whenever you look.
 
 - `sluice step <branch>` printing `elsewhere` means another host runs the

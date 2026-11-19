@@ -23,6 +23,11 @@ fn main() {
         eprintln!("sluice: {e:#}");
         std::process::exit(3);
     });
+    // 135: the start lock a `sluice daemon` this process started afresh
+    // from in place handed it, its variable taken out of the environment
+    // beside the hand-over's, so no child inherits it (design D6 of
+    // `sluice-runs-as-a-daemon`).
+    let start_lock = sluice::host_process::take_start_lock();
     raise_open_files();
     // The run as it started, which a `sluice run` starts afresh as: its
     // environment before telemetry takes anything out of it, its
@@ -69,6 +74,18 @@ fn main() {
             }
         }
     }
+    // `sluice daemon` is the host process kept running, and needs no
+    // repository either (137; design D1 of `sluice-runs-as-a-daemon`).
+    if let Some(Command::Daemon) = &cli.command {
+        match sluice::host_process::daemon(cli.choices(), start_lock) {
+            Ok(code) => std::process::exit(code),
+            Err(e) => {
+                eprintln!("sluice daemon: {e:#}");
+                std::process::exit(3);
+            }
+        }
+    }
+    drop(start_lock);
     // git's credential helper needs no repository: what it gives is in
     // its environment.
     if let Some(Command::Credential { operation }) = &cli.command {
