@@ -180,6 +180,7 @@ impl Sluice<'_> {
             revision: plan.revision.clone(),
             required: Vec::new(),
             since: None,
+            beyond: Vec::new(),
             limit: plan.timeout,
             limits: plan.limits.clone(),
             tests: plan.policy.tests.clone(),

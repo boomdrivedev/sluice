@@ -430,6 +430,7 @@ fn a_sessions_stack_stays_between_runs_and_goes_on_release() {
                 revision: head.clone(),
                 required: vec!["sh check.sh".into()],
                 since: None,
+                beyond: Vec::new(),
                 limit: Some(std::time::Duration::from_secs(180)),
                 limits: Limits {
                     docker: true,

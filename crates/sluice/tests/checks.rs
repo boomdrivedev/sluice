@@ -64,6 +64,7 @@ fn request(repo: &Repo, name: &str, tests: Settings) -> RunRequest {
         revision: sluice_seams::Rev::new(repo.rev("HEAD")),
         required: vec![],
         since: None,
+        beyond: Vec::new(),
         limit: Some(Duration::from_secs(60)),
         limits: Limits::default(),
         tests,

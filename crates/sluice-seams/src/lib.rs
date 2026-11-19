@@ -694,6 +694,12 @@ pub struct RunRequest {
     /// against; `None` when that revision is covered by no verdict, so
     /// every required check is affected (70).
     pub since: Option<Rev>,
+    /// The paths a worktree holds beyond `revision`, its uncommitted and
+    /// untracked files, which count among what the run changed since
+    /// `since` (36; design D2 of
+    /// a-worktrees-checks-run-only-what-its-own-changes-affect). Empty for
+    /// a checkout sluice made, which holds nothing beyond its revision.
+    pub beyond: Vec<String>,
     /// The time limit the branch's policy states (66).
     pub limit: Option<Duration>,
     /// 83: the memory and network the branch's policy states, and the

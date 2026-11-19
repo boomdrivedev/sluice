@@ -115,12 +115,18 @@ impl Moon {
             }
         }
         // 36, 70: what the run changed since `since`, an ancestor of its
-        // revision, read once; every required task when there is no
+        // revision, read once, with the paths a worktree holds beyond its
+        // revision (design D2); every required task when there is no
         // `since`, or when moon's own configuration changed, since then the
         // graph itself did. moon is handed the files rather than the range
         // (design D3).
         if let Some(since) = &request.since {
-            let changed = changed_files(place, since.as_str(), request.revision.as_str())?;
+            let mut changed = changed_files(place, since.as_str(), request.revision.as_str())?;
+            for path in &request.beyond {
+                if !changed.contains(path) {
+                    changed.push(path.clone());
+                }
+            }
             let graph_changed = changed
                 .iter()
                 .any(|p| p.starts_with(".moon/") || p == "moon.yml" || p.ends_with("/moon.yml"));
@@ -2765,6 +2771,7 @@ mod tests {
                 revision: Rev::new(""),
                 required: Vec::new(),
                 since: None,
+                beyond: Vec::new(),
                 limit: None,
                 limits: sluice_seams::Limits::default(),
                 tests: sluice_seams::Settings::new(),

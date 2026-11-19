@@ -176,6 +176,7 @@ impl Sluice<'_> {
             revision: head.clone(),
             required,
             since: Some(plan.base.clone()),
+            beyond: Vec::new(),
             limit: plan.rules.timeout,
             limits: plan.policy.limits.clone(),
             tests,
