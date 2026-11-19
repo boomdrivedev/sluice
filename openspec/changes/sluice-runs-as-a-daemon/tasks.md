@@ -17,7 +17,7 @@ run by hand.
 
 ## 2. sluice daemon is the host process kept running
 
-- [ ] 2.1 Add `sluice daemon`, named in `sluice --help`, its help saying it keeps sluice's host process running on a machine that chooses to and that nothing needs it, dispatched in `crates/sluice/src/main.rs` before any repository is opened, as `host` is (D1). True when `cargo test -p sluice --test cli the_help_names_sluice_daemon` passes.
+- [x] 2.1 Add `sluice daemon`, named in `sluice --help`, its help saying it keeps sluice's host process running on a machine that chooses to and that nothing needs it, dispatched in `crates/sluice/src/main.rs` before any repository is opened, as `host` is (D1). True when `cargo test -p sluice --test cli the_help_names_sluice_daemon` passes.
 - [ ] 2.2 Run the host process in a daemon mode whose loop never takes the idle end, `Named` giving `daemon` in `hello` and `host/version` (D1). True when `sluice exec bolt/sluice-keeps-a-gates-queues-moving -- cargo test -p sluice --test host_process an_idle_daemon_keeps_running` passes.
 - [ ] 2.3 Show that a submission to an idle daemon lands with no other host process started. True when `sluice exec bolt/sluice-keeps-a-gates-queues-moving -- cargo test -p sluice --test host_process a_daemon_lands_a_submission_with_no_other_host_process` passes.
 - [ ] 2.4 Note the daemon's working folder's repository in the host's index where it has sluice, before it runs as the host process (D8). True when `sluice exec bolt/sluice-keeps-a-gates-queues-moving -- cargo test -p sluice --test host_process a_daemon_indexes_the_repository_it_starts_in` passes.

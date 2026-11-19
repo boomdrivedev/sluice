@@ -4370,6 +4370,29 @@ fn sluice_run_says_nothing_needs_it() {
     );
 }
 
+/// host-daemon, "The help" (135, 137; design D1 of
+/// `sluice-runs-as-a-daemon`): `sluice --help` names `daemon`, saying it
+/// keeps sluice's host process running on a machine that chooses to and
+/// that nothing needs it, and `sluice daemon --help` says nothing needs it.
+#[test]
+fn the_help_names_sluice_daemon() {
+    let help = <Cli as clap::CommandFactory>::command()
+        .render_long_help()
+        .to_string();
+    let line = help
+        .lines()
+        .find(|l| l.trim_start().starts_with("daemon "))
+        .unwrap_or_else(|| panic!("no daemon: {help}"));
+    assert!(line.contains("host process running"), "{line}");
+    assert!(line.contains("on a machine that chooses to"), "{line}");
+    assert!(line.contains("nothing needs it"), "{line}");
+    let own = match Cli::try_parse_from(["sluice", "daemon", "--help"]) {
+        Err(e) => e.to_string(),
+        Ok(_) => panic!("--help parses to an error carrying the help"),
+    };
+    assert!(own.contains("nothing needs `sluice daemon`"), "{own}");
+}
+
 /// Submission `id`'s state, as its record says.
 fn state_of(f: &Fakes, id: u64) -> serde_json::Value {
     let (_, out) = sluice(f, &["status", &id.to_string(), "--json"]);
