@@ -11196,6 +11196,13 @@ fn init_codebuild_from_a_stack_appends_the_pool() {
     assert_eq!(code, 0, "{said}");
     assert!(said.contains(support::aws::KEY), "{said}");
     assert!(said.contains("sluice pool check"), "{said}");
+    assert!(
+        said.contains(
+            "a branch's `trust` names codebuild and the signer the hosts that may run its queue \
+             sign as, that signer's `systems = []` so it claims no run"
+        ),
+        "{said}"
+    );
     assert_eq!(aws.operations(), ["GetPublicKey"]);
     let asked: serde_json::Value = serde_json::from_str(&aws.requests()[0].body).unwrap();
     assert_eq!(asked["KeyId"], "alias/sluice-sign");

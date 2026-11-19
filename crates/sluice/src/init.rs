@@ -523,9 +523,9 @@ pub fn codebuild_stack(
     writeln!(
         out,
         "{POLICY_PATH}: [signers.codebuild], naming the key {}, and [pools.codebuild] appended; \
-         a branch's `trust` names codebuild and the signer its leading hosts sign as, that \
-         signer's `systems = []` so it claims no run, and the branch's `systems` the systems \
-         its runs need",
+         a branch's `trust` names codebuild and the signer the hosts that may run its queue \
+         sign as, that signer's `systems = []` so it claims no run, and the branch's `systems` \
+         the systems its runs need",
         key.arn
     )?;
     for system in left {
