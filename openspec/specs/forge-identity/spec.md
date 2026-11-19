@@ -394,7 +394,7 @@ SHALL get it once. A token held SHALL be taken by no app of another id
   `crates/sluice/tests/profiles/forge.rs`)
 
 #### Scenario: The host process's looks buy one token
-- **WHEN** a host process started afresh is held open with nothing in play, and looks at the idle repository four times, each look fetching main's records from GitHub as the app
+- **WHEN** a host process started afresh is held open with nothing in play, and looks at the idle repository four times, each look fetching the records from GitHub as the app
 - **THEN** one token for `o/r` was bought
   (`the_host_process_buys_a_repositorys_token_once_across_its_looks` in
   `crates/sluice/tests/profiles/pull_requests.rs`)

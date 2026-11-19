@@ -1642,9 +1642,9 @@ fn a_failed_list_ends_intake_and_the_queue_still_lands() {
 /// forge-identity, "The host process gets a repository's token once for
 /// its hour": a host process started afresh, held open with nothing in
 /// play, looks at the idle repository every few seconds, each look with a
-/// binding of its own that fetches main's records from GitHub as the app;
-/// over three looks and more it buys one token for o/r (record 0108 as
-/// amended 2026-11-19).
+/// binding of its own that fetches the records from GitHub as the app;
+/// over four looks it buys one token for o/r (record 0108 as amended
+/// 2026-11-19).
 #[test]
 fn the_host_process_buys_a_repositorys_token_once_across_its_looks() {
     use sluice::host_process::{client::Client, protocol::Answer};
@@ -1677,15 +1677,16 @@ fn the_host_process_buys_a_repositorys_token_once_across_its_looks() {
     let answer = held.next(Some(Duration::from_secs(10))).unwrap();
     assert!(matches!(answer, Some(Answer::Held)), "{answer:?}");
     // The host process looks at the repository as it starts, and every
-    // three seconds after, each look fetching main's records as the app.
-    let fetches = || {
+    // three seconds after, each look fetching every branch's records from
+    // GitHub as the app once, and main's again.
+    let looks = || {
         git.starts()
             .iter()
-            .filter(|a| a.contains(" fetch ") && a.contains("refs/sluice/state/"))
+            .filter(|a| a.contains(" fetch ") && a.contains("+refs/sluice/hosts/*"))
             .count()
     };
-    let until = Instant::now() + Duration::from_secs(20);
-    while fetches() < 4 {
+    let until = Instant::now() + Duration::from_secs(30);
+    while looks() < 4 {
         assert!(
             Instant::now() < until,
             "four looks: {:?}\n{}",
