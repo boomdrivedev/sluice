@@ -36,7 +36,7 @@ use left behind.
 
 ## 5. The refusals say the host that runs the queue
 
-- [ ] 5.1 A host's settings whose `[peers] alive` is not shorter than its `lease` are refused with `[peers] alive must be shorter than lease, so a host that runs a branch's queue and is alive keeps running it` (`instance.rs`); check: `sluice exec bolt/sluice-reports-its-work-plainly -- cargo test -p sluice --lib an_alive_as_long_as_the_lease_is_refused`, a new test
+- [x] 5.1 A host's settings whose `[peers] alive` is not shorter than its `lease` are refused with `[peers] alive must be shorter than lease, so a host that runs a branch's queue and is alive keeps running it` (`instance.rs`); check: `sluice exec bolt/sluice-reports-its-work-plainly -- cargo test -p sluice --lib an_alive_as_long_as_the_lease_is_refused`, a new test
 - [ ] 5.2 A CodeBuild pool's launch on a host whose `[forge]` names no app refuses, saying the token is bought by the host that runs the branch's queue and that a host that runs the queue of a branch on a CodeBuild pool names the app in `[forge]` (`profiles/codebuild/mod.rs`); check: `sluice exec bolt/sluice-reports-its-work-plainly -- cargo test -p sluice --lib a_launch_on_a_host_with_no_app_names_the_host_that_runs_the_queue`, a new test
 - [ ] 5.3 A reading token asked of a host whose `[forge]` names a credential command refuses, saying to name the app's key as `[forge] key` on a host that runs the queue of a branch on a CodeBuild pool (`profiles/github/app.rs`); check: `sluice exec bolt/sluice-reports-its-work-plainly -- cargo test -p sluice --lib a_credential_command_buys_no_reading_token`, a new test
 

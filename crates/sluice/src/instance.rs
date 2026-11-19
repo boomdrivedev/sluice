@@ -511,7 +511,8 @@ impl Instance {
         };
         if peers.alive >= peers.lease {
             bail!(
-                "[peers] alive must be shorter than lease, so a lead that is alive keeps its branch"
+                "[peers] alive must be shorter than lease, so a host that runs a branch's queue and \
+                 is alive keeps running it"
             );
         }
         let systems = match form.runs.systems {
@@ -1447,6 +1448,22 @@ dir = "/caches/moon"
         assert!(lead.contains("lead"), "{lead}");
         let queue = err("[queue]\nruns = \"daemon\"\n");
         assert!(queue.contains("queue"), "{queue}");
+    }
+
+    /// 73: a host's sign of life comes within its lease, so a host that
+    /// runs a branch's queue and is alive is never taken from: an `alive`
+    /// as long as the lease, or longer, is refused saying so (core.26).
+    #[test]
+    fn an_alive_as_long_as_the_lease_is_refused() {
+        let said = "[peers] alive must be shorter than lease, so a host that runs a branch's \
+                    queue and is alive keeps running it";
+        for text in [
+            "[peers]\nlease = \"2m\"\nalive = \"2m\"\n",
+            "[peers]\nlease = \"2m\"\nalive = \"3m\"\n",
+        ] {
+            assert_eq!(format!("{:#}", with(text, 4).unwrap_err()), said);
+        }
+        assert!(with("[peers]\nlease = \"2m\"\nalive = \"1m\"\n", 4).is_ok());
     }
 
     /// 35: an entry sluice cannot honour is refused, naming the entry by
