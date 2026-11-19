@@ -4896,6 +4896,35 @@ fn a_submit_by_name_opens_the_request_from_the_branch() {
     assert_eq!(g.bolt_on_github(), remote);
 }
 
+/// pull-request-submit, "Submitted by name": `main` takes pull requests
+/// with `reviews = 1`, and `sluice submit main --head bolt/x --no-wait
+/// --json` in the repository's main checkout opens a pull request from
+/// `bolt/x` and answers with it and the wait that follows it, with no `id`
+/// (124; record 0130).
+#[test]
+fn a_submit_by_name_names_its_pull_requests_wait() {
+    let g = OnGitHub::checked_policy("pr-by-name-wait", "reviews = 1", "1m", "", BOLTS);
+    g.repo.branch("bolt/x", "main", &[("x.txt", Some("x\n"))]);
+    g.repo
+        .git(&["push", "-q", "origin", "bolt/x:refs/heads/bolt/x"]);
+    let out = g
+        .command(env!("CARGO_BIN_EXE_sluice"), g.repo.dir())
+        .args(["submit", "main", "--head", "bolt/x", "--no-wait", "--json"])
+        .output()
+        .unwrap();
+    assert_eq!(out.status.code(), Some(0), "{}", text(&out));
+    let doc: Value =
+        serde_json::from_slice(&out.stdout).unwrap_or_else(|e| panic!("{e}: {}", text(&out)));
+    let n = g.pull_from("bolt/x").number;
+    assert_eq!(doc["pull_request"], n, "{doc}");
+    assert_eq!(
+        doc["wait"],
+        format!("sluice wait main --pull-request {n}").as_str(),
+        "{doc}"
+    );
+    assert!(doc.get("id").is_none(), "{doc}");
+}
+
 /// 124, 51, D6: the request a submit by name opened is blamed while GitHub
 /// refuses every post of its outcome, so the outcome stays owed to the
 /// request with no hand-over;
