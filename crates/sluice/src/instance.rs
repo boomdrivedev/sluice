@@ -36,7 +36,7 @@
 //! key = "~/.config/sluice/signing"
 //!
 //! [aws]
-//! profile = "sluice-lead"
+//! profile = "sluice-start"
 //!
 //! [peers]
 //! lease = "5m"
@@ -511,7 +511,8 @@ impl Instance {
         };
         if peers.alive >= peers.lease {
             bail!(
-                "[peers] alive must be shorter than lease, so a lead that is alive keeps its branch"
+                "[peers] alive must be shorter than lease, so a host that runs a branch's queue and \
+                 is alive keeps running it"
             );
         }
         let systems = match form.runs.systems {
@@ -994,8 +995,8 @@ mod tests {
         use aws_runtime::env_config::file::{EnvConfigFileKind, EnvConfigFiles};
         use aws_sdk_codebuild::config::ProvideCredentials as _;
         use aws_types::os_shim_internal::Env;
-        let named = with("[aws]\nprofile = \"sluice-lead\"\n", 4).unwrap();
-        assert_eq!(named.aws.profile.as_deref(), Some("sluice-lead"));
+        let named = with("[aws]\nprofile = \"sluice-start\"\n", 4).unwrap();
+        assert_eq!(named.aws.profile.as_deref(), Some("sluice-start"));
         let unset = with("", 4).unwrap();
         assert_eq!(unset.aws, Aws::default());
         assert_eq!(unset.changed_tables(&named), ["[aws]"]);
@@ -1014,7 +1015,7 @@ mod tests {
         let config = dir.join("config");
         std::fs::write(
             &config,
-            "[profile sluice-lead]\naws_access_key_id = AKIALEAD\naws_secret_access_key = lead\n\n\
+            "[profile sluice-start]\naws_access_key_id = AKIASTART\naws_secret_access_key = start\n\n\
              [profile person]\naws_access_key_id = AKIAPERSON\naws_secret_access_key = person\n",
         )
         .unwrap();
@@ -1044,8 +1045,8 @@ mod tests {
             ("AWS_ACCESS_KEY_ID", "AKIAENVIRONMENT"),
             ("AWS_SECRET_ACCESS_KEY", "environment"),
         ];
-        assert_eq!(made_as(&named.aws, &person), "AKIALEAD");
-        assert_eq!(made_as(&named.aws, &keys), "AKIALEAD");
+        assert_eq!(made_as(&named.aws, &person), "AKIASTART");
+        assert_eq!(made_as(&named.aws, &keys), "AKIASTART");
         assert_eq!(made_as(&unset.aws, &person), "AKIAPERSON");
         assert_eq!(made_as(&unset.aws, &keys), "AKIAENVIRONMENT");
         let _ = std::fs::remove_dir_all(&dir);
@@ -1447,6 +1448,22 @@ dir = "/caches/moon"
         assert!(lead.contains("lead"), "{lead}");
         let queue = err("[queue]\nruns = \"daemon\"\n");
         assert!(queue.contains("queue"), "{queue}");
+    }
+
+    /// 73: a host's sign of life comes within its lease, so a host that
+    /// runs a branch's queue and is alive is never taken from: an `alive`
+    /// as long as the lease, or longer, is refused saying so (core.26).
+    #[test]
+    fn an_alive_as_long_as_the_lease_is_refused() {
+        let said = "[peers] alive must be shorter than lease, so a host that runs a branch's \
+                    queue and is alive keeps running it";
+        for text in [
+            "[peers]\nlease = \"2m\"\nalive = \"2m\"\n",
+            "[peers]\nlease = \"2m\"\nalive = \"3m\"\n",
+        ] {
+            assert_eq!(format!("{:#}", with(text, 4).unwrap_err()), said);
+        }
+        assert!(with("[peers]\nlease = \"2m\"\nalive = \"1m\"\n", 4).is_ok());
     }
 
     /// 35: an entry sluice cannot honour is refused, naming the entry by

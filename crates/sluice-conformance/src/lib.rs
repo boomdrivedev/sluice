@@ -192,6 +192,7 @@ pub trait Rig {
                 after: after.to_vec(),
                 priority,
                 subject: None,
+                trace: None,
             })
             .expect("submit runs")
     }
@@ -209,6 +210,7 @@ pub trait Rig {
                 after: Vec::new(),
                 priority: 0,
                 subject: None,
+                trace: None,
             })
             .expect("submit runs")
     }
@@ -234,6 +236,7 @@ pub trait Rig {
                 after: after.to_vec(),
                 priority,
                 subjects: Vec::new(),
+                trace: None,
             })
             .expect("submit runs")
     }

@@ -38,6 +38,57 @@ fn stamp(path: &Path) -> Option<Stamp> {
     Some((m.len(), m.modified().ok()?))
 }
 
+/// The repository as its metrics name it, `sluice.repository` (rule
+/// core.66): the last two names of the path of an `origin` whose URL names
+/// a host, `scheme://[user@]host[:port]/…` or `[user@]host:…`, a trailing
+/// `/` and `.git` dropped; else the repository's folder's name, the folder
+/// holding `common` where that is `.git`, else `common`'s own name with
+/// `.git` dropped. Nothing else of the URL is kept, a credential least of
+/// all; no forge is named (core.1), as Flume names a place's repository
+/// (flume 218; design D3).
+pub fn repository_named(origin: Option<&str>, common: &Path) -> String {
+    origin
+        .and_then(hosted_path)
+        .and_then(|path| {
+            let path = path.trim_end_matches('/');
+            let path = path.strip_suffix(".git").unwrap_or(path);
+            let mut names = path.rsplit('/').filter(|n| !n.is_empty());
+            let name = names.next()?;
+            let owner = names.next()?;
+            Some(format!("{owner}/{name}"))
+        })
+        .unwrap_or_else(|| folder_named(common))
+}
+
+/// The path of a URL that names a host, `None` for a path, `file://` or
+/// anything else that names none.
+fn hosted_path(url: &str) -> Option<&str> {
+    if let Some((scheme, rest)) = url.split_once("://") {
+        if scheme.eq_ignore_ascii_case("file") {
+            return None;
+        }
+        let (host, path) = rest.split_once('/')?;
+        return (!host.is_empty()).then_some(path);
+    }
+    // git's scp form: a colon before any slash names a host.
+    let (host, path) = url.split_once(':')?;
+    (!host.is_empty() && !host.contains('/')).then_some(path)
+}
+
+/// The repository's folder's name from its common directory.
+fn folder_named(common: &Path) -> String {
+    let name = |p: &Path| {
+        p.file_name()
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or_default()
+    };
+    let own = name(common);
+    if own == ".git" {
+        return common.parent().map(name).unwrap_or_default();
+    }
+    own.strip_suffix(".git").map(str::to_string).unwrap_or(own)
+}
+
 impl LocalRefs {
     /// The repository holding `path`, a worktree or a git directory.
     pub fn open(path: &Path) -> Result<Self> {
@@ -84,16 +135,30 @@ impl LocalRefs {
     /// `insteadOf`: the forge it names is the one an identity is for. Read
     /// with no process (129).
     pub fn remote_url(&self, remote: &str) -> Result<String> {
+        match self.configured_url(remote)? {
+            Some(url) => Ok(url),
+            None => bail!("the remote {remote:?} has no url"),
+        }
+    }
+
+    /// The fetch address of `remote` as configured, `None` where it has
+    /// none or is no remote.
+    fn configured_url(&self, remote: &str) -> Result<Option<String>> {
         let repo = self.configured()?;
         let url = repo
             .try_find_remote_without_url_rewrite(remote)
             .transpose()
             .map_err(|e| anyhow!("reading the remote {remote:?}: {e}"))?
             .and_then(|r| r.url(gix::remote::Direction::Fetch).map(|u| u.to_bstring()));
-        match url {
-            Some(url) => Ok(url.to_string()),
-            None => bail!("the remote {remote:?} has no url"),
-        }
+        Ok(url.map(|u| u.to_string()))
+    }
+
+    /// The repository as its metrics name it, by the URL of `origin` as
+    /// configured and its common directory, [`repository_named`]; read with
+    /// no process and no fetch (129; rule core.66; design D3).
+    pub fn repository_name(&self) -> Result<String> {
+        let origin = self.configured_url("origin")?;
+        Ok(repository_named(origin.as_deref(), &self.common_dir()?))
     }
 
     /// The repository's default branch: the branch its common directory's
@@ -719,6 +784,29 @@ impl Branch for LocalRefs {
                 found if found.as_ref() != Some(expected) => Ok(Moved::Elsewhere(found)),
                 _ => other,
             },
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_repository_is_named_by_its_origin_else_its_folder() {
+        let common = Path::new("/src/app/.git");
+        let named = [
+            repository_named(Some("https://user:token@github.com/acme/app.git"), common),
+            repository_named(Some("git@github.com:acme/app.git"), common),
+            repository_named(Some("ssh://git@git.example:2222/acme/app/"), common),
+            repository_named(None, common),
+            repository_named(Some("/srv/git/app.git"), Path::new("/srv/q/app.git")),
+        ];
+        assert_eq!(named, ["acme/app", "acme/app", "acme/app", "app", "app"]);
+        for name in &named {
+            for part in ["user", "token", "github", "git.example"] {
+                assert!(!name.contains(part), "{name} holds {part}");
+            }
         }
     }
 }

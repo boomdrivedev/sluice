@@ -273,6 +273,7 @@ fn the_check_seam_counts_the_hosts_running_checks() {
         run_dir,
         pid: std::process::id(),
         admitted: "2026-10-23T09:00:00Z".into(),
+        branch: None,
     };
     checks
         .host_count()

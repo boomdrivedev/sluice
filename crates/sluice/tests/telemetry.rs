@@ -15,7 +15,7 @@ use sluice::instance::Instance;
 use sluice::profiles::checks::Checks;
 use sluice::telemetry::{Choices, Logs};
 use sluice::{run, Cli, Pause, CONFLICT, FAILED, LANDED};
-use sluice_core::OUTPUT;
+use sluice_core::{METRIC_KEYS, OUTPUT};
 use sluice_fakes::{Crash, Fakes};
 use sluice_seams::{Limits, Outcome, Place, Progress, Rev, RunRequest, Setting, Settings, Tests};
 use tracing::field::{Field, Visit};
@@ -173,6 +173,35 @@ fn has(seen: &[String], name: &str) -> bool {
     seen.iter().any(|s| s == name) || !metric(seen, name).is_empty()
 }
 
+/// The repository every metric names, as a metric line spells it: the
+/// fakes' host names none, so its peer's default (rule core.66; design D3).
+const REPOSITORY: &str = "sluice.repository=this-repository";
+
+/// What every metric names as its own, the repository and the branch, as
+/// a metric line spells them (rule core.66; design D2).
+fn named() -> String {
+    format!("{REPOSITORY} sluice.branch={BRANCH}")
+}
+
+/// Rule core.66 (design D2): every metric line in `seen` names the
+/// repository and the branch, and carries no field outside `METRIC_KEYS`.
+fn metrics_carry_only_their_keys(seen: &[String]) {
+    let branch = format!("sluice.branch={BRANCH}");
+    let metrics = ["monotonic_counter.", "histogram.", "gauge."];
+    for line in seen
+        .iter()
+        .filter(|s| metrics.iter().any(|m| s.starts_with(m)))
+    {
+        let fields: Vec<&str> = line.split(' ').skip(2).collect();
+        assert!(fields.contains(&REPOSITORY), "{line}");
+        assert!(fields.contains(&branch.as_str()), "{line}");
+        for field in fields {
+            let key = field.split_once('=').map_or(field, |(k, _)| k);
+            assert!(METRIC_KEYS.contains(&key), "{key} in {line}");
+        }
+    }
+}
+
 /// Each event of metric `name` in `seen`, as `<value> <field>=<value>...`.
 fn metric<'a>(seen: &'a [String], name: &str) -> Vec<&'a str> {
     seen.iter()
@@ -207,18 +236,12 @@ fn a_landing_reports_its_round_verdict_and_landing() {
     }
     assert!(!has(&seen, "sluice.blame"), "{seen:?}");
     assert!(!seen.iter().any(|s| s.starts_with("output ")), "{seen:?}");
-    // Each metric is the branch's, and a verdict is counted by its outcome.
-    let branch = format!("sluice.branch={BRANCH}");
-    let metrics = ["monotonic_counter.", "histogram.", "gauge."];
-    for line in seen
-        .iter()
-        .filter(|s| metrics.iter().any(|m| s.starts_with(m)))
-    {
-        assert!(line.split(' ').any(|f| f == branch), "{line}");
-    }
+    // Each metric is the repository's and the branch's, carries nothing of
+    // the run, and a verdict is counted by its outcome.
+    metrics_carry_only_their_keys(&seen);
     assert_eq!(
         metric(&seen, "monotonic_counter.sluice.verdicts"),
-        [format!("1 {branch} sluice.outcome=passed")]
+        [format!("1 {} sluice.outcome=passed", named())]
     );
 }
 
@@ -232,9 +255,10 @@ fn a_failure_reports_its_culprit() {
         assert!(has(&seen, name), "no {name} in {seen:?}");
     }
     assert!(!has(&seen, "sluice.land"), "{seen:?}");
+    metrics_carry_only_their_keys(&seen);
     assert_eq!(
         metric(&seen, "monotonic_counter.sluice.verdicts"),
-        [format!("1 sluice.branch={BRANCH} sluice.outcome=failed")]
+        [format!("1 {} sluice.outcome=failed", named())]
     );
     // ADR 0022, 20: the failed task's output, once, in the verdict's span.
     let outputs: Vec<&String> = seen.iter().filter(|s| s.starts_with("output ")).collect();
@@ -252,7 +276,8 @@ fn a_replay_is_counted() {
     }
     let seen = submit(&f, "unit/c", "agent-c", &[("lib/a.py", Some("one"))]);
     assert!(has(&seen, &format!("exit {LANDED}")), "{seen:?}");
-    let branch = format!("sluice.branch={BRANCH}");
+    metrics_carry_only_their_keys(&seen);
+    let branch = named();
     assert_eq!(
         metric(&seen, "monotonic_counter.sluice.tasks.replayed"),
         [format!("1 {branch}")],
@@ -261,6 +286,31 @@ fn a_replay_is_counted() {
     assert_eq!(
         metric(&seen, "monotonic_counter.sluice.tasks.ran"),
         [format!("0 {branch}")],
+        "{seen:?}"
+    );
+}
+
+/// Rule core.66, design D5: a replay counts the time its key took when it
+/// last ran, in seconds, with the repository and the branch.
+#[test]
+fn a_replay_counts_the_time_it_saved() {
+    let f = setup();
+    f.world.takes("lib:test", 4000, 1);
+    for (unit, agent, text) in [("unit/a", "agent-a", "one"), ("unit/b", "agent-b", "two")] {
+        let seen = submit(&f, unit, agent, &[("lib/a.py", Some(text))]);
+        assert!(has(&seen, &format!("exit {LANDED}")), "{seen:?}");
+    }
+    let seen = submit(&f, "unit/c", "agent-c", &[("lib/a.py", Some("one"))]);
+    assert!(has(&seen, &format!("exit {LANDED}")), "{seen:?}");
+    metrics_carry_only_their_keys(&seen);
+    assert_eq!(
+        metric(&seen, "monotonic_counter.sluice.tasks.replayed"),
+        [format!("1 {}", named())],
+        "{seen:?}"
+    );
+    assert_eq!(
+        metric(&seen, "monotonic_counter.sluice.tasks.time_saved"),
+        [format!("4.0 {}", named())],
         "{seen:?}"
     );
 }
@@ -276,9 +326,10 @@ fn a_conflict_is_counted() {
     let code = sluice(&f, &seen, &["submit", BRANCH, "--worktree", "unit/a"]).unwrap();
     let seen = seen.lines();
     assert_eq!(code, CONFLICT, "{seen:?}");
+    metrics_carry_only_their_keys(&seen);
     assert_eq!(
         metric(&seen, "monotonic_counter.sluice.conflicts"),
-        [format!("1 sluice.branch={BRANCH}")],
+        [format!("1 {}", named())],
         "{seen:?}"
     );
 }
@@ -304,12 +355,65 @@ fn a_refused_landing_is_counted() {
     f.world.hand_commit(BRANCH, &[("c/lib", Some("by hand"))]);
     step(&seen).unwrap();
     let seen = seen.lines();
+    metrics_carry_only_their_keys(&seen);
     assert_eq!(
         metric(&seen, "monotonic_counter.sluice.refused"),
-        [format!("1 sluice.branch={BRANCH}")],
+        [format!("1 {}", named())],
         "{seen:?}"
     );
     assert!(!has(&seen, "monotonic_counter.sluice.landed"), "{seen:?}");
+}
+
+/// 154, design D4, D9 (rules core.53, core.66): each submission's end is
+/// measured by how it ended, landed, blamed and withdrawn from the queue,
+/// its seconds waiting and under test beside it, each with the repository
+/// and the branch and nothing outside `METRIC_KEYS`.
+#[test]
+fn a_submission_s_end_is_measured() {
+    let f = setup();
+    let mut seen = submit(&f, "unit/a", "agent-a", &[("lib/a.py", Some("changed"))]);
+    assert!(has(&seen, &format!("exit {LANDED}")), "{seen:?}");
+    f.world.fails_with("tests:t-a", "tests/t_a.py", "broken");
+    let blamed = submit(&f, "unit/b", "agent-b", &[("tests/t_a.py", Some("broken"))]);
+    assert!(has(&blamed, &format!("exit {FAILED}")), "{blamed:?}");
+    seen.extend(blamed);
+    work(&f, "unit/c", "agent-c", &[("lib/a.py", Some("again"))]);
+    let queued = Seen::default();
+    sluice(
+        &f,
+        &queued,
+        &["submit", BRANCH, "--worktree", "unit/c", "--no-wait"],
+    )
+    .unwrap();
+    sluice(&f, &queued, &["withdraw", "3", "--as", "agent-c"]).unwrap();
+    seen.extend(queued.lines());
+    metrics_carry_only_their_keys(&seen);
+    let branch = named();
+    assert_eq!(
+        metric(&seen, "monotonic_counter.sluice.submissions.ended"),
+        ["landed", "failed", "withdrawn"].map(|o| format!("1 {branch} sluice.outcome={o}")),
+        "{seen:?}"
+    );
+    for name in [
+        "histogram.sluice.submission.waited",
+        "histogram.sluice.submission.tested",
+    ] {
+        let outcomes: Vec<&str> = metric(&seen, name)
+            .iter()
+            .map(|m| m.rsplit_once("sluice.outcome=").map_or("", |(_, o)| o))
+            .collect();
+        assert_eq!(
+            outcomes,
+            ["landed", "failed", "withdrawn"],
+            "{name} in {seen:?}"
+        );
+    }
+    let tested = metric(&seen, "histogram.sluice.submission.tested");
+    assert_eq!(
+        tested[2],
+        format!("0.0 {branch} sluice.outcome=withdrawn"),
+        "{seen:?}"
+    );
 }
 
 /// A command chooses only what its flags or its `SLUICE_OTEL*` variables

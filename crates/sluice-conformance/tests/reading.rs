@@ -414,6 +414,7 @@ fn led_with_no_room(h: &Harness) -> sluice_core::Sluice<'_> {
     h.w().be_host("a");
     let s = h.sluice().as_peer(sluice_core::Peer {
         name: "a".into(),
+        repository: "this-repository".into(),
         lease: std::time::Duration::from_secs(300),
         alive: std::time::Duration::from_secs(120),
         signer: Some("box".into()),
@@ -479,6 +480,7 @@ fn a_running_runs_time_is_its_own() {
     h.sluice()
         .as_peer(sluice_core::Peer {
             name: "a".into(),
+            repository: "this-repository".into(),
             lease: std::time::Duration::from_secs(300),
             alive: std::time::Duration::from_secs(120),
             signer: Some("box".into()),

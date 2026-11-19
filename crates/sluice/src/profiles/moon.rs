@@ -170,7 +170,9 @@ impl Moon {
         let jobs = cx.jobs.to_string();
         let mut argv: Vec<&str> = vec!["moon"];
         // ADR 0014: moon exports beside sluice; it reads no parent trace,
-        // so the run's resource attributes tie its spans to the round.
+        // so the run's resource attributes tie its spans to the round. It
+        // sends its spans and no metrics, since the run's environment
+        // turns them off (151 as amended 2026-11-18; rule core.66).
         if crate::telemetry::on() {
             argv.push("--otel");
         }
@@ -723,20 +725,51 @@ fn parse_version(text: &str) -> Option<(u64, u64)> {
     Some((parts.next()?.parse().ok()?, parts.next()?.parse().ok()?))
 }
 
-/// A file of `revision`'s tree, read by git in the place; `None` when the
-/// tree has no such file.
+/// A file of `revision`'s tree, read by git in the place as moon reads a
+/// task's input to hash it: a tracked symlink by the content of the file
+/// it names, followed within the tree, as git's `--follow-symlinks` does
+/// (C.2 moon row, C.6). `None` when the tree has no such file, or the
+/// path, followed, is no file of the tree: a link out of it, one that
+/// names nothing, a loop or a directory, none of which the tree bears
+/// out.
 pub fn file_at(place: &Path, revision: &str, path: &str) -> Option<Vec<u8>> {
-    let out = Command::new("git")
+    use std::io::Write;
+    let mut child = Command::new("git")
         .current_dir(place)
-        .args(["cat-file", "blob", &format!("{revision}:{path}")])
+        .args(["cat-file", "--batch", "--follow-symlinks", "-Z"])
         .env_remove("GIT_DIR")
         .env_remove("GIT_WORK_TREE")
         .env_remove("GIT_INDEX_FILE")
-        .stdin(Stdio::null())
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
         .stderr(Stdio::null())
-        .output()
+        .spawn()
         .ok()?;
-    out.status.success().then_some(out.stdout)
+    let mut ask = child.stdin.take()?;
+    let asked = ask.write_all(format!("{revision}:{path}\0").as_bytes());
+    drop(ask);
+    let out = child.wait_with_output().ok()?;
+    asked.ok()?;
+    if !out.status.success() {
+        return None;
+    }
+    blob_of_batch(&out.stdout)
+}
+
+/// The content `git cat-file --batch -Z` answers for one object,
+/// `<oid> blob <size>\0<content>\0`; `None` for any other answer, an
+/// object missing, a tree, or a link `--follow-symlinks` could not follow
+/// within the tree.
+fn blob_of_batch(out: &[u8]) -> Option<Vec<u8>> {
+    let end = out.iter().position(|b| *b == 0)?;
+    let header = std::str::from_utf8(&out[..end]).ok()?;
+    let mut words = header.split(' ');
+    let (_, kind, size) = (words.next()?, words.next()?, words.next()?);
+    if kind != "blob" || words.next().is_some() {
+        return None;
+    }
+    let size: usize = size.parse().ok()?;
+    out.get(end + 1..end + 1 + size).map(<[u8]>::to_vec)
 }
 
 /// The files that differ between two revisions, by git, in the place.
@@ -1714,6 +1747,130 @@ mod tests {
             let e = check_key(&b, "b:test", &blob, &tree(&[("b/y", "2")])).unwrap_err();
             assert!(e.to_string().contains("a/x is not in the tree"), "{e}");
             assert_eq!(missing(&e), None, "{e}");
+        }
+    }
+
+    /// How [`file_at`] reads a revision's tree, over a repository git made.
+    mod tree {
+        use super::super::*;
+        use std::collections::BTreeMap;
+
+        /// A repository holding a file, a link to it from another folder,
+        /// and links out of the tree, to nothing, to a folder and in a
+        /// loop; removed when the test ends.
+        struct Links(PathBuf);
+
+        impl Links {
+            fn new() -> Links {
+                let dir =
+                    std::env::temp_dir().join(format!("sluice-moon-links-{}", std::process::id()));
+                let _ = std::fs::remove_dir_all(&dir);
+                std::fs::create_dir_all(dir.join("docs/arch")).unwrap();
+                std::fs::create_dir_all(dir.join(".claude/rules")).unwrap();
+                let at = |p: &str| dir.join(p);
+                std::fs::write(at("docs/arch/core.md"), "the rules\n").unwrap();
+                let link = |to: &str, p: &str| std::os::unix::fs::symlink(to, at(p)).unwrap();
+                link("../../docs/arch/core.md", ".claude/rules/core.md");
+                link("/etc/hosts", "out");
+                link("../../../../outside", ".claude/rules/leaves.md");
+                link("nothing", "dangling");
+                link("docs", "folder");
+                link("loop-b", "loop-a");
+                link("loop-a", "loop-b");
+                let git = |args: &[&str]| {
+                    let out = Command::new("git")
+                        .current_dir(&dir)
+                        .args(args)
+                        .env("GIT_CONFIG_GLOBAL", "/dev/null")
+                        .env("GIT_CONFIG_NOSYSTEM", "1")
+                        .env_remove("GIT_DIR")
+                        .env_remove("GIT_WORK_TREE")
+                        .env_remove("GIT_INDEX_FILE")
+                        .stdin(Stdio::null())
+                        .output()
+                        .unwrap();
+                    assert!(out.status.success(), "git {args:?}: {out:?}");
+                };
+                git(&["init", "-q"]);
+                git(&["add", "-A"]);
+                git(&[
+                    "-c",
+                    "user.name=t",
+                    "-c",
+                    "user.email=t@t",
+                    "commit",
+                    "-q",
+                    "-m",
+                    "links",
+                ]);
+                Links(dir)
+            }
+        }
+
+        impl Drop for Links {
+            fn drop(&mut self) {
+                let _ = std::fs::remove_dir_all(&self.0);
+            }
+        }
+
+        /// Record 0129 (C.2 moon row, C.6): moon hashes a task's input
+        /// through a tracked link, so the tree is read through it, from the
+        /// link's own folder: flume's `.claude/rules/core-details.md`, a
+        /// link to `docs/architecture/core-details.md`, read as the link's
+        /// own text refused root:format's key on 2026-11-19. A link that
+        /// leaves the tree, or names a path the tree does not hold, is no
+        /// file of the tree, and a key naming it is still refused.
+        #[test]
+        fn a_tracked_link_is_read_as_the_file_it_names() {
+            let r = Links::new();
+            let read = |p: &str| file_at(&r.0, "HEAD", p);
+            assert_eq!(
+                read("docs/arch/core.md").as_deref(),
+                Some(&b"the rules\n"[..])
+            );
+            assert_eq!(
+                read(".claude/rules/core.md").as_deref(),
+                Some(&b"the rules\n"[..])
+            );
+            assert_eq!(
+                read("folder/arch/core.md").as_deref(),
+                Some(&b"the rules\n"[..])
+            );
+            for p in [
+                "out",
+                ".claude/rules/leaves.md",
+                "dangling",
+                "folder",
+                "loop-a",
+                "missing",
+                "docs",
+            ] {
+                assert_eq!(read(p), None, "{p}");
+            }
+
+            let key_of = |input: &str, content: &[u8]| {
+                let inputs: BTreeMap<&str, String> = [(input, sha256_hex(content))].into();
+                let bytes = serde_json::to_vec(&serde_json::json!([{
+                    "deps": {}, "inputs": inputs, "target": "root:format"
+                }]))
+                .unwrap();
+                (sha256_hex(&bytes), bytes)
+            };
+            let (key, bytes) = key_of(".claude/rules/core.md", b"the rules\n");
+            check_key(&key, "root:format", &|_| Some(bytes.clone()), &read).unwrap();
+            for (link, on_disk) in [
+                ("out", std::fs::read("/etc/hosts").unwrap_or_default()),
+                (".claude/rules/leaves.md", b"outside\n".to_vec()),
+                ("dangling", b"nothing\n".to_vec()),
+            ] {
+                let (key, bytes) = key_of(link, &on_disk);
+                let e =
+                    check_key(&key, "root:format", &|_| Some(bytes.clone()), &read).unwrap_err();
+                assert_eq!(
+                    e.to_string(),
+                    format!("root:format: {link} is not in the tree")
+                );
+            }
         }
     }
 

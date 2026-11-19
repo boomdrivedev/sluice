@@ -41,7 +41,7 @@ pub struct Fake(RefCell<State>);
 impl Fake {
     pub fn new() -> Fake {
         Fake(RefCell::new(State {
-            identity: format!("arn:aws:sts::{ACCOUNT}:assumed-role/sluice-lead/host"),
+            identity: format!("arn:aws:sts::{ACCOUNT}:assumed-role/sluice-start/host"),
             ..State::default()
         }))
     }

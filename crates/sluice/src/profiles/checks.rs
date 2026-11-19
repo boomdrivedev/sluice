@@ -65,7 +65,7 @@ use sluice_seams::{
     log_tail, AtBound, Enforced, Equip, EquipStep, Equipped, Found, HostRun, KeptOutTask, Limits,
     Network, NotRun, Outcome, Part, Place, Progress, Proof, Reading, Reads, Refusals, Rev,
     RunHandle, RunKind, RunReport, RunRequest, Running, Setting, Settings, Source, TaskLog,
-    TaskProgress, TaskResult, Tests, Through,
+    TaskProgress, TaskResult, TaskState, Tests, Through,
 };
 
 use super::moon::{self, Moon};
@@ -404,20 +404,23 @@ pub enum RoomHandle {
 }
 
 impl RoomHandle {
-    /// A part of `kind` for a run of `repository`; `None` where the room
-    /// refuses it. Over the socket, the room's first answer decides: held,
+    /// A part of `kind` for a run of `repository` on `branch`; `None` where
+    /// the room refuses it. Over the socket, the room's first answer decides: held,
     /// the part is the connection, given back as it closes; waiting, the
     /// room refuses it now and the ask is let go (71).
-    fn hold(&self, kind: RunKind, repository: &Path) -> Result<Option<Part>> {
+    fn hold(&self, kind: RunKind, repository: &Path, branch: &str) -> Result<Option<Part>> {
         use crate::host_process::protocol::Answer;
         match self {
-            RoomHandle::Here(shared) => shared.hold(kind, repository),
+            RoomHandle::Here(shared) => shared.hold(kind, repository, branch),
             RoomHandle::Socket(client) => {
                 let mut c = match client {
-                    Some(client) => client.hold(kind, repository, "")?,
-                    None => {
-                        crate::host_process::client::Client::host()?.hold(kind, repository, "")?
-                    }
+                    Some(client) => client.hold(kind, repository, "", Some(branch))?,
+                    None => crate::host_process::client::Client::host()?.hold(
+                        kind,
+                        repository,
+                        "",
+                        Some(branch),
+                    )?,
                 };
                 match c.next(Some(crate::host_process::read_for()))? {
                     Some(Answer::Held) => {
@@ -2238,8 +2241,8 @@ impl Tests for Checks {
         }))
     }
 
-    fn hold(&self, kind: RunKind) -> Result<Option<Part>> {
-        self.room()?.hold(kind, &self.common)
+    fn hold(&self, kind: RunKind, branch: &str) -> Result<Option<Part>> {
+        self.room()?.hold(kind, &self.common, branch)
     }
 
     fn bound(&self) -> Result<usize> {
@@ -2682,13 +2685,62 @@ impl Tests for Checks {
         }
         let meta: Meta = serde_json::from_value(self.runs.request(&run.0)?.meta)
             .with_context(|| format!("reading run {}", run.0))?;
-        let (Some(started), "moon") = (meta.started_ms, meta.runner.as_str()) else {
+        Ok(self.moon_tasks(run, &meta))
+    }
+
+    /// 153 (design D6): a finished run's checks as its runner timed them:
+    /// moon's from moon's records in the place, as [`Tests::tasks`] reads
+    /// them while the run goes (ADR 0028), and the `command` runner's one
+    /// check from the run's own start and end; nothing for a run still
+    /// going or lost.
+    fn timed(&self, run: &RunHandle) -> Result<Vec<TaskProgress>> {
+        let RunState::Finished(ended) = self.runs.state(&run.0)? else {
             return Ok(Vec::new());
+        };
+        let meta: Meta = serde_json::from_value(self.runs.request(&run.0)?.meta)
+            .with_context(|| format!("reading run {}", run.0))?;
+        Ok(match meta.runner.as_str() {
+            "moon" => self.moon_tasks(run, &meta),
+            _ => command_timed(&meta, &ended),
+        })
+    }
+}
+
+impl Checks {
+    /// ADR 0028: where each check of a moon run has got, from moon's
+    /// records in the place and the run's output, as it goes or once it
+    /// has ended; nothing for another runner's run, or one moon never
+    /// started.
+    fn moon_tasks(&self, run: &RunHandle, meta: &Meta) -> Vec<TaskProgress> {
+        let (Some(started), "moon") = (meta.started_ms, meta.runner.as_str()) else {
+            return Vec::new();
         };
         let out = std::fs::read(self.runs.dir(&run.0).join("out.log")).unwrap_or_default();
         let times = self.runs.times(&run.0).unwrap_or_default();
-        Ok(Moon.progress(&meta.place, &out, &times, &meta.targets, started))
+        Moon.progress(&meta.place, &out, &times, &meta.targets, started)
     }
+}
+
+/// 153 (design D6): the `command` runner's one check, timed by the run's
+/// own start and end (`result.json`); none where the command could not be
+/// started, which ran nothing.
+fn command_timed(meta: &Meta, ended: &Ended) -> Vec<TaskProgress> {
+    if ended.error.is_some() {
+        return Vec::new();
+    }
+    meta.targets
+        .iter()
+        .map(|t| TaskProgress {
+            target: t.clone(),
+            state: match ended.passed() {
+                true => TaskState::Passed,
+                false => TaskState::Failed,
+            },
+            started: Some(ended.started.clone()),
+            ended: Some(ended.ended.clone()),
+            exit: ended.exit,
+        })
+        .collect()
 }
 
 /// The `command` runner's one check: its key is the command and the
