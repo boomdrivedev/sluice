@@ -639,6 +639,23 @@ impl Branch for LocalRefs {
         }
     }
 
+    /// `git merge-base`, which exits 1 with nothing printed where the two
+    /// share no commit.
+    fn merge_base(&self, a: &Rev, b: &Rev) -> Result<Option<Rev>> {
+        let (a, b) = (self.id(a)?, self.id(b)?);
+        let out = self.git(&["merge-base", &a.to_string(), &b.to_string()])?;
+        match out.status.code() {
+            Some(0) => Ok(Some(Rev::new(
+                String::from_utf8_lossy(&out.stdout).trim().to_string(),
+            ))),
+            Some(1) if out.stdout.is_empty() && out.stderr.is_empty() => Ok(None),
+            code => bail!(
+                "git merge-base exited {code:?}: {}",
+                String::from_utf8_lossy(&out.stderr).trim()
+            ),
+        }
+    }
+
     /// 122: the last of `git rev-list --first-parent --ancestry-path
     /// rev..tip` is the oldest commit of the line descended from `rev`: the
     /// commit that landed it, or, where its first parent is `rev`, the

@@ -1526,6 +1526,11 @@ pub trait Branch {
     /// branch moved again since (24).
     fn contains(&self, tip: &Rev, rev: &Rev) -> Result<bool>;
 
+    /// Where `a` and `b` part: their best common ancestor, `None` where
+    /// they share no commit. A worktree's own changes are read from where
+    /// its head left the branch (36, 70).
+    fn merge_base(&self, a: &Rev, b: &Rev) -> Result<Option<Rev>>;
+
     /// 122: the commit that landed `rev` on a branch at `tip`: the oldest
     /// of `tip`'s first-parent line that holds it, `rev` itself where it is
     /// on that line; `None` when `tip` does not hold it. A profile that

@@ -12,7 +12,7 @@ id. The exec scenarios use `crates/sluice/tests/exec.rs`'s
 
 ## 1. The branch seam's merge base
 
-- [ ] 1.1 Add `merge_base(a, b) -> Result<Option<Rev>>` to the `Branch` seam in `crates/sluice-seams/src/lib.rs`, beside `contains` (design D1). In `crates/sluice/src/profiles/local_refs.rs`, answer it by `git merge-base`, `None` where the two share no commit. In `branches.rs`, `pushed_refs.rs` and `github/pulls.rs`, hand it on as each hands on `contains`. Answer it in `crates/sluice-fakes/src/lib.rs` and in `crates/sluice/tests/profiles/conformance.rs`. True when `sluice exec bolt/sluice-checks-and-waits-on-an-agents-own-work -- cargo test -p sluice --features tools --test local_refs a_merge_base_is_where_two_revisions_part` passes. That new test reads a revision two lines share as their merge base, and `None` for two roots.
+- [x] 1.1 Add `merge_base(a, b) -> Result<Option<Rev>>` to the `Branch` seam in `crates/sluice-seams/src/lib.rs`, beside `contains` (design D1). In `crates/sluice/src/profiles/local_refs.rs`, answer it by `git merge-base`, `None` where the two share no commit. In `branches.rs`, `pushed_refs.rs` and `github/pulls.rs`, hand it on as each hands on `contains`. Answer it in `crates/sluice-fakes/src/lib.rs` and in `crates/sluice/tests/profiles/conformance.rs`. True when `sluice exec bolt/sluice-checks-and-waits-on-an-agents-own-work -- cargo test -p sluice --features tools --test local_refs a_merge_base_is_where_two_revisions_part` passes. That new test reads a revision two lines share as their merge base, and `None` for two roots.
 
 ## 2. moon reads the affected checks from the files a run changed
 

@@ -388,6 +388,27 @@ fn contains_answers_ancestry() {
     assert!(!r.contains(&b, &other).unwrap());
 }
 
+/// 36, 70: a worktree's own changes are read from where its head left the
+/// branch: the revision two lines share, and nothing for two roots.
+#[test]
+fn a_merge_base_is_where_two_revisions_part() {
+    let repo = Repo::new("merge-base");
+    let r = refs(&repo);
+    let root = rev(repo.rev("main"));
+    let a = rev(repo.branch("bolt/x", "main", &[("a", Some("1"))]));
+    let b = rev(repo.branch("unit/u", "main", &[("b", Some("2"))]));
+    let c = rev(repo.branch("unit/c", "bolt/x", &[("c", Some("3"))]));
+    assert_eq!(r.merge_base(&a, &b).unwrap(), Some(root.clone()));
+    assert_eq!(r.merge_base(&c, &b).unwrap(), Some(root));
+    assert_eq!(r.merge_base(&c, &a).unwrap(), Some(a.clone()));
+    repo.git(&["switch", "-q", "--orphan", "other"]);
+    repo.write("other", "4\n");
+    repo.git(&["add", "-A"]);
+    repo.git(&["commit", "-q", "-m", "other root"]);
+    let other = rev(repo.rev("HEAD"));
+    assert_eq!(r.merge_base(&a, &other).unwrap(), None);
+}
+
 /// 121: a revision that is no commit on this host, as another host's
 /// landing a remote has since lost, is contained in nothing read here.
 #[test]

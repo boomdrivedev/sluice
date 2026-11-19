@@ -2469,6 +2469,10 @@ impl Branch for FakeBranch {
         Ok(World::ancestors(&self.0 .0.borrow(), tip).contains(rev))
     }
 
+    fn merge_base(&self, a: &Rev, b: &Rev) -> Result<Option<Rev>> {
+        Ok(World::merge_base(&self.0 .0.borrow(), a, b))
+    }
+
     /// 122: down `tip`'s first parents to the oldest that holds `rev`.
     fn landed_by(&self, tip: &Rev, rev: &Rev) -> Result<Option<Rev>> {
         let inner = self.0 .0.borrow();
