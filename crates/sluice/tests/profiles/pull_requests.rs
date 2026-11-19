@@ -6582,6 +6582,58 @@ fn a_wait_by_pull_request_from_the_main_checkout_follows_it_on_another_host() {
     assert!(g.of(n).is_empty(), "A took nothing in");
 }
 
+/// pull-request-submit, "No wait, another host takes it in": host B keeps
+/// main and takes its pull requests in, and `sluice submit main --no-wait
+/// --json` on host A answers with the pull request, its state, the host
+/// that takes it in and the wait that follows it, with no `id`. That wait,
+/// run in the repository's main checkout on A, follows the request to the
+/// landing B gives it (record 0130).
+#[test]
+fn no_wait_on_a_host_that_does_not_take_it_in_names_its_wait() {
+    let g = OnGitHub::new("pr-no-wait-there", "");
+    g.named("a", "");
+    let b = g.other("b", "", "");
+    b.run("1");
+    let w = g.session("two-apps", &[("t.txt", "t\n")]);
+    let out = g
+        .command(env!("CARGO_BIN_EXE_sluice"), &w)
+        .args(["submit", "main", "--no-wait", "--json"])
+        .output()
+        .unwrap();
+    assert_eq!(out.status.code(), Some(0), "{}", text(&out));
+    let doc = last_document(&out);
+    let n = g.pull_from("unit/two-apps").number;
+    assert_eq!(doc["pull_request"], n, "{doc}");
+    assert_eq!(doc["branch"], "main", "{doc}");
+    assert!(doc["state"].is_string(), "{doc}");
+    assert_eq!(
+        doc["taken_in_by"],
+        serde_json::json!({ "host": "b" }),
+        "{doc}"
+    );
+    let wait = format!("sluice wait main --pull-request {n}");
+    assert_eq!(doc["wait"], wait.as_str(), "{doc}");
+    assert!(doc.get("id").is_none(), "{doc}");
+
+    let until = Instant::now() + Duration::from_secs(60);
+    while !b.of(n).first().is_some_and(|s| s["state"] == "landed") {
+        assert!(Instant::now() < until, "B never landed it: {:?}", b.of(n));
+        b.discovery_passes();
+        b.run("2");
+    }
+    g.follow_due(n);
+    let args: Vec<&str> = wait.split(' ').skip(1).collect();
+    let out = g.skipping(
+        g.repo.dir(),
+        &[&args[..], &["--timeout", "1m", "--json"]].concat(),
+    );
+    assert_eq!(out.status.code(), Some(sluice::LANDED), "{}", text(&out));
+    let doc = last_document(&out);
+    assert_eq!(doc["pull_request"], n, "{doc}");
+    assert_eq!(doc["state"], "landed", "{doc}");
+    took_nothing_in(&g, &b, n);
+}
+
 /// submission-wait, "The status a submit reads": the same, and `sluice
 /// submit main --status --json` in that worktree gives the request's head,
 /// its draft mark, the mark's host and the check's queue beside the
