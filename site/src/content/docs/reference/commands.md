@@ -1369,9 +1369,17 @@ submission as `sluice wait <id>` does: out of time or stopped, it
 prints the submission's record under `--json`, and `still waiting:
 sluice wait 12` without. Until then, its document under `--json` is
 the one `sluice submit --status --json` prints,
-`{"pull_request","branch","state"}`, the state saying what the pull
-request waits for. Once its submission is decided, it prints the
-submission's record. Its own submission is the first it reads of the
+`{"pull_request","branch","state","wait"}`, the state saying what the
+pull request waits for, and `wait` the command that follows it by its
+number from any folder, `sluice wait main --pull-request 41`. Out of
+time or stopped before then, it prints that document under `--json`,
+and without it says:
+
+```console
+still open: #41; sluice wait main --pull-request 41
+```
+
+Once its submission is decided, it prints the submission's record. Its own submission is the first it reads of the
 pull request. When sluice takes the pull request in again on a new
 head, as when the branch moves under it, the wait follows the new
 head's submission and ends with its own, as above.
@@ -1406,8 +1414,13 @@ prints, the one a `--no-wait` submit prints and the one at its timeout.
 and `null` where the check carries none:
 
 ```json
-{"pull_request":41,"branch":"main","state":"queued behind #38","taken_in_by":{"host":"b"},"queue":{"host":"b","taken_in":true,"submission":1406,"state":"queued","ahead":[{"submission":1405,"pull_request":38}],"waits_for":[]}}
+{"pull_request":41,"branch":"main","state":"queued behind #38","wait":"sluice wait main --pull-request 41","taken_in_by":{"host":"b"},"queue":{"host":"b","taken_in":true,"submission":1406,"state":"queued","ahead":[{"submission":1405,"pull_request":38}],"waits_for":[]}}
 ```
+
+`queue.submission` is the pull request's number in the queue of the host
+that takes it in. On this host, that number may name another
+submission, or none, so a wait on it here follows the wrong work. Follow
+the pull request with its `wait` instead.
 
 It reports what GitHub shows with the words
 and exit of a submission's outcome. Merged is `passed · landed as
@@ -1696,7 +1709,7 @@ once those five minutes are spent exits `3` as well, saying it could not
 read and how long it tried, apart from any outcome:
 
 ```console
-could not read #77: sluice wait main
+could not read #77: sluice wait main --pull-request 77
 sluice: could not read #77 for 5m03s, so whether it landed is not known: GET /repos/o/r/pulls/77: 503 Service Unavailable
 ```
 

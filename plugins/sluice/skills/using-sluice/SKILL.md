@@ -130,7 +130,11 @@ withdrawn, is submitted again.
 
 Each `sluice wait --json` prints the submission's record however it ends:
 read its `state` and the exit. Exit `5` leaves it `queued`, `waiting`, `testing`, `passed` or
-`landing`; run `sluice wait` again. Never search `sluice status <branch>`'s
+`landing`; run the same command again. On a branch that takes pull
+requests, a wait that ends with exit `5` before sluice queued the pull
+request here prints the pull request's document, not a record: run the
+command in its `wait`, `sluice wait main --pull-request 41`, which
+follows that pull request from any folder. Never search `sluice status <branch>`'s
 listing for `landed` or `failed`: a decided submission leaves that listing,
 and a loop waiting for it there never ends. `sluice status 12 --json` reads
 the record once without waiting, with `notice`, the inbox's one line, once
