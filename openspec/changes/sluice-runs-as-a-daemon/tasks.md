@@ -44,7 +44,7 @@ run by hand.
 
 ## 5. A daemon stops when told
 
-- [ ] 5.1 End a daemon signalled with `SIGTERM` or `SIGINT` as a hand-over ends it, each task finishing its round, its lock and socket let go, exit 0, its runs going on (D7). True when `sluice exec bolt/sluice-keeps-a-gates-queues-moving -- cargo test -p sluice --test host_process a_stopped_daemon_leaves_its_runs_going` passes.
+- [x] 5.1 End a daemon signalled with `SIGTERM` or `SIGINT` as a hand-over ends it, each task finishing its round, its lock and socket let go, exit 0, its runs going on (D7). True when `sluice exec bolt/sluice-keeps-a-gates-queues-moving -- cargo test -p sluice --test host_process a_stopped_daemon_leaves_its_runs_going` passes.
 
 ## 6. The modules keep the daemon running where the host turns it on
 
