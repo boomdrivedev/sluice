@@ -131,7 +131,8 @@ impl Index {
 /// has sluice: its directory is there, and its records list a branch, or a
 /// revision the host holds, its own branches' or a remote's tracking
 /// branches' as last fetched, has the policy (129). Nothing is fetched and
-/// no process started.
+/// no remote asked: a remote's branches are listed as last fetched (129 as
+/// amended 2026-11-19).
 pub fn has_sluice(repository: &Path) -> Result<bool> {
     if !repository.is_dir() {
         return Ok(false);
@@ -142,6 +143,7 @@ pub fn has_sluice(repository: &Path) -> Result<bool> {
         crate::instance::Instance::from_file(None, 1)?,
         Rc::new(crate::retry::Policy::command().recording_where_set()),
     )?;
+    sluice_seams::State::hold(&bound.state);
     if !sluice_seams::State::branches(&bound.state)?.is_empty() {
         return Ok(true);
     }
@@ -150,17 +152,19 @@ pub fn has_sluice(repository: &Path) -> Result<bool> {
 }
 
 /// Whether the repository at the common git directory `repository` has
-/// work in play, read as an idle tick reads it (129, 135; design D4): each
-/// remote that keeps branches' records asked once, so work another host
-/// wrote there is found, then its branches' records and its previews, with
-/// no other process started. Records in the host's own files cost no
-/// process at all, and a remote that refuses leaves its branches read as
-/// last fetched. A repository whose directory is gone has none. The ask is
-/// a round's, which passes a spent allowance by rather than waiting it out
-/// (rule core.29).
+/// work in play, read as an idle tick reads it (129, 135; design D4): where
+/// it `asks`, each remote that keeps branches' records asked once, so work
+/// another host wrote there is found, and otherwise each read as the last
+/// ask fetched it (129 as amended 2026-11-19); then its branches' records
+/// and its previews, with no other process started. Records in the host's
+/// own files cost no process at all, and a remote that refuses leaves its
+/// branches read as last fetched. A repository whose directory is gone has
+/// none. The ask is a round's, which passes a spent allowance by rather
+/// than waiting it out (rule core.29).
 pub fn in_play(
     repository: &Path,
     instance: crate::instance::Instance,
+    asks: bool,
 ) -> Result<super::tasks::Looked> {
     if !repository.is_dir() {
         return Ok(super::tasks::Looked::default());
@@ -172,10 +176,18 @@ pub fn in_play(
         Rc::new(crate::retry::Policy::round().recording_where_set()),
     )?;
     // A refusal leaves the branches as last fetched, as a pass's ask does,
-    // and is the reading's words (D16).
-    let refused = sluice_seams::State::refresh(&bound.state)
-        .err()
-        .map(|e| format!("{e:#}"));
+    // and is the reading's words (D16). A look that asks nothing reads
+    // every remote as the last ask fetched it, and lists no branch by
+    // asking it.
+    let refused = match asks {
+        true => sluice_seams::State::refresh(&bound.state)
+            .err()
+            .map(|e| format!("{e:#}")),
+        false => {
+            sluice_seams::State::hold(&bound.state);
+            None
+        }
+    };
     let s = sluice_core::Sluice::new(bound.seams(), &sluice_core::SystemClock);
     // 137 (design D16, D25): the reading reads each pull request this host
     // follows into a branch it does not keep, as each falls due at the
