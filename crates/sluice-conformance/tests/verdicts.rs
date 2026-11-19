@@ -280,6 +280,37 @@ fn a_run_whose_executor_stopped_has_no_outcome_and_runs_again() {
     assert_eq!(h.w().started().len(), 2);
 }
 
+/// satisfies: 115 as amended 2026-11-18, 60; record 0031 as amended
+/// 2026-11-18; the run-life spec's "A pool's job lost in runs in a row",
+/// for a standing executor: a run whose executor stops before reporting,
+/// three runs in a row, reads the combination not passed, each check named
+/// with why and nothing recorded under a key
+#[test]
+fn a_run_whose_executor_stops_three_runs_in_a_row_is_blamed_with_why() {
+    let h = Harness::bolt();
+    h.w().hold_runs(true);
+    h.work("unit/a", "agent-a", &[("a/lib", Some("a2"))]);
+    let one = h.submit("unit/a");
+    h.step();
+    let c = h.sub(one).tested.unwrap().combination;
+    for _ in 0..3 {
+        h.w().lose(&c);
+        h.step();
+    }
+    assert_eq!(h.w().started().len(), 3, "no run started past the bound");
+    assert_eq!(h.sub(one).state, State::Failed);
+    let failed = &h.sub(one).failed;
+    assert!(!failed.is_empty());
+    for f in failed {
+        assert!(f.hash.is_empty(), "no key: it has no result");
+        assert_eq!(
+            f.not_run.as_deref(),
+            Some("its executor stopped before it reported"),
+            "{f:?}"
+        );
+    }
+}
+
 /// satisfies: 55, 70, 56
 #[test]
 fn a_landed_change_to_the_gate_runs_every_check_it_now_requires() {
