@@ -2846,6 +2846,7 @@ fn run_again_follows_a_pull_request_waiting_for_a_review() {
         doc,
         serde_json::json!({
             "pull_request": n, "branch": "main", "state": "waiting: needs 1 review",
+            "wait": format!("sluice wait main --pull-request {n}"),
         })
     );
     let said = String::from_utf8_lossy(&out.stderr);
@@ -6265,11 +6266,12 @@ fn last_document(out: &Output) -> Value {
     serde_json::from_str(last).unwrap_or_else(|e| panic!("{e}: {}", text(out)))
 }
 
-/// submission-wait, "Out of time, queued on the other host": host B's
+/// submission-wait, "Out of time, held on another host": host B's
 /// `sluice run` holds main's mark and holds host A's pull request as
 /// submission 1406, and A's `sluice wait main --timeout 2s --json` in its
-/// worktree exits 5, naming the request, the mark's host and holder, and
-/// the queue B's check carries.
+/// worktree exits 5, naming the request, the mark's host and holder, the
+/// queue B's check carries, and the wait that follows the request by its
+/// number, never B's 1406 (record 0130).
 #[test]
 fn out_of_time_queued_on_the_other_host() {
     let g = OnGitHub::new("wait-there-timeout", "");
@@ -6286,6 +6288,12 @@ fn out_of_time_queued_on_the_other_host() {
     );
     assert_eq!(doc["queue"]["submission"], 1406, "{doc}");
     assert_eq!(doc["queue"]["host"], "b", "{doc}");
+    assert_eq!(
+        doc["wait"],
+        format!("sluice wait main --pull-request {}", pull.number).as_str(),
+        "{doc}"
+    );
+    assert!(doc.get("id").is_none(), "{doc}");
     assert!(g.of(pull.number).is_empty(), "A took nothing in");
 }
 

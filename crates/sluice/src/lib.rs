@@ -5437,6 +5437,13 @@ impl PullMode<'_> {
     }
 }
 
+/// The wait that follows pull request `n` into `branch` from any folder of
+/// the repository, on any host: the one handle a request's work keeps
+/// from the submit to its landing (record 0130 D1; rule core.48).
+fn pull_wait(branch: &str, n: u64) -> String {
+    format!("sluice wait {branch} --pull-request {n}")
+}
+
 /// `sluice submit` to a branch with pull requests (C.5 pull request):
 /// push the worktree's branch and open or update its pull request, which
 /// waits for its conditions; then follow it, reporting each state it
@@ -5869,11 +5876,12 @@ fn submit_pull(
                 let state = last.as_ref().map_or("waiting", |l| l.0.as_str());
                 let doc = serde_json::json!({
                     "pull_request": number, "branch": branch, "state": state,
+                    "wait": pull_wait(branch, number),
                 });
                 let doc = There::with(doc, there.as_ref())?;
                 writeln!(out, "{}", with_copy(doc, copy.as_ref())?)?;
             } else {
-                writeln!(out, "still open: #{number}; sluice wait {branch}")?;
+                writeln!(out, "still open: #{number}; {}", pull_wait(branch, number))?;
             }
             Ok(code)
         };
