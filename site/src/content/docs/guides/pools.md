@@ -237,29 +237,29 @@ region, its sign project and the run project for each system.
 
 ### Test side by side
 
-A host of yours leads the branch, running its rounds and starting each
-run on the fleet. A host leads a branch whose queue is on its remote
-only when it signs as a signer the branch's gate trusts. A branch whose
-`trust` names only the pool's signer has no host to lead it, and nothing
-happens. Name the signer your leading hosts sign as, with
-`systems = []`, and trust it beside `codebuild`:
+A host of yours runs the branch's queue: its rounds, and the start of
+each run on the fleet. A host runs the queue of a branch held on its
+remote only when it signs as a signer the branch's gate trusts. A
+branch whose `trust` names only the pool's signer has no host to run
+its queue, and nothing happens. Name the signer the hosts that may run
+its queue sign as, with `systems = []`, and trust it beside `codebuild`:
 
 ```toml
-[signers.lead]
-ssh = ".config/sluice.leads"   # each leading host's key
+[signers.box]
+ssh = ".config/sluice.boxes"   # one line per host's key
 systems = []                   # it may claim no run
 
 [branches.main]
 remote = "origin"
-trust = ["lead", "codebuild"]
+trust = ["box", "codebuild"]
 systems = ["linux-x64"]
 batch = false
 parallel = 8
 ```
 
 A signer whose `systems` is empty claims no run and counts for no
-result, whatever the run's system. So the leading hosts take none of the
-branch's runs, whatever executors they have, and the fleet's results
+result, whatever the run's system. So the hosts that run the queue take
+none of the branch's runs, whatever executors they have, and the fleet's results
 are the only ones that land anything. A host can't sign as `codebuild`:
 its one key is the key in AWS KMS.
 
@@ -273,8 +273,8 @@ combination as it forms, rather than waiting to test the deepest, and
 
 ```console
 $ sluice pool check main
-ok      main is led by a host signing as lead
-ok      [pools.codebuild] is reached in us-east-1 as arn:aws:sts::111122223333:assumed-role/sluice-lead/host-a
+ok      main's queue is run by a host signing as box
+ok      [pools.codebuild] is reached in us-east-1 as arn:aws:sts::111122223333:assumed-role/sluice-start/host-a
 ok      sluice-run-linux-x64 runs linux-x64 on the reserved-capacity fleet sluice-linux-x64, LINUX_EC2
 ok      sluice-run-linux-x64's buildspec is as sluice 1.2.3 writes it, cloning acme/widgets
 ok      sluice-run-linux-x64 may take 90 minutes, longer than the branch's timeout of 45

@@ -1134,7 +1134,8 @@ walks through it.
 Reads each CodeBuild pool the policy at the branch's revision names back
 from AWS, as the host's [`[aws] profile`](/sluice/reference/configuration/#aws)
 reaches it, or `--profile <p>`. It fails where the branch's `trust`
-names no signer a host signs as, since no host can then lead it. It
+names no signer a host signs as, since no host can then run its queue,
+and says which signer the hosts that may run its queue sign as. It
 says who it reaches AWS as. Each run
 project must run on a reserved-capacity fleet of its system, with the
 buildspec this release writes and a timeout longer than the branch's.
@@ -1147,7 +1148,8 @@ Actions is `sluice forge check`'s.
 
 ```console
 $ sluice pool check main
-ok      [pools.codebuild] is reached in us-east-1 as arn:aws:sts::111122223333:assumed-role/sluice-lead/host-a
+ok      main's queue is run by a host signing as box
+ok      [pools.codebuild] is reached in us-east-1 as arn:aws:sts::111122223333:assumed-role/sluice-start/host-a
 ok      sluice-run-linux-x64 runs linux-x64 on the reserved-capacity fleet sluice-linux-x64, LINUX_EC2
 ...
 note    a branch on a fleet tests side by side: batch = false, with parallel = 10, the fleets' maximum, where it tests with batch = true and parallel = 3
