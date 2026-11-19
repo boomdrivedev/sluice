@@ -1986,7 +1986,7 @@ mod tests {
             unreachable!("a submit forms nothing")
         }
 
-        fn commit(&self, _: &LandingCommit) -> Result<Rev> {
+        fn commit(&self, _: &str, _: &LandingCommit) -> Result<Rev> {
             unreachable!("a submit commits nothing")
         }
 

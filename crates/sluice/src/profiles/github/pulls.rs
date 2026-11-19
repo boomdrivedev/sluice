@@ -2867,8 +2867,8 @@ impl Branch for ReadOnce<'_> {
         self.branch.form(onto, head)
     }
 
-    fn commit(&self, commit: &LandingCommit) -> Result<Rev> {
-        self.branch.commit(commit)
+    fn commit(&self, branch: &str, commit: &LandingCommit) -> Result<Rev> {
+        self.branch.commit(branch, commit)
     }
 
     fn contains(&self, tip: &Rev, rev: &Rev) -> Result<bool> {

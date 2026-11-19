@@ -6,6 +6,7 @@
 
 mod support;
 
+use sluice::identity::Author;
 use sluice::profiles::local_refs::LocalRefs;
 use sluice_seams::{Branch, CoveringVerdict, Formed, HostCopy, LandingCommit, Moved, Rev};
 use support::Repo;
@@ -164,12 +165,15 @@ fn commit_writes_the_landing() {
     let message = "Land #12: unit/u\n\nSluice-Submission: 12\nSluice-From: agent (unit/u)\nSluice-Tested: CAND\nSluice-Result: passed (2 run, 0 replayed)\n"
         .replace("CAND", candidate.as_str());
     let landed = r
-        .commit(&LandingCommit {
-            tree_of: candidate.clone(),
-            parent: onto.clone(),
-            head: head.clone(),
-            message,
-        })
+        .commit(
+            "bolt/x",
+            &LandingCommit {
+                tree_of: candidate.clone(),
+                parent: onto.clone(),
+                head: head.clone(),
+                message,
+            },
+        )
         .unwrap();
     let raw = repo.git(&["cat-file", "-p", landed.as_str()]);
     assert!(
@@ -208,6 +212,55 @@ fn commit_writes_the_landing() {
     );
 }
 
+/// Record 0019 as amended 2026-11-18; rule core.43: a landing written as
+/// an author names it as its author and committer, its tree the
+/// combination's, while the combination stays sluice's.
+#[test]
+fn commit_as_names_its_author() {
+    let repo = Repo::new("commit-as");
+    let r = refs(&repo);
+    let onto = rev(repo.branch("bolt/x", "main", &[("a", Some("1"))]));
+    let head = rev(repo.branch("unit/u", "main", &[("b", Some("2"))]));
+    let candidate = formed(r.form(&onto, &head).unwrap());
+    let author = Author {
+        name: "a fake".into(),
+        email: "fake@identity.invalid".into(),
+    };
+    let landed = r
+        .commit_as(
+            &LandingCommit {
+                tree_of: candidate.clone(),
+                parent: onto.clone(),
+                head: head.clone(),
+                message: "Land #12: unit/u\n".into(),
+            },
+            &author,
+        )
+        .unwrap();
+    let raw = repo.git(&["cat-file", "-p", landed.as_str()]);
+    assert!(
+        raw.contains("\nauthor a fake <fake@identity.invalid> "),
+        "{raw}"
+    );
+    assert!(
+        raw.contains("\ncommitter a fake <fake@identity.invalid> "),
+        "{raw}"
+    );
+    assert!(
+        raw.contains(&format!("parent {onto}\nparent {head}\n")),
+        "{raw}"
+    );
+    assert_eq!(
+        repo.rev(&format!("{landed}^{{tree}}")),
+        repo.rev(&format!("{candidate}^{{tree}}"))
+    );
+    let formed_raw = repo.git(&["cat-file", "-p", candidate.as_str()]);
+    assert!(
+        formed_raw.contains("\nauthor sluice <sluice@localhost> 0 +0000\n"),
+        "{formed_raw}"
+    );
+}
+
 /// 23, 140; record 0083; rule core.39: a landing beside committed as
 /// sluice writes it reads to git as passed: its `Sluice-Result` is one
 /// line whose first word is `passed`, whole as written, by either reading
@@ -239,12 +292,15 @@ fn a_landing_beside_reads_as_passed_to_git() {
         &covering,
     );
     let landed = r
-        .commit(&LandingCommit {
-            tree_of: candidate,
-            parent: onto.clone(),
-            head,
-            message,
-        })
+        .commit(
+            "bolt/x",
+            &LandingCommit {
+                tree_of: candidate,
+                parent: onto.clone(),
+                head,
+                message,
+            },
+        )
         .unwrap();
     let written = format!(
         "passed (0 run, 0 replayed) beside the queue: no required check reads its changes; \
