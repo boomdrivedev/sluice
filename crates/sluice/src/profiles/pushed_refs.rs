@@ -838,7 +838,7 @@ impl Branch for PushedRefs {
 
     /// The landing written as whoever pushes it, [`PushedRefs::author`]:
     /// nothing is written where that cannot be read.
-    fn commit(&self, commit: &LandingCommit) -> Result<Rev> {
+    fn commit(&self, _: &str, commit: &LandingCommit) -> Result<Rev> {
         let author = self.author()?;
         self.local.commit_as(commit, &author)
     }

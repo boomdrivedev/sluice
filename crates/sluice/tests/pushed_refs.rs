@@ -34,17 +34,21 @@ fn open(repo: &Repo) -> PushedRefs {
     PushedRefs::open_as(repo.dir(), "origin", None, recorded()).unwrap()
 }
 
-/// A landing commit of `head` onto `onto`, as the core writes one.
+/// A landing commit of `head` onto `onto` for `main`, as the core writes
+/// one.
 fn landing(b: &impl Branch, onto: &Rev, head: &Rev) -> Rev {
     let Ok(sluice_seams::Formed::Revision(c)) = b.form(onto, head) else {
         panic!("formed no candidate");
     };
-    b.commit(&LandingCommit {
-        parent: onto.clone(),
-        head: head.clone(),
-        tree_of: c,
-        message: "land\n".into(),
-    })
+    b.commit(
+        "main",
+        &LandingCommit {
+            parent: onto.clone(),
+            head: head.clone(),
+            tree_of: c,
+            message: "land\n".into(),
+        },
+    )
     .unwrap()
 }
 
@@ -1046,6 +1050,47 @@ fn a_landing_names_whoever_pushes_it() {
     assert_eq!(signed_by(&repo, &landed), (sluice.clone(), sluice));
 }
 
+/// C.7; record 0019 as amended 2026-11-18, rule core.43: the router writes
+/// a landing through the profile of the branch it lands on, so a landing
+/// on `main`, whose policy names `origin`, names the identity sluice
+/// pushes `origin` as, and one on `bolt/x`, which names no remote, names
+/// sluice.
+#[test]
+fn the_router_writes_a_landing_as_its_branchs_profile() {
+    let repo = Repo::new("router-author");
+    repo.write(
+        ".config/sluice.toml",
+        "[branches.main]\nremote = \"origin\"\n[branches.\"bolt/*\"]\n",
+    );
+    repo.git(&["add", "-A"]);
+    repo.git(&["commit", "-q", "-m", "policy"]);
+    repo.git(&["branch", "bolt/x"]);
+    let _bare = repo.bare_origin();
+    let onto = rev(repo.rev("main"));
+    let head = rev(repo.branch("unit/u", "main", &[("u", Some("1"))]));
+    let identity = Rc::new(FakeIdentity::following("tok"));
+    let b = Branches::open_as(repo.dir(), Some(speaker(&identity)), recorded()).unwrap();
+    let fake = fake_author().to_string();
+    let landed = landing(&b, &onto, &head);
+    assert_eq!(signed_by(&repo, &landed), (fake.clone(), fake));
+    let Ok(sluice_seams::Formed::Revision(c)) = b.form(&onto, &head) else {
+        panic!("formed no candidate");
+    };
+    let landed = b
+        .commit(
+            "bolt/x",
+            &LandingCommit {
+                parent: onto.clone(),
+                head: head.clone(),
+                tree_of: c,
+                message: "land\n".into(),
+            },
+        )
+        .unwrap();
+    let sluice = "sluice <sluice@localhost>".to_string();
+    assert_eq!(signed_by(&repo, &landed), (sluice.clone(), sluice));
+}
+
 /// The forge-identity spec's "A landing whose author cannot be read": a
 /// landing pushed as an identity that cannot give its author is not
 /// written, under its name or sluice's, the branch on the remote stays
@@ -1073,12 +1118,15 @@ fn a_landing_whose_author_cannot_be_read_is_not_written() {
         panic!("formed no candidate");
     };
     let e = p
-        .commit(&LandingCommit {
-            parent: onto.clone(),
-            head: head.clone(),
-            tree_of: c.clone(),
-            message: "land\n".into(),
-        })
+        .commit(
+            "main",
+            &LandingCommit {
+                parent: onto.clone(),
+                head: head.clone(),
+                tree_of: c.clone(),
+                message: "land\n".into(),
+            },
+        )
         .unwrap_err();
     assert!(
         format!("{e:#}").contains("the fake cannot say who it is"),

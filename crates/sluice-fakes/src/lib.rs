@@ -2454,7 +2454,7 @@ impl Branch for FakeBranch {
         Ok(Formed::Revision(rev))
     }
 
-    fn commit(&self, c: &LandingCommit) -> Result<Rev> {
+    fn commit(&self, _: &str, c: &LandingCommit) -> Result<Rev> {
         let mut inner = self.0 .0.borrow_mut();
         let tree = inner.commits[&c.tree_of].tree.clone();
         Ok(World::put_commit(

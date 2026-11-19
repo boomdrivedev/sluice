@@ -633,7 +633,7 @@ impl Branch for LocalRefs {
 
     /// The landing written as [`Author::sluice`]: a branch in the host's
     /// own refs is pushed as no identity.
-    fn commit(&self, commit: &LandingCommit) -> Result<Rev> {
+    fn commit(&self, _: &str, commit: &LandingCommit) -> Result<Rev> {
         self.commit_as(commit, &Author::sluice())
     }
 

@@ -165,12 +165,15 @@ fn commit_writes_the_landing() {
     let message = "Land #12: unit/u\n\nSluice-Submission: 12\nSluice-From: agent (unit/u)\nSluice-Tested: CAND\nSluice-Result: passed (2 run, 0 replayed)\n"
         .replace("CAND", candidate.as_str());
     let landed = r
-        .commit(&LandingCommit {
-            tree_of: candidate.clone(),
-            parent: onto.clone(),
-            head: head.clone(),
-            message,
-        })
+        .commit(
+            "bolt/x",
+            &LandingCommit {
+                tree_of: candidate.clone(),
+                parent: onto.clone(),
+                head: head.clone(),
+                message,
+            },
+        )
         .unwrap();
     let raw = repo.git(&["cat-file", "-p", landed.as_str()]);
     assert!(
@@ -289,12 +292,15 @@ fn a_landing_beside_reads_as_passed_to_git() {
         &covering,
     );
     let landed = r
-        .commit(&LandingCommit {
-            tree_of: candidate,
-            parent: onto.clone(),
-            head,
-            message,
-        })
+        .commit(
+            "bolt/x",
+            &LandingCommit {
+                tree_of: candidate,
+                parent: onto.clone(),
+                head,
+                message,
+            },
+        )
         .unwrap();
     let written = format!(
         "passed (0 run, 0 replayed) beside the queue: no required check reads its changes; \
