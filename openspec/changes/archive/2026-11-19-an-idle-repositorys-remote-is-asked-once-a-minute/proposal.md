@@ -29,6 +29,10 @@ opening ask it at once.
   refusal.
 - **Every reading asks where passes are taken only when asked** (D14),
   each a command's ask.
+- **Nothing asks the remote ahead of a reading's one ask.** The index's
+  prune as the host process starts reads each remote as last fetched,
+  and a task that passes at its tick reads what is in play at its first
+  pass rather than as it starts.
 - **Recorded.** Record 0093's amendment of 2026-11-19, rule core.31's
   rule and details, and the reference's one-shot reads.
 
@@ -52,7 +56,7 @@ None.
 - `crates/sluice/src/host_process/pass.rs`: `pass` asks each remote only
   where told to.
 - `crates/sluice/src/host_process/index.rs`: the look holds its binding
-  where it asks nothing.
+  where it asks nothing, and `has_sluice` always.
 - `crates/sluice/src/host_process/mod.rs`: `IDLE_ASK`.
 - Tests: `an_idle_repositorys_remote_is_asked_once_a_minute` and
   `a_tasks_pass_asks_where_work_is_in_play_or_a_watch_opens` in
