@@ -1779,3 +1779,111 @@ fn a_successor_that_does_not_start_leaves_the_host_process_as_it_was() {
     }
     the_one_host_process(&d, first, "the host process as it was");
 }
+
+/// `sluice daemon`, as a machine that keeps it running starts it, in a
+/// folder of `d`'s with `d`'s environment, passing at its own tick (design
+/// D1 of `sluice-runs-as-a-daemon`). It never ends for being idle: dropped,
+/// it is killed and waited for.
+struct Daemon {
+    child: std::process::Child,
+    /// What it says on stderr before it holds the host.
+    err: std::path::PathBuf,
+    _scratch: support::Scratch,
+}
+
+impl Daemon {
+    fn start(d: &OnDisk, dir: &Path) -> Daemon {
+        Daemon::start_with(d.command(dir))
+    }
+
+    fn start_with(mut command: std::process::Command) -> Daemon {
+        let scratch = support::Scratch::new("daemon-err");
+        let err = scratch.path().join("stderr");
+        let child = command
+            .arg("daemon")
+            .stdout(std::process::Stdio::null())
+            .stderr(std::fs::File::create(&err).unwrap())
+            .spawn()
+            .expect("sluice daemon starts");
+        Daemon {
+            child,
+            err,
+            _scratch: scratch,
+        }
+    }
+
+    fn pid(&self) -> u32 {
+        self.child.id()
+    }
+
+    /// What it said on stderr.
+    fn said(&self) -> String {
+        std::fs::read_to_string(&self.err).unwrap_or_default()
+    }
+
+    /// Whether it still runs.
+    fn runs(&mut self) -> bool {
+        self.child.try_wait().unwrap().is_none()
+    }
+}
+
+impl Drop for Daemon {
+    fn drop(&mut self) {
+        let _ = self.child.kill();
+        let _ = self.child.wait();
+    }
+}
+
+/// The host process that answers now, as it names itself.
+fn named(d: &OnDisk) -> Option<sluice::host_process::protocol::Named> {
+    d.client(d.repo.dir()).answering().unwrap().map(|c| c.named)
+}
+
+/// `daemon` answers as the host process, within thirty seconds.
+fn answers(d: &OnDisk, daemon: &Daemon) {
+    within(30, "the daemon answers", || {
+        answering(d) == Some(daemon.pid())
+    });
+}
+
+/// The host process's tick (64, 129).
+const TICK: Duration = Duration::from_secs(3);
+
+/// host-daemon, "Idle, it keeps running", and host-process, "A daemon's
+/// queues empty" (135, 137; design D1 of `sluice-runs-as-a-daemon`):
+/// `sluice daemon` with nothing queued and nothing following it still runs
+/// three ticks on, the host process that answers is it, and its `hello`
+/// and `host/version` say it is a daemon; and once the one submission
+/// queued lands, it still runs three ticks after the landing.
+#[test]
+fn an_idle_daemon_keeps_running() {
+    let d = OnDisk::new("daemon-idle", POLICY);
+    let dir = d.session("a");
+    let mut daemon = Daemon::start(&d, d.repo.dir());
+    answers(&d, &daemon);
+    let hello = named(&d).expect("it answers");
+    assert!(hello.daemon, "{hello:?}");
+    let version = d
+        .client(d.repo.dir())
+        .paths()
+        .named()
+        .expect("host/version");
+    assert!(version.daemon, "{version:?}");
+    assert_eq!(version.pid, daemon.pid());
+
+    std::thread::sleep(TICK * 3);
+    assert!(daemon.runs(), "idle three ticks: {}", daemon.said());
+    assert_eq!(answering(&d), Some(daemon.pid()));
+
+    let id = queued_live(&d, &dir);
+    within(60, "the submission lands", || {
+        state(&d, d.repo.dir(), id) == "landed"
+    });
+    std::thread::sleep(TICK * 3);
+    assert!(
+        daemon.runs(),
+        "three ticks after the landing: {}",
+        daemon.said()
+    );
+    assert_eq!(answering(&d), Some(daemon.pid()));
+}
