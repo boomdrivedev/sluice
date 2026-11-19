@@ -5935,6 +5935,11 @@ fn submit_pull(
             None => {}
         }
         if no_wait || status {
+            // Record 0130 D4: the request still open and undecided, the
+            // wait that follows it, on a line of its own after its state.
+            if no_wait && !json {
+                writeln!(out, "wait: {}", pull_wait(branch, number))?;
+            }
             return Ok(0);
         }
         // Undecided: taken in, its submission's record as it stands now, as

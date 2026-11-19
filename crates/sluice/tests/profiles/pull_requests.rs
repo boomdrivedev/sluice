@@ -2992,6 +2992,27 @@ fn no_wait_waiting_for_a_review_answers_with_the_pull_request() {
     assert!(g.of(n).is_empty(), "{:?}", g.subs());
 }
 
+/// pull-request-submit, "No wait, in words, waiting for a review": after
+/// the pull request's state, the submit says the wait that follows it, on
+/// the last line, and exits 0 (record 0130 D4).
+#[test]
+fn no_wait_waiting_for_a_review_names_its_wait_in_words() {
+    let g = OnGitHub::new("pr-no-wait-review-words", "reviews = 1");
+    let w = g.session("review", &[("r.txt", "r\n")]);
+    let out = g.wt_submit(&w, &["--no-wait"]);
+    assert_eq!(out.status.code(), Some(0), "{}", text(&out));
+    let n = g.pull_from("unit/review").number;
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let lines: Vec<&str> = stdout.lines().filter(|l| !l.trim().is_empty()).collect();
+    let state = lines
+        .iter()
+        .position(|l| *l == "waiting: needs 1 review")
+        .expect(&stdout);
+    let wait = format!("wait: sluice wait main --pull-request {n}");
+    assert_eq!(lines.last().copied(), Some(wait.as_str()), "{stdout}");
+    assert!(state < lines.len() - 1, "{stdout}");
+}
+
 /// No wait, in words: after the line naming the pull request opened, the
 /// submission it was taken in as and what is queued ahead of it, then the
 /// wait that follows the pull request (record 0130).
