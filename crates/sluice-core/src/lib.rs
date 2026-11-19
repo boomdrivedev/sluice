@@ -55,6 +55,22 @@ pub use step::{Round, SignedResult, Started, Step};
 /// and nothing reads it back (ADR 0022). The kept copy is the record (20).
 pub const OUTPUT: &str = "sluice::output";
 
+/// The attributes a metric sluice sends may carry, and nothing else: its
+/// repository, its branch and, where it has one, its outcome, so no metric
+/// carries a value that grows with each run (rule core.66; record 0014 as
+/// amended 2026-11-18; design D2). The round's tests hold every metric
+/// event to the list.
+pub const METRIC_KEYS: [&str; 3] = ["sluice.repository", "sluice.branch", "sluice.outcome"];
+
+/// The metrics the core gives in seconds, each declared with the unit `s`
+/// where it is sent, so a backend shows a time and not a bare number (rule
+/// core.66; record 0014 as amended 2026-11-18; design D4).
+pub const SECONDS: [&str; 3] = [
+    "sluice.submission.landed_after",
+    "sluice.candidate.tested_for",
+    "sluice.tasks.time_saved",
+];
+
 /// The time, for the records' timestamps. Not a seam: the environment.
 pub trait Clock {
     fn now(&self) -> DateTime<Utc>;
@@ -191,6 +207,11 @@ impl std::ops::Deref for Keeping<'_> {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Peer {
     pub name: String,
+    /// The repository this sluice acts in, as its metrics name it,
+    /// `sluice.repository`: one host process holds every repository of
+    /// its user (135), so a branch alone tells none apart (rule core.66;
+    /// record 0014 as amended 2026-11-18).
+    pub repository: String,
     pub lease: std::time::Duration,
     /// 77: how long a host's sign of life may stand before its claims
     /// lapse.
@@ -215,6 +236,7 @@ impl Default for Peer {
     fn default() -> Self {
         Peer {
             name: "this-host".into(),
+            repository: "this-repository".into(),
             lease: std::time::Duration::from_secs(300),
             alive: std::time::Duration::from_secs(120),
             signer: None,

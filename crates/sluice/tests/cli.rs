@@ -10027,6 +10027,7 @@ fn pooled_as(f: &Fakes, policy: &str, projects: &[&str]) -> String {
 fn pool_lead(f: &Fakes) -> sluice_core::Sluice<'_> {
     f.sluice().as_peer(sluice_core::Peer {
         name: "a".into(),
+        repository: "this-repository".into(),
         lease: Duration::from_secs(300),
         alive: Duration::from_secs(120),
         signer: Some("box".into()),

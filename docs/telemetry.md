@@ -83,7 +83,13 @@ under, are record 0014 as amended 2026-11-18 (the statement's clause
 - **A caller's trace turns nothing on**: it says only where sluice's
   spans nest. Whether sluice sends is the command's own choice, else the
   table, as above.
-- **Metrics**, each with `sluice.branch`:
+- **Metrics**, each with `sluice.repository` and `sluice.branch`, and
+  `sluice.outcome` where the table names it, and nothing else, so no
+  metric carries a value that grows with each run. `sluice.repository`
+  is the owner and name of the repository's `origin`, `acme/app` for
+  `git@github.com:acme/app.git` or `https://github.com/acme/app`, else
+  the repository's folder's name, `.git` dropped; nothing else of the
+  origin's address is kept:
 
   | Metric | Kind | What |
   |---|---|---|
@@ -91,11 +97,12 @@ under, are record 0014 as amended 2026-11-18 (the statement's clause
   | `sluice.window` | gauge | candidates the branch tests at once |
   | `sluice.verdicts` | counter | verdicts read, by `sluice.outcome` |
   | `sluice.tasks.ran`, `sluice.tasks.replayed` | counter | tasks run, and answered from the cache |
+  | `sluice.tasks.time_saved` | counter, seconds, declared in `s` | the time each replayed task's key last took when it ran |
   | `sluice.culprits` | counter | submissions blamed for a failure |
   | `sluice.conflicts` | counter | submissions removed for a conflict |
   | `sluice.landed`, `sluice.refused` | counter | submissions landed; landings refused because the branch moved |
-  | `sluice.submission.landed_after` | histogram, seconds | submit to landed |
-  | `sluice.candidate.tested_for` | histogram, seconds | a candidate's time under test, by `sluice.outcome` |
+  | `sluice.submission.landed_after` | histogram, seconds, declared in `s` | submit to landed |
+  | `sluice.candidate.tested_for` | histogram, seconds, declared in `s` | a candidate's time under test, by `sluice.outcome` |
 
 - **Logs**: one record for each failed task, sent by the round that
   reads its verdict, under that round's `sluice.verdict` span, with
@@ -121,16 +128,20 @@ under, are record 0014 as amended 2026-11-18 (the statement's clause
   becomes `[redacted]`. The output kept on disk is unchanged and stays
   the record; a log record lost on the way is never sent again.
 - **The checks inside a run**: with telemetry on, a run gets the
-  collector sluice sends to and the signals it sends, and moon runs with
-  `--otel`, so moon's own traces and metrics arrive as service `moon`.
-  With a `[telemetry]`, a run gets the table's collector, or the
+  collector sluice sends to and the traces and logs it sends, and no
+  metrics: its environment holds `OTEL_METRICS_EXPORTER=none`, with a
+  table or without, so a run's tools send their spans and logs, which
+  name the round that started them, and no metric names a run. moon runs
+  with `--otel`, so its own traces arrive under the service it names
+  itself. With a `[telemetry]`, a run gets the table's collector, or the
   caller's where the table names none, and none of the caller's other
-  `OTEL_*`. Each signal sluice does not send goes to it as
+  `OTEL_*`. Each other signal sluice does not send goes to it as
   `OTEL_<SIGNAL>_EXPORTER=none`. With no table, a run gets sluice's
-  `OTEL_*` as they are. moon does not nest its spans under sluice's:
-  each carries `host.name`, the table's attributes, `sluice.trace_id`,
-  `sluice.span_id`, `sluice.place` and `sluice.revision` as resource
-  attributes, so a search for the round's trace id finds them.
+  `OTEL_*` as they are, but for metrics. moon does not nest its spans
+  under sluice's: each carries `host.name`, the table's attributes,
+  `sluice.trace_id`, `sluice.span_id`, `sluice.place` and
+  `sluice.revision` as resource attributes, so a search for the round's
+  trace id finds them.
 
 ## What a host needs
 

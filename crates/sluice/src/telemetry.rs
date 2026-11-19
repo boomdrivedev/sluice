@@ -14,11 +14,14 @@
 //! alone; they never turn on a signal the table turns off. A signal
 //! turned off is never built.
 //!
-//! A run's checks get what sluice sends: its collector and the signals it
-//! sends, its resource attributes and, in `OTEL_RESOURCE_ATTRIBUTES`, the
-//! trace and span of the round that started them, so what they export is
-//! found beside the round; and the W3C `TRACEPARENT`, for a tool that
-//! reads it to nest its spans under the start.
+//! A run's checks get what sluice sends: its collector and the traces and
+//! logs it sends, its resource attributes and, in
+//! `OTEL_RESOURCE_ATTRIBUTES`, the trace and span of the round that
+//! started them, so what they export is found beside the round; and the
+//! W3C `TRACEPARENT`, for a tool that reads it to nest its spans under the
+//! start. They never get metrics: `OTEL_METRICS_EXPORTER=none`, with a
+//! table or without, so the run's ids on their resource ride on no metric
+//! (151 as amended 2026-11-18; rule core.66).
 //!
 //! Logs (ADR 0022): a failed check's output, which the core emits once
 //! where it keeps it, and sluice's own warnings and errors, sent as OTLP
@@ -43,11 +46,12 @@ use opentelemetry_appender_tracing::layer::OpenTelemetryTracingBridge;
 use opentelemetry_otlp::{LogExporter, MetricExporter, Protocol, SpanExporter, WithExportConfig};
 use opentelemetry_sdk::error::OTelSdkResult;
 use opentelemetry_sdk::logs::{self, LogProcessor, SdkLogRecord, SdkLoggerProvider};
-use opentelemetry_sdk::metrics::SdkMeterProvider;
+use opentelemetry_sdk::metrics::exporter::PushMetricExporter;
+use opentelemetry_sdk::metrics::{Instrument, SdkMeterProvider, Stream};
 use opentelemetry_sdk::propagation::TraceContextPropagator;
 use opentelemetry_sdk::trace::{SdkTracer, SdkTracerProvider};
 use opentelemetry_sdk::Resource;
-use sluice_core::OUTPUT;
+use sluice_core::{OUTPUT, SECONDS};
 use sluice_seams::LOG_LIMIT;
 use tracing_opentelemetry::{MetricsLayer, OpenTelemetrySpanExt};
 use tracing_subscriber::filter::filter_fn;
@@ -479,6 +483,24 @@ impl Extractor for Variables {
     }
 }
 
+/// The meter provider sluice's metrics are sent through, to `exporter`
+/// with `resource`: each instrument [`SECONDS`] names declared with the
+/// unit `s`, OpenTelemetry's own name for seconds, by a view, since the
+/// core's metric events are `tracing`'s and name no unit (rule core.66;
+/// record 0014 as amended 2026-11-18; design D4).
+pub fn meter_provider<E: PushMetricExporter>(exporter: E, resource: Resource) -> SdkMeterProvider {
+    SdkMeterProvider::builder()
+        .with_periodic_exporter(exporter)
+        .with_resource(resource)
+        .with_view(|i: &Instrument| {
+            SECONDS
+                .contains(&i.name())
+                .then(|| Stream::builder().with_unit("s").build().ok())
+                .flatten()
+        })
+        .build()
+}
+
 /// The exporters, flushed by [`Telemetry::finish`] before sluice exits:
 /// a provider for each signal left on, and none for a signal turned off.
 pub struct Telemetry {
@@ -597,12 +619,7 @@ impl Telemetry {
                 .with_resource(resource.clone())
                 .build()
         });
-        let metrics = metrics.map(|metrics| {
-            SdkMeterProvider::builder()
-                .with_periodic_exporter(metrics)
-                .with_resource(resource.clone())
-                .build()
-        });
+        let metrics = metrics.map(|metrics| meter_provider(metrics, resource.clone()));
         let logs = exporter.map(|e| {
             SdkLoggerProvider::builder()
                 .with_log_processor(Scrub::new(
@@ -786,9 +803,12 @@ pub fn run_env(attributes: &[(&str, &str)]) -> BTreeMap<String, String> {
 /// `host.name` and the table's `attributes`, never `service.name`, so a
 /// tool reports as itself; no other `OTEL_*`. With none: the caller's
 /// `OTEL_*` as they were when chosen, `host.name` added where sluice
-/// named the host itself. Either way, while traces go, the trace and span
-/// ids and `TRACEPARENT`, and then the run's own attributes, each value
-/// encoded.
+/// named the host itself. Either way `OTEL_METRICS_EXPORTER=none`, over
+/// the caller's, so a run's tools send their spans and logs and no
+/// metrics, and no metric carries the run's ids (151 as amended
+/// 2026-11-18; rule core.66; design D1); while traces go, the trace and
+/// span ids and `TRACEPARENT`; and then the run's own attributes, each
+/// value encoded.
 fn variables(
     settings: &Settings,
     ids: &opentelemetry::trace::SpanContext,
@@ -827,7 +847,6 @@ fn variables(
             let on = settings.signals;
             for (sent, variable) in [
                 (on.traces, "OTEL_TRACES_EXPORTER"),
-                (on.metrics, "OTEL_METRICS_EXPORTER"),
                 (on.logs, "OTEL_LOGS_EXPORTER"),
             ] {
                 if !sent {
@@ -837,6 +856,7 @@ fn variables(
             (env, named.collect())
         }
     };
+    env.insert("OTEL_METRICS_EXPORTER".into(), "none".into());
     if ids.is_valid() {
         let (trace, span) = (ids.trace_id().to_string(), ids.span_id().to_string());
         pairs.push(format!("sluice.trace_id={trace}"));
@@ -871,6 +891,63 @@ fn encode(v: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Rule core.66 (design D4): every time the core gives in seconds is
+    /// sent declared in `s`, and a count with no unit.
+    #[test]
+    fn a_time_is_sent_in_seconds() {
+        use opentelemetry_sdk::metrics::InMemoryMetricExporter;
+        let exporter = InMemoryMetricExporter::default();
+        let provider = meter_provider(exporter.clone(), Resource::builder_empty().build());
+        let subscriber = tracing_subscriber::registry().with(MetricsLayer::new(provider.clone()));
+        tracing::subscriber::with_default(subscriber, || {
+            let (repository, branch) = ("acme/app", "main");
+            tracing::info!(
+                histogram.sluice.submission.landed_after = 3.5f64,
+                sluice.repository = repository,
+                sluice.branch = branch,
+            );
+            tracing::info!(
+                histogram.sluice.candidate.tested_for = 2.0f64,
+                sluice.repository = repository,
+                sluice.branch = branch,
+                sluice.outcome = "passed",
+            );
+            tracing::info!(
+                monotonic_counter.sluice.tasks.time_saved = 4.0f64,
+                sluice.repository = repository,
+                sluice.branch = branch,
+            );
+            tracing::info!(
+                monotonic_counter.sluice.landed = 1u64,
+                sluice.repository = repository,
+                sluice.branch = branch,
+            );
+        });
+        provider.force_flush().unwrap();
+        let mut units: Vec<(String, String)> = exporter
+            .get_finished_metrics()
+            .unwrap()
+            .iter()
+            .flat_map(|r| r.scope_metrics())
+            .flat_map(|s| s.metrics())
+            .map(|m| (m.name().to_string(), m.unit().to_string()))
+            .collect();
+        units.sort();
+        units.dedup();
+        assert_eq!(
+            units,
+            [
+                ("sluice.candidate.tested_for".to_string(), "s".to_string()),
+                ("sluice.landed".to_string(), String::new()),
+                (
+                    "sluice.submission.landed_after".to_string(),
+                    "s".to_string()
+                ),
+                ("sluice.tasks.time_saved".to_string(), "s".to_string()),
+            ]
+        );
+    }
 
     #[test]
     fn values_are_encoded_where_the_syntax_would_read_them() {
@@ -1283,6 +1360,64 @@ mod tests {
             ..HostTelemetry::default()
         };
         assert!(!choose(Choices::default(), Some(&quiet), &context).send);
+    }
+
+    /// 151 as amended 2026-11-18, rule core.66 (design D1): a run's tools
+    /// send no metrics, with a table sending metrics or not, with none,
+    /// and whatever the caller's environment says, while the run's ids
+    /// stay on its resource for its spans and logs.
+    #[test]
+    fn a_run_s_tools_send_no_metrics() {
+        use opentelemetry::trace::{SpanContext, SpanId, TraceFlags, TraceId, TraceState};
+        let ids = SpanContext::new(
+            TraceId::from_bytes([1; 16]),
+            SpanId::from_bytes([2; 8]),
+            TraceFlags::SAMPLED,
+            false,
+            TraceState::default(),
+        );
+        let table = |metrics| HostTelemetry {
+            send: Some(true),
+            collector: Some("http://localhost:4318".into()),
+            metrics,
+            ..HostTelemetry::default()
+        };
+        let on = Choices {
+            otel: Some(true),
+            ..Choices::default()
+        };
+        let endpoint = ("OTEL_EXPORTER_OTLP_ENDPOINT", "http://collector:4318");
+        let ways = [
+            choose(Choices::default(), Some(&table(None)), &[]),
+            choose(Choices::default(), Some(&table(Some(false))), &[]),
+            choose(on.clone(), None, &[endpoint]),
+            choose(on, None, &[endpoint, ("OTEL_METRICS_EXPORTER", "otlp")]),
+        ];
+        for (n, settings) in ways.iter().enumerate() {
+            let env = variables(
+                settings,
+                &ids,
+                &[("sluice.place", "p"), ("sluice.revision", "r")],
+            );
+            assert_eq!(
+                env.get("OTEL_METRICS_EXPORTER").map(String::as_str),
+                Some("none"),
+                "way {n}: {env:?}"
+            );
+            let attributes = &env["OTEL_RESOURCE_ATTRIBUTES"];
+            for pair in [
+                format!("sluice.trace_id={}", ids.trace_id()),
+                format!("sluice.span_id={}", ids.span_id()),
+                "sluice.place=p".to_string(),
+                "sluice.revision=r".to_string(),
+            ] {
+                assert!(
+                    attributes.split(',').any(|a| a == pair),
+                    "way {n}: no {pair} in {attributes}"
+                );
+            }
+        }
+        assert!(ways[0].signals.metrics && !ways[1].signals.metrics);
     }
 
     #[test]
