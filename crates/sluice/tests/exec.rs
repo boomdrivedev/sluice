@@ -466,6 +466,44 @@ fn a_second_run_on_the_same_files_replays_and_records_nothing() {
     assert_eq!(s.results(), results, "a replay is never recorded as a run");
 }
 
+/// The exec-checks spec's "After a fix" (108; design D4): once a clean
+/// run recorded a pass of `b:test` and a fail of `a:test`, a commit to
+/// `a/lib` alone runs `a:test` again and replays `b:test`.
+#[test]
+fn after_a_fix_exec_runs_the_fixed_check_and_replays_the_rest() {
+    let s = moon_at_branch("exec-after-a-fix", "grep -qx ok a/lib\n");
+    s.commit(&[("a/lib", "broken"), ("b/lib", "2")]);
+    let out = s.sluice(&["exec", "bolt/x"]);
+    assert_eq!(out.status.code(), Some(1), "{}", text(&out));
+    let mut first = recorded(&s);
+    first.sort();
+    assert_eq!(
+        first,
+        [
+            ("a:test".to_string(), "fail".to_string()),
+            ("b:test".to_string(), "pass".to_string())
+        ],
+        "{}",
+        text(&out)
+    );
+
+    s.commit(&[("a/lib", "ok\n")]);
+    let out = s.sluice(&["exec", "bolt/x"]);
+    assert!(out.status.success(), "{}", text(&out));
+    assert!(
+        text(&out).contains("passed: 2 tasks (1 replayed)"),
+        "{}",
+        text(&out)
+    );
+    let then = recorded(&s);
+    assert_eq!(
+        then[first.len()..],
+        [("a:test".to_string(), "pass".to_string())],
+        "a:test ran, and b:test's replay is recorded as nothing: {}",
+        text(&out)
+    );
+}
+
 /// Each result `sluice exec` recorded: `(task, outcome)`.
 fn recorded(s: &Setup) -> Vec<(String, String)> {
     s.results()
