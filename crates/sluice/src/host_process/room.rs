@@ -167,6 +167,20 @@ struct SessionWait {
     repository: PathBuf,
     /// 154: the branch its run is held to, where its ask names one.
     branch: Option<String>,
+    /// 154: when it came to wait, which its wait for room is timed from
+    /// (design D7 of `each-submission-shows-its-wait-and-its-test`).
+    since: Instant,
+}
+
+/// 154: how long a run whose part the room held waited for room, from
+/// the ask first refused to the hold, zero where none was, by repository
+/// and branch (design D7 of `each-submission-shows-its-wait-and-its-test`).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Wait {
+    pub repository: PathBuf,
+    /// The branch it was held for; `None` where its ask named none.
+    pub branch: Option<String>,
+    pub waited: Duration,
 }
 
 /// How a room counts the runs going on the host.
@@ -192,6 +206,12 @@ pub struct Room {
     queue_waits: BTreeMap<PathBuf, QueueWait>,
     /// Sessions' and previews' waits in the order they came to wait.
     session_waits: Vec<SessionWait>,
+    /// 154: combinations' waits by repository and branch, which time each
+    /// run's wait and decide nothing; they lapse as `queue_waits` do
+    /// (design D7 of `each-submission-shows-its-wait-and-its-test`).
+    waited_since: BTreeMap<(PathBuf, Option<String>), QueueWait>,
+    /// 154: each part held since the last [`Room::waits`], with its wait.
+    waits: Vec<Wait>,
     turn: Turn,
     next: u64,
     /// The runs counted at the last look, so a run that ended is found.
@@ -209,6 +229,8 @@ impl Room {
             held: BTreeMap::new(),
             queue_waits: BTreeMap::new(),
             session_waits: Vec::new(),
+            waited_since: BTreeMap::new(),
+            waits: Vec::new(),
             turn: Turn::Queue,
             next: 1,
             last: None,
@@ -358,13 +380,26 @@ impl Room {
     /// `branch`, where it names one, from now, behind every one before it:
     /// its asker's id, which it asks with and lets go of.
     pub fn wait(&mut self, repository: &Path, branch: Option<&str>) -> u64 {
+        self.wait_at(repository, branch, Instant::now())
+    }
+
+    /// [`Room::wait`], from `now`.
+    pub fn wait_at(&mut self, repository: &Path, branch: Option<&str>, now: Instant) -> u64 {
         let id = self.id();
         self.session_waits.push(SessionWait {
             id,
             repository: repository.to_path_buf(),
             branch: branch.map(str::to_string),
+            since: now,
         });
         id
+    }
+
+    /// 154: each part held since the last call, with its repository, its
+    /// branch and how long its run waited for room, taken from the room
+    /// (design D7 of `each-submission-shows-its-wait-and-its-test`).
+    pub fn waits(&mut self) -> Vec<Wait> {
+        std::mem::take(&mut self.waits)
     }
 
     /// The session's or preview's wait `id` is let go: its asker ended,
@@ -436,6 +471,8 @@ impl Room {
             .saturating_sub(self.reserved)
             .saturating_sub(count);
         let kind = asker.kind();
+        // 154 (design D7): when a session's or a preview's run came to wait.
+        let mut session_since = None;
         let refused = match asker {
             Asker::Queue(repo) => {
                 let sessions = self.session_waits.len();
@@ -454,6 +491,7 @@ impl Room {
                     None
                 } else {
                     self.queue_wait(repo, now);
+                    self.branch_wait(repo, branch.as_deref(), now);
                     Some(Why::AtBound)
                 }
             }
@@ -463,6 +501,7 @@ impl Room {
                         id: *id,
                         repository: repository.to_path_buf(),
                         branch: branch.clone(),
+                        since: now,
                     });
                 }
                 let first = self.session_waits.first().map(|w| w.id) == Some(*id);
@@ -475,6 +514,11 @@ impl Room {
                 } else if free <= owed {
                     Some(Why::CombinationFirst)
                 } else {
+                    session_since = self
+                        .session_waits
+                        .iter()
+                        .find(|w| w.id == *id)
+                        .map(|w| w.since);
                     self.let_go(*id);
                     self.turn = Turn::Queue;
                     None
@@ -509,6 +553,7 @@ impl Room {
                     None => {
                         if let Asker::Queue(repo) = asker {
                             self.queue_wait(repo, now);
+                            self.branch_wait(repo, branch.as_deref(), now);
                         }
                         return Ok(Asked::Refused(Why::AtBound));
                     }
@@ -516,6 +561,20 @@ impl Room {
             }
             Count::Own(_) | Count::Seen(_) => None,
         };
+        // 154 (design D7): the run's wait for room, from the ask first
+        // refused to this hold, zero where none was.
+        let since = match asker {
+            Asker::Queue(repo) => self
+                .waited_since
+                .remove(&(repo.clone(), branch.clone()))
+                .map(|w| w.since),
+            Asker::Session(_) => session_since,
+        };
+        self.waits.push(Wait {
+            repository: repository.to_path_buf(),
+            branch: branch.clone(),
+            waited: since.map_or(Duration::ZERO, |s| now.saturating_duration_since(s)),
+        });
         let id = self.id();
         self.held.insert(
             id,
@@ -527,6 +586,18 @@ impl Room {
             },
         );
         Ok(Asked::Held(id))
+    }
+
+    /// 154: `repository`'s combination of `branch` waits from `now`, or
+    /// still waits (design D7).
+    fn branch_wait(&mut self, repository: &Path, branch: Option<&str>, now: Instant) {
+        self.waited_since
+            .entry((repository.to_path_buf(), branch.map(str::to_string)))
+            .and_modify(|w| w.last = now)
+            .or_insert(QueueWait {
+                since: now,
+                last: now,
+            });
     }
 
     /// `repository`'s combination waits from `now`, or still waits.
@@ -603,6 +674,8 @@ impl Room {
     /// Combinations' waits whose rounds stopped asking go.
     fn lapse(&mut self, now: Instant) {
         self.queue_waits
+            .retain(|_, w| now.saturating_duration_since(w.last) < QUEUE_WAIT);
+        self.waited_since
             .retain(|_, w| now.saturating_duration_since(w.last) < QUEUE_WAIT);
     }
 
@@ -1163,6 +1236,56 @@ mod tests {
         assert_eq!(room.running().unwrap().total(), 4);
         drop(older);
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// 154, design D7 of `each-submission-shows-its-wait-and-its-test`: a
+    /// combination of `main` refused at 0 s and held at 20 s waited 20 s,
+    /// one of `bolt/x` held at its first ask none, and a session's run that
+    /// waited from 5 s and was held at 12 s, 7 s; each given once.
+    #[test]
+    fn a_run_s_wait_for_room_is_measured_by_branch() {
+        let t0 = Instant::now();
+        let at = |s: u64| t0 + Duration::from_secs(s);
+        let mut room = Room::new(2, 0);
+        let (a, b) = (go(&mut room, &queue(), t0), go(&mut room, &queue(), t0));
+        room.waits();
+        assert_eq!(
+            room.ask(&queue(), &repo(), Some("main"), t0).unwrap(),
+            Asked::Refused(Why::AtBound)
+        );
+        let agent = room.wait_at(&repo(), Some("work/s"), at(5));
+        assert_eq!(
+            room.ask(&Asker::Session(agent), &repo(), None, at(5))
+                .unwrap(),
+            Asked::Refused(Why::AtBound)
+        );
+        room.ended(a);
+        let x = match room.ask(&queue(), &repo(), Some("bolt/x"), at(10)).unwrap() {
+            Asked::Held(id) => id,
+            refused => panic!("bolt/x: {refused:?}"),
+        };
+        room.started(x);
+        room.ended(b);
+        assert!(matches!(
+            room.ask(&Asker::Session(agent), &repo(), None, at(12))
+                .unwrap(),
+            Asked::Held(_)
+        ));
+        room.ended(x);
+        assert!(matches!(
+            room.ask(&queue(), &repo(), Some("main"), at(20)).unwrap(),
+            Asked::Held(_)
+        ));
+        let wait = |branch: &str, secs: u64| Wait {
+            repository: repo(),
+            branch: Some(branch.into()),
+            waited: Duration::from_secs(secs),
+        };
+        assert_eq!(
+            room.waits(),
+            [wait("bolt/x", 0), wait("work/s", 7), wait("main", 20)]
+        );
+        assert!(room.waits().is_empty(), "each is given once");
     }
 
     /// Two repositories beside this one's.
