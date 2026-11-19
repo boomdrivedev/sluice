@@ -321,6 +321,55 @@ fn a_worktrees_checks_leave_out_what_its_branch_landed_since() {
     assert_eq!(checks_of(&out), ["b:test"], "{}", text(&out));
 }
 
+/// The exec-checks spec's "An edit not committed" (36; design D2): an
+/// unstaged edit is the worktree's own, and its run records nothing (92).
+#[test]
+fn a_worktrees_unstaged_edit_runs_the_checks_it_affects() {
+    let s = moon_at_branch("exec-unstaged", "true\n");
+    std::fs::write(s.worktree.join("a/lib"), "2").unwrap();
+    let out = s.sluice(&["exec", "bolt/x", "--json"]);
+    assert!(out.status.success(), "{}", text(&out));
+    assert_eq!(checks_of(&out), ["a:test"], "{}", text(&out));
+    assert!(
+        text(&out).contains("not recorded: worktree is not clean"),
+        "{}",
+        text(&out)
+    );
+    assert_eq!(s.results(), "", "nothing is recorded");
+}
+
+/// The exec-checks spec's "A file not yet tracked" (36; design D2): an
+/// untracked file git does not ignore is the worktree's own.
+#[test]
+fn a_worktrees_untracked_file_runs_the_checks_it_affects() {
+    let s = moon_at_branch("exec-untracked", "true\n");
+    std::fs::write(s.worktree.join("b/new"), "new").unwrap();
+    let out = s.sluice(&["exec", "bolt/x", "--json"]);
+    assert!(out.status.success(), "{}", text(&out));
+    assert_eq!(checks_of(&out), ["b:test"], "{}", text(&out));
+}
+
+/// The exec-checks spec's "Nothing of its own" (36): a worktree that
+/// holds exactly its branch's revision runs no check, and exits 0.
+#[test]
+fn a_worktree_at_its_branchs_revision_runs_no_check() {
+    let s = moon_at_branch("exec-nothing", "exit 1\n");
+    let out = s.sluice(&["exec", "bolt/x", "--json"]);
+    assert_eq!(out.status.code(), Some(0), "{}", text(&out));
+    assert!(checks_of(&out).is_empty(), "{}", text(&out));
+}
+
+/// The exec-checks spec's "Its own moon.yml" (36, 70): a worktree's own
+/// change to moon's configuration runs every required check.
+#[test]
+fn a_worktrees_own_moon_yml_runs_every_check() {
+    let s = moon_at_branch("exec-own-moon-yml", "true\n");
+    s.commit(&[("b/moon.yml", &moon_yml("true # its own"))]);
+    let out = s.sluice(&["exec", "bolt/x", "--json"]);
+    assert!(out.status.success(), "{}", text(&out));
+    assert_eq!(checks_of(&out), ["a:test", "b:test"], "{}", text(&out));
+}
+
 /// Each result `sluice exec` recorded: `(task, outcome)`.
 fn recorded(s: &Setup) -> Vec<(String, String)> {
     s.results()
