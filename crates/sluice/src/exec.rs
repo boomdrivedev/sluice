@@ -331,6 +331,11 @@ impl Exec<'_> {
         let command = (!self.command.is_empty()).then(|| shell_line(&self.command));
         let work = s.session_work(&plan, &session, command.as_deref())?;
         say(out, json, &opening(&work, &self.branch, &plan.base))?;
+        // Design D6: where the worktree's own changes are read from.
+        let since = match &work {
+            SessionWork::Checks { since, .. } => since.clone(),
+            SessionWork::Command(_) | SessionWork::Again(_) => None,
+        };
 
         let mut told = crate::host_process::room::Told::default();
         let Some((place, run)) =
@@ -362,6 +367,7 @@ impl Exec<'_> {
                     false,
                     None,
                     &place.env,
+                    since.as_ref(),
                     forecast.as_ref(),
                     FAILED,
                 )?;
@@ -417,6 +423,7 @@ impl Exec<'_> {
                         false,
                         None,
                         &place.env,
+                        since.as_ref(),
                         forecast.as_ref(),
                         FAILED,
                     )?;
@@ -477,6 +484,7 @@ impl Exec<'_> {
             recorded,
             Some(report.timed_out),
             &place.env,
+            since.as_ref(),
             forecast.as_ref(),
             code,
         )?;
@@ -715,6 +723,7 @@ impl Exec<'_> {
         recorded: bool,
         timed_out: Option<bool>,
         env: &std::collections::BTreeMap<String, String>,
+        since: Option<&Rev>,
         forecast: Option<&serde_json::Value>,
         code: i32,
     ) -> Result<()> {
@@ -729,6 +738,7 @@ impl Exec<'_> {
                         "hash": t.hash,
                         "outcome": t.outcome,
                         "recorded": recorded && matches!(t.source, sluice_seams::Source::Ran { .. }),
+                        "replayed": matches!(t.source, sluice_seams::Source::Replayed { .. }),
                     })
                 })
                 .collect()
@@ -751,6 +761,7 @@ impl Exec<'_> {
             "{}",
             serde_json::json!({
                 "branch": self.branch,
+                "since": since.map(Rev::as_str),
                 "tasks": tasks,
                 "dependencies": dependencies,
                 "failed_by": report.map(|r| r.failed_by.as_slice()).unwrap_or_default(),

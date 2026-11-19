@@ -540,6 +540,37 @@ fn a_pass_sluice_never_recorded_runs_again_and_is_recorded() {
     assert_eq!(recorded(&s), [("a:test".to_string(), "pass".to_string())]);
 }
 
+/// The exec-checks spec's "The document for scripts" (design D6): `--json`
+/// gives `since`, the merge base's full revision, and each task's
+/// `replayed`.
+#[test]
+fn exec_json_gives_since_and_each_tasks_replayed() {
+    let s = moon_at_branch("exec-json-replayed", "true\n");
+    let cut = s.repo.rev("bolt/x");
+    s.commit(&[("a/lib", "2"), ("b/lib", "2")]);
+    let out = s.sluice(&["exec", "bolt/x"]);
+    assert!(out.status.success(), "{}", text(&out));
+
+    s.commit(&[("a/lib", "3")]);
+    let out = s.sluice(&["exec", "bolt/x", "--json"]);
+    assert!(out.status.success(), "{}", text(&out));
+    let doc = document(&out);
+    assert_eq!(doc["since"], cut.as_str(), "{doc}");
+    let task = |name: &str| {
+        doc["tasks"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|t| t["task"] == name)
+            .unwrap_or_else(|| panic!("no {name} in {doc}"))
+            .clone()
+    };
+    assert_eq!(task("b:test")["replayed"], true, "{doc}");
+    assert_eq!(task("b:test")["recorded"], false, "{doc}");
+    assert_eq!(task("a:test")["replayed"], false, "{doc}");
+    assert_eq!(task("a:test")["recorded"], true, "{doc}");
+}
+
 /// Each result `sluice exec` recorded: `(task, outcome)`.
 fn recorded(s: &Setup) -> Vec<(String, String)> {
     s.results()
