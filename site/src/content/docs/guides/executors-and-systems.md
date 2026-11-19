@@ -162,8 +162,8 @@ claim no system: [Running checks on a pool](/sluice/guides/pools/).
 `sluice overview` lists the hosts serving a remote, by their last sign
 of life: the signer, the system, the runs held, the room left, and a
 host whose sign of life has stood still past `alive`. `sluice step
-<branch>` says `led` on a host that does not keep the branch, and still
-takes its runs. `sluice status <branch>` reads the queue from the remote.
+<branch>` says `elsewhere` on a host that does not run the branch's
+queue, and still takes its runs. `sluice status <branch>` reads the queue from the remote.
 When the remote is out of reach, it shows the queue as last fetched and
 says so.
 
