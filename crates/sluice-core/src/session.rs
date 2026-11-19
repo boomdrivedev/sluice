@@ -25,6 +25,68 @@ pub struct SessionPlan {
     pub rules: Rules,
 }
 
+/// What a session run runs (89).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum SessionWork {
+    /// The branch's required checks the worktree's own changes affect,
+    /// with what depends on them (36): those since `since`, where its head
+    /// left the branch, and the paths in `beyond`, what it holds beyond its
+    /// head; every required check where `since` is `None`, a head that
+    /// shares no history with the branch (70; design D1, D2 of
+    /// a-worktrees-checks-run-only-what-its-own-changes-affect).
+    Checks {
+        since: Option<Rev>,
+        beyond: Vec<String>,
+    },
+    /// A command, in place of the runner's checks (89).
+    Command(String),
+}
+
+impl SessionWork {
+    /// The checks the worktree `session` holds affect since `since`, its
+    /// head's merge base with the branch ([`Sluice::session_since`]).
+    pub fn checks(since: Option<Rev>, session: &Session) -> SessionWork {
+        SessionWork::Checks {
+            since,
+            beyond: beyond(&session.dirty),
+        }
+    }
+
+    pub fn command(&self) -> Option<&str> {
+        match self {
+            SessionWork::Command(c) => Some(c),
+            SessionWork::Checks { .. } => None,
+        }
+    }
+}
+
+/// A path of what a worktree holds beyond its head, an entry of
+/// [`Session::dirty`], without the status `git status --porcelain` puts
+/// before it: `new <- old` for a rename or a copy.
+pub fn path_of(line: &str) -> &str {
+    let b = line.as_bytes();
+    if b.len() > 3 && b[2] == b' ' && b[..2].iter().all(|c| b" MTADRCU?!".contains(c)) {
+        &line[3..]
+    } else {
+        line
+    }
+}
+
+/// Design D2: each path `dirty` names, as [`path_of`] reads it, both
+/// paths of a rename or a copy.
+fn beyond(dirty: &[String]) -> Vec<String> {
+    let mut paths = Vec::new();
+    for line in dirty {
+        let path = path_of(line);
+        let moved = line.len() > 3 && line.as_bytes()[..2].iter().any(|c| b"RC".contains(c));
+        match path.split_once(" <- ").filter(|_| moved) {
+            Some((new, old)) => paths.extend([new.to_string(), old.to_string()]),
+            None => paths.push(path.to_string()),
+        }
+    }
+    paths
+}
+
 /// A session run under way: its place and its run.
 #[derive(Clone, Debug)]
 pub struct SessionStart {
@@ -148,53 +210,76 @@ impl Sluice<'_> {
         self.seams.tests.unmet(&engine)
     }
 
-    /// 89, 83: a session run of the checks `head` affects against the
-    /// branch, or of `command`, in `place`, under the branch's executor,
-    /// limits and time limit; never answered from the cache, since what a
-    /// session run records must be observed (16). A command runs in place
-    /// of the runner's checks, in a worktree equipped by the runner the
-    /// branch's policy names (147).
+    /// 36, 70; design D1: where the session's head left the branch, the
+    /// merge base of its head and the branch's revision the plan read, from
+    /// which a run of its checks reads its own changes; `None` where the
+    /// two share no commit, so every required check runs.
+    pub fn session_since(&self, plan: &SessionPlan, session: &Session) -> Result<Option<Rev>> {
+        self.seams.branch.merge_base(&session.head, &plan.base)
+    }
+
+    /// 89: what a session run of `session` runs: `command`, or the checks
+    /// its own changes affect since [`Sluice::session_since`].
+    pub fn session_work(
+        &self,
+        plan: &SessionPlan,
+        session: &Session,
+        command: Option<&str>,
+    ) -> Result<SessionWork> {
+        Ok(match command {
+            Some(c) => SessionWork::Command(c.to_string()),
+            None => SessionWork::checks(self.session_since(plan, session)?, session),
+        })
+    }
+
+    /// 89, 83: a session run of `work` on `head` in `place`, under the
+    /// branch's executor, limits and time limit; never answered from the
+    /// cache, since what a session run records must be observed (16). A
+    /// command runs in place of the runner's checks, in a worktree equipped
+    /// by the runner the branch's policy names (147).
     pub fn session_request(
         plan: &SessionPlan,
         place: Place,
         head: &Rev,
-        command: Option<&str>,
+        work: &SessionWork,
     ) -> RunRequest {
         let mut tests = plan.policy.tests.clone();
-        let required = match command {
-            None => plan.rules.required.clone(),
-            Some(_) => {
+        let (required, since, beyond) = match work {
+            SessionWork::Checks { since, beyond } => {
+                (plan.rules.required.clone(), since.clone(), beyond.clone())
+            }
+            SessionWork::Command(_) => {
                 // Could-not-run-1 114: a not-run exit says a check could
                 // not run here; a command's exit is its own, so none of
                 // its exits is read so.
                 tests.remove("not_run");
-                Vec::new()
+                (Vec::new(), Some(plan.base.clone()), Vec::new())
             }
         };
         RunRequest {
             place,
             revision: head.clone(),
             required,
-            since: Some(plan.base.clone()),
-            beyond: Vec::new(),
+            since,
+            beyond,
             limit: plan.rules.timeout,
             limits: plan.policy.limits.clone(),
             tests,
-            command: command.map(str::to_string),
+            command: work.command().map(str::to_string),
             replay: false,
             system: None,
         }
     }
 
-    /// 89, 90: adopt the session's worktree and start its run there, of
-    /// the checks or of `command`, in `part`, the room in the host's bound
-    /// its caller holds for it (71, 150; rule core.49).
+    /// 89, 90: adopt the session's worktree and start its run of `work`
+    /// there, in `part`, the room in the host's bound its caller holds for
+    /// it (71, 150; rule core.49).
     pub fn start_session(
         &self,
         plan: &SessionPlan,
         worktree: &str,
         head: &Rev,
-        command: Option<&str>,
+        work: &SessionWork,
         part: Part,
     ) -> Result<SessionStart> {
         let place = self.seams.checkout.adopt(
@@ -203,7 +288,7 @@ impl Sluice<'_> {
             &plan.policy.checkout,
             &self.now(),
         )?;
-        let request = Sluice::session_request(plan, place.clone(), head, command);
+        let request = Sluice::session_request(plan, place.clone(), head, work);
         let run = self.seams.tests.start(&request, part)?;
         Ok(SessionStart { place, run })
     }

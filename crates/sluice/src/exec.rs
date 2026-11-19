@@ -11,7 +11,9 @@ use std::path::PathBuf;
 use anyhow::Result;
 use sluice_core::overview::OrderFrom;
 use sluice_core::release::{ReleaseOutcome, Releasing};
-use sluice_core::session::{Abandoned, Recorded, SessionPlan, SessionRefusal, SessionStart};
+use sluice_core::session::{
+    path_of, Abandoned, Recorded, SessionPlan, SessionRefusal, SessionStart,
+};
 use sluice_core::{Clock, Forecast, Sluice};
 use sluice_seams::{
     AtBound, Outcome, Progress, Released, Rev, RunHandle, RunOutcome, RunReport, TaskProgress,
@@ -326,6 +328,7 @@ impl Exec<'_> {
         }
         let forecast = forecast.as_ref().map(crate::forecast_json);
         let command = (!self.command.is_empty()).then(|| shell_line(&self.command));
+        let work = s.session_work(&plan, &session, command.as_deref())?;
         match &command {
             None => say(
                 out,
@@ -374,7 +377,7 @@ impl Exec<'_> {
             };
             drop(holding);
             let _guard = seams.state.wait_lock(&self.branch)?;
-            match s.start_session(&plan, &worktree, &session.head, command.as_deref(), part) {
+            match s.start_session(&plan, &worktree, &session.head, &work, part) {
                 Ok(started) => {
                     let (place, run) = (started.place, started.run);
                     let held = self.host.lock_sessions()?;
@@ -885,17 +888,6 @@ pub fn changed_text(
         ));
     }
     format!("not recorded: {}", parts.join("; "))
-}
-
-/// A path of what a worktree holds beyond its head, without the status
-/// `git status --porcelain` puts before it.
-fn path_of(line: &str) -> &str {
-    let b = line.as_bytes();
-    if b.len() > 3 && b[2] == b' ' && b[..2].iter().all(|c| b" MTADRCU?!".contains(c)) {
-        &line[3..]
-    } else {
-        line
-    }
 }
 
 /// 97: a result that could not be kept on the worktree is said on stderr,

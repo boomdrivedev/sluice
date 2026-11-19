@@ -208,6 +208,119 @@ fn moon_setup(name: &str, a_check: &str) -> Setup {
     }
 }
 
+/// `bolt/x` holding a moon workspace of two projects whose `test` tasks,
+/// tagged `gate`, the policy requires: `a`'s runs `a_check`, `b`'s passes.
+/// The session's worktree holds exactly `bolt/x`'s revision, nothing of
+/// its own. Needs moon on the path.
+fn moon_at_branch(name: &str, a_check: &str) -> Setup {
+    let repo = Repo::new(name);
+    repo.write(
+        ".config/sluice.toml",
+        "[tests]\nrunner = \"moon\"\n\n\
+         [branches.\"bolt/*\"]\nrequired = [\"#gate\"]\ntimeout = \"5m\"\n",
+    );
+    repo.write(
+        ".moon/workspace.yml",
+        "projects:\n  a: 'a'\n  b: 'b'\n\
+         vcs:\n  client: 'git'\n  defaultBranch: 'main'\ntelemetry: false\n",
+    );
+    repo.write(".gitignore", ".moon/cache/\n");
+    repo.write("a/check.sh", a_check);
+    for (p, command) in [("a", "sh a/check.sh"), ("b", "true")] {
+        repo.write(&format!("{p}/lib"), "1");
+        repo.write(&format!("{p}/moon.yml"), &moon_yml(command));
+    }
+    repo.git(&["add", "-A"]);
+    repo.git(&["commit", "-q", "-m", "two projects"]);
+    repo.git(&["branch", "bolt/x", "main"]);
+    let sessions = Scratch::new(&format!("{name}-sessions"));
+    let worktree = sessions.path().join("a");
+    repo.git(&[
+        "worktree",
+        "add",
+        "-q",
+        "-b",
+        "unit/a",
+        worktree.to_str().unwrap(),
+        "bolt/x",
+    ]);
+    Setup {
+        repo,
+        worktree,
+        config: Scratch::new(&format!("{name}-config")),
+        state: Scratch::new(&format!("{name}-state")),
+        _sessions: sessions,
+    }
+}
+
+/// A project's `moon.yml` of [`moon_at_branch`]: its `test` task runs
+/// `command` from the workspace's root.
+fn moon_yml(command: &str) -> String {
+    format!(
+        "tasks:\n  test:\n    command: '{command}'\n    inputs: ['**/*']\n    \
+         tags: [gate]\n    options: {{runFromWorkspaceRoot: true}}\n"
+    )
+}
+
+impl Setup {
+    /// Write `files` in the worktree and commit them on its branch.
+    fn commit(&self, files: &[(&str, &str)]) -> String {
+        for (path, content) in files {
+            std::fs::write(self.worktree.join(path), content).unwrap();
+        }
+        let dir = self.worktree.to_str().unwrap();
+        self.repo.git(&["-C", dir, "add", "-A"]);
+        self.repo
+            .git(&["-C", dir, "commit", "-q", "-m", "the worktree's own"]);
+        self.repo.git(&["-C", dir, "rev-parse", "HEAD"])
+    }
+
+    /// Land `files` on `bolt/x`, as the branch moving on past the worktree.
+    fn land(&self, files: &[(&str, &str)]) -> String {
+        for (path, content) in files {
+            self.repo.write(path, content);
+        }
+        self.repo.git(&["add", "-A"]);
+        self.repo.git(&["commit", "-q", "-m", "landed"]);
+        self.repo.git(&["branch", "-f", "bolt/x", "main"]);
+        self.repo.rev("bolt/x")
+    }
+}
+
+/// The `--json` document of `sluice exec`.
+fn document(out: &Output) -> serde_json::Value {
+    serde_json::from_slice(&out.stdout).unwrap_or_else(|e| panic!("{e}: {}", text(out)))
+}
+
+/// The checks a `sluice exec --json` ran or replayed, by name, sorted.
+fn checks_of(out: &Output) -> Vec<String> {
+    let doc = document(out);
+    let mut names: Vec<String> = doc["tasks"]
+        .as_array()
+        .unwrap_or_else(|| panic!("no tasks in {doc}"))
+        .iter()
+        .map(|t| t["task"].as_str().unwrap().to_string())
+        .collect();
+    names.sort();
+    names
+}
+
+/// The exec-checks spec's "The branch moved on" (36; design D1): a
+/// worktree's own changes are read from where its head left the branch,
+/// so what the branch landed since is none of its own.
+#[test]
+fn a_worktrees_checks_leave_out_what_its_branch_landed_since() {
+    let s = moon_at_branch("exec-moved-on", "true\n");
+    s.commit(&[("b/lib", "2")]);
+    s.land(&[
+        ("a/lib", "2"),
+        ("a/moon.yml", &moon_yml("sh a/check.sh # moved")),
+    ]);
+    let out = s.sluice(&["exec", "bolt/x", "--json"]);
+    assert!(out.status.success(), "{}", text(&out));
+    assert_eq!(checks_of(&out), ["b:test"], "{}", text(&out));
+}
+
 /// Each result `sluice exec` recorded: `(task, outcome)`.
 fn recorded(s: &Setup) -> Vec<(String, String)> {
     s.results()
