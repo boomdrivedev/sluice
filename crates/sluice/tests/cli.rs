@@ -47,7 +47,18 @@ fn setup() -> Fakes {
 }
 
 fn sluice(f: &Fakes, args: &[&str]) -> (i32, String) {
+    sluice_under(f, None, args)
+}
+
+/// `sluice <args>` over the fakes, started under `caller`'s trace context
+/// (153): its exit and what it said.
+fn sluice_under(
+    f: &Fakes,
+    caller: Option<sluice::telemetry::Caller>,
+    args: &[&str],
+) -> (i32, String) {
     let cli = Cli::try_parse_from(std::iter::once("sluice").chain(args.iter().copied())).unwrap();
+    let cli = Cli { caller, ..cli };
     let mut out = Vec::new();
     let code = settled(|| {
         run(
@@ -1544,12 +1555,12 @@ fn status_lists_the_queue() {
             format!("2 no longer in the queue: sluice status {BRANCH} --all"),
             "OWED".to_string(),
             "  unit/batch-review · never confirmed".to_string(),
-            "    2:failed #2  owed until 2026-10-18T09:00:11Z · handed over by notice at \
-             2026-10-11T09:00:18Z"
+            "    2:failed #2  owed until 2026-10-18T09:00:12Z · handed over by notice at \
+             2026-10-11T09:00:21Z"
                 .to_string(),
             "  unit/touches · never confirmed".to_string(),
-            "    1:landed #1  owed until 2026-10-18T09:00:14Z · handed over by notice at \
-             2026-10-11T09:00:19Z"
+            "    1:landed #1  owed until 2026-10-18T09:00:16Z · handed over by notice at \
+             2026-10-11T09:00:22Z"
                 .to_string(),
             "confirm one with: sluice confirm <key>, in its worktree, or sluice confirm <key> \
              --as operator"
@@ -4318,6 +4329,46 @@ fn step_under_json() {
         sluice(&f, &["step", BRANCH]),
         (0, format!("{BRANCH}: stepped\n"))
     );
+}
+
+/// satisfies: the peer-lead spec's "Host B steps a branch whose queue host
+/// A runs": host `a`, accepted by `main` on `origin`, runs its queue, and a
+/// step on this host says `elsewhere`, as its line and its document's
+/// `outcome`, and nowhere `led` (72, 73, 75; core.26).
+#[test]
+fn step_on_a_host_that_does_not_run_the_queue_says_elsewhere() {
+    let f = Fakes::new();
+    f.world.init(
+        "main",
+        &[(
+            POLICY_PATH,
+            "[tests]\nrunner = \"fake\"\n\n[branches.main]\nrequired = []\n\
+             trust = [\"box\"]\nremote = \"origin\"\n\
+             \n[signers.box]\nssh = \"box ssh-ed25519 AAAA\"\n",
+        )],
+    );
+    f.world.be_host("a");
+    f.world.signs_as("box");
+    pool_lead(&f).step("main").unwrap();
+    f.world.be_host("b");
+    let led = |out: &str| {
+        out.split(|c: char| !c.is_alphanumeric())
+            .any(|w| w == "led")
+    };
+    let (code, out) = sluice(&f, &["step", "main"]);
+    assert_eq!(code, 0, "{out}");
+    assert!(
+        out.lines().any(|l| {
+            l
+            == "main: elsewhere: another host runs the branch's queue, and its lease has not passed"
+        }),
+        "{out}"
+    );
+    assert!(!led(&out), "{out}");
+    let (code, out) = sluice(&f, &["step", "main", "--json"]);
+    assert_eq!(code, 0, "{out}");
+    assert_eq!(json(&out)["outcome"], "elsewhere", "{out}");
+    assert!(!led(&out), "{out}");
 }
 
 // ---------------------------------------------------------------------------
@@ -7299,8 +7350,8 @@ fn status_and_overview_show_a_hold_while_it_lasts() {
             // D13 (51; record 0102): #1's landing, which nobody confirmed.
             "OWED".to_string(),
             "  unit/a · never confirmed".to_string(),
-            "    1:landed #1  owed until 2026-10-18T09:00:13Z · handed over by notice at \
-             2026-10-11T09:00:16Z, wait at 2026-10-11T09:00:19Z"
+            "    1:landed #1  owed until 2026-10-18T09:00:15Z · handed over by notice at \
+             2026-10-11T09:00:19Z, wait at 2026-10-11T09:00:22Z"
                 .to_string(),
             "confirm one with: sluice confirm <key>, in its worktree, or sluice confirm <key> \
              --as operator"
@@ -7616,6 +7667,52 @@ fn queued(f: &Fakes) -> Vec<serde_json::Value> {
         .as_array()
         .cloned()
         .unwrap_or_default()
+}
+
+/// 153 (design D4): with telemetry off, a submit started under a caller's
+/// context keeps its `TRACEPARENT` as the submission's `trace`, each
+/// submission of an act of two worktrees keeps the same, and a submit
+/// started under none keeps none.
+#[test]
+fn a_submission_keeps_the_trace_it_was_submitted_under() {
+    let f = setup();
+    work(&f, "unit/a", "agent-1", &[("plugin/one", Some("1"))]);
+    work(&f, "unit/b1", "agent-2", &[("plugin/two", Some("2"))]);
+    work(&f, "unit/b2", "agent-3", &[("tests/three", Some("3"))]);
+    work(&f, "unit/c", "agent-4", &[("plugin/four", Some("4"))]);
+    let traceparent = "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01";
+    let caller = sluice::telemetry::Caller::read([("TRACEPARENT", traceparent)]);
+    assert!(caller.is_some());
+    for (caller, worktrees) in [
+        (caller.clone(), &["--worktree", "unit/a"][..]),
+        (
+            caller,
+            &["--worktree", "unit/b1", "--worktree", "unit/b2"][..],
+        ),
+        (None, &["--worktree", "unit/c"][..]),
+    ] {
+        let args = [&["submit", BRANCH, "--no-wait"][..], worktrees].concat();
+        let (code, out) = sluice_under(&f, caller, &args);
+        assert_eq!(code, LANDED, "{args:?}: {out}");
+    }
+    let s = sluice_core::Sluice::new(f.seams(), &f.clock);
+    let kept: Vec<(u64, Option<String>)> = s
+        .status(BRANCH)
+        .unwrap()
+        .submissions
+        .into_iter()
+        .map(|sub| (sub.id, sub.trace))
+        .collect();
+    let given = Some(traceparent.to_string());
+    assert_eq!(
+        kept,
+        [
+            (1, given.clone()),
+            (2, given.clone()),
+            (3, given),
+            (4, None)
+        ]
+    );
 }
 
 /// Three worktrees: three submissions numbered in the order given, each
@@ -9183,6 +9280,7 @@ mod read_once {
             after: vec![],
             priority: 0,
             subject: None,
+            trace: None,
         })
         .unwrap()
         .unwrap();
@@ -9982,6 +10080,7 @@ fn pooled_as(f: &Fakes, policy: &str, projects: &[&str]) -> String {
         after: Vec::new(),
         priority: 0,
         subject: None,
+        trace: None,
     })
     .unwrap()
     .expect("accepted");
@@ -9996,6 +10095,7 @@ fn pooled_as(f: &Fakes, policy: &str, projects: &[&str]) -> String {
 fn pool_lead(f: &Fakes) -> sluice_core::Sluice<'_> {
     f.sluice().as_peer(sluice_core::Peer {
         name: "a".into(),
+        repository: "this-repository".into(),
         lease: Duration::from_secs(300),
         alive: Duration::from_secs(120),
         signer: Some("box".into()),
@@ -11054,6 +11154,27 @@ fn init_codebuild_writes_the_stack() {
         said.contains("sluice init codebuild --stack sluice"),
         "{said}"
     );
+    assert!(
+        said.contains(
+            "--parameter-overrides StartPrincipal=<the ARN the hosts that may run the branch's \
+             queue reach AWS as>"
+        ),
+        "{said}"
+    );
+    assert!(
+        said.contains(
+            "name the profile that assumes the stack's start role as [aws] profile on each host \
+             that may run the branch's queue"
+        ),
+        "{said}"
+    );
+    assert!(
+        !said
+            .to_lowercase()
+            .split(|c: char| !c.is_alphanumeric())
+            .any(|w| ["lead", "leads", "leading", "led"].contains(&w)),
+        "{said}"
+    );
     assert_eq!(
         std::fs::read_to_string(dir.path().join(POLICY_PATH)).unwrap(),
         INIT_POLICY,
@@ -11162,6 +11283,13 @@ fn init_codebuild_from_a_stack_appends_the_pool() {
     assert_eq!(code, 0, "{said}");
     assert!(said.contains(support::aws::KEY), "{said}");
     assert!(said.contains("sluice pool check"), "{said}");
+    assert!(
+        said.contains(
+            "a branch's `trust` names codebuild and the signer the hosts that may run its queue \
+             sign as, that signer's `systems = []` so it claims no run"
+        ),
+        "{said}"
+    );
     assert_eq!(aws.operations(), ["GetPublicKey"]);
     let asked: serde_json::Value = serde_json::from_str(&aws.requests()[0].body).unwrap();
     assert_eq!(asked["KeyId"], "alias/sluice-sign");
@@ -11249,14 +11377,14 @@ fn init_codebuild_from_a_stack_appends_the_pool() {
 }
 
 /// `main` on `origin` trusting the CodeBuild pool `codebuild`, its key's
-/// public half `public`, and `lead`, its leading hosts' signer, which may
-/// claim no system, testing as `rules` say.
+/// public half `public`, and `box`, the signer the hosts that may run its
+/// queue sign as, which may claim no system, testing as `rules` say.
 fn fleet_policy(public: &str, rules: &str) -> String {
     format!(
         "[tests]\nrunner = \"fake\"\n\n[checkout]\n\n\
          [branches.main]\nrequired = [\"#gate\"]\n{rules}timeout = \"45m\"\n\
-         trust = [\"lead\", \"codebuild\"]\nremote = \"origin\"\nsystems = [\"linux-x64\"]\n\
-         \n[signers.lead]\nssh = \"lead ssh-ed25519 AAAA\"\nsystems = []\n\
+         trust = [\"box\", \"codebuild\"]\nremote = \"origin\"\nsystems = [\"linux-x64\"]\n\
+         \n[signers.box]\nssh = \"box ssh-ed25519 AAAA\"\nsystems = []\n\
          \n[signers.codebuild]\nkms = {{ key = \"{key}\", public = \"{public}\" }}\nsystems = [\"linux-x64\"]\n\
          \n[pools.codebuild]\ncodebuild = {{ region = \"us-east-1\", sign = \"sluice-sign\" }}\nsigner = \"codebuild\"\n\
          runners = {{ linux-x64 = \"sluice-run-linux-x64\" }}\n\
@@ -11297,8 +11425,8 @@ fn pool_check_says_a_fleet_tests_side_by_side() {
     assert_eq!(code, 0, "{said}");
     assert!(!said.contains("failed"), "{said}");
     for line in [
-        "ok      main is led by a host signing as lead",
-        "ok      [pools.codebuild] is reached in us-east-1 as arn:aws:sts::111122223333:assumed-role/sluice-lead/host",
+        "ok      main's queue is run by a host signing as box",
+        "ok      [pools.codebuild] is reached in us-east-1 as arn:aws:sts::111122223333:assumed-role/sluice-start/host",
         "ok      sluice-run-linux-x64 runs linux-x64 on the reserved-capacity fleet sluice-linux-x64, LINUX_EC2",
         "ok      sluice-run-linux-x64's buildspec is as sluice",
         "ok      sluice-run-linux-x64 may take 90 minutes, longer than the branch's timeout of 45",
@@ -11331,11 +11459,12 @@ fn pool_check_says_a_fleet_tests_side_by_side() {
 }
 
 /// satisfies: record 0119 (design D11); rule core.60; the codebuild-pool
-/// spec's "A branch no host can lead": `main` trusting the pool's signer
-/// alone, `sluice pool check main` says no host can lead it and exits 1
+/// spec's "A gate that trusts only the pool's signer": `main` trusting the
+/// pool's signer alone, `sluice pool check main` says no host can run its
+/// queue and exits 1
 #[test]
-fn pool_check_names_a_branch_no_host_can_lead() {
-    if !alone("pool_check_names_a_branch_no_host_can_lead") {
+fn pool_check_names_a_branch_whose_queue_no_host_can_run() {
+    if !alone("pool_check_names_a_branch_whose_queue_no_host_can_run") {
         return;
     }
     let (_aws, key) = fleet_deployed();
@@ -11345,7 +11474,7 @@ fn pool_check_names_a_branch_no_host_can_lead() {
         "batch = false\nparallel = 10\n",
     )
     .replace(
-        "trust = [\"lead\", \"codebuild\"]",
+        "trust = [\"box\", \"codebuild\"]",
         "trust = [\"codebuild\"]",
     );
     f.world.init("main", &[(POLICY_PATH, policy.as_str())]);
@@ -11353,9 +11482,9 @@ fn pool_check_names_a_branch_no_host_can_lead() {
     assert_eq!(code, FAILED, "{said}");
     assert!(
         said.contains(
-            "failed  main's trust names no signer a host signs as, so no host can lead it and it \
-             forms nothing: trust the signer its leading hosts sign as beside the pool's, with \
-             systems = [] so it claims no run"
+            "failed  main's trust names no signer a host signs as, so no host can run its queue \
+             and it forms nothing: trust the signer the hosts that run its queue sign as beside \
+             the pool's, with systems = [] so it claims no run"
         ),
         "{said}"
     );

@@ -366,6 +366,60 @@ fn sluice_exec_gets_the_hosts_cache_environment() {
     );
 }
 
+/// 153 (design D1, D2, D8): the binary's `exec`, started with
+/// `TRACEPARENT` `00-<t>-<s>-01` and given `--otel`, sends a `sluice exec` span beneath `s`,
+/// and its run's checks get a `TRACEPARENT` naming trace `t` and a span
+/// other than `s`, the exec's. The trace and span ids are bytes that read
+/// as text, `ABCDEFGHIJKLMNOP` and `abcdefgh`, so the protobuf the
+/// collector is sent holds them as written: a span's parent id, field 4,
+/// is encoded just before its name, field 5.
+#[test]
+fn an_exec_hands_its_checks_its_own_span_in_the_caller_s_trace() {
+    let s = Setup::new("exec-caller-trace");
+    let collector = support::http::Fake::start(|_| (200, Vec::new(), String::new()));
+    let (trace, parent) = ("4142434445464748494a4b4c4d4e4f50", "6162636465666768");
+    let traceparent = format!("00-{trace}-{parent}-01");
+    // None of the host's `OTEL_*`, which a suite run under `sluice exec`
+    // is handed, a signal its table turns off among them.
+    let mut c = s.command(&["exec", "--otel", "bolt/x", "--", "sh", "-c", "env > seen"]);
+    for (k, _) in std::env::vars().filter(|(k, _)| k.starts_with("OTEL_")) {
+        c.env_remove(k);
+    }
+    let out = c
+        .env("TRACEPARENT", &traceparent)
+        .env("OTEL_EXPORTER_OTLP_ENDPOINT", collector.url())
+        .env("OTEL_METRICS_EXPORTER", "none")
+        .env("OTEL_LOGS_EXPORTER", "none")
+        .output()
+        .unwrap();
+    assert!(out.status.success(), "{}", text(&out));
+    let seen = std::fs::read_to_string(s.worktree.join("seen")).unwrap();
+    let handed = seen
+        .lines()
+        .find_map(|l| l.strip_prefix("TRACEPARENT="))
+        .unwrap_or_else(|| panic!("no TRACEPARENT in {seen}: {}", text(&out)));
+    let fields: Vec<&str> = handed.split('-').collect();
+    assert_eq!(fields.len(), 4, "{handed}");
+    assert_eq!(fields[1], trace, "{handed}");
+    assert_ne!(fields[2], parent, "{handed}");
+
+    let sent: Vec<String> = collector
+        .requests()
+        .into_iter()
+        .filter(|r| r.path == "/v1/traces")
+        .map(|r| r.body)
+        .collect();
+    assert!(
+        sent.iter()
+            .any(|b| b.contains("\"\u{8}abcdefgh*\u{b}sluice exec")),
+        "no sluice exec span beneath the caller's in {sent:?}"
+    );
+    assert!(
+        sent.iter().any(|b| b.contains("\n\u{10}ABCDEFGHIJKLMNOP")),
+        "nothing in the caller's trace in {sent:?}"
+    );
+}
+
 /// Every file name kept under `dir`, walked whole.
 /// 64: before it runs, exec says whether the head would form if
 /// submitted now; a conflict is told and the run goes on, and `--json`

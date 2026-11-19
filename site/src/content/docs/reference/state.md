@@ -488,8 +488,8 @@ a run's state is written before anything acts on it, so a sluice that
 stops at any point leaves the next one what to do:
 
 - `open`, with `opened`, when it was opened. Its time limit counts from
-  `running`, never from here. `no_executor` is `true` while the leading
-  host last found no host or pool that could take it, so a status reads
+  `running`, never from here. `no_executor` is `true` while the host
+  that runs the queue last found no host or pool that could take it, so a status reads
   it as waiting for a host of its system rather than for room.
 - `claimed`, with `claim`: `{"by": "build-1", "at":
   "2026-11-16T09:16:40Z"}`, the host or pool's claim that holds it, and

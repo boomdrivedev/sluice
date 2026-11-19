@@ -97,6 +97,11 @@ pub enum Request {
         kind: RunKind,
         repository: PathBuf,
         place: String,
+        /// 154: the branch its run is held to; `None` from an older sluice,
+        /// whose run counts toward the bound under no branch (design D6 of
+        /// `each-submission-shows-its-wait-and-its-test`).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        branch: Option<String>,
     },
     /// The bound, what counts against it, the runs waiting and whose turn
     /// is next.
@@ -243,5 +248,34 @@ mod tests {
             serde_json::from_str(r#"{"version":"0.71.0","pid":7,"since":"2026-11-07T00:00:00Z"}"#)
                 .unwrap();
         assert!(!named.daemon);
+    }
+
+    /// 154, design D6 of `each-submission-shows-its-wait-and-its-test`: a
+    /// hold naming `main` reads back naming it, and one an older sluice
+    /// wrote, with no branch, reads naming none.
+    #[test]
+    fn a_hold_names_its_branch_and_an_older_one_none() {
+        let named = Request::Hold {
+            kind: RunKind::Session,
+            repository: PathBuf::from("/host/repo.git"),
+            place: "unit/a".into(),
+            branch: Some("main".into()),
+        };
+        let mut line = Vec::new();
+        send(&mut line, &named).unwrap();
+        let read: Request = receive(&mut line.as_slice()).unwrap();
+        assert_eq!(read, named);
+        let older = b"{\"ask\":\"hold\",\"kind\":\"session\",\
+                      \"repository\":\"/host/repo.git\",\"place\":\"unit/a\"}\n";
+        let read: Request = receive(&mut older.as_slice()).unwrap();
+        assert_eq!(
+            read,
+            Request::Hold {
+                kind: RunKind::Session,
+                repository: PathBuf::from("/host/repo.git"),
+                place: "unit/a".into(),
+                branch: None,
+            }
+        );
     }
 }
