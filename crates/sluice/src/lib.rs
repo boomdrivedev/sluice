@@ -2080,7 +2080,10 @@ pub fn run(
                         told::tell(out, json, Kind::NotFound, &text, &[])?;
                         return Ok(FAILED);
                     }
-                    let mode = PullMode::Wait { deadline };
+                    let mode = PullMode::Wait {
+                        deadline,
+                        number: Some(n),
+                    };
                     let worktree = SubmitHead::Worktree(worktree);
                     return submit_pull(
                         &s, host, pulls, clock, &worktree, &target, mode, json, confirms, pause,
@@ -2088,7 +2091,10 @@ pub fn run(
                     );
                 }
                 Err(_) if takes_pulls(&s, &target)? => {
-                    let mode = PullMode::Wait { deadline };
+                    let mode = PullMode::Wait {
+                        deadline,
+                        number: None,
+                    };
                     let worktree = SubmitHead::Worktree(worktree);
                     return submit_pull(
                         &s, host, pulls, clock, &worktree, &target, mode, json, confirms, pause,
@@ -5470,9 +5476,12 @@ enum PullMode<'a> {
     /// Only say where it stands.
     Status,
     /// Follow it to its outcome, or until `deadline`: `sluice wait
-    /// <branch>` (ADR 0041).
+    /// <branch>` (ADR 0041); pull request `number` where the wait names
+    /// one, from any folder, in place of the one the worktree's branch
+    /// opened (record 0130 D2).
     Wait {
         deadline: Option<chrono::DateTime<chrono::Utc>>,
+        number: Option<u64>,
     },
     /// Follow pull request `number` as [`PullMode::Wait`] follows the one
     /// open, for `own`: a wait whose submission was withdrawn while the
@@ -5494,7 +5503,7 @@ impl PullMode<'_> {
 
     fn deadline(&self) -> Option<chrono::DateTime<chrono::Utc>> {
         match self {
-            PullMode::Wait { deadline } | PullMode::Follow { deadline, .. } => *deadline,
+            PullMode::Wait { deadline, .. } | PullMode::Follow { deadline, .. } => *deadline,
             _ => None,
         }
     }
@@ -5589,6 +5598,14 @@ fn submit_pull(
     // 124: how the host's copy differed from what the submit opened.
     let mut copy = None;
     let number = if let PullMode::Follow { number, .. } = mode {
+        number
+    } else if let PullMode::Wait {
+        number: Some(number),
+        ..
+    } = mode
+    {
+        // Record 0130 D2: the request named, read already (D3); the
+        // outcome is still delivered to the worktree the wait runs for.
         number
     } else if !opens {
         let found = match pulls.find(seams, clock, branch, worktree) {

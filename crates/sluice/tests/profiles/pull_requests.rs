@@ -6405,6 +6405,49 @@ fn out_of_time_queued_on_the_other_host() {
     assert!(g.of(pull.number).is_empty(), "A took nothing in");
 }
 
+/// submission-wait, "Held on another host, out of time" and "Landed on
+/// another host": host B holds host A's pull request as submission 1406,
+/// and `sluice wait main --pull-request <n> --timeout 2s --json` in the
+/// repository's main checkout on A exits 5, naming the request, the host
+/// that takes it in, B's queue and the wait itself, with no `id`. Once B
+/// lands it and GitHub shows it merged, the same wait on A prints it
+/// landed and exits 0 (record 0130 D2).
+#[test]
+fn a_wait_by_pull_request_from_the_main_checkout_follows_it_on_another_host() {
+    let g = OnGitHub::new("wait-by-number-there", "");
+    let (_w, pull) = g.opened_here_held_by_b("bynumber");
+    let n = pull.number;
+    g.held_there(n, &pull.head, 1406);
+    let number = n.to_string();
+    let wait = ["wait", "main", "--pull-request", &number, "--json"];
+    let out = g.skipping(g.repo.dir(), &[&wait[..], &["--timeout", "2s"]].concat());
+    assert_eq!(out.status.code(), Some(sluice::WAITING), "{}", text(&out));
+    let doc = last_document(&out);
+    assert_eq!(doc["pull_request"], n, "{doc}");
+    assert_eq!(
+        doc["taken_in_by"],
+        serde_json::json!({ "host": "b" }),
+        "{doc}"
+    );
+    assert_eq!(doc["queue"]["submission"], 1406, "{doc}");
+    assert_eq!(doc["queue"]["host"], "b", "{doc}");
+    assert_eq!(
+        doc["wait"],
+        format!("sluice wait main --pull-request {n}").as_str(),
+        "{doc}"
+    );
+    assert!(doc.get("id").is_none(), "{doc}");
+
+    g.gh.forge.merge(n).unwrap();
+    g.follow_due(n);
+    let out = g.skipping(g.repo.dir(), &[&wait[..], &["--timeout", "1m"]].concat());
+    assert_eq!(out.status.code(), Some(sluice::LANDED), "{}", text(&out));
+    let doc = last_document(&out);
+    assert_eq!(doc["pull_request"], n, "{doc}");
+    assert_eq!(doc["state"], "landed", "{doc}");
+    assert!(g.of(n).is_empty(), "A took nothing in");
+}
+
 /// submission-wait, "The status a submit reads": the same, and `sluice
 /// submit main --status --json` in that worktree gives the request's head,
 /// its draft mark, the mark's host and the check's queue beside the
