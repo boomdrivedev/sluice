@@ -1118,6 +1118,58 @@ fn a_key_is_checked_against_the_tree_without_running() {
     assert_eq!(manifest(&beta.hash)["deps"]["alpha:test"], "ignored");
 }
 
+/// Design D9 (C.2 moon row, C.6): moon hashes a task's input that the
+/// tree tracks as a link by the file it names, so the profile's `proven`
+/// reads the combination's tree through the link and keeps the key.
+/// flume's `.claude/rules/core-details.md`, a link to
+/// `docs/architecture/core-details.md`, read as the link's own text,
+/// refused root:format's key on 2026-11-19.
+#[test]
+fn a_key_whose_input_is_a_link_is_proven() {
+    let repo = workspace("moon-link");
+    std::fs::create_dir_all(repo.dir().join("docs")).unwrap();
+    repo.write("docs/notes.md", "the notes\n");
+    std::fs::remove_file(repo.dir().join("alpha/notes.md")).unwrap();
+    std::os::unix::fs::symlink("../docs/notes.md", repo.dir().join("alpha/notes.md")).unwrap();
+    repo.git(&["add", "-A"]);
+    repo.git(&["commit", "-q", "-m", "a link"]);
+    assert_eq!(
+        repo.git(&["ls-tree", "HEAD", "alpha/notes.md"])
+            .split_whitespace()
+            .next(),
+        Some("120000"),
+        "the tree holds alpha/notes.md as a link"
+    );
+
+    let c = checks(&repo);
+    let (run, report) = finish_run(&c, &request(&repo, "p1", &["#check-fast"], None));
+    let alpha = report
+        .tasks
+        .iter()
+        .find(|t| t.task == "alpha:test")
+        .unwrap();
+    let blob = repo
+        .dir()
+        .join(".moon/cache/blobs")
+        .join(&alpha.hash[..2])
+        .join(&alpha.hash[2..]);
+    let manifest: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(blob).unwrap()).unwrap();
+    use sha2::{Digest, Sha256};
+    let target: String = Sha256::digest(b"the notes\n")
+        .iter()
+        .map(|x| format!("{x:02x}"))
+        .collect();
+    assert_eq!(
+        manifest[0]["inputs"]["alpha/notes.md"], target,
+        "moon hashes the link by the file it names"
+    );
+    let proof = c.proven(&run, &report).unwrap();
+    let mut proven = proof.proven;
+    proven.sort();
+    assert_eq!(proven, ["alpha:test", "beta:test"], "{:?}", proof.refused);
+}
+
 /// Design D9: the profile's `proven` keeps every task whose key the
 /// candidate's tree bears out, and drops one whose manifest was changed
 /// after the run, as a check that lies about its key would leave it.
