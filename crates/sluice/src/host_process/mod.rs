@@ -697,6 +697,11 @@ fn serve(
     let listener = &mut listener;
     let mut looked = Instant::now();
     let mut scanned = Instant::now();
+    // 154 (design D8 of `each-submission-shows-its-wait-and-its-test`): the
+    // rows of the room last sent, and each repository's name as its
+    // binding names it, read once.
+    let mut sent = std::collections::BTreeSet::new();
+    let mut names = std::collections::BTreeMap::new();
     loop {
         accept_all(hosting, listener);
         if looked.elapsed() < LOOK {
@@ -729,6 +734,7 @@ fn serve(
             if scanned.elapsed() >= SCAN {
                 scanned = Instant::now();
                 scan(hosting);
+                send_room(hosting, telemetry, &mut sent, &mut names);
             }
         }
         if hosting.stopping.load(Ordering::SeqCst) {
@@ -777,6 +783,120 @@ fn scan(hosting: &Hosting) {
     for repository in index.list().unwrap_or_default() {
         hosting.tasks.look(&repository);
     }
+}
+
+/// 154, 71 (design D8 of `each-submission-shows-its-wait-and-its-test`;
+/// rule core.66): at each scan the room's waits are drained, whether or
+/// not anything is sent, so they never gather; and while `telemetry`
+/// sends metrics, the room is measured by repository and branch, each
+/// repository named once as its binding names it, `names` keeping it.
+fn send_room(
+    hosting: &Hosting,
+    telemetry: Option<&crate::telemetry::Telemetry>,
+    sent: &mut std::collections::BTreeSet<(PathBuf, String)>,
+    names: &mut std::collections::BTreeMap<PathBuf, Option<String>>,
+) {
+    let (running, bound, waits) = {
+        let mut room = hosting.room.lock();
+        let running = room.running_by_branch().unwrap_or_else(|e| {
+            log(&format!("sluice host: counting the room by branch: {e:#}"));
+            Default::default()
+        });
+        (running, room.bound(), room.waits())
+    };
+    if !telemetry.is_some_and(|t| t.sends_metrics()) {
+        return;
+    }
+    let repositories: Vec<PathBuf> = running
+        .keys()
+        .chain(sent.iter())
+        .map(|(r, _)| r.clone())
+        .chain(waits.iter().map(|w| w.repository.clone()))
+        .collect();
+    for r in repositories {
+        names
+            .entry(r.clone())
+            .or_insert_with(|| name_of(hosting, &r));
+    }
+    measure_room(
+        &running,
+        bound,
+        &waits,
+        &|r| names.get(r).cloned().flatten(),
+        sent,
+    );
+}
+
+/// The name `repository`'s binding gives it in its metrics (rule core.66);
+/// `None` where it cannot be opened, said in the host process's log.
+fn name_of(hosting: &Hosting, repository: &Path) -> Option<String> {
+    let bound = crate::profiles::Bound::open_with(
+        &tasks::open_dir(repository),
+        std::env::current_exe().ok()?,
+        hosting.settings.instance(),
+        std::rc::Rc::new(crate::retry::Policy::round()),
+    );
+    match bound {
+        Ok(b) => Some(b.peer().repository),
+        Err(e) => {
+            log(&format!(
+                "sluice host: naming {} for its metrics: {e:#}",
+                repository.display()
+            ));
+            None
+        }
+    }
+}
+
+/// 154, 71 (design D8 of `each-submission-shows-its-wait-and-its-test`;
+/// rule core.66): for each repository and branch with runs counted now
+/// (`running`) or at the last sending (`sent`), `sluice.host.running`, its
+/// runs, and `sluice.host.bound`, the host's bound, a row whose runs ended
+/// reading 0 once; and for each of `waits` that names a branch,
+/// `sluice.run.waited_for_room` in seconds. Each carries the repository as
+/// `name` gives it, and the branch, and nothing else; a repository `name`
+/// gives none is passed by. `sent` becomes the rows with runs now.
+pub(crate) fn measure_room(
+    running: &std::collections::BTreeMap<(PathBuf, String), usize>,
+    bound: usize,
+    waits: &[room::Wait],
+    name: &dyn Fn(&Path) -> Option<String>,
+    sent: &mut std::collections::BTreeSet<(PathBuf, String)>,
+) {
+    let rows: std::collections::BTreeSet<&(PathBuf, String)> =
+        running.keys().chain(sent.iter()).collect();
+    for row in rows {
+        let Some(repository) = name(&row.0) else {
+            continue;
+        };
+        let (repository, branch) = (repository.as_str(), row.1.as_str());
+        let runs = running.get(row).copied().unwrap_or(0);
+        tracing::info!(
+            gauge.sluice.host.running = runs as u64,
+            sluice.repository = repository,
+            sluice.branch = branch,
+        );
+        tracing::info!(
+            gauge.sluice.host.bound = bound as u64,
+            sluice.repository = repository,
+            sluice.branch = branch,
+        );
+    }
+    for wait in waits {
+        let (Some(branch), Some(repository)) = (&wait.branch, name(&wait.repository)) else {
+            continue;
+        };
+        tracing::info!(
+            histogram.sluice.run.waited_for_room = wait.waited.as_secs_f64(),
+            sluice.repository = repository.as_str(),
+            sluice.branch = branch.as_str(),
+        );
+    }
+    *sent = running
+        .iter()
+        .filter(|(_, n)| **n > 0)
+        .map(|(row, _)| row.clone())
+        .collect();
 }
 
 /// Take every connection queued, each answered on a thread of its own:
@@ -884,10 +1004,12 @@ fn answer(hosting: &Arc<Hosting>, stream: UnixStream) -> Result<()> {
             kind,
             repository,
             place: _,
+            branch,
         } => hold(
             hosting,
             kind,
             &repository,
+            branch.as_deref(),
             &stream,
             &mut writer,
             &mut reader,
@@ -1000,6 +1122,7 @@ fn hold(
     hosting: &Arc<Hosting>,
     kind: sluice_seams::RunKind,
     repository: &Path,
+    branch: Option<&str>,
     stream: &UnixStream,
     writer: &mut UnixStream,
     reader: &mut BufReader<UnixStream>,
@@ -1008,7 +1131,7 @@ fn hold(
     // a profile beside the host process (task 3.4), is answered once, held
     // or refused, as a round's own ask is, and counts as no session's wait.
     let waiter = match kind {
-        sluice_seams::RunKind::Session => Some(hosting.room.lock().wait(repository)),
+        sluice_seams::RunKind::Session => Some(hosting.room.lock().wait(repository, branch)),
         sluice_seams::RunKind::Queue => None,
     };
     let let_go = || {
@@ -1026,7 +1149,10 @@ fn hold(
             let_go();
             return Ok(());
         }
-        let asked = hosting.room.lock().ask(&asker, repository, Instant::now());
+        let asked = hosting
+            .room
+            .lock()
+            .ask(&asker, repository, branch, Instant::now());
         match asked {
             Ok(Asked::Held(id)) => break id,
             Ok(Asked::Refused(why)) => {
@@ -1064,4 +1190,106 @@ fn hold(
     // Its supervisor holds the run directory before the command says so.
     held.started();
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::Mutex;
+    use tracing::field::{Field, Visit};
+    use tracing_subscriber::layer::SubscriberExt;
+
+    /// Each metric event, as `<metric> <value>` and its other fields after
+    /// it as `<field>=<value>`.
+    #[derive(Clone, Default)]
+    struct Seen(Arc<Mutex<Vec<String>>>);
+
+    struct Line(Vec<String>);
+
+    impl Visit for Line {
+        fn record_debug(&mut self, field: &Field, value: &dyn std::fmt::Debug) {
+            let name = field.name();
+            match ["gauge.", "histogram.", "monotonic_counter."]
+                .iter()
+                .any(|p| name.starts_with(p))
+            {
+                true => self.0.insert(0, format!("{name} {value:?}")),
+                false => self.0.push(format!("{name}={value:?}")),
+            }
+        }
+
+        fn record_str(&mut self, field: &Field, value: &str) {
+            self.0.push(format!("{}={value}", field.name()));
+        }
+    }
+
+    impl<S: tracing::Subscriber> tracing_subscriber::Layer<S> for Seen {
+        fn on_event(
+            &self,
+            event: &tracing::Event<'_>,
+            _: tracing_subscriber::layer::Context<'_, S>,
+        ) {
+            let mut line = Line(Vec::new());
+            event.record(&mut line);
+            self.0.lock().unwrap().push(line.0.join(" "));
+        }
+    }
+
+    /// 154, 71, design D8 of `each-submission-shows-its-wait-and-its-test`
+    /// (rule core.66): two runs for `main` under a bound of 4, with a wait
+    /// of 20 s drained, are sent as such; then none, as 0 once; then nothing
+    /// for it; each with the repository and the branch.
+    #[test]
+    fn the_host_s_room_is_measured_by_branch() {
+        let seen = Seen::default();
+        let repo = PathBuf::from("/host/repo.git");
+        let name = |r: &Path| (r == Path::new("/host/repo.git")).then(|| "acme/app".to_string());
+        let main = (repo.clone(), "main".to_string());
+        let mut sent = std::collections::BTreeSet::new();
+        let sending =
+            |running: std::collections::BTreeMap<(PathBuf, String), usize>,
+             waits: Vec<room::Wait>,
+             sent: &mut std::collections::BTreeSet<(PathBuf, String)>| {
+                let at = seen.0.lock().unwrap().len();
+                let subscriber = tracing_subscriber::registry().with(seen.clone());
+                tracing::subscriber::with_default(subscriber, || {
+                    measure_room(&running, 4, &waits, &name, sent)
+                });
+                seen.0.lock().unwrap()[at..].to_vec()
+            };
+        let named = "sluice.repository=acme/app sluice.branch=main";
+        let first = sending(
+            std::collections::BTreeMap::from([(main.clone(), 2)]),
+            vec![room::Wait {
+                repository: repo.clone(),
+                branch: Some("main".into()),
+                waited: Duration::from_secs(20),
+            }],
+            &mut sent,
+        );
+        assert_eq!(
+            first,
+            [
+                format!("gauge.sluice.host.running 2 {named}"),
+                format!("gauge.sluice.host.bound 4 {named}"),
+                format!("histogram.sluice.run.waited_for_room 20.0 {named}"),
+            ]
+        );
+        let second = sending(Default::default(), Vec::new(), &mut sent);
+        assert_eq!(
+            second,
+            [
+                format!("gauge.sluice.host.running 0 {named}"),
+                format!("gauge.sluice.host.bound 4 {named}"),
+            ]
+        );
+        let third = sending(Default::default(), Vec::new(), &mut sent);
+        assert!(third.is_empty(), "{third:?}");
+        for line in first.iter().chain(&second) {
+            for field in line.split(' ').skip(2) {
+                let key = field.split_once('=').map_or(field, |(k, _)| k);
+                assert!(sluice_core::METRIC_KEYS.contains(&key), "{key} in {line}");
+            }
+        }
+    }
 }

@@ -401,10 +401,12 @@ impl Exec<'_> {
         };
         let mut told = crate::host_process::room::Told::default();
         let (place, run) = 'start: loop {
-            let mut holding =
-                self.host
-                    .host_process()
-                    .hold(&here, sluice_seams::RunKind::Session, &worktree)?;
+            let mut holding = self.host.host_process().hold(
+                &here,
+                sluice_seams::RunKind::Session,
+                &worktree,
+                &self.branch,
+            )?;
             let part = loop {
                 match holding.next(std::time::Duration::from_millis(100))? {
                     Some(crate::host_process::Holds::Held(part)) => break part,

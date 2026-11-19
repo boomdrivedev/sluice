@@ -1804,6 +1804,9 @@ fn admit(
             covered_by: None,
             act,
             trace: req.trace.clone(),
+            under_test_ms: 0,
+            under_test_since: None,
+            runs_with_no_outcome: 0,
         },
     );
     l.log(
@@ -2220,7 +2223,7 @@ mod tests {
             unreachable!("a submit runs nothing")
         }
 
-        fn hold(&self, _: sluice_seams::RunKind) -> Result<Option<sluice_seams::Part>> {
+        fn hold(&self, _: sluice_seams::RunKind, _: &str) -> Result<Option<sluice_seams::Part>> {
             unreachable!("a submit runs nothing")
         }
 

@@ -629,6 +629,70 @@ fn a_round_links_to_the_trace_its_work_was_submitted_under() {
     telemetry.finish();
 }
 
+/// 154 (design D1, D5 of `each-submission-shows-its-wait-and-its-test`;
+/// rule core.53): each submission that lands sends one `sluice.submission`
+/// span, from its submission to its end: one made under a caller's context
+/// in that trace, beneath the caller's span, and one made under none the
+/// root of a trace of its own; each `landed`, its seconds waiting and
+/// under test summing to its length.
+#[test]
+fn a_submission_s_life_is_a_span_in_the_trace_it_was_submitted_under() {
+    if !alone("a_submission_s_life_is_a_span_in_the_trace_it_was_submitted_under") {
+        return;
+    }
+    let (telemetry, spans, _) = start(Logs::Off);
+    let f = setup();
+    let tip = f.world.tip(BRANCH);
+    let one = f.world.work(&tip, &[("tests/t_a.py", Some("one"))]);
+    f.world.session("unit/a", "agent-a", &one);
+    let args = ["submit", BRANCH, "--worktree", "unit/a"];
+    assert_eq!(under(&f, &(), &args, Some(caller())), LANDED);
+    let two = f
+        .world
+        .work(&f.world.tip(BRANCH), &[("tests/t_b.py", Some("two"))]);
+    f.world.session("unit/b", "agent-b", &two);
+    let args = ["submit", BRANCH, "--worktree", "unit/b"];
+    assert_eq!(under(&f, &(), &args, None), LANDED);
+    telemetry.flush();
+
+    let all = spans.get_finished_spans().unwrap();
+    let lives: Vec<&SpanData> = all
+        .iter()
+        .filter(|s| s.name == "sluice.submission")
+        .collect();
+    assert_eq!(lives.len(), 2, "{all:?}");
+    let life = |n: i64| {
+        *lives
+            .iter()
+            .find(|s| value(s, "sluice.submission") == Some(Value::I64(n)))
+            .unwrap_or_else(|| panic!("no life of #{n} in {lives:?}"))
+    };
+    let (first, second) = (life(1), life(2));
+    assert_eq!(first.span_context.trace_id().to_string(), TRACE);
+    assert_eq!(first.parent_span_id.to_string(), PARENT);
+    assert_eq!(second.parent_span_id, SpanId::INVALID, "{second:?}");
+    assert_ne!(second.span_context.trace_id().to_string(), TRACE);
+    let sluice = sluice_core::Sluice::new(f.seams(), &f.clock);
+    for (n, span) in [(1, first), (2, second)] {
+        let record = sluice.state_on(BRANCH, n).unwrap().expect("its record");
+        assert_eq!(span.start_time, time(&record.submitted), "#{n}");
+        assert_eq!(value(span, "sluice.outcome"), Some("landed".into()));
+        let seconds = |key: &str| match value(span, key) {
+            Some(Value::F64(v)) => v,
+            other => panic!("{key} of #{n}: {other:?}"),
+        };
+        let length = span
+            .end_time
+            .duration_since(span.start_time)
+            .unwrap()
+            .as_secs_f64();
+        assert!(length > 0.0, "#{n}");
+        let sum = seconds("sluice.waited_seconds") + seconds("sluice.tested_seconds");
+        assert!((sum - length).abs() < 1e-9, "#{n}: {sum} of {length}");
+    }
+    telemetry.finish();
+}
+
 /// A branch with three checks, `tests:t-a`, `tests:t-b` and `tests:t-c`,
 /// each reading its own folder, and a worktree `unit/a` whose head
 /// changes each, `tests:t-b`'s so it fails; the runner answers

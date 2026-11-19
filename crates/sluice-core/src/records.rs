@@ -134,6 +134,16 @@ impl State {
         )
     }
 
+    /// 154 (design D1 of `each-submission-shows-its-wait-and-its-test`):
+    /// an end of its life, landed, refused, blamed, dropped for a conflict
+    /// or withdrawn; the write that moves it into one sends its life.
+    pub fn ends(self) -> bool {
+        matches!(
+            self,
+            State::Landed | State::Refused | State::Failed | State::Conflict | State::Withdrawn
+        )
+    }
+
     pub fn word(self) -> &'static str {
         match self {
             State::Queued => "queued",
@@ -332,6 +342,25 @@ pub struct Submission {
     /// D4, D5 of `a-sluice-command-shows-inside-its-callers-trace`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub trace: Option<String>,
+    /// 154: the milliseconds a combination on the branch's revision holding
+    /// it was under test, through the last write, combinations that overlap
+    /// counted once, stopping at its end. Kept by every write whether or
+    /// not telemetry is on; nothing sluice decides reads it (design D2 of
+    /// `each-submission-shows-its-wait-and-its-test`).
+    #[serde(default, skip_serializing_if = "is_zero_ms")]
+    pub under_test_ms: u64,
+    /// 154: since when a combination holding it is under test, RFC 3339;
+    /// `None` while none is (design D2).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub under_test_since: Option<String>,
+    /// 114, 154: the runs of its combinations that decided nothing, which
+    /// its life names and which never make it a failure (design D3).
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub runs_with_no_outcome: u32,
+}
+
+fn is_zero_ms(n: &u64) -> bool {
+    *n == 0
 }
 
 /// 140: what a submission's work was read as at the first round that
@@ -653,6 +682,19 @@ impl Ended {
         } else {
             RunVerdict::Failed
         }
+    }
+
+    /// 114, 154 (design D3 of `each-submission-shows-its-wait-and-its-test`):
+    /// a run its time limit did not end in which no check passed or failed:
+    /// one no host took, one whose every check is `none` or `unproven`, and
+    /// one given no check.
+    pub fn decided_nothing(&self) -> bool {
+        !self.timed_out
+            && (self.untaken
+                || self
+                    .outcomes
+                    .values()
+                    .all(|o| matches!(o, CheckOutcome::Unproven | CheckOutcome::None { .. })))
     }
 }
 

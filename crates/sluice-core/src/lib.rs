@@ -9,6 +9,7 @@
 pub mod branches;
 pub mod equip;
 pub mod home;
+pub mod life;
 pub mod line;
 pub mod links;
 pub mod notice;
@@ -65,10 +66,13 @@ pub const METRIC_KEYS: [&str; 3] = ["sluice.repository", "sluice.branch", "sluic
 /// The metrics the core gives in seconds, each declared with the unit `s`
 /// where it is sent, so a backend shows a time and not a bare number (rule
 /// core.66; record 0014 as amended 2026-11-18; design D4).
-pub const SECONDS: [&str; 3] = [
+pub const SECONDS: [&str; 6] = [
     "sluice.submission.landed_after",
     "sluice.candidate.tested_for",
     "sluice.tasks.time_saved",
+    "sluice.submission.waited",
+    "sluice.submission.tested",
+    "sluice.run.waited_for_room",
 ];
 
 /// The time, for the records' timestamps. Not a seam: the environment.
@@ -355,20 +359,31 @@ impl<'a> Sluice<'a> {
     /// even when `line` changes nothing else, and no cause of refused
     /// writes is ended unless it does.
     fn carry(&self, line: &Line, always: bool) -> Result<Written> {
+        // The write's time, asked of the clock once and only where the
+        // write needs one.
+        let at = std::cell::OnceCell::new();
+        let now = || at.get_or_init(|| self.now()).clone();
+        let mut kept: Option<Line> = None;
+        // 154 (design D2 of `each-submission-shows-its-wait-and-its-test`):
+        // every write keeps each submission's time under test, where it
+        // moved, before the line's changes are read.
+        if line.under_test_moved() {
+            let mut l = line.clone();
+            l.keep_under_test(&now());
+            kept = Some(l);
+        }
         // 72, record 0122 (design D9): every write the lead makes sets
         // `kept`, its own time of its last write.
-        let led;
-        let line = match line.doc.lead.as_deref() == Some(self.peer.name.as_str())
-            && !line.changes().is_empty()
-        {
-            true => {
-                let mut l = line.clone();
-                l.doc.kept = Some(self.now());
-                led = l;
-                &led
-            }
-            false => line,
+        let leads = {
+            let read = kept.as_ref().unwrap_or(line);
+            read.doc.lead.as_deref() == Some(self.peer.name.as_str()) && !read.changes().is_empty()
         };
+        if leads {
+            let mut l = kept.take().unwrap_or_else(|| line.clone());
+            l.doc.kept = Some(now());
+            kept = Some(l);
+        }
+        let line = kept.as_ref().unwrap_or(line);
         let own = line.changes();
         if own.is_empty() && !always {
             return Ok(Written::Written(line.version));
@@ -377,7 +392,7 @@ impl<'a> Sluice<'a> {
         // branch with none reads no clock.
         let ending = match own.is_empty() || line.doc.refused_writes.is_empty() {
             true => None,
-            false => Some(self.now()).filter(|now| {
+            false => Some(now()).filter(|now| {
                 line.doc
                     .refused_writes
                     .iter()
@@ -429,6 +444,16 @@ impl<'a> Sluice<'a> {
             .state
             .write(&line.branch, line.version, changes)?;
         if let Written::Written(_) = written {
+            // 154 (design D1, D4 of
+            // `each-submission-shows-its-wait-and-its-test`): each submission
+            // this write ended is sent once, by whichever process wrote it.
+            let ended = line.ended();
+            if !ended.is_empty() {
+                let at = now();
+                for s in ended {
+                    self.send_life(&line.branch, s, &at);
+                }
+            }
             // The write stands whatever this does: a line not marked is
             // written again by the next write, which decides nothing.
             if let Some(r) = refusal.filter(|_| !carried.is_empty()) {
@@ -457,6 +482,58 @@ impl<'a> Sluice<'a> {
             }
         }
         Ok(written)
+    }
+
+    /// 154 (design D4, D9 of `each-submission-shows-its-wait-and-its-test`;
+    /// rules core.53, core.66): submission `s`'s life, ended by a write of
+    /// `branch` at `at`, handed to the life hook, and its end measured by
+    /// its repository, its branch and how it ended alone. Its time under
+    /// test is its record's; its time waiting the rest of its life, never
+    /// below zero.
+    fn send_life(&self, branch: &str, s: &Submission, at: &str) {
+        let outcome = s.state.word();
+        let tested = s.under_test_ms as f64 / 1000.0;
+        let life_seconds = chrono::DateTime::parse_from_rfc3339(&s.submitted)
+            .ok()
+            .zip(chrono::DateTime::parse_from_rfc3339(at).ok())
+            .map_or(0.0, |(from, to)| {
+                (to - from).num_milliseconds() as f64 / 1000.0
+            });
+        let waited = (life_seconds - tested).max(0.0);
+        life::ended(&life::Life {
+            repository: self.peer.repository.clone(),
+            branch: branch.into(),
+            submission: s.id,
+            head: s.head.to_string(),
+            work: s.from.worktree.clone(),
+            agent: s.from.agent.clone(),
+            trace: s.trace.clone(),
+            submitted: s.submitted.clone(),
+            ended: at.into(),
+            outcome,
+            waited_seconds: waited,
+            tested_seconds: tested,
+            no_outcome: s.runs_with_no_outcome,
+        });
+        let repository = self.peer.repository.as_str();
+        tracing::info!(
+            monotonic_counter.sluice.submissions.ended = 1u64,
+            sluice.repository = repository,
+            sluice.branch = branch,
+            sluice.outcome = outcome,
+        );
+        tracing::info!(
+            histogram.sluice.submission.waited = waited,
+            sluice.repository = repository,
+            sluice.branch = branch,
+            sluice.outcome = outcome,
+        );
+        tracing::info!(
+            histogram.sluice.submission.tested = tested,
+            sluice.repository = repository,
+            sluice.branch = branch,
+            sluice.outcome = outcome,
+        );
     }
 
     /// 133: the lines of this host's refusal of `branch`'s remote not yet in

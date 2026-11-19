@@ -95,7 +95,7 @@ pub fn start(
     request: &sluice_seams::RunRequest,
 ) -> anyhow::Result<sluice_seams::RunHandle> {
     let part = tests
-        .hold(sluice_seams::RunKind::Queue)?
+        .hold(sluice_seams::RunKind::Queue, "main")?
         .ok_or(sluice_seams::AtBound)?;
     tests.start(request, part)
 }
@@ -834,9 +834,10 @@ impl sluice::host_process::HostProcess for FakeProcess {
         here: &sluice::host_process::Here<'a, '_>,
         kind: sluice_seams::RunKind,
         _place: &str,
+        branch: &str,
     ) -> anyhow::Result<Box<dyn sluice::host_process::Holding + 'a>> {
         let roomed = self.roomed(here)?;
-        let waiter = roomed.room.lock().wait(&roomed.repository);
+        let waiter = roomed.room.lock().wait(&roomed.repository, Some(branch));
         Ok(Box::new(FakeHolding {
             roomed,
             waiter,
@@ -905,7 +906,7 @@ impl sluice::host_process::Holding for FakeHolding<'_> {
         _: std::time::Duration,
     ) -> anyhow::Result<Option<sluice::host_process::Holds>> {
         use sluice::host_process::room::{Asked, Asker};
-        match self.roomed.ask(&Asker::Session(self.waiter))? {
+        match self.roomed.ask(&Asker::Session(self.waiter), None)? {
             Asked::Held(id) => Ok(Some(sluice::host_process::Holds::Held(
                 self.roomed.room.part(self.kind, id),
             ))),

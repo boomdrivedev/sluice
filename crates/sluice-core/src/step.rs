@@ -1084,7 +1084,7 @@ impl Sluice<'_> {
                     if full {
                         continue;
                     }
-                    match self.seams.tests.hold(RunKind::Queue)? {
+                    match self.seams.tests.hold(RunKind::Queue, branch)? {
                         Some(part) => held = Some(part),
                         None => {
                             full = true;
@@ -1118,7 +1118,7 @@ impl Sluice<'_> {
                 // 88, S19: a run a lead marked starting under the claim it
                 // gave this pool's job holds its room at the job's start, as
                 // `start_claimed` holds it (rule core.49).
-                None => match self.seams.tests.hold(RunKind::Queue)? {
+                None => match self.seams.tests.hold(RunKind::Queue, branch)? {
                     Some(part) => part,
                     None => {
                         self.reopen_made(branch, &c.id, i, &name, &given, releases)?;
@@ -1221,7 +1221,7 @@ impl Sluice<'_> {
             return Ok(None);
         };
         from.claim = Some(claim.to_string());
-        let Some(part) = self.seams.tests.hold(RunKind::Queue)? else {
+        let Some(part) = self.seams.tests.hold(RunKind::Queue, branch)? else {
             let name = c.runs[i].place.clone().expect("a starting run has a place");
             let given = given_checks(&c.runs[i], &from.rules);
             self.reopen_made(branch, &c.id, i, &name, &given, releases)?;
@@ -1336,7 +1336,7 @@ impl Sluice<'_> {
             .policy_at(&base)?
             .ok_or_else(|| anyhow!("{branch}'s revision {base} has no {POLICY_PATH}"))?;
         let rules = self.gate(branch, &base)?;
-        let Some(part) = self.seams.tests.hold(RunKind::Queue)? else {
+        let Some(part) = self.seams.tests.hold(RunKind::Queue, branch)? else {
             return Ok(Started::AtBound);
         };
         let name = head_place(head);
@@ -2405,12 +2405,17 @@ impl Sluice<'_> {
                                 untaken: true,
                             });
                             r.closed = Some(now.to_string());
-                            closing.push((r.system.clone(), n, why));
+                            closing.push((r.system.clone(), n, why, r.ended.clone()));
                         }
                     }
                     // Record 0122 (design D1): ended and closed in one write,
                     // having made no checkout.
-                    for (system, n, why) in closing {
+                    for (system, n, why, ended) in closing {
+                        // 114, 154 (design D3 of
+                        // `each-submission-shows-its-wait-and-its-test`).
+                        if let Some(ended) = &ended {
+                            line.count_no_outcome(&c.id, ended);
+                        }
                         for event in [
                             Event::Ended {
                                 combination: c.revision.clone(),
@@ -2873,6 +2878,9 @@ impl Sluice<'_> {
             untaken: false,
         };
         let ended_why = ended.why.clone();
+        // 114, 154 (design D3 of `each-submission-shows-its-wait-and-its-test`):
+        // a run that decided nothing counts on each submission it held.
+        line.count_no_outcome(&c.id, &ended);
         // Record 0122 (design D3): its end, after its results and before
         // its checkout's release, which [`Sluice::perform_closes`] makes.
         let x = line.candidate_mut(&c.id).expect("polled candidate");
@@ -3744,6 +3752,9 @@ impl Sluice<'_> {
         chain: &[String],
         now: &str,
     ) -> Result<Parts> {
+        // 154 (design D6 of `each-submission-shows-its-wait-and-its-test`):
+        // each part is held for the line's branch.
+        let branch = &line.branch.clone();
         let mut parts = Parts::new();
         let mut full = false;
         let reopened: Vec<(String, usize)> = chain
@@ -3760,7 +3771,7 @@ impl Sluice<'_> {
             })
             .collect();
         for (id, i) in reopened {
-            let Some(part) = self.seams.tests.hold(RunKind::Queue)? else {
+            let Some(part) = self.seams.tests.hold(RunKind::Queue, branch)? else {
                 full = true;
                 break;
             };
@@ -3852,7 +3863,7 @@ impl Sluice<'_> {
             let part = match mine {
                 Some(_) if full && rules.signed => None,
                 Some(_) if full => break,
-                Some(_) => match self.seams.tests.hold(RunKind::Queue)? {
+                Some(_) => match self.seams.tests.hold(RunKind::Queue, branch)? {
                     Some(part) => Some(part),
                     None if rules.signed => {
                         full = true;
@@ -4744,7 +4755,7 @@ impl Sluice<'_> {
         // first, and none is made once the host holds none.
         self.seams.state.fetch_candidates(branch)?;
         let mut parts = Parts::new();
-        while let Some(part) = self.seams.tests.hold(RunKind::Queue)? {
+        while let Some(part) = self.seams.tests.hold(RunKind::Queue, branch)? {
             let mut part = Some(part);
             let claimed = self.update(branch, |l| {
                 let now = self.now();
@@ -5222,6 +5233,11 @@ const AT_BOUND: &str = "the host had no room for it";
 /// ended with `ended`, and closed in the same write where it holds no
 /// checkout, each logged.
 fn end_run(l: &mut Line, cand: &str, i: usize, ended: Ended, now: &str) {
+    // 114, 154 (design D3 of `each-submission-shows-its-wait-and-its-test`):
+    // a run that decided nothing counts on each submission it held.
+    if l.candidate(cand).is_some_and(|x| i < x.runs.len()) {
+        l.count_no_outcome(cand, &ended);
+    }
     let Some(x) = l.candidate_mut(cand) else {
         return;
     };
@@ -5765,6 +5781,122 @@ mod tests {
             .iter()
             .find(|c| c.submissions == ids)
             .cloned()
+    }
+
+    /// A clock a test moves on.
+    struct Moving(std::cell::Cell<chrono::DateTime<Utc>>);
+
+    impl Moving {
+        fn at_noon() -> Moving {
+            Moving(std::cell::Cell::new(Noon.now()))
+        }
+
+        fn advance(&self, minutes: i64) {
+            self.0
+                .set(self.0.get() + chrono::Duration::minutes(minutes));
+        }
+    }
+
+    impl Clock for Moving {
+        fn now(&self) -> chrono::DateTime<Utc> {
+            self.0.get()
+        }
+    }
+
+    /// 154, design D2 of `each-submission-shows-its-wait-and-its-test`: a
+    /// submission's combination goes under test, the clock moves four
+    /// minutes, and the round that reads its verdict keeps four minutes on
+    /// its record.
+    #[test]
+    fn every_write_keeps_a_submission_s_time_under_test() {
+        let f = Fakes::new();
+        let tip = f
+            .world
+            .init("main", &[(POLICY_PATH, POLICY), ("a/lib", "1")]);
+        f.world.task("a:test", "a/");
+        let head = f.world.work(&tip, &[("a/lib", Some("2"))]);
+        f.world.session("unit/a", "agent", &head);
+        f.world.hold_runs(true);
+        let clock = Moving::at_noon();
+        let seams = Seams {
+            checkout: &f.checkout,
+            tests: &f.tests,
+            branch: &f.branch,
+            driver: &f.driver,
+            state: &f.state,
+        };
+        let s = Sluice::new(seams, &clock);
+        let one = submit(&s, "unit/a");
+        s.step("main").unwrap();
+        let line = s.read_line("main").unwrap();
+        let held = holding(&line, &[one]).expect("#1 under test");
+        assert!(held.state.under_test());
+        let record = line.sub(one).unwrap();
+        assert_eq!(
+            record.under_test_since.as_deref(),
+            Some("2026-10-30T12:00:00Z")
+        );
+        assert_eq!(record.under_test_ms, 0);
+        clock.advance(4);
+        f.world.complete(&held.revision);
+        s.step("main").unwrap();
+        let record = s.state(one).unwrap().unwrap();
+        assert_eq!(record.state, State::Landed);
+        assert_eq!(record.under_test_ms, 240_000);
+        assert_eq!(record.under_test_since, None);
+    }
+
+    /// 66, 87, 114, 154, design D3 of `each-submission-shows-its-wait-and-
+    /// its-test`: a combination's run no live host may take, ended at its
+    /// time limit, counts one run with no outcome on each submission it
+    /// holds, and blames none.
+    #[test]
+    fn a_run_no_host_took_counts_as_no_outcome_on_its_submissions() {
+        let f = Fakes::new();
+        let policy = "[branches.main]\nrequired = [\"#gate\"]\nparallel = 4\nbatch = true\n\
+                      timeout = \"20m\"\nsystems = [\"macos-arm64\"]\n\n[systems]\n\
+                      linux-x64 = { os = \"linux\", arch = \"x86_64\" }\n\
+                      macos-arm64 = { os = \"macos\", arch = \"aarch64\" }\n";
+        let tip = f.world.init(
+            "main",
+            &[(POLICY_PATH, policy), ("a/lib", "1"), ("b/lib", "1")],
+        );
+        f.world.platform("linux", "x86_64");
+        for p in ["a", "b"] {
+            f.world.task(&format!("{p}:test"), &format!("{p}/"));
+            let head = f.world.work(&tip, &[(&format!("{p}/lib"), Some("2"))]);
+            f.world.session(&format!("unit/{p}"), "agent", &head);
+        }
+        let clock = Moving::at_noon();
+        let seams = Seams {
+            checkout: &f.checkout,
+            tests: &f.tests,
+            branch: &f.branch,
+            driver: &f.driver,
+            state: &f.state,
+        };
+        let s = Sluice::new(seams, &clock).as_peer(crate::Peer {
+            systems: Some(vec!["linux-x64".into()]),
+            ..crate::Peer::default()
+        });
+        let (one, two) = (submit(&s, "unit/a"), submit(&s, "unit/b"));
+        s.step("main").unwrap();
+        let line = s.read_line("main").unwrap();
+        let held = holding(&line, &[one, two]).expect("#1 and #2 under test");
+        assert_eq!(held.runs[0].system.as_deref(), Some("macos-arm64"));
+        clock.advance(21);
+        s.step("main").unwrap();
+        let line = s.read_line("main").unwrap();
+        let read = line
+            .candidate(&held.id)
+            .expect("the combination, not passed");
+        assert_eq!(read.state, CandidateState::NotPassed);
+        assert!(read.runs[0].ended.as_ref().is_some_and(|e| e.untaken));
+        for id in [one, two] {
+            let record = line.sub(id).unwrap();
+            assert_eq!(record.runs_with_no_outcome, 1, "#{id}");
+            assert_ne!(record.state, State::Failed, "#{id} is blamed");
+        }
     }
 
     /// Design D1, D2 (25, 81; rules core.7, core.17): a round drops the

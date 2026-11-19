@@ -80,6 +80,23 @@ back: the queue never depends on it
 - **A caller's trace turns nothing on**: it says only where sluice's
   spans nest. Whether sluice sends is the command's own choice, else the
   table, as above.
+- **A submission's life**: while traces go, the write that ends a
+  submission sends one span, `sluice.submission`, from its submission to
+  that end: landed, `refused`, blamed (`failed`), dropped for a conflict
+  (`conflict`) or `withdrawn`, whichever host or command wrote it. It is
+  in the trace the submission was submitted under, beneath the caller's
+  span its record kept, or the root of a trace of its own where it kept
+  none, and it links to the span of the round or command that ended it.
+  It holds `sluice.repository`, `sluice.branch`, `sluice.submission` (its
+  number), `sluice.head`, `sluice.work`, `sluice.agent`,
+  `sluice.outcome`, its seconds waiting with no combination of it under
+  test, `sluice.waited_seconds`, and under test, `sluice.tested_seconds`,
+  and `sluice.no_outcome`, the runs of its combinations that decided
+  nothing. Only a blame is an error: a run with no outcome is named, and
+  is never the submission's failure. A submission's record keeps its
+  time under test, `under_test_ms` and `under_test_since`, and
+  `runs_with_no_outcome`, whether or not telemetry is on; nothing sluice
+  decides reads them.
 - **Metrics**, each with `sluice.repository` and `sluice.branch`, and
   `sluice.outcome` where the table names it, and nothing else, so no
   metric carries a value that grows with each run. `sluice.repository`
@@ -100,6 +117,12 @@ back: the queue never depends on it
   | `sluice.landed`, `sluice.refused` | counter | submissions landed; landings refused because the branch moved |
   | `sluice.submission.landed_after` | histogram, seconds, declared in `s` | submit to landed |
   | `sluice.candidate.tested_for` | histogram, seconds, declared in `s` | a combination's time under test, by `sluice.outcome` |
+  | `sluice.submissions.ended` | counter | submissions ended, by `sluice.outcome`: `landed`, `refused`, `failed`, `conflict` or `withdrawn` |
+  | `sluice.submission.waited` | histogram, seconds, declared in `s` | a submission's time waiting with no combination of it under test, by `sluice.outcome` |
+  | `sluice.submission.tested` | histogram, seconds, declared in `s` | a submission's time under test, combinations that overlap counted once, by `sluice.outcome` |
+  | `sluice.host.running` | gauge | the host's checks running for the branch, sent by sluice's host process every three seconds, and 0 once after its last run |
+  | `sluice.host.bound` | gauge | the host's bound, the same on each branch's row: read `sluice.host.running` summed over branches against its greatest |
+  | `sluice.run.waited_for_room` | histogram, seconds, declared in `s` | how long a run waited for room under the host's bound, from its ask first refused to its hold |
 
 - **Logs**: a failed check's output, and sluice's own warnings and
   errors, under the span they were emitted in. The table's `logs`, or a

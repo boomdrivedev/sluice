@@ -478,7 +478,7 @@ fn a_second_repositorys_start_waits_for_the_hosts_bound() {
 
     let req = request(&b, "sluice/try/main/1", command("touch ran"));
     assert!(
-        second.hold(RunKind::Queue).unwrap().is_none(),
+        second.hold(RunKind::Queue, "main").unwrap().is_none(),
         "the host's one run is the first repository's"
     );
     let dir = second.runs().dir("sluice/try/main/1");
@@ -492,7 +492,10 @@ fn a_second_repositorys_start_waits_for_the_hosts_bound() {
         assert!(Instant::now() < until, "the first run never ended");
         std::thread::sleep(Duration::from_millis(50));
     }
-    let part = second.hold(RunKind::Queue).unwrap().expect("the run ended");
+    let part = second
+        .hold(RunKind::Queue, "main")
+        .unwrap()
+        .expect("the run ended");
     let run = second.start(&req, part).unwrap();
     let until = Instant::now() + Duration::from_secs(60);
     let report = loop {

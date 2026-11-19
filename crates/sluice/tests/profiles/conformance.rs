@@ -187,8 +187,12 @@ impl Tests for RecordedChecks {
         Ok(run)
     }
 
-    fn hold(&self, kind: sluice_seams::RunKind) -> Result<Option<sluice_seams::Part>> {
-        self.inner.hold(kind)
+    fn hold(
+        &self,
+        kind: sluice_seams::RunKind,
+        branch: &str,
+    ) -> Result<Option<sluice_seams::Part>> {
+        self.inner.hold(kind, branch)
     }
 
     fn progress(&self, run: &RunHandle) -> Result<Progress> {
