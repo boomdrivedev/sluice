@@ -66,12 +66,13 @@ pub const METRIC_KEYS: [&str; 3] = ["sluice.repository", "sluice.branch", "sluic
 /// The metrics the core gives in seconds, each declared with the unit `s`
 /// where it is sent, so a backend shows a time and not a bare number (rule
 /// core.66; record 0014 as amended 2026-11-18; design D4).
-pub const SECONDS: [&str; 5] = [
+pub const SECONDS: [&str; 6] = [
     "sluice.submission.landed_after",
     "sluice.candidate.tested_for",
     "sluice.tasks.time_saved",
     "sluice.submission.waited",
     "sluice.submission.tested",
+    "sluice.run.waited_for_room",
 ];
 
 /// The time, for the records' timestamps. Not a seam: the environment.

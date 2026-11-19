@@ -748,6 +748,11 @@ impl Telemetry {
         }
     }
 
+    /// Whether it sends metrics: a signal left on, with a provider.
+    pub fn sends_metrics(&self) -> bool {
+        self.metrics.is_some()
+    }
+
     /// Send what is left. A collector that cannot be reached loses it.
     pub fn finish(self) {
         if let Some(t) = self.traces {
