@@ -5918,6 +5918,7 @@ fn submit_pull(
                     } else if json && no_wait {
                         let doc = serde_json::json!({
                             "pull_request": number, "branch": branch, "state": now.0,
+                            "wait": pull_wait(branch, number),
                         });
                         let doc = There::with(doc, there.as_ref())?;
                         writeln!(out, "{}", with_copy(doc, copy.as_ref())?)?;

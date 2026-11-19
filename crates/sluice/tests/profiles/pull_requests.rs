@@ -2970,8 +2970,9 @@ fn no_wait_answers_with_its_submission() {
     assert_eq!(doc["state"], "landed");
 }
 
-/// No wait, waiting for a review: the submit answers with the pull request
-/// and what it waits for, and nothing of it is queued.
+/// No wait, waiting for a review: the submit answers with the pull request,
+/// what it waits for and the wait that follows it (record 0130), and
+/// nothing of it is queued.
 #[test]
 fn no_wait_waiting_for_a_review_answers_with_the_pull_request() {
     let g = OnGitHub::new("pr-no-wait-review", "reviews = 1");
@@ -2985,6 +2986,7 @@ fn no_wait_waiting_for_a_review_answers_with_the_pull_request() {
         doc,
         serde_json::json!({
             "pull_request": n, "branch": "main", "state": "waiting: needs 1 review",
+            "wait": format!("sluice wait main --pull-request {n}"),
         })
     );
     assert!(g.of(n).is_empty(), "{:?}", g.subs());
@@ -7347,6 +7349,7 @@ fn run_again_marks_ready_a_draft_another_host_sent_back() {
     // (record 0095 D5).
     let waiting = serde_json::json!({
         "pull_request": n, "branch": "main", "state": "waiting to be taken in by b",
+        "wait": format!("sluice wait main --pull-request {n}"),
         "taken_in_by": { "host": "b" },
         "queue": {
             "host": "b", "taken_in": true, "submission": b.of(n)[0]["id"],
