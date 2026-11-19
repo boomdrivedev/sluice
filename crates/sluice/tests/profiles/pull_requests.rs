@@ -3220,6 +3220,68 @@ fn a_wait_by_pull_request_taken_in_here_prints_its_record() {
     assert_eq!(record, by_id);
 }
 
+/// submission-wait, "Another worktree's pull request": worktree `unit/a`
+/// opened one pull request and `unit/b` another, this host took both in,
+/// and GitHub refuses every post of their outcomes, so neither is
+/// confirmed on the request. `sluice wait main --pull-request <a's>` in
+/// `unit/b` reports `unit/a`'s submission landed, never `unit/b`'s, and
+/// hands it over to no one; `sluice inbox` in `unit/a` then hands that
+/// landing over (51; rule core.52; record 0130 D2).
+#[test]
+fn a_wait_by_another_worktrees_pull_request_hands_nothing_over() {
+    let g = OnGitHub::new("pr-wait-by-number-another", "");
+    let submitted = |name: &str| {
+        let file = format!("{name}.txt");
+        let w = g.session(name, &[(file.as_str(), "x\n")]);
+        let out = g.wt_submit(&w, &["--no-wait", "--json"]);
+        assert_eq!(out.status.code(), Some(0), "{}", text(&out));
+        let doc: Value =
+            serde_json::from_slice(&out.stdout).unwrap_or_else(|e| panic!("{e}: {}", text(&out)));
+        let id = doc["id"].as_u64().unwrap_or_else(|| panic!("{doc}"));
+        (w, id, doc["pull_request"].clone())
+    };
+    let (a, a_id, a_n) = submitted("a");
+    let (b, b_id, _) = submitted("b");
+    for (method, path) in [
+        ("POST", "/repos/o/r/check-runs"),
+        ("PATCH", "/repos/o/r/check-runs"),
+        ("POST", "/repos/o/r/issues"),
+        ("PATCH", "/repos/o/r/issues"),
+    ] {
+        g.gh.trouble(method, path, usize::MAX, github::Trouble::Status(422));
+    }
+    let out = g
+        .command(env!("CARGO_BIN_EXE_sluice"), &b)
+        .args(["wait", "main", "--pull-request", &a_n.to_string()])
+        .args(["--timeout", "1m", "--json"])
+        .output()
+        .unwrap();
+    assert_eq!(out.status.code(), Some(sluice::LANDED), "{}", text(&out));
+    let record: Value =
+        serde_json::from_slice(&out.stdout).unwrap_or_else(|e| panic!("{e}: {}", text(&out)));
+    assert_eq!(record["id"], a_id, "{record}");
+    assert_ne!(record["id"], b_id, "{record}");
+    assert_eq!(record["state"], "landed", "{record}");
+    let id = Value::from(a_id);
+    assert_eq!(g.delivery(&id)["state"], "owed", "{}", g.delivery(&id));
+    assert_eq!(g.delivery(&id)["handed"], serde_json::json!([]));
+
+    let out = g
+        .command(env!("CARGO_BIN_EXE_sluice"), &a)
+        .args(["inbox", "--json"])
+        .output()
+        .unwrap();
+    assert_eq!(out.status.code(), Some(0), "{}", text(&out));
+    let doc: Value =
+        serde_json::from_slice(&out.stdout).unwrap_or_else(|e| panic!("{e}: {}", text(&out)));
+    let outcomes = doc["outcomes"]
+        .as_array()
+        .unwrap_or_else(|| panic!("{doc}"));
+    assert_eq!(outcomes.len(), 1, "{doc}");
+    assert_eq!(outcomes[0]["id"], a_id, "{doc}");
+    assert_eq!(outcomes[0]["state"], "landed", "{doc}");
+}
+
 /// 135: beside a live driver, `sluice wait <branch>` takes no pull request
 /// in and runs no round: a request ready to be taken in is still not, out
 /// of time.

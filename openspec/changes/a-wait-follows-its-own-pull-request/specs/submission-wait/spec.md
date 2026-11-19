@@ -36,8 +36,9 @@ another submission as its own outcome (135, 137; rule core.48).
 #### Scenario: Another worktree's pull request
 
 - **WHEN** worktree `unit/a` opened `#12` and worktree `unit/b` opened
-  `#13`, this host took both in, and `sluice wait main --pull-request
-  12` runs in `unit/b` until `#12` lands
+  `#13`, this host took both in, GitHub refuses every post of their
+  outcomes, so neither is confirmed on its request (C.5), and `sluice
+  wait main --pull-request 12` runs in `unit/b` until `#12` lands
 - **THEN** it reports `#12`'s submission landed and exits 0, never
   `#13`'s, and `sluice inbox` in `unit/a` then hands over `#12`'s
   landing, which the wait handed over to no one (51; rule core.52)
