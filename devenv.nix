@@ -64,16 +64,16 @@ let
   worktrunk = fromRelease {
     name = "worktrunk";
     repo = "max-sixty/worktrunk";
-    version = "0.80.0";
+    version = "0.82.0";
     bins = [
       "wt"
       "git-wt"
     ];
     hashes = {
-      aarch64-apple-darwin = "8a2bb053c4bc80dea7d9ce6c221ff038d10a3d2dca2dc8f60d1b1a094fa783a9";
-      x86_64-apple-darwin = "aa898aa301617abaf91cb3078de4c8c11444a061016dc8f6dd80aa17cc1c46be";
-      aarch64-unknown-linux-musl = "347b260c1b044a53a7720b33181d7c66dcde945efbd605d784e5b6a5616c17e9";
-      x86_64-unknown-linux-musl = "532ce3ed5eecb1be274c925b5887f61671e2434a4ca2561b9a8ac9379dbba199";
+      aarch64-apple-darwin = "6945bc82e0513d0b974c99fb1d30de24e448697fd533ed6b3f442c66a1b3620c";
+      x86_64-apple-darwin = "d9c87668baa1aad2b44d5bfb08074609c5e4a186a0948dfed6e65d6e6c5a7744";
+      aarch64-unknown-linux-musl = "b907f891bc051dcfc13fa479194e156b356f434a37103522ea1fe1b7ded899b5";
+      x86_64-unknown-linux-musl = "d1e38cf36d8c14ef0682a6d6617f8a512b1a971feb3dfa437419d00136e19a3e";
     };
   };
 
