@@ -1811,6 +1811,37 @@ fn landed_and_merged_by_landing() {
         .contains("## sluice: landed on main as "));
 }
 
+/// forge-identity spec, "A landing and its records pushed as the app"
+/// (record 0019 as amended 2026-11-18; rule core.43): a request landed on
+/// `main`, which sluice pushes to GitHub as its app, is a landing commit
+/// whose author and committer are the app's bot, and so is the commit of
+/// `main`'s records on `refs/sluice/state/main`.
+#[test]
+fn a_landing_and_its_records_name_the_apps_bot() {
+    let g = OnGitHub::new("pr-landed-by-bot", "");
+    let (n, _) = g.by_hand("unit/bot", &[("b.txt", Some("b\n"))], false);
+    g.step_until("landed", |g| {
+        g.of(n).first().is_some_and(|s| s["state"] == "landed")
+    });
+    let bot = format!(
+        "{}[bot] <{}+{}[bot]@users.noreply.github.com> ",
+        github::SLUG,
+        github::BOT,
+        github::SLUG
+    );
+    for name in ["refs/heads/main", "refs/sluice/state/main"] {
+        let out = support::git_command()
+            .arg("--git-dir")
+            .arg(g.bare.path())
+            .args(["cat-file", "-p", name])
+            .output()
+            .unwrap();
+        let raw = String::from_utf8_lossy(&out.stdout);
+        assert!(raw.contains(&format!("\nauthor {bot}")), "{name}: {raw}");
+        assert!(raw.contains(&format!("\ncommitter {bot}")), "{name}: {raw}");
+    }
+}
+
 /// 51, C.5; outcome-delivery spec, "A request's landing is posted" and "A
 /// post that fails": the driver's post of a request's outcome is a
 /// hand-over by `pull-request` to `pull/<n>` that confirms on receipt, so a
