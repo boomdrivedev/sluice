@@ -101,10 +101,11 @@ combination passes.
   a branch can accept results moon already has.
 - **Confined checks.** A run can be held in a sandbox: it writes only its
   own worktree and reaches only the network its branch allows.
-- **Agents' own test runs, under the same bound.** `sluice exec` runs an
-  agent's tests in its worktree with ports of its own and the branch's
-  limits, sharing the host with the queue's runs; a clean run is recorded
-  for the submission that follows.
+- **Agents' own test runs, under the same bound.** `sluice exec` runs the
+  tests an agent's own changes affect since its worktree left the branch,
+  its uncommitted and untracked files included, in its worktree with
+  ports of its own and the branch's limits, sharing the host with the
+  queue's runs; a clean run is recorded for the submission that follows.
 - **Try what landed.** `sluice preview` brings a revision a branch landed
   up on the repository's own stack, at addresses a person opens, and
   keeps it until it is released: one per landing, with nothing kept
@@ -266,7 +267,7 @@ sets it up.
 | `sluice amend <id>` | Reorder a queued submission (`--after`, `--priority`) until it is under test. `--json` for scripts. |
 | `sluice withdraw <id>` | Take a submission out of the queue; one already withdrawn exits `0` and says so. `--json` for scripts. |
 | `sluice protect` | Install the branch-protection hook; `--remove` takes it out. Warns of a worktree that has checked out a protected branch. `--json` for scripts. |
-| `sluice exec <branch>` | Run the tests this worktree's head affects against the branch, in the worktree, under the host's bound; `-- <command>` runs a command instead. |
+| `sluice exec <branch>` | Run the tests the worktree's own changes affect since it left the branch, its uncommitted and untracked files included, in the worktree, under the host's bound; `-- <command>` runs a command instead. |
 | `sluice equip <branch>` | Make this worktree ready for the branch's runner, as sluice makes every checkout ready before it runs anything there: the toolchain, then under moon the tool versions `.prototools` lists, moon's version check and `moon setup`. It holds nothing. `--json` for scripts. |
 | `sluice release` | Release this worktree: its release command, what its runs left running, its ports. `--json` for scripts. |
 | `sluice preview <branch> <revision>` | Bring up a revision the branch has landed, at the addresses the policy's `[preview]` names, until it is released. `--wait`, `--json`. |
