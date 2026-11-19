@@ -364,6 +364,58 @@ fn a_refused_landing_is_counted() {
     assert!(!has(&seen, "monotonic_counter.sluice.landed"), "{seen:?}");
 }
 
+/// 154, design D4, D9 (rules core.53, core.66): each submission's end is
+/// measured by how it ended, landed, blamed and withdrawn from the queue,
+/// its seconds waiting and under test beside it, each with the repository
+/// and the branch and nothing outside `METRIC_KEYS`.
+#[test]
+fn a_submission_s_end_is_measured() {
+    let f = setup();
+    let mut seen = submit(&f, "unit/a", "agent-a", &[("lib/a.py", Some("changed"))]);
+    assert!(has(&seen, &format!("exit {LANDED}")), "{seen:?}");
+    f.world.fails_with("tests:t-a", "tests/t_a.py", "broken");
+    let blamed = submit(&f, "unit/b", "agent-b", &[("tests/t_a.py", Some("broken"))]);
+    assert!(has(&blamed, &format!("exit {FAILED}")), "{blamed:?}");
+    seen.extend(blamed);
+    work(&f, "unit/c", "agent-c", &[("lib/a.py", Some("again"))]);
+    let queued = Seen::default();
+    sluice(
+        &f,
+        &queued,
+        &["submit", BRANCH, "--worktree", "unit/c", "--no-wait"],
+    )
+    .unwrap();
+    sluice(&f, &queued, &["withdraw", "3", "--as", "agent-c"]).unwrap();
+    seen.extend(queued.lines());
+    metrics_carry_only_their_keys(&seen);
+    let branch = named();
+    assert_eq!(
+        metric(&seen, "monotonic_counter.sluice.submissions.ended"),
+        ["landed", "failed", "withdrawn"].map(|o| format!("1 {branch} sluice.outcome={o}")),
+        "{seen:?}"
+    );
+    for name in [
+        "histogram.sluice.submission.waited",
+        "histogram.sluice.submission.tested",
+    ] {
+        let outcomes: Vec<&str> = metric(&seen, name)
+            .iter()
+            .map(|m| m.rsplit_once("sluice.outcome=").map_or("", |(_, o)| o))
+            .collect();
+        assert_eq!(
+            outcomes,
+            ["landed", "failed", "withdrawn"],
+            "{name} in {seen:?}"
+        );
+    }
+    let tested = metric(&seen, "histogram.sluice.submission.tested");
+    assert_eq!(
+        tested[2],
+        format!("0.0 {branch} sluice.outcome=withdrawn"),
+        "{seen:?}"
+    );
+}
+
 /// A command chooses only what its flags or its `SLUICE_OTEL*` variables
 /// give it, each `None` where it was given neither, so the host's
 /// `[telemetry]` holds (151; record 0106; design D2); and while telemetry
