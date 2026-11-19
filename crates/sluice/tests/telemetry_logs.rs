@@ -174,6 +174,10 @@ impl PullRequests for Unreadable {
         Ok(None)
     }
 
+    fn holds(&self, _: Seams<'_>, _: &dyn Clock, branch: &str, _: u64) -> anyhow::Result<bool> {
+        anyhow::bail!("{branch} takes no pull requests")
+    }
+
     fn follow(
         &self,
         _: Seams<'_>,

@@ -882,14 +882,17 @@ beside it:
 $ wt submit main --no-wait --subject "Batch review cards"
 pushed batch-review · opened #41: Batch review cards
 submission 12 to main from #41 · nothing queued ahead
+wait: sluice wait main --pull-request 41
 $ wt submit main --no-wait --json
-{"id":12,"branch":"main","ahead":[],"pull_request":41}
+{"id":12,"branch":"main","ahead":[],"pull_request":41,"wait":"sluice wait main --pull-request 41"}
 ```
 
 Otherwise it answers with the pull request and what it waits for, as
 `wt submit main --status` reports it later: under `--json`,
-`{"pull_request":41,"branch":"main","state":"waiting: needs 1 review"}`,
-with no `id`.
+`{"pull_request":41,"branch":"main","state":"waiting: needs 1 review","wait":"sluice wait main --pull-request 41"}`,
+with no `id`. Either way, `wait` is the command that follows the pull
+request by its number, from any folder and on any host, and the words
+end with it: `wait: sluice wait main --pull-request 41`.
 
 A pull request a submit opened is the agent's. When its submission
 leaves the queue without landing, blamed, in conflict, withdrawn, or on
@@ -1236,6 +1239,18 @@ whatever the round failed after it. A submission already decided is
 reported at once, and nothing runs. `sluice wait <branch>` waits for this worktree's last submission
 to that branch, the one `sluice submit <branch> --status` reports.
 
+`sluice wait <branch> --pull-request <n>` follows pull request `<n>`
+into the branch, from any folder of the repository and on any host. It
+follows the pull request as `sluice wait <branch>` follows the one its
+worktree opened, with the same outcomes, exits and documents, and its
+number is the same on every host from the submit to the landing. Where
+the branch takes no pull requests, or GitHub holds no pull request `<n>`
+into it, the wait follows nothing, says `no pull request #<n> into
+<branch>` and exits `1`. Given a submission's number in place of a
+branch, it exits `64`. A wait by pull request run anywhere but the
+worktree that opened the request hands nothing over: its outcome stays
+owed there, and `sluice inbox` in that worktree collects it.
+
 sluice finds a submission by its number on any branch it can read,
 whatever other branch it cannot. A branch whose policy, revision or
 state sluice cannot read holds up no wait on another branch. When the
@@ -1369,9 +1384,17 @@ submission as `sluice wait <id>` does: out of time or stopped, it
 prints the submission's record under `--json`, and `still waiting:
 sluice wait 12` without. Until then, its document under `--json` is
 the one `sluice submit --status --json` prints,
-`{"pull_request","branch","state"}`, the state saying what the pull
-request waits for. Once its submission is decided, it prints the
-submission's record. Its own submission is the first it reads of the
+`{"pull_request","branch","state","wait"}`, the state saying what the
+pull request waits for, and `wait` the command that follows it by its
+number from any folder, `sluice wait main --pull-request 41`. Out of
+time or stopped before then, it prints that document under `--json`,
+and without it says:
+
+```console
+still open: #41; sluice wait main --pull-request 41
+```
+
+Once its submission is decided, it prints the submission's record. Its own submission is the first it reads of the
 pull request. When sluice takes the pull request in again on a new
 head, as when the branch moves under it, the wait follows the new
 head's submission and ends with its own, as above.
@@ -1406,8 +1429,13 @@ prints, the one a `--no-wait` submit prints and the one at its timeout.
 and `null` where the check carries none:
 
 ```json
-{"pull_request":41,"branch":"main","state":"queued behind #38","taken_in_by":{"host":"b"},"queue":{"host":"b","taken_in":true,"submission":1406,"state":"queued","ahead":[{"submission":1405,"pull_request":38}],"waits_for":[]}}
+{"pull_request":41,"branch":"main","state":"queued behind #38","wait":"sluice wait main --pull-request 41","taken_in_by":{"host":"b"},"queue":{"host":"b","taken_in":true,"submission":1406,"state":"queued","ahead":[{"submission":1405,"pull_request":38}],"waits_for":[]}}
 ```
+
+`queue.submission` is the pull request's number in the queue of the host
+that takes it in. On this host, that number may name another
+submission, or none, so a wait on it here follows the wrong work. Follow
+the pull request with its `wait` instead.
 
 It reports what GitHub shows with the words
 and exit of a submission's outcome. Merged is `passed · landed as
@@ -1454,8 +1482,8 @@ there, so it hands the outcome over once its report is written, as
 it is confirmed. `--confirm` confirms it on receipt, for a caller that
 keeps what it is given. Under `--json`, the record it prints carries its
 `delivery` as the wait leaves it. A wait on another worktree's
-submission hands nothing over, and nor does one that ends out of time
-or stopped. A submission by name came from no worktree, and nor did a
+submission or pull request hands nothing over, and nor does one that
+ends out of time or stopped. A submission by name came from no worktree, and nor did a
 pull request from a branch sluice lands on, so a wait on either hands
 nothing over, wherever it runs. In a bare repository or a git directory,
 which has no files checked out, a wait hands over only what one in a
@@ -1696,7 +1724,7 @@ once those five minutes are spent exits `3` as well, saying it could not
 read and how long it tried, apart from any outcome:
 
 ```console
-could not read #77: sluice wait main
+could not read #77: sluice wait main --pull-request 77
 sluice: could not read #77 for 5m03s, so whether it landed is not known: GET /repos/o/r/pulls/77: 503 Service Unavailable
 ```
 

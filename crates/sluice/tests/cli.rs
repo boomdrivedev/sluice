@@ -6362,6 +6362,17 @@ impl sluice::PullRequests for Pull7 {
         Ok(Some(7))
     }
 
+    /// Pull request 7 is into the branch, and no other is.
+    fn holds(
+        &self,
+        _: sluice_core::Seams<'_>,
+        _: &dyn sluice_core::Clock,
+        branch: &str,
+        n: u64,
+    ) -> anyhow::Result<bool> {
+        Ok(branch == BRANCH && n == 7)
+    }
+
     fn follow(
         &self,
         _: sluice_core::Seams<'_>,
@@ -6532,7 +6543,10 @@ fn following_a_pull_request_the_forge_could_not_answer_says_it_could_not_read() 
     let f = pulls_setup();
     let (code, out) = sluice_pulls(&f, &Pull7::new(0, 1), &Unpaused, &["wait", BRANCH]);
     assert_eq!(code, sluice::INTERNAL, "{out}");
-    assert_eq!(out, format!("could not read #7: sluice wait {BRANCH}\n"));
+    assert_eq!(
+        out,
+        format!("could not read #7: sluice wait {BRANCH} --pull-request 7\n")
+    );
     let (code, out) = sluice_pulls(
         &f,
         &Pull7::new(0, 1),
@@ -6544,7 +6558,7 @@ fn following_a_pull_request_the_forge_could_not_answer_says_it_could_not_read() 
     assert_eq!(v["error"]["kind"], "internal");
     assert_eq!(
         v["error"]["next"],
-        serde_json::json!([format!("sluice wait {BRANCH}")])
+        serde_json::json!([format!("sluice wait {BRANCH} --pull-request 7")])
     );
     let message = v["error"]["message"].as_str().unwrap();
     assert_eq!(
@@ -6563,7 +6577,7 @@ fn following_a_pull_request_the_forge_could_not_answer_says_it_could_not_read() 
     assert_eq!(code, sluice::INTERNAL, "{out}");
     assert_eq!(
         out,
-        format!("opened #7\ncould not read #7: sluice wait {BRANCH}\n")
+        format!("opened #7\ncould not read #7: sluice wait {BRANCH} --pull-request 7\n")
     );
 
     let (code, out) = sluice_pulls(
@@ -6579,6 +6593,91 @@ fn following_a_pull_request_the_forge_could_not_answer_says_it_could_not_read() 
             "could not read the pull request from unit/a into {BRANCH}: sluice wait {BRANCH}\n"
         )
     );
+}
+
+/// submission-wait, "A wait that could not read its pull request names
+/// itself again": `sluice wait <branch> --json` in a worktree whose request
+/// it finds, every follow of it answered as a forge that could not answer,
+/// names as the command to run again the wait that follows the request by
+/// its number, never `sluice wait <branch>`, which reads the folder it runs
+/// in (record 0130 D4).
+#[test]
+fn a_pull_requests_wait_that_could_not_read_names_itself_again() {
+    let f = pulls_setup();
+    work(&f, "unit/a", "agent-a", &[("plugin/a", Some("b"))]);
+    let (code, out) = sluice_pulls(
+        &f,
+        &Pull7::new(0, usize::MAX),
+        &Unpaused,
+        &["wait", BRANCH, "--worktree", "unit/a", "--json"],
+    );
+    assert_eq!(code, sluice::INTERNAL, "{out}");
+    let v = json(&out);
+    assert_eq!(v["error"]["kind"], "internal", "{out}");
+    assert_eq!(
+        v["error"]["next"],
+        serde_json::json!([format!("sluice wait {BRANCH} --pull-request 7")]),
+        "{out}"
+    );
+}
+
+/// submission-wait, "With a submission's number": a pull request is into
+/// a branch, so `--pull-request` with a submission's number as the target
+/// is a command line sluice cannot read, and it follows nothing (record
+/// 0130 D3).
+#[test]
+fn a_wait_by_pull_request_with_a_number_exits_64() {
+    let f = pulls_setup();
+    let pulls = Pull7::new(0, 0);
+    let wait = ["wait", "12", "--pull-request", "12"];
+    for args in [wait.to_vec(), [&wait[..], &["--json"]].concat()] {
+        let (code, out) = sluice_pulls(&f, &pulls, &Unpaused, &args);
+        assert_eq!(code, sluice::USAGE, "{args:?}: {out}");
+        assert_eq!(
+            out,
+            "sluice wait: --pull-request names a pull request into a branch, as sluice wait \
+             <branch> --pull-request <n>\n",
+            "{args:?}"
+        );
+    }
+}
+
+/// submission-wait, "The forge never answers": every follow of pull
+/// request 7 fails as a forge that could not answer does, and `sluice wait
+/// <branch> --pull-request 7` exits 3, naming itself as the command to run
+/// again, in words and as the error document's `next` (134; record 0130
+/// D4).
+#[test]
+fn a_wait_by_pull_request_that_could_not_read_names_itself_again() {
+    let f = pulls_setup();
+    let wait = ["wait", BRANCH, "--pull-request", "7"];
+    let again = format!("sluice wait {BRANCH} --pull-request 7");
+    let (code, out) = sluice_pulls(&f, &Pull7::new(0, usize::MAX), &Unpaused, &wait);
+    assert_eq!(code, sluice::INTERNAL, "{out}");
+    assert_eq!(out, format!("could not read #7: {again}\n"));
+    let args = [&wait[..], &["--json"]].concat();
+    let (code, out) = sluice_pulls(&f, &Pull7::new(0, usize::MAX), &Unpaused, &args);
+    assert_eq!(code, sluice::INTERNAL, "{out}");
+    let v = json(&out);
+    assert_eq!(v["error"]["kind"], "internal", "{out}");
+    assert_eq!(v["error"]["next"], serde_json::json!([again]), "{out}");
+}
+
+/// Record 0130: `sluice wait --help` gives the wait by pull request among
+/// its examples, exit 1 for no such pull request into the branch, and
+/// exit 64 for `--pull-request` with a submission's number.
+#[test]
+fn wait_help_names_a_wait_by_pull_request() {
+    let help = Cli::try_parse_from(["sluice", "wait", "--help"])
+        .unwrap_err()
+        .to_string();
+    for said in [
+        "$ sluice wait main --pull-request 41   pull request 41 into main, from any folder",
+        "every branch read; or no such pull\n       request into the branch",
+        "each branch is named; or\n       --pull-request with a submission's number",
+    ] {
+        assert!(help.contains(said), "{said:?} in {help}");
+    }
 }
 
 /// ADR 0042: a waiting command says its combination's progress each time

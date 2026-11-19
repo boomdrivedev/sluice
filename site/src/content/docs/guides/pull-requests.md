@@ -249,16 +249,29 @@ submit answers with that submission:
 
 ```console
 $ wt submit main --no-wait --json
-{"id":12,"branch":"main","ahead":[],"pull_request":41}
+{"id":12,"branch":"main","ahead":[],"pull_request":41,"wait":"sluice wait main --pull-request 41"}
 ```
 
-When they don't, the submit answers with the pull request and what it
-waits for, `{"pull_request":41,"branch":"main","state":"waiting: needs
-1 review"}`. An agent waiting in steps hands an `id` to `sluice wait 12
---timeout 9m --json`. With only `pull_request`, it runs `sluice wait
-main --timeout 9m --json` in its worktree, which follows the pull
-request and, once sluice queues it, its submission. Each exits `5`
-while there is no outcome yet; run it again.
+When they don't, the submit answers with the pull request, what it
+waits for and the same `wait`:
+
+```console
+$ wt submit main --no-wait --json
+{"pull_request":41,"branch":"main","state":"waiting: needs 1 review","wait":"sluice wait main --pull-request 41"}
+```
+
+Without `--json`, the answer ends with `wait: sluice wait main
+--pull-request 41`. An agent waiting in steps runs the answer's `wait`
+with `--timeout 9m --json`. It follows the pull request by its number,
+from any folder of the repository and on any host, and once sluice
+queues it, its submission. It exits `5` while there is no outcome yet;
+run it again.
+
+Where another host takes `main`'s pull requests in, the answer also
+gives `taken_in_by` and `queue`. `queue.submission` is the pull
+request's number in that other host's queue. On this host the same
+number may name another submission, or none, so never hand it to
+`sluice wait`: follow the pull request with its `wait`.
 
 ## Several pull requests as one act
 
@@ -295,7 +308,8 @@ submission 62 to main from #52 · 1 queued ahead (#51)
 ```
 
 Under `--json` each item of `submissions` holds its `id`, `worktree`,
-`ahead` and `pull_request`. When sluice refuses one of the worktrees,
+`ahead`, `pull_request` and `wait`, the command that follows that pull
+request, `sluice wait main --pull-request 51`. When sluice refuses one of the worktrees,
 one holding changes beyond its commits, it refuses the act before
 anything is pushed. A pull request from a fork is never one of the act:
 sluice opens or updates only the repository's own.
