@@ -6642,6 +6642,27 @@ fn a_wait_by_pull_request_with_a_number_exits_64() {
     }
 }
 
+/// submission-wait, "The forge never answers": every follow of pull
+/// request 7 fails as a forge that could not answer does, and `sluice wait
+/// <branch> --pull-request 7` exits 3, naming itself as the command to run
+/// again, in words and as the error document's `next` (134; record 0130
+/// D4).
+#[test]
+fn a_wait_by_pull_request_that_could_not_read_names_itself_again() {
+    let f = pulls_setup();
+    let wait = ["wait", BRANCH, "--pull-request", "7"];
+    let again = format!("sluice wait {BRANCH} --pull-request 7");
+    let (code, out) = sluice_pulls(&f, &Pull7::new(0, usize::MAX), &Unpaused, &wait);
+    assert_eq!(code, sluice::INTERNAL, "{out}");
+    assert_eq!(out, format!("could not read #7: {again}\n"));
+    let args = [&wait[..], &["--json"]].concat();
+    let (code, out) = sluice_pulls(&f, &Pull7::new(0, usize::MAX), &Unpaused, &args);
+    assert_eq!(code, sluice::INTERNAL, "{out}");
+    let v = json(&out);
+    assert_eq!(v["error"]["kind"], "internal", "{out}");
+    assert_eq!(v["error"]["next"], serde_json::json!([again]), "{out}");
+}
+
 /// ADR 0042: a waiting command says its combination's progress each time
 /// the count ended or the tasks running move, never at every round.
 #[test]
