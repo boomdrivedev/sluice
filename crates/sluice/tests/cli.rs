@@ -4563,9 +4563,9 @@ fn exec_outside_a_worktree_is_refused() {
     assert_eq!(code, CONFLICT, "{out}");
 }
 
-/// 89: the checks the head affects against the branch run in the
-/// worktree's adopted place, count against the bound only while they run, and the
-/// exit is theirs.
+/// 89, 36: the checks the worktree's own changes affect since it left the
+/// branch run in the worktree's adopted place, count against the bound
+/// only while they run, and the exit is theirs.
 #[test]
 fn exec_runs_the_affected_checks_against_the_branch() {
     let f = setup();
@@ -4593,11 +4593,7 @@ fn exec_runs_the_affected_checks_against_the_branch() {
     assert_eq!(
         lines[0],
         format!(
-            "running the checks {} affects against {BRANCH} ({})",
-            sluice_seams::Driver::session(&f.driver, "unit/a")
-                .unwrap()
-                .head
-                .short(),
+            "running the checks the worktree's own changes affect since {} on {BRANCH}",
             base.short()
         )
     );

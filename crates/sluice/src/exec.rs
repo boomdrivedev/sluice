@@ -12,7 +12,7 @@ use anyhow::Result;
 use sluice_core::overview::OrderFrom;
 use sluice_core::release::{ReleaseOutcome, Releasing};
 use sluice_core::session::{
-    path_of, Abandoned, Recorded, SessionPlan, SessionRefusal, SessionStart,
+    path_of, Abandoned, Recorded, SessionPlan, SessionRefusal, SessionStart, SessionWork,
 };
 use sluice_core::{Clock, Forecast, Sluice};
 use sluice_seams::{
@@ -329,19 +329,7 @@ impl Exec<'_> {
         let forecast = forecast.as_ref().map(crate::forecast_json);
         let command = (!self.command.is_empty()).then(|| shell_line(&self.command));
         let work = s.session_work(&plan, &session, command.as_deref())?;
-        match &command {
-            None => say(
-                out,
-                json,
-                &format!(
-                    "running the checks {} affects against {} ({})",
-                    session.head.short(),
-                    self.branch,
-                    plan.base.short()
-                ),
-            )?,
-            Some(c) => say(out, json, &format!("running {c}"))?,
-        }
+        say(out, json, &opening(&work, &self.branch, &plan.base))?;
 
         // 89, 91, 71, 150 (rule core.49; design D12): its room asked of
         // the host process, which holds the host's bound for every
@@ -888,6 +876,30 @@ pub fn changed_text(
         ));
     }
     format!("not recorded: {}", parts.join("; "))
+}
+
+/// Design D6: what a run says it runs, first: a command, or where the
+/// worktree's own changes are read from, the merge base of its head on the
+/// branch, and the branch's revision where it moved on past it (36, 70).
+fn opening(work: &SessionWork, branch: &str, base: &Rev) -> String {
+    match work {
+        SessionWork::Command(c) => format!("running {c}"),
+        SessionWork::Checks { since: None, .. } => format!(
+            "running every required check: the worktree's head shares no history with {branch}"
+        ),
+        SessionWork::Checks {
+            since: Some(since), ..
+        } => {
+            let mut line = format!(
+                "running the checks the worktree's own changes affect since {} on {branch}",
+                since.short()
+            );
+            if since != base {
+                line.push_str(&format!(", now at {}", base.short()));
+            }
+            line
+        }
+    }
 }
 
 /// 97: a result that could not be kept on the worktree is said on stderr,

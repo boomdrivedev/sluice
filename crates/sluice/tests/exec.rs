@@ -370,6 +370,71 @@ fn a_worktrees_own_moon_yml_runs_every_check() {
     assert_eq!(checks_of(&out), ["a:test", "b:test"], "{}", text(&out));
 }
 
+/// The exec-checks spec's "A worktree behind its branch" and "No history
+/// in common" (36, 70; design D6): the run opens with where the worktree
+/// left its branch, the branch's revision where it moved on past it, and
+/// says a head that shares no history with the branch runs every check.
+#[test]
+fn exec_opens_with_where_the_worktree_left_its_branch() {
+    let s = moon_at_branch("exec-opens", "true\n");
+    let cut = s.repo.rev("bolt/x");
+    s.commit(&[("b/lib", "2")]);
+    let out = s.sluice(&["exec", "bolt/x"]);
+    assert!(out.status.success(), "{}", text(&out));
+    let first = |out: &Output| {
+        String::from_utf8_lossy(&out.stdout)
+            .lines()
+            .next()
+            .map(String::from)
+    };
+    assert_eq!(
+        first(&out).as_deref(),
+        Some(
+            format!(
+                "running the checks the worktree's own changes affect since {} on bolt/x",
+                &cut[..7]
+            )
+            .as_str()
+        ),
+        "{}",
+        text(&out)
+    );
+
+    let now = s.land(&[("a/lib", "2")]);
+    let out = s.sluice(&["exec", "bolt/x"]);
+    assert!(out.status.success(), "{}", text(&out));
+    assert_eq!(
+        first(&out).as_deref(),
+        Some(
+            format!(
+                "running the checks the worktree's own changes affect since {} on bolt/x, \
+                 now at {}",
+                &cut[..7],
+                &now[..7]
+            )
+            .as_str()
+        ),
+        "{}",
+        text(&out)
+    );
+
+    let dir = s.worktree.to_str().unwrap();
+    s.repo
+        .git(&["-C", dir, "switch", "-q", "--orphan", "unit/unrelated"]);
+    s.repo
+        .git(&["-C", dir, "checkout", "-q", "unit/a", "--", "."]);
+    s.commit(&[]);
+    let out = s.sluice(&["exec", "bolt/x", "--json"]);
+    assert!(out.status.success(), "{}", text(&out));
+    let said = String::from_utf8_lossy(&out.stderr).into_owned();
+    assert!(
+        said.lines().any(|l| l
+            == "running every required check: the worktree's head shares no history with bolt/x"),
+        "{said}"
+    );
+    assert_eq!(checks_of(&out), ["a:test", "b:test"], "{}", text(&out));
+}
+
 /// Each result `sluice exec` recorded: `(task, outcome)`.
 fn recorded(s: &Setup) -> Vec<(String, String)> {
     s.results()
