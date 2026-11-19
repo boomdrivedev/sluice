@@ -259,6 +259,58 @@ impl OnGitHub {
         c
     }
 
+    /// The host's `[forge]` naming a credential command in place of the
+    /// app's key (record 0108): a script that gives the fake's token,
+    /// ending an hour from when it is asked, and writes the pid of the
+    /// process that ran it to the file returned at each `get`.
+    fn given_by_a_command(&self) -> PathBuf {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = self.config.path().join("sluice");
+        let gets = dir.join("gets");
+        let script = dir.join("token-helper");
+        std::fs::write(
+            &script,
+            format!(
+                "#!/bin/sh\ncat > /dev/null\n[ \"$1\" = get ] || exit 0\n\
+                 echo $PPID >> '{}'\n\
+                 echo username=x-access-token\necho password={}\n\
+                 echo password_expiry_utc=$(( $(date +%s) + 3600 ))\n",
+                gets.display(),
+                github::TOKEN
+            ),
+        )
+        .unwrap();
+        std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let config = dir.join("config.toml");
+        let text = std::fs::read_to_string(&config).unwrap();
+        let mut table = "";
+        let given: Vec<String> = text
+            .lines()
+            .map(|l| {
+                if l.starts_with('[') {
+                    table = l;
+                }
+                match table == "[forge]" && l.starts_with("key = ") {
+                    true => format!("credential = [{:?}]", script.display().to_string()),
+                    false => l.to_string(),
+                }
+            })
+            .collect();
+        assert_ne!(given.join("\n"), text.trim_end(), "{text}");
+        std::fs::write(&config, given.join("\n") + "\n").unwrap();
+        gets
+    }
+
+    /// The way to this setup's host process, as a command run in its
+    /// repository reaches it (135).
+    fn client(&self) -> sluice::host_process::client::Client {
+        sluice::host_process::client::Client::new(
+            Path::new(env!("CARGO_BIN_EXE_sluice")),
+            support::env_of(&self.command(env!("CARGO_BIN_EXE_sluice"), self.repo.dir())),
+        )
+        .expect("the host process's paths")
+    }
+
     fn sluice(&self, args: &[&str]) -> Output {
         self.command(env!("CARGO_BIN_EXE_sluice"), self.repo.dir())
             .args(args)
@@ -642,6 +694,54 @@ fn pull_requests_need_a_remote() {
         said.contains("main") && said.contains("needs remote"),
         "{said}"
     );
+}
+
+/// Record 0108 as amended 2026-11-19: the host process holds one token
+/// for each repository for every binding it makes, so its steps' tasks,
+/// each binding the repository afresh, and its looks at the repository
+/// while it is idle, each binding it afresh every three seconds and
+/// fetching its records, ask the host's credential command once for the
+/// hour of the token it gives (the user's report of 2026-11-19: the host's
+/// command run on about a third of the host process's git calls, until
+/// GitHub refused every submit for the allowance spent).
+#[test]
+fn the_host_process_asks_the_credential_command_once_for_its_hour() {
+    let g = OnGitHub::new("pr-command-held", "");
+    let gets = g.given_by_a_command();
+    g.step();
+    // An agent's room, held, keeps the host process on while the
+    // repository is idle, its task ended after each step.
+    let client = g.client();
+    let repository = std::fs::canonicalize(g.repo.dir().join(".git")).unwrap();
+    let mut held = client
+        .hold(
+            sluice_seams::RunKind::Session,
+            &repository,
+            "an-agent",
+            None,
+        )
+        .expect("the host process answers");
+    let answer = held.next(Some(Duration::from_secs(10))).unwrap();
+    assert!(
+        matches!(answer, Some(sluice::host_process::protocol::Answer::Held)),
+        "{answer:?}"
+    );
+    let pid = client.answering().unwrap().expect("it runs").named.pid;
+    g.step();
+    g.step();
+    std::thread::sleep(Duration::from_secs(10));
+    assert_eq!(client.answering().unwrap().map(|c| c.named.pid), Some(pid));
+    let asked: Vec<u32> = std::fs::read_to_string(&gets)
+        .unwrap_or_default()
+        .lines()
+        .map(|l| l.trim().parse().unwrap())
+        .collect();
+    assert_eq!(
+        asked.iter().filter(|p| **p == pid).count(),
+        1,
+        "the host process {pid} asked the command each time of {asked:?}"
+    );
+    drop(held);
 }
 
 /// S21, waiting for QA: approved and out of draft, it waits while

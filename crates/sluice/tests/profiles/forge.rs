@@ -18,6 +18,7 @@ use serde_json::json;
 use sluice::identity::{CredentialCommand, Identity};
 use sluice::profiles::github::check::{check, Finding};
 use sluice::profiles::github::{App, Bearer, Repo};
+use sluice::profiles::Tokens;
 use sluice::retry::Policy;
 use support::http::{json, Answer, Fake, Request};
 
@@ -394,6 +395,89 @@ fn a_commands_token_with_no_end_is_held_until_refused() {
         assert_eq!(app.token(&repo()).unwrap(), "token-1");
     }
     assert_eq!(runs(&scratch), 1);
+}
+
+/// Record 0108 as amended 2026-11-19: apps made holding one store of
+/// tokens, as every binding sluice's host process makes is, share each
+/// repository's token, so an app made afresh each minute for two hours
+/// asks the command as one app does, at 0, 55 and 115 minutes; an app
+/// that holds a store of its own asks for its own.
+#[test]
+fn apps_holding_one_store_get_a_commands_token_once_before_each_end() {
+    let clock = Clock::new();
+    let fake = Forge::new(&clock).start();
+    let scratch = support::Scratch::new("command-held-once");
+    let start = clock.now();
+    std::fs::write(scratch.path().join("base"), start.timestamp().to_string()).unwrap();
+    let command = credential_script(
+        &scratch,
+        &counting("echo \"password_expiry_utc=$(( $(cat \"$here/base\") + n * 3600 ))\""),
+    );
+    let tokens = Tokens::default();
+    let mut seen = Vec::new();
+    for minute in 0..=120 {
+        clock.set(start + TimeDelta::minutes(minute));
+        let at = clock.clone();
+        let app =
+            commanded(fake.url(), command.clone(), Box::new(move || at.now())).holding(&tokens);
+        let t = app.token(&repo()).unwrap();
+        if seen.last() != Some(&t) {
+            seen.push(t);
+        }
+    }
+    assert_eq!(seen, ["token-1", "token-2", "token-3"]);
+    assert_eq!(runs(&scratch), 3);
+    let at = clock.clone();
+    let own = commanded(fake.url(), command, Box::new(move || at.now()));
+    assert_eq!(own.token(&repo()).unwrap(), "token-4");
+}
+
+/// Record 0108 as amended 2026-11-19: apps made holding one store share a
+/// token bought with the app's key too, one bought each hour however many
+/// apps ask.
+#[test]
+fn apps_holding_one_store_buy_a_token_once_an_hour() {
+    let clock = Clock::new();
+    let fake = Forge::new(&clock).start();
+    let tokens = Tokens::default();
+    let start = clock.now();
+    let mut seen = Vec::new();
+    for minute in 0..=120 {
+        clock.set(start + TimeDelta::minutes(minute));
+        let t = app(&fake, &clock).holding(&tokens).token(&repo()).unwrap();
+        if seen.last() != Some(&t) {
+            seen.push(t);
+        }
+    }
+    assert_eq!(seen, ["token-1", "token-2", "token-3"]);
+    assert_eq!(minted(&fake), 3);
+}
+
+/// Record 0108 as amended 2026-11-19: of two apps sharing a store, one
+/// refused the token both were given gets it afresh, the refused one
+/// erased; the other, refused it after, takes the fresh one, and the
+/// command is neither told to erase it nor asked again.
+#[test]
+fn a_token_got_afresh_by_one_app_is_the_others() {
+    use sluice::profiles::github::forge::Forge as _;
+    let clock = Clock::new();
+    let fake = refusing(Forge::new(&clock), "Bearer token-1");
+    let scratch = support::Scratch::new("command-shared-renew");
+    let command = credential_script(&scratch, &counting(""));
+    let tokens = Tokens::default();
+    let first = commanded(fake.url(), command.clone(), ticking(&clock)).holding(&tokens);
+    let second = commanded(fake.url(), command, ticking(&clock)).holding(&tokens);
+    let url = "https://github.com/o/r.git";
+    assert_eq!(second.credentials(url).unwrap().password, "token-1");
+    assert_eq!(first.pull(&repo(), 7).unwrap().unwrap().number, 7);
+    assert_eq!(script_log(&scratch), ["get", "erase token-1", "get"]);
+    assert_eq!(second.renew(url).unwrap().password, "token-2");
+    assert_eq!(script_log(&scratch), ["get", "erase token-1", "get"]);
+    assert_eq!(second.pull(&repo(), 7).unwrap().unwrap().number, 7);
+    assert_eq!(
+        pull_reads(&fake),
+        ["Bearer token-1", "Bearer token-2", "Bearer token-2"]
+    );
 }
 
 /// The forge-identity spec's "A command's token described": the

@@ -157,19 +157,23 @@ pub fn has_sluice(repository: &Path) -> Result<bool> {
 /// process at all, and a remote that refuses leaves its branches read as
 /// last fetched. A repository whose directory is gone has none. The ask is
 /// a round's, which passes a spent allowance by rather than waiting it out
-/// (rule core.29).
+/// (rule core.29). Its identity's tokens are the host process's `tokens`,
+/// so a look asks for no token one held lasts past (record 0108 as amended
+/// 2026-11-19).
 pub fn in_play(
     repository: &Path,
     instance: crate::instance::Instance,
+    tokens: &crate::profiles::Tokens,
 ) -> Result<super::tasks::Looked> {
     if !repository.is_dir() {
         return Ok(super::tasks::Looked::default());
     }
-    let bound = Bound::open_with(
+    let bound = Bound::open_holding(
         repository,
         std::env::current_exe()?,
         instance,
         Rc::new(crate::retry::Policy::round().recording_where_set()),
+        tokens,
     )?;
     // A refusal leaves the branches as last fetched, as a pass's ask does,
     // and is the reading's words (D16).

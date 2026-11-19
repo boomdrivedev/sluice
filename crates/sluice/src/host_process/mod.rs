@@ -210,6 +210,11 @@ pub(crate) struct Hosting {
     /// The host's settings it holds, which every binding it makes is of
     /// (record 0107; design D19).
     pub settings: Arc<tasks::Settings>,
+    /// The forge's tokens it holds, one for each repository, which every
+    /// binding it makes holds its tokens in, so a repository's token is
+    /// got once for its hour, never for each pass, look or ask that binds
+    /// afresh (record 0108 as amended 2026-11-19).
+    pub tokens: crate::profiles::Tokens,
     /// A daemon asked to hand over: the executable the asker named, or
     /// `None` where it named none (design D3 of `sluice-runs-as-a-daemon`).
     pub afresh: Mutex<Option<Afresh>>,
@@ -578,11 +583,21 @@ fn run_holding(
         instance.bound,
         instance.reserved,
     ));
+    // Record 0108 as amended 2026-11-19: one token for each repository,
+    // held for every binding it makes.
+    let tokens = crate::profiles::Tokens::default();
     let looked_with = settings.clone();
+    let looked_holding = tokens.clone();
     let tasks = tasks::Tasks::new(
-        tasks::repository_body(room.clone(), asked_only(), named.clone(), settings.clone()),
+        tasks::repository_body(
+            room.clone(),
+            asked_only(),
+            named.clone(),
+            settings.clone(),
+            tokens.clone(),
+        ),
         Arc::new(move |r: &Path| {
-            index::in_play(r, looked_with.instance()).unwrap_or(tasks::Looked {
+            index::in_play(r, looked_with.instance(), &looked_holding).unwrap_or(tasks::Looked {
                 in_play: true,
                 refused: None,
             })
@@ -604,6 +619,7 @@ fn run_holding(
         stopping: AtomicBool::new(false),
         folder,
         settings,
+        tokens,
         afresh: Mutex::new(None),
     });
     log(&format!(
@@ -1252,11 +1268,12 @@ fn send_room(
 /// The name `repository`'s binding gives it in its metrics (rule core.66);
 /// `None` where it cannot be opened, said in the host process's log.
 fn name_of(hosting: &Hosting, repository: &Path) -> Option<String> {
-    let bound = crate::profiles::Bound::open_with(
+    let bound = crate::profiles::Bound::open_holding(
         &tasks::open_dir(repository),
         std::env::current_exe().ok()?,
         hosting.settings.instance(),
         std::rc::Rc::new(crate::retry::Policy::round()),
+        &hosting.tokens,
     );
     match bound {
         Ok(b) => Some(b.peer().repository),
@@ -1493,11 +1510,12 @@ fn results_of(
     branch: &str,
     ask: &sluice_seams::ResultAsk,
 ) -> Result<Vec<u8>> {
-    let bound = crate::profiles::Bound::open_with(
+    let bound = crate::profiles::Bound::open_holding(
         &tasks::open_dir(repository),
         std::env::current_exe()?,
         hosting.settings.instance(),
         std::rc::Rc::new(crate::retry::Policy::round().recording_where_set()),
+        &hosting.tokens,
     )?;
     let state = bound
         .state

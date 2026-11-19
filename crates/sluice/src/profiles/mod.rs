@@ -20,6 +20,12 @@ pub mod refusals;
 pub mod remote_refs;
 pub mod worktrunk;
 
+/// The tokens sluice's identity on the forge holds, one for each
+/// repository, which every binding made holding the same store shares:
+/// sluice's host process holds one for all its bindings (record 0108 as
+/// amended 2026-11-19).
+pub use github::app::Tokens;
+
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
@@ -108,7 +114,22 @@ impl Bound {
         instance: Instance,
         retry: Rc<retry::Policy>,
     ) -> Result<Self> {
-        Bound::bind(dir, program, instance, false, retry)
+        Bound::bind(dir, program, instance, false, retry, None)
+    }
+
+    /// [`Bound::open_with`], its identity holding its tokens in `tokens`,
+    /// which every binding made holding it shares: sluice's host process's
+    /// bindings, so a repository's token is got once for its hour however
+    /// often the host process binds it afresh (record 0108 as amended
+    /// 2026-11-19).
+    pub fn open_holding(
+        dir: &Path,
+        program: PathBuf,
+        instance: Instance,
+        retry: Rc<retry::Policy>,
+        tokens: &Tokens,
+    ) -> Result<Self> {
+        Bound::bind(dir, program, instance, false, retry, Some(tokens))
     }
 
     /// 124: bind the repository holding `dir` for branch protection's hook:
@@ -122,6 +143,7 @@ impl Bound {
             Instance::guarding()?,
             true,
             retry,
+            None,
         )
     }
 
@@ -131,11 +153,19 @@ impl Bound {
         instance: Instance,
         guarding: bool,
         retry: Rc<retry::Policy>,
+        tokens: Option<&Tokens>,
     ) -> Result<Self> {
         // C.4: the app the host names is sluice's identity on GitHub, and
-        // C.5: what reads and posts pull requests there.
+        // C.5: what reads and posts pull requests there, its tokens held
+        // in `tokens` where given (record 0108 as amended 2026-11-19).
         let app = match &instance.forge {
-            Some(f) => Some(Rc::new(github::App::open(f, retry.clone())?)),
+            Some(f) => {
+                let app = github::App::open(f, retry.clone())?;
+                Some(Rc::new(match tokens {
+                    Some(t) => app.holding(t),
+                    None => app,
+                }))
+            }
             None => None,
         };
         let app_for_pool = app.clone();

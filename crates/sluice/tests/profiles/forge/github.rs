@@ -321,6 +321,14 @@ fn graphql(forge: &FileForge, refuse: bool, refuse_query: bool, r: &Request) -> 
             json!({ "data": null, "errors": [{ "type": kind, "message": message }] }),
         )
     };
+    // Who a token is, as GitHub answers its holder: the app's bot (record
+    // 0108).
+    if query.contains("viewer") {
+        return json(
+            200,
+            json!({ "data": { "viewer": { "login": format!("{SLUG}[bot]") } } }),
+        );
+    }
     if query.contains("pullRequests(") {
         if refuse_query {
             return error("FORBIDDEN", "Resource not accessible by integration");

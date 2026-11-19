@@ -2,7 +2,12 @@
 //! installation token an hour, bought from the repository's own
 //! installation for that repository alone, kept in this process's memory
 //! and bought again five minutes before it ends, or at once for a call
-//! GitHub refused it on. Nothing is written anywhere.
+//! GitHub refused it on. Nothing is written anywhere. The tokens an app
+//! holds are [`Tokens`], its own or a store every app made holding it
+//! shares: sluice's host process holds one for every binding it makes, so
+//! a repository's token is got once for its hour however many of its
+//! passes, looks and asks bind afresh (record 0108 as amended
+//! 2026-11-19).
 //!
 //! Where the host names a credential command in place of the app's key,
 //! the token for a repository is the command's, asked as git asks a
@@ -41,6 +46,7 @@
 use std::cell::{Cell, RefCell};
 use std::collections::BTreeMap;
 use std::rc::Rc;
+use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 
 use anyhow::{anyhow, bail, Context, Result};
 use chrono::{DateTime, TimeDelta, Utc};
@@ -147,6 +153,41 @@ struct Token {
     about: String,
 }
 
+impl Token {
+    /// Whether it is held at `now`: until five minutes before its end, or,
+    /// given with no end, until GitHub refuses it, as git holds a
+    /// credential with no expiry (record 0108).
+    fn lasts(&self, now: DateTime<Utc>) -> bool {
+        self.ends.is_none_or(|ends| ends - now > REFRESH)
+    }
+}
+
+/// The tokens held, one for each repository of each app and way to its
+/// tokens, which every [`App`] made holding the same store shares: an app's
+/// own, or the store sluice's host process holds for every binding it
+/// makes, on any of its threads (record 0108 as amended 2026-11-19). Each
+/// repository's token is got under a lock of its own, so two apps that
+/// need it at once get it once, and one repository's wait for its command
+/// holds no other's. Held in memory alone, never written anywhere.
+#[derive(Clone, Default)]
+pub struct Tokens(Arc<Mutex<BTreeMap<(String, Repo), Arc<Mutex<Option<Token>>>>>>);
+
+impl Tokens {
+    /// The place `repo`'s token is held for the app and way `whose` names.
+    fn slot(&self, whose: &str, repo: &Repo) -> Arc<Mutex<Option<Token>>> {
+        locked(&self.0)
+            .entry((whose.to_string(), repo.clone()))
+            .or_default()
+            .clone()
+    }
+}
+
+/// `m` locked; a thread that panicked holding it left its token whole or
+/// none, so what it holds is read all the same.
+fn locked<T>(m: &Mutex<T>) -> MutexGuard<'_, T> {
+    m.lock().unwrap_or_else(PoisonError::into_inner)
+}
+
 /// How the app comes by a token for a repository: minted with its key, or
 /// given by the host's credential command (record 0108).
 enum Mint {
@@ -233,7 +274,16 @@ pub struct App {
     git: String,
     now: Now,
     http: ureq::Agent,
-    tokens: RefCell<BTreeMap<Repo, Token>>,
+    /// The tokens it holds, its own or a store it shares.
+    tokens: Tokens,
+    /// What its tokens are held under in [`Tokens`]: the API it calls, the
+    /// app and the way its tokens come, so apps of another app, or another
+    /// way, share none.
+    whose: String,
+    /// The token it last handed over for each repository, the one a call
+    /// it makes afresh was refused: where the store holds another, an app
+    /// sharing it got that one afresh since.
+    handed: RefCell<BTreeMap<Repo, String>>,
     /// The app's bot, once read.
     login: RefCell<Option<String>>,
     policy: Rc<Policy>,
@@ -286,14 +336,21 @@ impl App {
     }
 
     fn made(id: u64, mint: Mint, api: &str, now: Now, policy: Rc<Policy>) -> App {
+        let api: String = api.trim_end_matches('/').into();
+        let whose = match &mint {
+            Mint::Key(_) => format!("{api} app {id} by its key"),
+            Mint::Command(c) => format!("{api} app {id} by [forge] credential {c}"),
+        };
         App {
             id,
             mint,
-            api: api.trim_end_matches('/').into(),
+            api,
             git: GIT.into(),
             now,
             http: http_config().into(),
-            tokens: RefCell::default(),
+            tokens: Tokens::default(),
+            whose,
+            handed: RefCell::default(),
             login: RefCell::default(),
             policy,
             kept: None,
@@ -351,6 +408,14 @@ impl App {
     /// `self`, keeping its answers and pauses in `kept`.
     pub fn keeping(mut self, kept: Kept) -> App {
         self.kept = Some(kept);
+        self
+    }
+
+    /// `self`, holding its tokens in `tokens`, which every app made
+    /// holding it shares: a token one got, or got afresh, is the others'
+    /// while it lasts (record 0108 as amended 2026-11-19).
+    pub fn holding(mut self, tokens: &Tokens) -> App {
+        self.tokens = tokens.clone();
         self
     }
 
@@ -566,56 +631,83 @@ impl App {
         })
     }
 
-    /// The token this process holds for `repo` while it lasts five
-    /// minutes more, or one given with no end, or one got now.
+    /// The token held for `repo` while it lasts five minutes more, or one
+    /// given with no end, or one got now and held for the next call on
+    /// `repo`, by this app or any sharing its [`Tokens`].
     fn held(&self, repo: &Repo) -> Result<Token> {
-        let now = (self.now)();
-        if let Some(t) = self.tokens.borrow().get(repo) {
-            match t.ends {
-                Some(ends) if ends - now > REFRESH => return Ok(t.clone()),
-                // Held until GitHub refuses it, as git holds a credential
-                // with no expiry (record 0108).
-                None => return Ok(t.clone()),
-                Some(_) => {}
+        let slot = self.tokens.slot(&self.whose, repo);
+        let mut held = locked(&slot);
+        let t = match held.as_ref().filter(|t| t.lasts((self.now)())) {
+            Some(t) => t.clone(),
+            None => {
+                let t = self.get_token(repo)?;
+                *held = Some(t.clone());
+                t
             }
-        }
-        self.get_token(repo)
+        };
+        Ok(self.handing(repo, t))
+    }
+
+    /// `t`, noted as the token this app last handed over for `repo`.
+    fn handing(&self, repo: &Repo, t: Token) -> Token {
+        self.handed
+            .borrow_mut()
+            .insert(repo.clone(), t.secret.clone());
+        t
     }
 
     /// A token got now for `repo` alone, bought with the app's key or
-    /// given by the host's command, kept for the next call on `repo`.
+    /// given by the host's command.
     fn get_token(&self, repo: &Repo) -> Result<Token> {
+        match &self.mint {
+            Mint::Key(_) => self.buy(repo),
+            Mint::Command(command) => {
+                let given = command.get(&asked(repo))?;
+                self.described(command, repo, given.password, given.ends)
+            }
+        }
+    }
+
+    /// A token got afresh for `repo` in place of the one this app handed
+    /// over, which GitHub refused, held in its place: under a command, the
+    /// refused one erased first, and the same one given again no fresh
+    /// token (134; rule core.29; record 0108). Where an app sharing its
+    /// [`Tokens`] replaced the refused token since, the one it holds is
+    /// handed over while it lasts, and nothing it holds is erased (record
+    /// 0108 as amended 2026-11-19).
+    fn renewed(&self, repo: &Repo) -> Result<Token> {
+        let slot = self.tokens.slot(&self.whose, repo);
+        let mut held = locked(&slot);
+        let handed = self.handed.borrow().get(repo).cloned();
+        let refused = match held.take() {
+            Some(t) if handed.is_some_and(|h| h != t.secret) => {
+                if t.lasts((self.now)()) {
+                    *held = Some(t.clone());
+                    return Ok(self.handing(repo, t));
+                }
+                None
+            }
+            t => t,
+        };
         let t = match &self.mint {
             Mint::Key(_) => self.buy(repo)?,
             Mint::Command(command) => {
-                let given = command.get(&asked(repo))?;
+                let asked = asked(repo);
+                if let Some(r) = &refused {
+                    command.erase(&asked, super::TOKEN_USER, &r.secret);
+                }
+                let given = command.get(&asked)?;
+                if refused.is_some_and(|r| r.secret == given.password) {
+                    bail!(
+                        "[forge] credential {command} gave again the token GitHub refused for \
+                         {repo}"
+                    );
+                }
                 self.described(command, repo, given.password, given.ends)?
             }
         };
-        self.tokens.borrow_mut().insert(repo.clone(), t.clone());
-        Ok(t)
-    }
-
-    /// A token got afresh for `repo` in place of the one held, which
-    /// GitHub refused: under a command, the refused one erased first, and
-    /// the same one given again no fresh token (134; rule core.29; record
-    /// 0108).
-    fn renewed(&self, repo: &Repo) -> Result<Token> {
-        let Mint::Command(command) = &self.mint else {
-            return self.get_token(repo);
-        };
-        let asked = asked(repo);
-        let refused = self.tokens.borrow_mut().remove(repo);
-        if let Some(r) = &refused {
-            command.erase(&asked, super::TOKEN_USER, &r.secret);
-        }
-        let given = command.get(&asked)?;
-        if refused.is_some_and(|r| r.secret == given.password) {
-            bail!("[forge] credential {command} gave again the token GitHub refused for {repo}");
-        }
-        let t = self.described(command, repo, given.password, given.ends)?;
-        self.tokens.borrow_mut().insert(repo.clone(), t.clone());
-        Ok(t)
+        *held = Some(t.clone());
+        Ok(self.handing(repo, t))
     }
 
     /// The token `command` gave for `repo`, what it is read once from
