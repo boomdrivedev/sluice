@@ -340,6 +340,11 @@ pub enum Command {
         /// branch holds it.
         #[arg(long)]
         branch: Option<String>,
+        /// A pull request into the branch the target names, by its
+        /// number: follows it from any folder of the repository, on any
+        /// host.
+        #[arg(long, value_name = "N")]
+        pull_request: Option<u64>,
     },
     /// Hand over every outcome still owed to this worktree's submissions,
     /// printing each with the key to confirm it by; each is handed over
@@ -2004,12 +2009,19 @@ pub fn run(
             confirm,
             confirm_landing,
             branch,
+            pull_request,
         } => {
             let confirms = Confirms::of(confirm, confirm_landing);
             let deadline = timeout.map(|t| {
                 clock.now() + chrono::Duration::from_std(t).unwrap_or(chrono::Duration::MAX)
             });
             let number = target.parse::<u64>();
+            // Record 0130 D3: a pull request is into a branch, so its
+            // number goes with a branch's name, never a submission's.
+            if number.is_ok() && pull_request.is_some() {
+                writeln!(out, "sluice wait: {PULL_REQUEST_GOES_WITH_A_BRANCH}")?;
+                return Ok(USAGE);
+            }
             if number.is_err() && branch.is_some() {
                 writeln!(out, "sluice wait: {}", branch_goes_with_a_number(&target))?;
                 return Ok(USAGE);
@@ -5227,6 +5239,10 @@ fn lookup(s: &Sluice<'_>, id: u64, branch: Option<&str>) -> Result<Lookup> {
 
 /// Why `--branch` beside `target`, a branch, is a command line sluice
 /// cannot read (record 0114).
+/// Record 0130 D3: `--pull-request` given a submission's number.
+const PULL_REQUEST_GOES_WITH_A_BRANCH: &str =
+    "--pull-request names a pull request into a branch, as sluice wait <branch> --pull-request <n>";
+
 fn branch_goes_with_a_number(target: &str) -> String {
     format!("--branch names the branch of a submission's number; {target} is a branch")
 }

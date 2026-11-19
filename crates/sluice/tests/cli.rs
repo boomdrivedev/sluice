@@ -6610,6 +6610,27 @@ fn a_pull_requests_wait_that_could_not_read_names_itself_again() {
     );
 }
 
+/// submission-wait, "With a submission's number": a pull request is into
+/// a branch, so `--pull-request` with a submission's number as the target
+/// is a command line sluice cannot read, and it follows nothing (record
+/// 0130 D3).
+#[test]
+fn a_wait_by_pull_request_with_a_number_exits_64() {
+    let f = pulls_setup();
+    let pulls = Pull7::new(0, 0);
+    let wait = ["wait", "12", "--pull-request", "12"];
+    for args in [wait.to_vec(), [&wait[..], &["--json"]].concat()] {
+        let (code, out) = sluice_pulls(&f, &pulls, &Unpaused, &args);
+        assert_eq!(code, sluice::USAGE, "{args:?}: {out}");
+        assert_eq!(
+            out,
+            "sluice wait: --pull-request names a pull request into a branch, as sluice wait \
+             <branch> --pull-request <n>\n",
+            "{args:?}"
+        );
+    }
+}
+
 /// ADR 0042: a waiting command says its combination's progress each time
 /// the count ended or the tasks running move, never at every round.
 #[test]
