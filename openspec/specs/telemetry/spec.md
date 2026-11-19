@@ -66,19 +66,19 @@ apply, `sluice.branch`, `sluice.submissions`, `sluice.candidate`,
 ### Requirement: A branch's queue is measured
 
 While telemetry is on and sends metrics, sluice SHALL send, each with
-`sluice.branch`, the gauges `sluice.queue.depth` (submissions not yet
-out of the queue) and `sluice.window` (combinations tested at once), and
-the counters `sluice.verdicts` by `sluice.outcome`, `sluice.tasks.ran`,
-`sluice.tasks.replayed`, `sluice.culprits` (submissions blamed),
-`sluice.conflicts`, `sluice.landed` and `sluice.refused` (landings
-refused because the branch moved).
+`sluice.repository` and `sluice.branch`, the gauges `sluice.queue.depth`
+(submissions not yet out of the queue) and `sluice.window` (combinations
+tested at once), and the counters `sluice.verdicts` by `sluice.outcome`,
+`sluice.tasks.ran`, `sluice.tasks.replayed`, `sluice.culprits`
+(submissions blamed), `sluice.conflicts`, `sluice.landed` and
+`sluice.refused` (landings refused because the branch moved).
 
 #### Scenario: A landing's metrics
 
 - **WHEN** a submission is tested, passes and lands
 - **THEN** sluice reports `sluice.queue.depth`, `sluice.verdicts`,
-  `sluice.tasks.ran` and `sluice.landed`
-  (`a_landing_reports_its_round_verdict_and_landing` in
+  `sluice.tasks.ran` and `sluice.landed`, each naming the repository and
+  the branch (`a_landing_reports_its_round_verdict_and_landing` in
   `crates/sluice/tests/telemetry.rs`)
 
 #### Scenario: A blamed submission is counted
@@ -90,9 +90,10 @@ refused because the branch moved).
 ### Requirement: Waiting and testing are timed
 
 While telemetry is on and sends metrics, sluice SHALL send, with
-`sluice.branch`, the histograms `sluice.submission.landed_after`
-(seconds from submit to landed) and `sluice.candidate.tested_for`
-(seconds a combination was under test, by `sluice.outcome`).
+`sluice.repository` and `sluice.branch`, the histograms
+`sluice.submission.landed_after` (seconds from submit to landed) and
+`sluice.candidate.tested_for` (seconds a combination was under test, by
+`sluice.outcome`), each declared in seconds, the unit `s`.
 
 #### Scenario: A landing is timed
 
@@ -102,12 +103,21 @@ While telemetry is on and sends metrics, sluice SHALL send, with
   (`a_landing_reports_its_round_verdict_and_landing` in
   `crates/sluice/tests/telemetry.rs`)
 
+#### Scenario: A time is sent in seconds
+
+- **WHEN** sluice's meter is sent `sluice.submission.landed_after`,
+  `sluice.candidate.tested_for`, `sluice.tasks.time_saved` and
+  `sluice.landed` as the core emits them
+- **THEN** the first three are exported with the unit `s`, and
+  `sluice.landed` with none (`a_time_is_sent_in_seconds` in
+  `crates/sluice/src/telemetry.rs`)
+
 ### Requirement: A run's checks join the round
 
 While telemetry is on, moon SHALL run with `--otel`, and a run's
 environment SHALL carry:
 
-- the collector sluice sends to and the signals it sends;
+- the collector sluice sends to and the traces and logs it sends;
 - `OTEL_RESOURCE_ATTRIBUTES` extended with `sluice.place` and
   `sluice.revision`, each value percent-encoded where the variable's
   syntax would read it;
@@ -129,19 +139,21 @@ Nothing of telemetry SHALL be added while telemetry is off.
   holds `deployment.environment=test`, and a run is started under a
   span at a place named `p 1`
 - **THEN** its environment holds the caller's
-  `OTEL_EXPORTER_OTLP_ENDPOINT`, a `TRACEPARENT` naming the span, and
-  `OTEL_RESOURCE_ATTRIBUTES` with `deployment.environment=test`,
-  `host.name`, the trace and span ids, `sluice.place=p%201` and the
-  revision (`a_run_s_checks_join_the_round` in
+  `OTEL_EXPORTER_OTLP_ENDPOINT`, `OTEL_METRICS_EXPORTER=none`, a
+  `TRACEPARENT` naming the span, and `OTEL_RESOURCE_ATTRIBUTES` with
+  `deployment.environment=test`, `host.name`, the trace and span ids,
+  `sluice.place=p%201` and the revision
+  (`a_run_s_checks_join_the_round` in
   `crates/sluice/tests/telemetry_logs.rs`)
 
 #### Scenario: A run joins no trace while traces are off
 
 - **WHEN** telemetry is on, `OTEL_TRACES_EXPORTER` is `none`, and a run
   is started under a span
-- **THEN** its environment holds `OTEL_TRACES_EXPORTER=none`, no
-  `TRACEPARENT`, and `OTEL_RESOURCE_ATTRIBUTES` with the host's own
-  attributes, `host.name`, `sluice.place` and `sluice.revision`, and no
+- **THEN** its environment holds `OTEL_TRACES_EXPORTER=none`,
+  `OTEL_METRICS_EXPORTER=none`, no `TRACEPARENT`, and
+  `OTEL_RESOURCE_ATTRIBUTES` with the host's own attributes,
+  `host.name`, `sluice.place` and `sluice.revision`, and no
   `sluice.trace_id` or `sluice.span_id`
   (`with_traces_off_a_run_s_checks_join_no_trace` in
   `crates/sluice/tests/telemetry_logs.rs`)
@@ -567,9 +579,9 @@ sluice sends and from none of the caller's other `OTEL_*`:
 ### Requirement: With no table, a run gets the caller's telemetry
 
 Where the host has no `[telemetry]` table, a run SHALL get the caller's
-`OTEL_*` as sluice read them when it started, its
-`OTEL_RESOURCE_ATTRIBUTES` holding `host.name` where sluice named the
-host itself.
+`OTEL_*` as sluice read them when it started, but for
+`OTEL_METRICS_EXPORTER`, which is `none`; its `OTEL_RESOURCE_ATTRIBUTES`
+holding `host.name` where sluice named the host itself.
 
 #### Scenario: A run gets the caller's collector and attributes
 
@@ -601,3 +613,276 @@ or `false` SHALL need no `collector`.
   last two is read, its `send` as written and no collector
   (`a_telemetry_table_that_sends_names_its_collector` in
   `crates/sluice/src/instance.rs`)
+
+### Requirement: A run's tools send no metrics
+
+While telemetry is on, a run's environment SHALL hold
+`OTEL_METRICS_EXPORTER=none`, with a table or without, whether or not
+sluice sends metrics and whatever the caller's environment holds, so the
+run's ids on its resource ride on no metric (151 and record 0014, each
+as amended 2026-11-18; rule core.66).
+
+#### Scenario: A run's tools send no metrics
+
+- **WHEN** a run's environment is built under a span with telemetry on,
+  four ways: a table sending metrics; a table with `metrics = false`; no
+  table; and no table with the caller's `OTEL_METRICS_EXPORTER` at
+  `otlp`
+- **THEN** each holds `OTEL_METRICS_EXPORTER=none`, and its
+  `OTEL_RESOURCE_ATTRIBUTES` the trace and span ids, `sluice.place` and
+  `sluice.revision` (`a_run_s_tools_send_no_metrics` in
+  `crates/sluice/src/telemetry.rs`)
+
+### Requirement: A metric carries only its repository, branch and outcome
+
+Each metric sluice sends SHALL carry `sluice.repository` and
+`sluice.branch`, `sluice.outcome` where it has one, and no other
+attribute, so none names a run's trace, span, revision or place, a
+submission, a submitter or a task (record 0014 as amended 2026-11-18;
+rule core.66).
+
+#### Scenario: A round's metrics carry nothing of a run
+
+- **WHEN** a submission is tested, passes and lands; one is blamed; one
+  is replayed; one conflicts; and a landing is refused
+- **THEN** every metric each reports names `sluice.repository` and
+  `sluice.branch`, and carries no field but those and `sluice.outcome`
+  (`a_landing_reports_its_round_verdict_and_landing`,
+  `a_failure_reports_its_culprit`, `a_replay_is_counted`,
+  `a_conflict_is_counted` and `a_refused_landing_is_counted` in
+  `crates/sluice/tests/telemetry.rs`)
+
+### Requirement: A metric names its repository by its origin, else its folder
+
+`sluice.repository` SHALL be the last two names of the path of the
+repository's `origin`, where its URL names a host, a trailing `.git`
+dropped; else the repository's folder's name, `.git` dropped. No other
+part of the origin's URL SHALL be kept.
+
+#### Scenario: A repository's name
+
+- **WHEN** a repository is named from its origin and its common
+  directory
+- **THEN** each comes out as follows
+  (`a_repository_is_named_by_its_origin_else_its_folder` in
+  `crates/sluice/src/profiles/local_refs.rs`):
+  - `https://user:token@github.com/acme/app.git`,
+    `git@github.com:acme/app.git` and
+    `ssh://git@git.example:2222/acme/app/` each give `acme/app`;
+  - no origin with the common directory `/src/app/.git` gives `app`;
+  - the origin `/srv/git/app.git` with the common directory
+    `/srv/q/app.git` gives `app`;
+  - no name holds `user`, `token` or a host.
+
+### Requirement: What a replay saved is measured
+
+While telemetry sends metrics, the round that reads a run's verdict
+SHALL add to the counter `sluice.tasks.time_saved`, in seconds with the
+unit `s`, the time each replayed task's key took when it last ran: the
+`took_ms` of the newest pass the verdict counts for its key. A replay
+that no counted pass proves, or whose pass recorded no time, SHALL add
+nothing.
+
+#### Scenario: A replay saves its key's last time
+
+- **WHEN** a verdict is read of a run that replayed three keys: one whose
+  counted passes took 4000 ms and later 6000 ms, one whose counted pass
+  recorded no time, and one with no counted pass
+- **THEN** it reads 6000 ms saved, and the third key unproven
+  (`a_replay_saves_the_time_its_key_last_took` in
+  `crates/sluice-core/src/verdict.rs`)
+
+#### Scenario: A round counts what its replays saved
+
+- **WHEN** `lib:test` takes 4000 ms when it runs, and a submission
+  brings `lib/` back to a tree a landing before had, so the task is
+  replayed
+- **THEN** sluice reports `sluice.tasks.time_saved` of 4 seconds with
+  the repository and the branch (`a_replay_counts_the_time_it_saved` in
+  `crates/sluice/tests/telemetry.rs`)
+
+### Requirement: A command started under a caller's trace nests in it
+
+A command SHALL read its caller's W3C trace context from `TRACEPARENT`
+and, where given, `TRACESTATE` in its environment as it starts; one
+that does not read as W3C's trace context SHALL be none (153). While
+telemetry sends traces, a command started under one SHALL send one span
+named `sluice <command>`, such as `sluice exec` or `sluice job run`,
+whose parent is the caller's span, holding `sluice.exit`, its exit. A
+command started under none SHALL send no span of its own.
+
+#### Scenario: A command nests under its caller
+
+- **WHEN** telemetry sends traces, `sluice submit` is started under
+  `TRACEPARENT` `00-<t>-<s>-01`, and another submit under none
+- **THEN** one `sluice submit` span is sent in trace `<t>` with parent
+  `<s>` and the first submit's exit as `sluice.exit`, and no
+  `sluice submit` span is sent for the second
+  (`a_command_nests_under_its_caller_s_trace` in
+  `crates/sluice/tests/telemetry_logs.rs`)
+
+#### Scenario: A context is read as W3C reads it
+
+- **WHEN** `TRACEPARENT` is `00-` then 32 hex digits, 16 hex digits and
+  `01`, beside a `TRACESTATE`; or holds an all-zero trace id, hex in
+  upper case, version `ff`, or three fields
+- **THEN** the first reads as a context with its trace state and its
+  `TRACEPARENT` as given, and each of the others reads as none
+  (`a_trace_context_is_read_as_w3c_reads_it` in
+  `crates/sluice/src/telemetry.rs`)
+
+### Requirement: A caller's trace turns nothing on
+
+A caller's trace context SHALL name only where sluice's spans nest. It
+SHALL never turn telemetry or a signal on: whether sluice sends is the
+command's own choice, else the host's `[telemetry]`, as before (151;
+rule core.53).
+
+#### Scenario: A context with nothing asked sends nothing
+
+- **WHEN** the command gives no telemetry choice, the host has no
+  `[telemetry]`, and the environment holds a `TRACEPARENT`
+- **THEN** the settings chosen send nothing
+  (`a_caller_s_context_turns_nothing_on` in
+  `crates/sluice/src/telemetry.rs`)
+
+### Requirement: A round is a trace of its own under any command
+
+Each round SHALL be one trace of its own, its `sluice.round` with no
+parent, whatever process runs it and under whatever command's span.
+sluice's host process SHALL keep no `TRACEPARENT` or `TRACESTATE` of
+the command that starts it.
+
+#### Scenario: A round run under a command's span
+
+- **WHEN** telemetry sends traces and a submit started under a caller's
+  context waits while its combination is tested and lands
+- **THEN** each `sluice.round` span has no parent and a trace that is
+  neither the caller's nor another round's
+  (`a_command_nests_under_its_caller_s_trace` in
+  `crates/sluice/tests/telemetry_logs.rs`)
+
+#### Scenario: The host process keeps no caller's context
+
+- **WHEN** the host process's environment is chosen from a command's
+  that holds `TRACEPARENT` and `TRACESTATE`
+- **THEN** it keeps neither
+  (`the_host_process_keeps_no_caller_s_trace_context` in
+  `crates/sluice/src/host_process/environment.rs`)
+
+### Requirement: A submission keeps the trace it was submitted under
+
+A submission SHALL keep on its record, as `trace`, the `TRACEPARENT` of
+the context its submit was started under, whether or not the submit
+sends telemetry; each submission of one submit of several worktrees
+SHALL keep the same. A submission submitted under none, and a pull
+request's taken in from the forge, SHALL keep none. Nothing sluice
+decides SHALL read it (153).
+
+#### Scenario: Each submission keeps its submit's context
+
+- **WHEN** with telemetry off, `sluice submit` is started under
+  `00-<t>-<s>-01`, a submit of two worktrees as one act under it, and a
+  submit under none
+- **THEN** the first submission's record holds `trace`
+  `00-<t>-<s>-01`, each of the act's two holds it, and the last's holds
+  no `trace`
+  (`a_submission_keeps_the_trace_it_was_submitted_under` in
+  `crates/sluice/tests/cli.rs`)
+
+### Requirement: A round that tests a submission links to its trace
+
+While telemetry sends traces, each `sluice.start` span and each
+`sluice.verdict` span of a combination SHALL hold one link to the
+trace each submission it holds kept, the link holding
+`sluice.submission`, that submission's number (153; rule core.53).
+
+#### Scenario: A combination's start and verdict link to its work's caller
+
+- **WHEN** a combination holds submission 1, submitted under
+  `00-<t>-<s>-01`, and submission 2, submitted under none, and is
+  tested and lands
+- **THEN** each of its `sluice.start` and `sluice.verdict` spans holds a
+  link to span `<s>` of trace `<t>` with `sluice.submission` 1, and no
+  link for submission 2
+  (`a_round_links_to_the_trace_its_work_was_submitted_under` in
+  `crates/sluice/tests/telemetry_logs.rs`)
+
+### Requirement: A finished run's checks keep their runner's times
+
+The check seam SHALL answer, for a run that has ended and while its
+directory stands, each of its checks as its runner timed it: moon's
+from moon's records in the place, as while the run went, and the
+`command` runner's one check from the run's own start and end. It is
+never a result (37, 38).
+
+#### Scenario: A finished command run is timed by its start and end
+
+- **WHEN** a run of the `command` runner has ended
+- **THEN** the check seam's times for it hold its one check, started
+  when the run started and ended when it ended
+  (`a_finished_command_run_is_timed_by_its_start_and_end` in
+  `crates/sluice/tests/checks.rs`)
+
+#### Scenario: A finished moon run's checks keep their times
+
+- **WHEN** a moon run of `alpha:test` and `beta:test` has ended
+- **THEN** the check seam's times for it hold each with its start and
+  its end, its start no later than its end
+  (`a_finished_moon_run_s_checks_are_timed` in
+  `crates/sluice/tests/profiles/moon.rs`)
+
+### Requirement: An exec's span holds each check it ran
+
+While telemetry sends traces, `sluice exec` started under a caller's
+context SHALL send beneath its `sluice exec` span one `sluice.check`
+span for each check its run ran whose runner gave its start and end,
+over those times, with `sluice.task` and `sluice.outcome`, `pass` or
+`fail` as the run's report has it. A check answered from an earlier
+run, or with no time from its runner, SHALL have none, and the
+`sluice exec` span SHALL hold `sluice.ran` and `sluice.replayed`.
+
+#### Scenario: Each check run is a span over its runner's times
+
+- **WHEN** `sluice exec` started under a caller's context runs
+  `tests:t-a`, which passes from 12:00:01 to 12:00:04, `tests:t-b`,
+  which fails, and `tests:t-c`, answered from an earlier run
+- **THEN** its `sluice exec` span holds a `sluice.check` span for
+  `tests:t-a` from 12:00:01 to 12:00:04 with `sluice.outcome` `pass`,
+  one for `tests:t-b` with `fail`, and none for `tests:t-c`, and holds
+  `sluice.ran` 2 and `sluice.replayed` 1
+  (`an_exec_s_span_holds_each_check_it_ran` in
+  `crates/sluice/tests/telemetry_logs.rs`)
+
+### Requirement: An exec's command is one check, named scrubbed
+
+A command `sluice exec` runs after `--` SHALL be its run's one check,
+its `sluice.check` span's `sluice.task` the command's words with
+whatever reads as a secret replaced by `[redacted]`, as a log's body
+is.
+
+#### Scenario: A command's secret never names its span
+
+- **WHEN** `sluice exec` started under a caller's context runs
+  `-- env API_TOKEN=ghp_0123456789abcdefghijABCDEFGHIJ012345 true`
+- **THEN** its one `sluice.check` span's `sluice.task` holds
+  `[redacted]` and not the token
+  (`an_exec_s_command_is_one_check_named_scrubbed` in
+  `crates/sluice/tests/telemetry_logs.rs`)
+
+### Requirement: An exec's checks nest under its span
+
+While telemetry sends traces, the run `sluice exec` starts under a
+caller's context SHALL be handed what a combination's run is handed
+(151), its `TRACEPARENT` naming the `sluice exec` span in the caller's
+trace.
+
+#### Scenario: An exec's checks get its span through the binary
+
+- **WHEN** the `sluice` binary runs `sluice exec --otel <branch> -- sh
+  -c 'env > seen'` with `TRACEPARENT` `00-<t>-<s>-01` and a collector
+- **THEN** `seen`'s `TRACEPARENT` names trace `<t>` and a span other
+  than `<s>`, and the traces sent hold a `sluice exec` span whose
+  parent is `<s>`
+  (`an_exec_hands_its_checks_its_own_span_in_the_caller_s_trace` in
+  `crates/sluice/tests/exec.rs`)

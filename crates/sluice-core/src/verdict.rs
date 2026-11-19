@@ -12,6 +12,12 @@ pub struct Verdict {
     pub failed: Vec<FailedTask>,
     pub ran: usize,
     pub replayed: usize,
+    /// What the run's replays saved, in milliseconds: for each replay a
+    /// counted pass proves, the time its key took when it last ran, the
+    /// `took_ms` of the newest such pass by `at`; nothing for a replay no
+    /// counted pass proves, which runs again (108), or whose newest pass
+    /// recorded no time (rule core.66; design D5).
+    pub saved_ms: u64,
     /// 108: the tasks the run replayed with no trusted pass recorded for
     /// their key, which count for nothing, each with its key and why
     /// (design D4 of `a-signed-run-without-a-sandbox-proves-its-passes`).
@@ -177,7 +183,7 @@ pub fn read(
     let mut unproven = Vec::new();
     let mut missing = Vec::new();
     let mut passed = Vec::new();
-    let (mut ran, mut replayed) = (0, 0);
+    let (mut ran, mut replayed, mut saved_ms) = (0, 0, 0);
     // 149: a task a check was failed by is read as the check would be.
     for t in report.tasks.iter().chain(&report.dependencies) {
         let recorded: Vec<&ResultLine> = results
@@ -209,6 +215,14 @@ pub fn read(
                     });
                     continue;
                 }
+                // Design D5: the time its key took when it last ran, read
+                // from the newest pass counted for it.
+                saved_ms += recorded
+                    .iter()
+                    .filter(|r| r.outcome == Outcome::Pass)
+                    .max_by_key(|r| chrono::DateTime::parse_from_rfc3339(&r.at).ok())
+                    .and_then(|r| r.took_ms)
+                    .unwrap_or(0);
                 // The pass it replays is already among the recorded.
                 false
             }
@@ -339,6 +353,7 @@ pub fn read(
         failed,
         ran,
         replayed,
+        saved_ms,
         unproven,
         missing,
         unjudged,
@@ -420,6 +435,53 @@ mod tests {
             &given[..1],
         );
         assert!(v.passed && v.none.is_empty(), "{v:?}");
+    }
+
+    /// Design D5 (the telemetry spec's "A replay saves its key's last
+    /// time"): a replay saves the time its key took at its newest counted
+    /// pass by `at`, wherever that pass is in the log; one whose counted
+    /// pass recorded no time saves nothing, and one no counted pass proves
+    /// is unproven and saves nothing.
+    #[test]
+    fn a_replay_saves_the_time_its_key_last_took() {
+        let replays = ["a:test", "b:test", "c:test"];
+        let run = RunReport {
+            tasks: replays
+                .iter()
+                .map(|t| TaskResult {
+                    took_ms: Some(10),
+                    attempts: None,
+                    task: t.to_string(),
+                    hash: format!("{t}-key"),
+                    outcome: Outcome::Pass,
+                    source: Source::Replayed { from_run_at: None },
+                })
+                .collect(),
+            ..report(
+                Source::Replayed { from_run_at: None },
+                enforced("open", false),
+            )
+        };
+        let pass = |task: &str, at: &str, took_ms| ResultLine {
+            task: task.into(),
+            hash: format!("{task}-key"),
+            at: at.into(),
+            took_ms,
+            ..recorded(
+                ResultKind::Ran,
+                Some(enforced("open", false)),
+                Outcome::Pass,
+            )
+        };
+        let results = [
+            pass("a:test", "2026-11-02T00:00:00Z", Some(6000)),
+            pass("a:test", "2026-11-01T00:00:00Z", Some(4000)),
+            pass("b:test", "2026-11-01T00:00:00Z", None),
+        ];
+        let v = read(&run, &results, &rules(&["open"]));
+        assert_eq!(v.saved_ms, 6000, "{v:?}");
+        assert_eq!(unproven(&v), ["c:test"]);
+        assert_eq!(v.replayed, 3);
     }
 
     /// The tasks a verdict reads unproven (108).

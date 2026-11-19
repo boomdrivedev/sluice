@@ -1194,6 +1194,12 @@ pub trait Tests {
     /// ends. Never a result (37, 38).
     fn tasks(&self, run: &RunHandle) -> Result<Vec<TaskProgress>>;
 
+    /// 153: each check of a run that has ended, as its runner timed it,
+    /// while the run's directory stands, for telemetry to show; nothing
+    /// for a run still going. Never a result (37, 38; design D6 of
+    /// `a-sluice-command-shows-inside-its-callers-trace`).
+    fn timed(&self, run: &RunHandle) -> Result<Vec<TaskProgress>>;
+
     /// ADR 0050: which of `required`, the branch's required checks as its
     /// policy names them, the runner keeps out of its CI mode in
     /// `worktree`, by the runner's settings in `tests`: each such task

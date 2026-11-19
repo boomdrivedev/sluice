@@ -26,7 +26,7 @@ use sluice_seams::{
     PreviewPlace, Progress, Proof, ReadRefused, Reading, Reads, ReleaseFailure, ReleasePolicy,
     Released, ResultAsk, Rev, RunHandle, RunKind, RunReport, RunRequest, Running, Session,
     SessionPlace, Settings, Snapshot, Source, State, Stopped, Submitter, TaskLog, TaskProgress,
-    TaskResult, Tests, Unanswered, Written,
+    TaskResult, TaskState, Tests, Unanswered, Written,
 };
 
 /// A tree: path to content.
@@ -241,6 +241,9 @@ struct Inner {
     /// fetched it, its branch and its id, in order (record 0118).
     candidate_fetches: Vec<(String, String, String)>,
     took: BTreeMap<String, (u64, u32)>,
+    /// Tasks the runner answers from an earlier run, whatever the request
+    /// asks (38).
+    replays: BTreeSet<String>,
     /// Checks a run leaves not run, with why (could-not-run-1 114).
     cannot_run: BTreeMap<String, String>,
     /// 149: the tasks each task depends on, which a run runs first.
@@ -281,6 +284,9 @@ struct Inner {
     runs: Vec<RunState>,
     /// What each run says of its tasks while it goes, by run.
     run_tasks: BTreeMap<usize, Vec<TaskProgress>>,
+    /// 153: when the runner starts and ends each run of a task, by its
+    /// name.
+    times: BTreeMap<String, (String, String)>,
     /// Asking after a run's tasks fails from now.
     tasks_fail: bool,
     hold: bool,
@@ -908,6 +914,12 @@ impl World {
         self.0.borrow_mut().took.insert(task.into(), (ms, attempts));
     }
 
+    /// The runner answers `task` from an earlier run, a pass, whatever the
+    /// request asks of replays, as a runner's own cache may (38).
+    pub fn replays(&self, task: &str) {
+        self.0.borrow_mut().replays.insert(task.into());
+    }
+
     /// Runs leave `task` not run, for `reason` (could-not-run-1 114);
     /// `None` lets it run again.
     pub fn cannot_run(&self, task: &str, reason: Option<&str>) {
@@ -1120,6 +1132,15 @@ impl World {
             }
         }
         assert!(any, "no run on {revision}");
+    }
+
+    /// The runner times each run of `task` from `started` to `ended`, RFC
+    /// 3339, as the check seam's times of a finished run say (153).
+    pub fn times(&self, task: &str, started: &str, ended: &str) {
+        self.0
+            .borrow_mut()
+            .times
+            .insert(task.to_string(), (started.to_string(), ended.to_string()));
     }
 
     /// The live run on `revision` says this of its tasks until it ends.
@@ -1754,6 +1775,16 @@ impl World {
         let hash = Self::task_hash(&t, tree);
         let key = (t.name.clone(), hash.clone());
         let scripted = inner.flaky.get_mut(&t.name).and_then(|q| q.pop_front());
+        if scripted.is_none() && inner.replays.contains(&t.name) {
+            return TaskResult {
+                took_ms: None,
+                attempts: None,
+                task: t.name.clone(),
+                hash,
+                outcome: Outcome::Pass,
+                source: Source::Replayed { from_run_at: None },
+            };
+        }
         if scripted.is_none() && request.replay {
             if let Some(at) = inner.cache.get(&key) {
                 return TaskResult {
@@ -3055,6 +3086,42 @@ impl Tests for FakeTests {
             .and_then(|n| n.parse().ok())
             .ok_or_else(|| anyhow!("no run {}", run.0))?;
         Ok(inner.run_tasks.get(&n).cloned().unwrap_or_default())
+    }
+
+    /// 153 (design D6): what the run said of its tasks, where it said
+    /// anything; else, once it has ended, each check of its report, timed
+    /// as the world's runner times it ([`World::times`]).
+    fn timed(&self, run: &RunHandle) -> Result<Vec<TaskProgress>> {
+        let inner = self.0 .0.borrow();
+        let n: usize = run
+            .0
+            .strip_prefix("run-")
+            .and_then(|n| n.parse().ok())
+            .ok_or_else(|| anyhow!("no run {}", run.0))?;
+        if let Some(said) = inner.run_tasks.get(&n) {
+            return Ok(said.clone());
+        }
+        let Some(report) = inner.runs.get(n).and_then(|r| r.report.as_ref()) else {
+            return Ok(Vec::new());
+        };
+        Ok(report
+            .tasks
+            .iter()
+            .map(|t| {
+                let times = inner.times.get(&t.task);
+                TaskProgress {
+                    target: t.task.clone(),
+                    state: match (&t.source, t.outcome) {
+                        (Source::Replayed { .. }, _) => TaskState::Replayed,
+                        (_, Outcome::Pass) => TaskState::Passed,
+                        (_, Outcome::Fail) => TaskState::Failed,
+                    },
+                    started: times.map(|(s, _)| s.clone()),
+                    ended: times.map(|(_, e)| e.clone()),
+                    exit: None,
+                }
+            })
+            .collect())
     }
 
     fn kept_out(

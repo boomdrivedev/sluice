@@ -165,6 +165,20 @@ struct StartFrom {
     /// 88 (design D2): the claim a pool's job starts its run under, where
     /// it is not this instance's own.
     claim: Option<String>,
+    /// 153 (design D5): the context each submission of the live records
+    /// kept, by its number, which a start links to.
+    traces: BTreeMap<u64, String>,
+}
+
+/// 153 (design D5; rule core.53): `span`, which tests a combination
+/// holding `submissions`, linked to the context each kept, as `kept`
+/// reads it by number; a submission that kept none gets no link.
+fn link_kept(span: &tracing::Span, submissions: &[u64], kept: impl Fn(u64) -> Option<String>) {
+    for &id in submissions {
+        if let Some(trace) = kept(id) {
+            crate::links::link(span, &trace, id);
+        }
+    }
 }
 
 /// 140: how a queued entry's work was read beside the chain.
@@ -245,7 +259,15 @@ impl Sluice<'_> {
         if self.held {
             bail!("a round of {branch} never reads its records as held");
         }
-        let round = info_span!("sluice.round", sluice.branch = branch, sluice.step = "");
+        // 153 (design D3): a round is a trace of its own wherever it runs,
+        // nested under no command's span; it reaches the work's callers by
+        // links alone.
+        let round = info_span!(
+            parent: None,
+            "sluice.round",
+            sluice.branch = branch,
+            sluice.step = ""
+        );
         let _round = round.enter();
         let released = info_span!("sluice.abandoned").in_scope(|| self.release_abandoned())?;
         let previews =
@@ -762,11 +784,13 @@ impl Sluice<'_> {
                             .and_then(|s| seconds_between(&s.submitted, &now));
                         info!(
                             monotonic_counter.sluice.landed = 1u64,
+                            sluice.repository = self.peer.repository.as_str(),
                             sluice.branch = branch,
                         );
                         if let Some(secs) = waited {
                             info!(
                                 histogram.sluice.submission.landed_after = secs,
+                                sluice.repository = self.peer.repository.as_str(),
                                 sluice.branch = branch,
                             );
                         }
@@ -820,6 +844,7 @@ impl Sluice<'_> {
                 span.record("sluice.outcome", "refused");
                 info!(
                     monotonic_counter.sluice.refused = 1u64,
+                    sluice.repository = self.peer.repository.as_str(),
                     sluice.branch = branch
                 );
                 self.update(branch, |l| {
@@ -1363,6 +1388,11 @@ impl Sluice<'_> {
         }
         Ok(Some(StartFrom {
             claim: None,
+            traces: line
+                .subs
+                .values()
+                .filter_map(|s| Some((s.id, s.trace.clone()?)))
+                .collect(),
             home: self.home_system(&base)?,
             verified: line.doc.verified,
             base,
@@ -1399,7 +1429,7 @@ impl Sluice<'_> {
     ) -> Result<Started> {
         let r = &c.runs[i];
         let kind = from.policy.limits.executor.as_deref().unwrap_or("open");
-        let _span = info_span!(
+        let span = info_span!(
             "sluice.start",
             sluice.branch = branch,
             sluice.candidate = %c.revision,
@@ -1408,6 +1438,7 @@ impl Sluice<'_> {
             sluice.system = r.system.as_deref().unwrap_or(""),
         )
         .entered();
+        link_kept(&span, &c.submissions, |id| from.traces.get(&id).cloned());
         let name = r.place.clone().expect("a starting run has a place");
         let checks = if r.checks.is_empty() {
             from.rules.required.clone()
@@ -1981,9 +2012,14 @@ impl Sluice<'_> {
         let queued = line.subs.values().filter(|s| !s.state.is_out()).count() as u64;
         let written = matches!(self.write(&line)?, Written::Written(_));
         if written {
-            info!(gauge.sluice.queue.depth = queued, sluice.branch = branch);
+            info!(
+                gauge.sluice.queue.depth = queued,
+                sluice.repository = self.peer.repository.as_str(),
+                sluice.branch = branch
+            );
             info!(
                 gauge.sluice.window = line.doc.window as u64,
+                sluice.repository = self.peer.repository.as_str(),
                 sluice.branch = branch
             );
         }
@@ -2511,6 +2547,9 @@ impl Sluice<'_> {
             sluice.ran = 0u64,
             sluice.replayed = 0u64,
         );
+        link_kept(&span, &c.submissions, |id| {
+            line.subs.get(&id).and_then(|s| s.trace.clone())
+        });
         let _span = span.enter();
         // Design D17: the results of the keys this run reported and of its
         // combination alone.
@@ -2811,10 +2850,18 @@ impl Sluice<'_> {
         let branch = line.branch.clone();
         info!(
             monotonic_counter.sluice.tasks.ran = v.ran as u64,
+            sluice.repository = self.peer.repository.as_str(),
             sluice.branch = branch.as_str()
         );
         info!(
             monotonic_counter.sluice.tasks.replayed = v.replayed as u64,
+            sluice.repository = self.peer.repository.as_str(),
+            sluice.branch = branch.as_str(),
+        );
+        // Rule core.66, design D5: what the replays saved, in seconds.
+        info!(
+            monotonic_counter.sluice.tasks.time_saved = v.saved_ms as f64 / 1000.0,
+            sluice.repository = self.peer.repository.as_str(),
             sluice.branch = branch.as_str(),
         );
         let ended = Ended {
@@ -2881,6 +2928,7 @@ impl Sluice<'_> {
         let branch = branch.as_str();
         info!(
             monotonic_counter.sluice.verdicts = 1u64,
+            sluice.repository = self.peer.repository.as_str(),
             sluice.branch = branch,
             sluice.outcome = word.as_str(),
         );
@@ -2888,6 +2936,7 @@ impl Sluice<'_> {
             if let Some(secs) = self.tested_for(branch, &c.revision, now)? {
                 info!(
                     histogram.sluice.candidate.tested_for = secs,
+                    sluice.repository = self.peer.repository.as_str(),
                     sluice.branch = branch,
                     sluice.outcome = word.as_str(),
                 );
@@ -3141,7 +3190,11 @@ impl Sluice<'_> {
         with: Vec<Contested>,
         now: &str,
     ) -> Result<()> {
-        info!(monotonic_counter.sluice.conflicts = 1u64, sluice.branch = %line.branch);
+        info!(
+            monotonic_counter.sluice.conflicts = 1u64,
+            sluice.repository = self.peer.repository.as_str(),
+            sluice.branch = %line.branch,
+        );
         let s = line.sub_mut(id);
         s.state = State::Conflict;
         s.conflict = Some(ConflictRecord {
@@ -3178,7 +3231,11 @@ impl Sluice<'_> {
             sluice.candidate = %c.revision,
         )
         .entered();
-        info!(monotonic_counter.sluice.culprits = 1u64, sluice.branch = %line.branch);
+        info!(
+            monotonic_counter.sluice.culprits = 1u64,
+            sluice.repository = self.peer.repository.as_str(),
+            sluice.branch = %line.branch,
+        );
         let s = line.sub_mut(id);
         s.state = State::Failed;
         s.tested = Some(Tested {
@@ -5689,6 +5746,7 @@ mod tests {
             after: Vec::new(),
             priority: 0,
             subject: None,
+            trace: None,
         };
         s.submit(&req).unwrap().unwrap().id
     }
