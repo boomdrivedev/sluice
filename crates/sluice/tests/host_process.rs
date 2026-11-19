@@ -1929,3 +1929,26 @@ fn a_daemon_lands_a_submission_with_no_other_host_process() {
         "{starts:#?}"
     );
 }
+
+/// host-daemon, "Started in a repository" and "Started in no repository"
+/// (135; design D8 of `sluice-runs-as-a-daemon`): `sluice daemon` started
+/// in a repository whose `main` holds a policy, in no index, adds it to the
+/// host's index before it runs as the host process; started in `/`, it
+/// runs as the host process all the same, and the index is as it was.
+#[test]
+fn a_daemon_indexes_the_repository_it_starts_in() {
+    let d = OnDisk::new("daemon-index", POLICY);
+    let index = d.client(d.repo.dir()).paths().index();
+    assert_eq!(index.list().unwrap(), Vec::<std::path::PathBuf>::new());
+    let repository = std::fs::canonicalize(d.repo.dir().join(".git")).unwrap();
+    let daemon = Daemon::start(&d, d.repo.dir());
+    answers(&d, &daemon);
+    assert_eq!(index.list().unwrap(), vec![repository]);
+    drop(daemon);
+
+    let d = OnDisk::new("daemon-index-none", POLICY);
+    let index = d.client(d.repo.dir()).paths().index();
+    let daemon = Daemon::start(&d, Path::new("/"));
+    answers(&d, &daemon);
+    assert_eq!(index.list().unwrap(), Vec::<std::path::PathBuf>::new());
+}
