@@ -3047,6 +3047,34 @@ fn wait_follows_a_pull_request() {
     assert_eq!(doc["state"], "landed");
 }
 
+/// submission-wait, "Out of time, waiting for a review, in words": the
+/// agent's pull request waits for a review, and `sluice wait main --timeout
+/// 2s` in its worktree exits 5, its last line naming the wait that follows
+/// the request by its number, never one that reads the folder it runs in
+/// (record 0130).
+#[test]
+fn out_of_time_waiting_for_a_review_names_its_wait() {
+    let g = OnGitHub::new("pr-wait-review-words", "reviews = 1");
+    let w = g.session("reviewed", &[("r.txt", "r\n")]);
+    let out = g.wt_submit(&w, &["--no-wait"]);
+    assert_eq!(out.status.code(), Some(0), "{}", text(&out));
+    let n = g.pull_from("unit/reviewed").number;
+    let out = g
+        .command(env!("CARGO_BIN_EXE_sluice"), &w)
+        .args(["wait", "main", "--timeout", "2s"])
+        .output()
+        .unwrap();
+    assert_eq!(out.status.code(), Some(sluice::WAITING), "{}", text(&out));
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let last = stdout.lines().rfind(|l| !l.trim().is_empty());
+    assert_eq!(
+        last,
+        Some(format!("still open: #{n}; sluice wait main --pull-request {n}").as_str()),
+        "{}",
+        text(&out)
+    );
+}
+
 /// A pull request taken in, out of time: `sluice wait <branch>` follows its
 /// submission, and ends with that submission's record, as `sluice wait
 /// <id>` does.
