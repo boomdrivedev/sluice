@@ -884,10 +884,12 @@ fn answer(hosting: &Arc<Hosting>, stream: UnixStream) -> Result<()> {
             kind,
             repository,
             place: _,
+            branch,
         } => hold(
             hosting,
             kind,
             &repository,
+            branch.as_deref(),
             &stream,
             &mut writer,
             &mut reader,
@@ -1000,6 +1002,7 @@ fn hold(
     hosting: &Arc<Hosting>,
     kind: sluice_seams::RunKind,
     repository: &Path,
+    branch: Option<&str>,
     stream: &UnixStream,
     writer: &mut UnixStream,
     reader: &mut BufReader<UnixStream>,
@@ -1008,7 +1011,7 @@ fn hold(
     // a profile beside the host process (task 3.4), is answered once, held
     // or refused, as a round's own ask is, and counts as no session's wait.
     let waiter = match kind {
-        sluice_seams::RunKind::Session => Some(hosting.room.lock().wait(repository, None)),
+        sluice_seams::RunKind::Session => Some(hosting.room.lock().wait(repository, branch)),
         sluice_seams::RunKind::Queue => None,
     };
     let let_go = || {
@@ -1029,7 +1032,7 @@ fn hold(
         let asked = hosting
             .room
             .lock()
-            .ask(&asker, repository, None, Instant::now());
+            .ask(&asker, repository, branch, Instant::now());
         match asked {
             Ok(Asked::Held(id)) => break id,
             Ok(Asked::Refused(why)) => {

@@ -834,9 +834,10 @@ impl sluice::host_process::HostProcess for FakeProcess {
         here: &sluice::host_process::Here<'a, '_>,
         kind: sluice_seams::RunKind,
         _place: &str,
+        branch: &str,
     ) -> anyhow::Result<Box<dyn sluice::host_process::Holding + 'a>> {
         let roomed = self.roomed(here)?;
-        let waiter = roomed.room.lock().wait(&roomed.repository, None);
+        let waiter = roomed.room.lock().wait(&roomed.repository, Some(branch));
         Ok(Box::new(FakeHolding {
             roomed,
             waiter,

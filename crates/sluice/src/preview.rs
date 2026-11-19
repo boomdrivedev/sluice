@@ -237,6 +237,7 @@ impl Ask<'_> {
                     &here,
                     sluice_seams::RunKind::Session,
                     &preview.name,
+                    &self.branch,
                 )?;
                 let part = loop {
                     match holding.next(std::time::Duration::from_millis(100))? {

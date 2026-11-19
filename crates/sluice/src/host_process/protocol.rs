@@ -90,6 +90,11 @@ pub enum Request {
         kind: RunKind,
         repository: PathBuf,
         place: String,
+        /// 154: the branch its run is held to; `None` from an older sluice,
+        /// whose run counts toward the bound under no branch (design D6 of
+        /// `each-submission-shows-its-wait-and-its-test`).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        branch: Option<String>,
     },
     /// The bound, what counts against it, the runs waiting and whose turn
     /// is next.
@@ -179,4 +184,38 @@ pub fn receive<T: for<'de> Deserialize<'de>>(from: &mut impl BufRead) -> Result<
         bail!("the host process closed the connection");
     }
     serde_json::from_str(line.trim_end()).with_context(|| format!("reading {:?}", line.trim_end()))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// 154, design D6 of `each-submission-shows-its-wait-and-its-test`: a
+    /// hold naming `main` reads back naming it, and one an older sluice
+    /// wrote, with no branch, reads naming none.
+    #[test]
+    fn a_hold_names_its_branch_and_an_older_one_none() {
+        let named = Request::Hold {
+            kind: RunKind::Session,
+            repository: PathBuf::from("/host/repo.git"),
+            place: "unit/a".into(),
+            branch: Some("main".into()),
+        };
+        let mut line = Vec::new();
+        send(&mut line, &named).unwrap();
+        let read: Request = receive(&mut line.as_slice()).unwrap();
+        assert_eq!(read, named);
+        let older = b"{\"ask\":\"hold\",\"kind\":\"session\",\
+                      \"repository\":\"/host/repo.git\",\"place\":\"unit/a\"}\n";
+        let read: Request = receive(&mut older.as_slice()).unwrap();
+        assert_eq!(
+            read,
+            Request::Hold {
+                kind: RunKind::Session,
+                repository: PathBuf::from("/host/repo.git"),
+                place: "unit/a".into(),
+                branch: None,
+            }
+        );
+    }
 }

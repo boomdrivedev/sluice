@@ -392,6 +392,7 @@ fn the_host_processs_look_at_an_idle_repository_starts_nothing() {
             sluice_seams::RunKind::Session,
             Path::new(&repository),
             "an-agent",
+            None,
         )
         .expect("the host process starts");
     let answer = held.next(Some(Duration::from_secs(10))).unwrap();

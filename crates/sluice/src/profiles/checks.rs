@@ -414,10 +414,13 @@ impl RoomHandle {
             RoomHandle::Here(shared) => shared.hold(kind, repository, branch),
             RoomHandle::Socket(client) => {
                 let mut c = match client {
-                    Some(client) => client.hold(kind, repository, "")?,
-                    None => {
-                        crate::host_process::client::Client::host()?.hold(kind, repository, "")?
-                    }
+                    Some(client) => client.hold(kind, repository, "", Some(branch))?,
+                    None => crate::host_process::client::Client::host()?.hold(
+                        kind,
+                        repository,
+                        "",
+                        Some(branch),
+                    )?,
                 };
                 match c.next(Some(crate::host_process::read_for()))? {
                     Some(Answer::Held) => {
