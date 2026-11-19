@@ -616,7 +616,10 @@ The host process can't swap its telemetry in place, so it takes a change
 of `[telemetry]` up by handing its repositories to a fresh host process
 it starts itself, with nothing to restart. Runs already testing keep
 what they started with. Its log says the file and the tables as it
-hands over, and the fresh host process reads the file itself. A change whose settings don't bind, or whose fresh host process
+hands over, and the fresh host process reads the file itself.
+[`sluice daemon`](/sluice/reference/commands/#sluice-daemon) starts
+afresh in its own process instead, keeping its process ID, so whatever
+keeps it running keeps the new one, and it keeps running. A change whose settings don't bind, or whose fresh host process
 doesn't start, leaves it on the settings it holds, and it says so once,
 with the file and the reason. A `sluice run` still kept running follows
 the host process, and starts itself afresh for a change of `[telemetry]`

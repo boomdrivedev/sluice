@@ -1831,7 +1831,9 @@ branch.
   host's bound on runs in one place. It takes up a change of the host's
   settings file between its passes, and hands a change of `[telemetry]`
   to a fresh host process it starts itself, so nothing restarts it
-  ([configuration](/sluice/reference/configuration/)). A waiting `sluice submit`,
+  ([configuration](/sluice/reference/configuration/)). `sluice daemon`
+  starts afresh in its own process instead, keeping its process ID, and
+  keeps running. A waiting `sluice submit`,
   `wt submit` or `sluice wait` follows it and runs no round, and
   `sluice step` asks it for one round of a branch. A command that finds
   work in play and no host process answering starts it again, so a
