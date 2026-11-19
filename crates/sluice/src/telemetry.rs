@@ -435,6 +435,73 @@ pub fn checks(parent: &tracing::Span, checks: &[Check]) {
     }
 }
 
+/// 154 (design D5 of `each-submission-shows-its-wait-and-its-test`; rule
+/// core.53): a submission's life, sent while traces go with the tracer
+/// telemetry started, linked to the span current where its end was
+/// written.
+fn send_life(life: &sluice_core::life::Life) {
+    if let Some(tracer) = TRACER.get() {
+        life_span(tracer, life, &tracing::Span::current());
+    }
+}
+
+/// 154 (design D5 of `each-submission-shows-its-wait-and-its-test`; rule
+/// core.53): `life` as one span, `sluice.submission`, built with `tracer`
+/// from its submission to the write that ended it. Its parent is the trace
+/// it kept, as [`traceparent`] reads it; where it kept none, or that does
+/// not read, it roots a trace of its own, never nesting under the span
+/// current where it ended. It links to `ending`, the span that ended it,
+/// where that span is sent. Only a blame, `failed`, is an error: a run with
+/// no outcome is named and never its failure (114).
+pub fn life_span<T: opentelemetry::trace::Tracer>(
+    tracer: &T,
+    life: &sluice_core::life::Life,
+    ending: &tracing::Span,
+) {
+    use opentelemetry::trace::{Link, Span as _, Status};
+    use opentelemetry::KeyValue;
+    let time = |t: &str| {
+        chrono::DateTime::parse_from_rfc3339(t)
+            .ok()
+            .map(std::time::SystemTime::from)
+    };
+    let parent = match life.trace.as_deref().and_then(traceparent) {
+        Some(kept) => opentelemetry::Context::new().with_remote_span_context(kept),
+        None => opentelemetry::Context::new(),
+    };
+    let ended = ending.context();
+    let links = Some(ended.span().span_context().clone())
+        .filter(|c| c.is_valid())
+        .map(|c| vec![Link::with_context(c)])
+        .unwrap_or_default();
+    let mut builder = tracer
+        .span_builder("sluice.submission")
+        .with_links(links)
+        .with_attributes(vec![
+            KeyValue::new("sluice.repository", life.repository.clone()),
+            KeyValue::new("sluice.branch", life.branch.clone()),
+            KeyValue::new("sluice.submission", life.submission as i64),
+            KeyValue::new("sluice.head", life.head.clone()),
+            KeyValue::new("sluice.work", life.work.clone()),
+            KeyValue::new("sluice.agent", life.agent.clone()),
+            KeyValue::new("sluice.outcome", life.outcome),
+            KeyValue::new("sluice.waited_seconds", life.waited_seconds),
+            KeyValue::new("sluice.tested_seconds", life.tested_seconds),
+            KeyValue::new("sluice.no_outcome", i64::from(life.no_outcome)),
+        ]);
+    if let Some(start) = time(&life.submitted) {
+        builder = builder.with_start_time(start);
+    }
+    let mut span = builder.start_with_context(tracer, &parent);
+    if life.outcome == "failed" {
+        span.set_status(Status::error("blamed"));
+    }
+    match time(&life.ended) {
+        Some(end) => span.end_with_timestamp(end),
+        None => span.end(),
+    }
+}
+
 /// 153 (design D5; rule core.53): `span` linked to the span `trace`, a
 /// `TRACEPARENT` a submission kept, names, the link holding
 /// `sluice.submission`, its number; a text that does not read adds
@@ -652,6 +719,9 @@ impl Telemetry {
         // and an exec's check spans are built with the tracer kept.
         if let Some(t) = &traces {
             sluice_core::links::set(link);
+            // 154 (design D5 of `each-submission-shows-its-wait-and-its-test`):
+            // and each submission's life is sent as a span of its own.
+            sluice_core::life::set(send_life);
             let _ = TRACER.set(t.tracer("sluice"));
         }
         let _ = SENT.set(settings.clone());
@@ -946,6 +1016,90 @@ mod tests {
                 ),
                 ("sluice.tasks.time_saved".to_string(), "s".to_string()),
             ]
+        );
+    }
+
+    /// A life of submission `n` that ended `outcome`, with `no_outcome`
+    /// runs that decided nothing, submitted under `trace`.
+    fn life(
+        n: u64,
+        outcome: &'static str,
+        no_outcome: u32,
+        trace: Option<&str>,
+    ) -> sluice_core::life::Life {
+        sluice_core::life::Life {
+            repository: "acme/app".into(),
+            branch: "main".into(),
+            submission: n,
+            head: format!("h{n}"),
+            work: format!("unit/{n}"),
+            agent: "agent".into(),
+            trace: trace.map(str::to_string),
+            submitted: "2026-11-18T12:00:00Z".into(),
+            ended: "2026-11-18T12:10:00Z".into(),
+            outcome,
+            waited_seconds: 360.0,
+            tested_seconds: 240.0,
+            no_outcome,
+        }
+    }
+
+    /// 114, 154 (design D5 of `each-submission-shows-its-wait-and-its-test`;
+    /// rule core.53): a blamed submission's life is an error; one withdrawn
+    /// after two runs with no outcome is not, and names both, its parent the
+    /// trace it kept and its times its own.
+    #[test]
+    fn a_life_names_how_it_ended_and_its_runs_with_no_outcome() {
+        use opentelemetry::trace::Status;
+        use opentelemetry_sdk::trace::InMemorySpanExporter;
+        let exporter = InMemorySpanExporter::default();
+        let provider = SdkTracerProvider::builder()
+            .with_simple_exporter(exporter.clone())
+            .build();
+        let tracer = provider.tracer("sluice");
+        let kept = "00-0af7651916cd43dd8448eb211c80319c-b7ad6b7169203331-01";
+        life_span(&tracer, &life(7, "failed", 0, None), &tracing::Span::none());
+        life_span(
+            &tracer,
+            &life(8, "withdrawn", 2, Some(kept)),
+            &tracing::Span::none(),
+        );
+        let spans = exporter.get_finished_spans().unwrap();
+        assert_eq!(spans.len(), 2);
+        let attr = |i: usize, key: &str| {
+            spans[i]
+                .attributes
+                .iter()
+                .find(|kv| kv.key.as_str() == key)
+                .map(|kv| kv.value.clone())
+        };
+        assert!(spans.iter().all(|s| s.name == "sluice.submission"));
+        assert!(matches!(spans[0].status, Status::Error { .. }));
+        assert_eq!(attr(0, "sluice.outcome"), Some("failed".into()));
+        assert_eq!(
+            spans[0].parent_span_id,
+            opentelemetry::trace::SpanId::INVALID
+        );
+        assert!(!matches!(spans[1].status, Status::Error { .. }));
+        assert_eq!(attr(1, "sluice.outcome"), Some("withdrawn".into()));
+        assert_eq!(attr(1, "sluice.no_outcome"), Some(2i64.into()));
+        assert_eq!(attr(1, "sluice.submission"), Some(8i64.into()));
+        assert_eq!(attr(1, "sluice.head"), Some("h8".into()));
+        assert_eq!(attr(1, "sluice.work"), Some("unit/8".into()));
+        assert_eq!(attr(1, "sluice.agent"), Some("agent".into()));
+        assert_eq!(attr(1, "sluice.waited_seconds"), Some(360.0.into()));
+        assert_eq!(attr(1, "sluice.tested_seconds"), Some(240.0.into()));
+        assert_eq!(
+            spans[1].span_context.trace_id().to_string(),
+            "0af7651916cd43dd8448eb211c80319c"
+        );
+        assert_eq!(spans[1].parent_span_id.to_string(), "b7ad6b7169203331");
+        assert_eq!(
+            spans[1]
+                .end_time
+                .duration_since(spans[1].start_time)
+                .unwrap(),
+            std::time::Duration::from_secs(600)
         );
     }
 
