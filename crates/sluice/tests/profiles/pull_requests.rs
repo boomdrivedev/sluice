@@ -2772,8 +2772,8 @@ fn no_wait_then_status() {
 }
 
 /// Waiting for a review: `--status --json` names the pull request's head,
-/// that it is no draft, and what a submit from the worktree would send,
-/// beside its number, branch and state.
+/// that it is no draft, what a submit from the worktree would send and the
+/// wait that follows it (record 0130), beside its number, branch and state.
 #[test]
 fn status_names_the_head_waiting_for_a_review() {
     let g = OnGitHub::new("pr-status-head", "reviews = 1");
@@ -2791,6 +2791,7 @@ fn status_names_the_head_waiting_for_a_review() {
             "pull_request": pull.number, "branch": "main",
             "state": "waiting: needs 1 review", "head": pull.head, "draft": false,
             "sends": pull.head,
+            "wait": format!("sluice wait main --pull-request {}", pull.number),
         })
     );
 }
@@ -6671,6 +6672,11 @@ fn the_status_a_submit_reads_across_hosts() {
             "host": "b", "taken_in": true, "submission": 1406, "state": "queued",
             "ahead": [], "waits_for": [],
         }),
+        "{doc}"
+    );
+    assert_eq!(
+        doc["wait"],
+        format!("sluice wait main --pull-request {}", pull.number).as_str(),
         "{doc}"
     );
 }

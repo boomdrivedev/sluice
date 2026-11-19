@@ -5911,7 +5911,7 @@ fn submit_pull(
                         // (record 0065).
                         let doc = serde_json::json!({
                             "pull_request": number, "branch": branch, "state": now.0,
-                            "head": head, "draft": draft,
+                            "head": head, "draft": draft, "wait": pull_wait(branch, number),
                         });
                         let doc = with_sends(There::with(doc, there.as_ref())?, s, worktree)?;
                         writeln!(out, "{}", with_copy(doc, copy.as_ref())?)?;
@@ -5937,7 +5937,7 @@ fn submit_pull(
         if no_wait || status {
             // Record 0130 D4: the request still open and undecided, the
             // wait that follows it, on a line of its own after its state.
-            if no_wait && !json {
+            if !json {
                 writeln!(out, "wait: {}", pull_wait(branch, number))?;
             }
             return Ok(0);
