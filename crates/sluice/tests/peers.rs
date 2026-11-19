@@ -901,3 +901,77 @@ fn a_wait_follows_its_submission_to_its_queues_new_home() {
     assert_eq!(host_b.state_of(now), "landed");
     host_b.host_process_ended();
 }
+
+/// A child killed and waited for once dropped: a `sluice daemon` never
+/// ends for being idle.
+struct Kept(std::process::Child);
+
+impl Drop for Kept {
+    fn drop(&mut self) {
+        let _ = self.0.kill();
+        let _ = self.0.wait();
+    }
+}
+
+/// host-daemon, "A gate box lands another machine's submission" (129,
+/// 137; design D1 and D8 of `sluice-runs-as-a-daemon`): `main`'s records
+/// are on origin and its signers name the second host, which runs `sluice
+/// daemon`, started in its clone, and no other command; the first host
+/// submits, and the second host's daemon tests and lands the submission,
+/// read from origin with no command run on either host.
+#[test]
+fn a_daemon_lands_what_another_host_submits() {
+    let (host_a, host_b, origin) = two_hosts("peers-daemon", "[\"a\", \"b\"]");
+    let mut daemon = Kept(
+        host_b
+            .command(host_b.repo.dir())
+            .env_remove("SLUICE_ROUND_SLEEP")
+            .arg("daemon")
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .expect("sluice daemon starts"),
+    );
+    let pid = daemon.0.id();
+    let version = host_b.state.path().join("sluice/host/version");
+    let deadline = Instant::now() + Duration::from_secs(30);
+    loop {
+        let named: Option<serde_json::Value> = std::fs::read(&version)
+            .ok()
+            .and_then(|b| serde_json::from_slice(&b).ok());
+        if named.is_some_and(|n| n["pid"] == pid && n["daemon"] == true) {
+            break;
+        }
+        assert!(Instant::now() < deadline, "the daemon never held the host");
+        std::thread::sleep(Duration::from_millis(100));
+    }
+
+    let id = host_a.submit("x");
+    let subject = || {
+        let out = support::git_command()
+            .arg("--git-dir")
+            .arg(origin.path())
+            .args(["log", "-1", "--format=%s", "main"])
+            .output()
+            .unwrap();
+        String::from_utf8_lossy(&out.stdout).into_owned()
+    };
+    let deadline = Instant::now() + Duration::from_secs(120);
+    while !subject().contains(&format!("#{id}")) {
+        assert!(
+            daemon.0.try_wait().unwrap().is_none(),
+            "the daemon ended: {}",
+            std::fs::read_to_string(host_b.state.path().join("sluice/host/log"))
+                .unwrap_or_default()
+        );
+        assert!(
+            Instant::now() < deadline,
+            "never landed: {}\n{}",
+            subject(),
+            std::fs::read_to_string(host_b.state.path().join("sluice/host/log"))
+                .unwrap_or_default()
+        );
+        std::thread::sleep(Duration::from_millis(200));
+    }
+    assert!(refs_under(&origin, "refs/sluice/runs/").contains("refs/sluice/runs/b"));
+}
