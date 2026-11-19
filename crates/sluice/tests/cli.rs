@@ -4320,6 +4320,46 @@ fn step_under_json() {
     );
 }
 
+/// satisfies: the peer-lead spec's "Host B steps a branch whose queue host
+/// A runs": host `a`, accepted by `main` on `origin`, runs its queue, and a
+/// step on this host says `elsewhere`, as its line and its document's
+/// `outcome`, and nowhere `led` (72, 73, 75; core.26).
+#[test]
+fn step_on_a_host_that_does_not_run_the_queue_says_elsewhere() {
+    let f = Fakes::new();
+    f.world.init(
+        "main",
+        &[(
+            POLICY_PATH,
+            "[tests]\nrunner = \"fake\"\n\n[branches.main]\nrequired = []\n\
+             trust = [\"box\"]\nremote = \"origin\"\n\
+             \n[signers.box]\nssh = \"box ssh-ed25519 AAAA\"\n",
+        )],
+    );
+    f.world.be_host("a");
+    f.world.signs_as("box");
+    pool_lead(&f).step("main").unwrap();
+    f.world.be_host("b");
+    let led = |out: &str| {
+        out.split(|c: char| !c.is_alphanumeric())
+            .any(|w| w == "led")
+    };
+    let (code, out) = sluice(&f, &["step", "main"]);
+    assert_eq!(code, 0, "{out}");
+    assert!(
+        out.lines().any(|l| {
+            l
+            == "main: elsewhere: another host runs the branch's queue, and its lease has not passed"
+        }),
+        "{out}"
+    );
+    assert!(!led(&out), "{out}");
+    let (code, out) = sluice(&f, &["step", "main", "--json"]);
+    assert_eq!(code, 0, "{out}");
+    assert_eq!(json(&out)["outcome"], "elsewhere", "{out}");
+    assert!(!led(&out), "{out}");
+}
+
 // ---------------------------------------------------------------------------
 // sluice run, a follower of the host process (135; design D11)
 // ---------------------------------------------------------------------------

@@ -74,7 +74,8 @@ pub enum Step {
     /// Another step holds the branch's lock (rule core.14).
     Busy,
     /// Another instance keeps the branch, and its lease has not passed
-    /// (72, 73).
+    /// (72, 73); `sluice step` says `elsewhere`, another host runs the
+    /// branch's queue (core.26).
     Led,
     /// The records were written between this step's read and its write;
     /// nothing was done (62).
@@ -331,7 +332,7 @@ impl Sluice<'_> {
             // 75: another instance keeps the branch; this one takes, runs
             // and reports runs of its own.
             info_span!("sluice.claim").in_scope(|| self.execute(branch, releases))?;
-            round.record("sluice.step", "led");
+            round.record("sluice.step", "elsewhere");
             return Ok(Step::Led);
         }
         // Record 0122 (design D5; 73, 77): the lead shows its sign of life
