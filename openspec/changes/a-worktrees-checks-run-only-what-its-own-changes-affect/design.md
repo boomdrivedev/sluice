@@ -107,8 +107,23 @@ combination's targets stay what they were, since its list is what moon's
 range gave. `Moon::reads` (140) keeps its revision pairs: it reads no
 worktree, and its pairs are ancestors as well.
 
-Alternative: **stdin for a worktree, the range for a combination.**
-Rejected: that is two affected readings of one profile.
+An empty list asks moon nothing: no file changed, so no task is
+affected, and the plan runs none and sets nothing up (147, rule
+core.46). moon 2.6.1 answers `{"files": []}` with no task as well, but
+given no input at all it reads git's own changes in the place instead
+(probed 2026-11-19), so the profile does not lean on a later moon
+telling the two apart. `tests/checks.rs`'s
+`a_run_that_runs_nothing_is_never_set_up` holds both forms of a run that
+runs nothing: a change moon reads as affecting no required check, moon
+asked, and no change at all, moon not asked.
+
+Alternatives:
+
+- **stdin for a worktree, the range for a combination.** Rejected: that
+  is two affected readings of one profile.
+- **Hand moon the empty list too.** Rejected: it spends a query on an
+  answer the list already gives, and leaves that answer to how moon
+  reads an empty input.
 
 ### D4. A worktree's run replays, and its replays are read as a combination's
 
