@@ -58,6 +58,14 @@ let
       "${lib.concatStringsSep "." path} names ${toString (namesOf base path)} with the module, and ${toString (namesOf off path)} without";
 in
 {
+  # daemon-service, "Unset on nix-darwin" (record 0093 as amended
+  # 2026-11-18; design D12 of `sluice-runs-as-a-daemon`).
+  "The daemon is off unless turned on" =
+    t.expect (!base.config.services.sluice.daemon.enable) "services.sluice.daemon.enable is true unset"
+    ++ t.expect (
+      !(base.config.launchd.user.agents ? sluice)
+    ) "launchd.user.agents names sluice with the daemon unset";
+
   "On nix-darwin" =
     t.expect (t.failures every == [ ]) "every key fails: ${toString (t.failures every)}"
     ++ links every (linkOf every (builtins.readFile ./files/every.toml));

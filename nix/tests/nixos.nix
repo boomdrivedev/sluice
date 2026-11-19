@@ -64,6 +64,17 @@ let
   activationNamesOf = evaluated: builtins.attrNames (activationsOf evaluated);
 in
 {
+  # daemon-service, "Unset on NixOS" (record 0093 as amended 2026-11-18;
+  # design D12 of `sluice-runs-as-a-daemon`).
+  "The daemon is off unless turned on" =
+    t.expect (!base.config.services.sluice.daemon.enable) "services.sluice.daemon.enable is true unset"
+    ++ t.expect (
+      !(base.config.systemd.user.services ? sluice)
+    ) "systemd.user.services names sluice with the daemon unset"
+    ++ t.expect (
+      (lingerOf base).alice == (lingerOf off).alice
+    ) "alice's linger changes with the module, the daemon unset";
+
   "On NixOS" =
     t.expect (t.failures every == [ ]) "every key fails: ${toString (t.failures every)}"
     ++ links every (linkOf every (builtins.readFile ./files/every.toml));
