@@ -1,5 +1,5 @@
 ---
-number: 130
+number: 131
 title: A worktree's checks read its own changes and replay what sluice passed
 status: accepted
 date: 2026-11-19
