@@ -452,16 +452,49 @@ fn an_idle_repositorys_remote_is_asked_once_a_minute() {
             .filter(|(p, args)| *p == pid && asks_a_remote(args))
             .count()
     };
-    within(10, "its first look asks origin", || asks() == 1);
+    let said = || {
+        format!(
+            "{:?}\n{}",
+            &d.git.parented()[before..],
+            std::fs::read_to_string(client.paths().log()).unwrap_or_default()
+        )
+    };
+    let until = Instant::now() + Duration::from_secs(10);
+    while asks() != 1 {
+        assert!(
+            Instant::now() < until,
+            "its first look asks origin: {}",
+            said()
+        );
+        std::thread::sleep(Duration::from_millis(100));
+    }
     std::thread::sleep(Duration::from_secs(7));
-    assert_eq!(asks(), 1, "a look within the minute asked origin");
+    assert_eq!(
+        asks(),
+        1,
+        "a look within the minute asked origin: {}",
+        said()
+    );
 
     let watch = client
         .follow(Path::new(&repository), FollowKind::Watch)
         .expect("the watch follows");
-    within(10, "the watch's opening asks origin", || asks() == 2);
+    let until = Instant::now() + Duration::from_secs(10);
+    while asks() != 2 {
+        assert!(
+            Instant::now() < until,
+            "the watch's opening asks origin: {}",
+            said()
+        );
+        std::thread::sleep(Duration::from_millis(100));
+    }
     std::thread::sleep(Duration::from_secs(4));
-    assert_eq!(asks(), 2, "a watched pass within the minute asked origin");
+    assert_eq!(
+        asks(),
+        2,
+        "a watched pass within the minute asked origin: {}",
+        said()
+    );
     drop(watch);
     drop(held);
 }

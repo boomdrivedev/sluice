@@ -131,7 +131,8 @@ impl Index {
 /// has sluice: its directory is there, and its records list a branch, or a
 /// revision the host holds, its own branches' or a remote's tracking
 /// branches' as last fetched, has the policy (129). Nothing is fetched and
-/// no process started.
+/// no remote asked: a remote's branches are listed as last fetched (129 as
+/// amended 2026-11-19).
 pub fn has_sluice(repository: &Path) -> Result<bool> {
     if !repository.is_dir() {
         return Ok(false);
@@ -142,6 +143,7 @@ pub fn has_sluice(repository: &Path) -> Result<bool> {
         crate::instance::Instance::from_file(None, 1)?,
         Rc::new(crate::retry::Policy::command().recording_where_set()),
     )?;
+    sluice_seams::State::hold(&bound.state);
     if !sluice_seams::State::branches(&bound.state)?.is_empty() {
         return Ok(true);
     }

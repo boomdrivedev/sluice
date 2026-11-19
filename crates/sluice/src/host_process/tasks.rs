@@ -906,7 +906,11 @@ fn repository(inbox: Inbox, room: Shared, asked_only: bool, named: Named, settin
         driver: None,
         reader: None,
         kept: Kept::default(),
-        in_play: pass::in_play(&sluice_of(&bound, &policies, clock)),
+        // 129 as amended 2026-11-19: where it passes at its tick, its first
+        // pass, at once, asks the remote and reads what is in play; read
+        // now, a binding that has asked nothing would list a remote's
+        // branches by asking it first.
+        in_play: !asked_only || pass::in_play(&sluice_of(&bound, &policies, clock)),
         said_driven: false,
         readers,
         repository,
