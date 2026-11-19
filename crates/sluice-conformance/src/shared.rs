@@ -1068,8 +1068,11 @@ pub fn a_worktree_that_changes_while_its_run_runs_records_nothing(h: &impl Rig) 
             .expect("the branch is managed");
         let session = s.seams().driver.session(&place).expect("a session");
         let part = session_part(&s);
+        let work = s
+            .session_work(&plan, &session, None)
+            .expect("the work reads");
         let started = s
-            .start_session(&plan, &place, &session.head, None, part)
+            .start_session(&plan, &place, &session.head, &work, part)
             .expect("the run starts");
         match change {
             "commit" => {

@@ -64,6 +64,7 @@ fn request(repo: &Repo, name: &str, tests: Settings) -> RunRequest {
         revision: sluice_seams::Rev::new(repo.rev("HEAD")),
         required: vec![],
         since: None,
+        beyond: Vec::new(),
         limit: Some(Duration::from_secs(60)),
         limits: Limits::default(),
         tests,
@@ -1787,13 +1788,20 @@ fn a_run_that_runs_a_check_is_set_up() {
 }
 
 /// 147; rule core.46: a combination that affects no required check passes
-/// with nothing run, and its working copy is never set up.
+/// with nothing run, and its working copy is never set up: one whose
+/// changed files moon reads as affecting none, and one that changes no
+/// file, which asks moon nothing (36, 70; the change
+/// `a-worktrees-checks-run-only-what-its-own-changes-affect`, design D3).
 #[test]
 fn a_run_that_runs_nothing_is_never_set_up() {
     let w = Equippable::new("equip-run-nothing", true, "true");
     let c = checks(&w.repo);
+    let since = sluice_seams::Rev::new(w.repo.rev("HEAD"));
+    w.repo.write("docs/note", "read by no task\n");
+    w.repo.git(&["add", "docs/note"]);
+    w.repo.git(&["commit", "-q", "-m", "note"]);
     let mut req = moon_request(&w, "p1");
-    req.since = Some(req.revision.clone());
+    req.since = Some(since);
     let r = finish(&c, &req);
     assert!(r.tasks.is_empty() && r.missing.is_empty(), "{r:?}");
     let log = w.log();
@@ -1802,6 +1810,16 @@ fn a_run_that_runs_nothing_is_never_set_up() {
             .any(|l| l.starts_with("moon query tasks --affected")),
         "{log:?}"
     );
+    assert!(!log.iter().any(|l| l == "moon setup"), "{log:?}");
+
+    let w = Equippable::new("equip-run-no-change", true, "true");
+    let c = checks(&w.repo);
+    let mut req = moon_request(&w, "p2");
+    req.since = Some(req.revision.clone());
+    let r = finish(&c, &req);
+    assert!(r.tasks.is_empty() && r.missing.is_empty(), "{r:?}");
+    let log = w.log();
+    assert!(!log.iter().any(|l| l.contains("--affected")), "{log:?}");
     assert!(!log.iter().any(|l| l == "moon setup"), "{log:?}");
 }
 

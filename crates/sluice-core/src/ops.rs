@@ -1994,6 +1994,10 @@ mod tests {
             unreachable!("a submit reads no history")
         }
 
+        fn merge_base(&self, _: &Rev, _: &Rev) -> Result<Option<Rev>> {
+            unreachable!("a submit reads no history")
+        }
+
         fn move_to(&self, _: &str, _: &Rev, _: &Rev) -> Result<Moved> {
             unreachable!("a submit moves no branch")
         }

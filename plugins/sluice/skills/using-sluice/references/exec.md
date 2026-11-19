@@ -5,30 +5,42 @@
 | you want | run | what it does |
 |---|---|---|
 | a fast loop while editing | `sluice exec <branch> -- moon run <project:task>` (or `-- moon run :test --affected`, `-- npm test`) | your command with the worktree's ports, `SLUICE_TMP`, the host's bound and the branch's limits; moon's cache applies; uncommitted edits count; nothing recorded |
-| the gate's verdict before submitting | commit, then `sluice exec <branch>` | the branch's required tasks your commits affect since the branch's tip, and their dependents (`moon query tasks --affected --downstream deep`, every required task if `.moon/` or a `moon.yml` changed), forced past moon's cache, recorded when the worktree is clean |
+| the gate's verdict before submitting | `sluice exec <branch>`, committed first so it is recorded | the branch's required tasks your own changes affect since your worktree left the branch, your uncommitted and untracked files included, and their dependents (`moon query tasks --affected --downstream deep`, every required task if `.moon/` or a `moon.yml` of yours changed); a task sluice passed on the same files is replayed, and a replay sluice holds no pass for runs again; recorded when the worktree is clean |
 | to know whether that saves the submission work | read the branch's `trust` | reused only on a branch that trusts `"open"` that has not moved since; otherwise feedback only |
 
 Affected-only is the whole gate: a task's key is the task and a hash of its
 inputs, so a task your change does not touch has the key it passed under
 when the branch's tip landed, and the submission's gate already holds that
 result. The submission computes the affected set the same way, since the
-branch's verified revision. `--force` is what makes the run worth recording:
-a replay from moon's cache is not an observation and is never recorded as a
-run.
+branch's verified revision. Your run lets moon answer a task from its
+cache, as the submission's run does, and the replay stands only where
+sluice holds a pass the branch's gate counts for its key. A replay with no
+such pass runs again in the same `sluice exec`. A replay is never recorded
+as a run.
 
 ## `sluice exec <branch>`
 
 ```console
 $ sluice exec feature/x
-running the checks 8d41b6c affects against feature/x (c41e8f2)
+running the checks the worktree's own changes affect since 1a2b3c4 on feature/x, now at c41e8f2
 ports: SLUICE_PORT_DB=20001 SLUICE_PORT_WEB=20000
 …what the tests print…
-passed: 2 tasks
-recorded 2 results under their keys for 8d41b6c
+passed: 2 tasks (1 replayed)
+recorded 1 result under its key for 8d41b6c
 ```
 
-- Runs the tests your head affects against the branch, reading the
-  branch's policy, never your worktree's.
+- Runs the tests your own changes affect since your worktree left the
+  branch: your commits since the last commit you share with it, and every
+  file you hold beyond your head, uncommitted edits and untracked files
+  included. What the branch landed since is not yours. The first line
+  names where you left it, and the branch's revision where it has moved
+  on. A worktree with nothing of its own runs no test and exits 0. It
+  reads the branch's policy, never your worktree's.
+- Replays a test sluice passed on the same files, counted in the pass
+  line, `passed: 2 tasks (1 replayed)`. A replay sluice holds no pass for,
+  as one of a run that was not recorded, runs again in the same command:
+  `replayed with no result sluice recorded: <task>, …; running them
+  again`.
 - Counts against the host's bound (`[runs] max` in
   `~/.config/sluice/config.toml`) while it runs and waits while it is full,
   saying `waiting: the host is at its bound`. The bound counts every

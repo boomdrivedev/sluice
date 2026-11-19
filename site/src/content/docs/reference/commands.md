@@ -18,7 +18,7 @@ sidebar:
 | `sluice amend <id>` | Reorder a queued submission (`--after`, `--priority`) until it is under test. `--branch <branch>` names the branch its number is on, where more than one branch holds it ([below](#sluice-wait)). `--json` for scripts. |
 | `sluice withdraw <id>` | Take a submission out of the queue. One already withdrawn is said so, and exits `0`; one landed is refused. `--branch <branch>` names the branch its number is on, where more than one branch holds it ([below](#sluice-wait)). `--json` for scripts. |
 | `sluice protect` | Install the branch-protection hook; `--remove` takes it out. Warns of a worktree that has checked out a protected branch. `--json` for scripts. |
-| `sluice exec <branch>` | Run the tests this worktree's head affects against the branch, in the worktree, under the host's bound, with the worktree's ports and the branch's limits. `-- <command>` runs a command instead. `--json` for scripts. |
+| `sluice exec <branch>` | Run the tests the worktree's own changes affect since it left the branch, its uncommitted and untracked files included, in the worktree, under the host's bound, with the worktree's ports and the branch's limits. `-- <command>` runs a command instead. `--json` for scripts. |
 | `sluice equip <branch>` | Make this worktree ready for the branch's runner, as sluice makes every checkout ready before it runs anything there: the toolchain, then under moon the tool versions `.prototools` lists installed, moon's version checked and `moon setup`. It holds nothing. `--at <revision>` reads the policy at that revision; `--json` for scripts ([below](#sluice-equip)). |
 | `sluice release` | Release this worktree: run the policy's release command, end what its runs left running, and free its ports. The worktree stays. In a worktree sluice holds nothing for, it runs the default branch's release command all the same ([below](#worktrees-sluice-holds)). `--accept-failure` frees its ports and ends its runs without running the release command. `--json` for scripts. |
 | `sluice preview <branch> <revision>` | Bring up a revision the branch has landed in a checkout of its own, at addresses a person opens, until it is released. `--wait` returns once its command has ended; `--json` for scripts. |
@@ -265,17 +265,46 @@ waiting while the bound is full, and never uses the part
 `[runs] reserved` keeps for submissions. It gets the worktree's ports,
 the same on every run, runs under the branch's executor, memory,
 network and time limit, and ends with its process group. The tests are
-the ones the head affects against the branch, read from the branch's own
-policy, never the worktree's.
+the branch's required tests, read from the branch's own policy, never
+the worktree's, that the worktree's own changes affect, with the tasks
+that depend on them. Its own changes are the files that differ between
+where its head left the branch and the worktree as it stands. Where it
+left the branch is the last commit the two share. The files are its
+commits since then, and every file it holds beyond its head, uncommitted
+edits and untracked files git does not ignore among them. What the
+branch landed since is none of its own. A
+change to the runner's own configuration among them, under moon a
+`moon.yml` or `.moon/`, runs every required test, and so does a head
+that shares no history with the branch. A worktree with nothing of its
+own runs no test and exits `0`.
+
+The first line names the commit its changes are read from, and the
+branch's revision where the branch has moved on past it. A head with no
+commit in common with the branch says `running every required check:
+the worktree's head shares no history with <branch>`.
 
 ```console
 $ sluice exec feature/concurrent-units
-running the checks 8d41b6c affects against feature/concurrent-units (c41e8f2)
+running the checks the worktree's own changes affect since 1a2b3c4 on feature/concurrent-units, now at c41e8f2
 ports: SLUICE_PORT_DB=20001 SLUICE_PORT_WEB=20000
 …what the tests print…
-passed: 2 tasks
-recorded 2 results under their keys for 8d41b6c
+passed: 2 tasks (1 replayed)
+recorded 1 result under its key for 8d41b6c
 ```
+
+The runner may answer a test from its cache, as it may in a
+combination's run. Such a replay stands only where sluice holds a pass
+the branch's gate counts for the test's key, held to the run's limits,
+grant and system, as a combination's replay is. A test sluice passed on
+the same files is so replayed, and the pass line counts it: `passed: 2
+tasks (1 replayed)`. Where the runner replays a test sluice holds no
+such pass for, as one a run of an unclean worktree passed, exec says
+`replayed with no result sluice recorded: <test>, …; running them
+again`. It then runs those tests again in the worktree, with no replay,
+waiting for room in the host's bound as the first run did. Their
+results stand in place of the replays, recorded as the first run's are,
+and the summary, the exit and `--json` are of the two runs together. A
+replay is never recorded as a run.
 
 When the worktree holds exactly its head, with nothing modified, staged
 or untracked, each test's result is recorded under its key as an open
@@ -309,18 +338,21 @@ test as not run: it never ran, and the task is the one to fix.
 
 ```console
 $ sluice exec main
-running the checks 8d41b6c affects against main (c41e8f2)
+running the checks the worktree's own changes affect since c41e8f2 on main
 …what the tests print…
 failed: api:integration
   root:integration failed by api:integration, a task it depends on
 recorded 1 result under its key for 8d41b6c
 ```
 
-Under `--json`, `dependencies` gives each task that failed a test as
-`tasks` gives a test, `{task, hash, outcome, recorded}`, and
-`failed_by` gives each test a task failed, `{task, by}`, `by` naming
-the tasks. Neither is in `missing`, which lists only the required tests the
-run left without a result.
+Under `--json`, `since` is the full revision the worktree's own changes
+are read from, or `null` for a head that shares no history with the
+branch, and for a command. `tasks` gives each test as `{task, hash,
+outcome, recorded, replayed}`, `replayed` true for a test the runner
+answered from its cache. `dependencies` gives each task that failed a
+test as `tasks` gives a test, and `failed_by` gives each test a task
+failed, `{task, by}`, `by` naming the tasks. Neither is in `missing`,
+which lists only the required tests the run left without a result.
 
 `sluice exec <branch> -- <command>` runs any command the same way, with
 `SLUICE_CHECKOUT`, `SLUICE_TMP` and the ports in its environment, and
@@ -504,7 +536,7 @@ its release went, once:
 ```console
 $ sluice exec feature/concurrent-units
 freed /home/me/wt/unit-c: it no longer exists; its release ran once from its scratch directory; its runs ended, its ports free
-running the checks 8d41b6c affects against feature/concurrent-units (c41e8f2)
+running the checks the worktree's own changes affect since 1a2b3c4 on feature/concurrent-units, now at c41e8f2
 …
 ```
 

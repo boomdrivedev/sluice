@@ -524,6 +524,7 @@ fn a_run_s_environment() -> (String, String) {
         revision: Rev::new(revision.clone()),
         required: vec![],
         since: None,
+        beyond: Vec::new(),
         limit: Some(Duration::from_secs(60)),
         limits: Limits::default(),
         tests: Settings::from([

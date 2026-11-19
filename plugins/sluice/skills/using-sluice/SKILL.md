@@ -312,11 +312,16 @@ Pick the form by what you want from the run:
    sluice exec main
    ```
 
-   It runs the branch's required tasks that your commits since the branch's
-   tip affect, with the tasks that depend on them, forced past moon's cache
-   so the run is observed. That is the whole gate: every task your change
-   does not touch has the same key (the task plus a hash of its inputs) it
-   passed under when the tip landed, so you do not need to run everything.
+   It runs the branch's required tasks that your own changes affect since
+   your worktree left the branch, your uncommitted files included, with
+   the tasks that depend on them. What the branch landed since is not
+   yours. That is the whole gate: every task your change does not touch
+   has the same key (the task plus a hash of its inputs) it passed under
+   when the tip landed, so you do not need to run everything. A task
+   sluice passed on the same files is replayed from moon's cache, and a
+   replay sluice holds no pass for runs again in the same command, so what
+   it says is what the gate would read. Commit first: only a run of a
+   clean worktree is recorded.
 3. **Whether that run saves the submission any work** depends on the
    branch's `trust` in `.config/sluice.toml`. It is recorded, as an `open`
    run, only when the worktree holds exactly its head. A submission reuses

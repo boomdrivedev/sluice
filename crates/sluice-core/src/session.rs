@@ -12,7 +12,7 @@ use sluice_seams::{
 };
 
 use crate::policy::{Policy, Rules};
-use crate::records::{Event, ResultLine};
+use crate::records::{Event, ResultLine, UnprovenKey};
 use crate::Sluice;
 
 /// What a session run is held to: the branch's revision and the policy
@@ -23,6 +23,72 @@ pub struct SessionPlan {
     pub base: Rev,
     pub policy: Policy,
     pub rules: Rules,
+}
+
+/// What a session run runs (89).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum SessionWork {
+    /// The branch's required checks the worktree's own changes affect,
+    /// with what depends on them (36): those since `since`, where its head
+    /// left the branch, and the paths in `beyond`, what it holds beyond its
+    /// head; every required check where `since` is `None`, a head that
+    /// shares no history with the branch (70; design D1, D2 of
+    /// a-worktrees-checks-run-only-what-its-own-changes-affect).
+    Checks {
+        since: Option<Rev>,
+        beyond: Vec<String>,
+    },
+    /// A command, in place of the runner's checks (89).
+    Command(String),
+    /// Design D5: these checks again, each run with no replay and nothing
+    /// read beyond the worktree's head: the replays of the run before it
+    /// that no pass the gate counts proved (108).
+    Again(Vec<String>),
+}
+
+impl SessionWork {
+    /// The checks the worktree `session` holds affect since `since`, its
+    /// head's merge base with the branch ([`Sluice::session_since`]).
+    pub fn checks(since: Option<Rev>, session: &Session) -> SessionWork {
+        SessionWork::Checks {
+            since,
+            beyond: beyond(&session.dirty),
+        }
+    }
+
+    pub fn command(&self) -> Option<&str> {
+        match self {
+            SessionWork::Command(c) => Some(c),
+            SessionWork::Checks { .. } | SessionWork::Again(_) => None,
+        }
+    }
+}
+
+/// A path of what a worktree holds beyond its head, an entry of
+/// [`Session::dirty`], without the status `git status --porcelain` puts
+/// before it: `new <- old` for a rename or a copy.
+pub fn path_of(line: &str) -> &str {
+    let b = line.as_bytes();
+    if b.len() > 3 && b[2] == b' ' && b[..2].iter().all(|c| b" MTADRCU?!".contains(c)) {
+        &line[3..]
+    } else {
+        line
+    }
+}
+
+/// Design D2: each path `dirty` names, as [`path_of`] reads it, both
+/// paths of a rename or a copy.
+fn beyond(dirty: &[String]) -> Vec<String> {
+    let mut paths = Vec::new();
+    for line in dirty {
+        let path = path_of(line);
+        let moved = line.len() > 3 && line.as_bytes()[..2].iter().any(|c| b"RC".contains(c));
+        match path.split_once(" <- ").filter(|_| moved) {
+            Some((new, old)) => paths.extend([new.to_string(), old.to_string()]),
+            None => paths.push(path.to_string()),
+        }
+    }
+    paths
 }
 
 /// A session run under way: its place and its run.
@@ -63,6 +129,10 @@ pub struct Finished {
     /// session is told.
     pub report: RunReport,
     pub unkept: Option<String>,
+    /// 108; design D4: the checks the run replayed whose key holds no
+    /// pass the branch's gate counts, each with why, for `sluice exec` to
+    /// run again (design D5). Empty for a command.
+    pub unproven: Vec<UnprovenKey>,
 }
 
 /// A session's place freed because its worktree no longer exists
@@ -148,52 +218,79 @@ impl Sluice<'_> {
         self.seams.tests.unmet(&engine)
     }
 
-    /// 89, 83: a session run of the checks `head` affects against the
-    /// branch, or of `command`, in `place`, under the branch's executor,
-    /// limits and time limit; never answered from the cache, since what a
-    /// session run records must be observed (16). A command runs in place
-    /// of the runner's checks, in a worktree equipped by the runner the
-    /// branch's policy names (147).
+    /// 36, 70; design D1: where the session's head left the branch, the
+    /// merge base of its head and the branch's revision the plan read, from
+    /// which a run of its checks reads its own changes; `None` where the
+    /// two share no commit, so every required check runs.
+    pub fn session_since(&self, plan: &SessionPlan, session: &Session) -> Result<Option<Rev>> {
+        self.seams.branch.merge_base(&session.head, &plan.base)
+    }
+
+    /// 89: what a session run of `session` runs: `command`, or the checks
+    /// its own changes affect since [`Sluice::session_since`].
+    pub fn session_work(
+        &self,
+        plan: &SessionPlan,
+        session: &Session,
+        command: Option<&str>,
+    ) -> Result<SessionWork> {
+        Ok(match command {
+            Some(c) => SessionWork::Command(c.to_string()),
+            None => SessionWork::checks(self.session_since(plan, session)?, session),
+        })
+    }
+
+    /// 89, 83: a session run of `work` on `head` in `place`, under the
+    /// branch's executor, limits and time limit. A run of the checks may
+    /// be answered from the runner's cache, as a combination's is: a
+    /// replay is never recorded as a run (16), and counts only through a
+    /// pass the gate counts for its key (108; design D4). A command runs in
+    /// place of the runner's checks, in a worktree equipped by the runner
+    /// the branch's policy names (147).
     pub fn session_request(
         plan: &SessionPlan,
         place: Place,
         head: &Rev,
-        command: Option<&str>,
+        work: &SessionWork,
     ) -> RunRequest {
         let mut tests = plan.policy.tests.clone();
-        let required = match command {
-            None => plan.rules.required.clone(),
-            Some(_) => {
+        let (required, since, beyond) = match work {
+            SessionWork::Checks { since, beyond } => {
+                (plan.rules.required.clone(), since.clone(), beyond.clone())
+            }
+            SessionWork::Command(_) => {
                 // Could-not-run-1 114: a not-run exit says a check could
                 // not run here; a command's exit is its own, so none of
                 // its exits is read so.
                 tests.remove("not_run");
-                Vec::new()
+                (Vec::new(), Some(plan.base.clone()), Vec::new())
             }
+            SessionWork::Again(checks) => (checks.clone(), None, Vec::new()),
         };
         RunRequest {
             place,
             revision: head.clone(),
             required,
-            since: Some(plan.base.clone()),
+            since,
+            beyond,
             limit: plan.rules.timeout,
             limits: plan.policy.limits.clone(),
             tests,
-            command: command.map(str::to_string),
-            replay: false,
+            command: work.command().map(str::to_string),
+            replay: matches!(work, SessionWork::Checks { .. }),
             system: None,
         }
     }
 
-    /// 89, 90: adopt the session's worktree and start its run there, of
-    /// the checks or of `command`, in `part`, the room in the host's bound
-    /// its caller holds for it (71, 150; rule core.49).
+    /// 89, 90: adopt the session's worktree and start its run of `work`
+    /// there, in `part`, the room in the host's bound its caller holds for
+    /// it (71, 150; rule core.49).
     pub fn start_session(
         &self,
         plan: &SessionPlan,
         worktree: &str,
         head: &Rev,
-        command: Option<&str>,
+        work: &SessionWork,
         part: Part,
     ) -> Result<SessionStart> {
         let place = self.seams.checkout.adopt(
@@ -202,7 +299,7 @@ impl Sluice<'_> {
             &plan.policy.checkout,
             &self.now(),
         )?;
-        let request = Sluice::session_request(plan, place.clone(), head, command);
+        let request = Sluice::session_request(plan, place.clone(), head, work);
         let run = self.seams.tests.start(&request, part)?;
         Ok(SessionStart { place, run })
     }
@@ -233,11 +330,50 @@ impl Sluice<'_> {
         command: bool,
         report: &RunReport,
     ) -> Result<Finished> {
+        self.finish_session_run(plan, session, started, command, report, None)
+    }
+
+    /// Design D5: a run again of `first`'s unproven replays, finished as
+    /// [`Sluice::finish_session`] finishes a run, read and recorded on its
+    /// own (92); what the session is told and left on its place is the two
+    /// runs joined, this run's checks in place of the replays they ran.
+    pub fn finish_again(
+        &self,
+        plan: &SessionPlan,
+        session: &Session,
+        started: &SessionStart,
+        report: &RunReport,
+        first: &Finished,
+    ) -> Result<Finished> {
+        self.finish_session_run(plan, session, started, false, report, Some(first))
+    }
+
+    fn finish_session_run(
+        &self,
+        plan: &SessionPlan,
+        session: &Session,
+        started: &SessionStart,
+        command: bool,
+        report: &RunReport,
+        first: Option<&Finished>,
+    ) -> Result<Finished> {
         let report = &match command {
             true => report.clone(),
             false => self.after_run(&started.run, &plan.policy.limits, report.clone())?,
         };
         let recorded = self.record_finished(plan, session, started, command, report)?;
+        let (report, unproven) = &match command {
+            true => (report.clone(), Vec::new()),
+            false => self.read_replays(plan, report.clone())?,
+        };
+        let (report, recorded) = &match first {
+            None => (report.clone(), recorded),
+            Some(f) => (
+                joined(&f.report, report),
+                joined_recorded(&f.recorded, recorded),
+            ),
+        };
+        let recorded = recorded.clone();
         let outcome = if report.timed_out {
             RunOutcome::TimedOut
         } else if passed(report) {
@@ -274,7 +410,60 @@ impl Sluice<'_> {
             recorded,
             report: report.clone(),
             unkept,
+            unproven: unproven.clone(),
         })
+    }
+
+    /// 108, 19; design D4: a worktree's replays read as a combination's,
+    /// through [`crate::verdict::read`] against the branch's results for
+    /// the keys the run replayed, under its rules, on the host's own
+    /// system, with nothing given to prove. A replay no counted pass
+    /// proves is returned with why; a proven one whose key holds a counted
+    /// fail too reads as `flaky` says, a fail in the report where it reads
+    /// failed. Nothing of the reading is recorded or decides anything
+    /// (rule core.18).
+    fn read_replays(
+        &self,
+        plan: &SessionPlan,
+        mut report: RunReport,
+    ) -> Result<(RunReport, Vec<UnprovenKey>)> {
+        let replayed = |t: &sluice_seams::TaskResult| matches!(t.source, Source::Replayed { .. });
+        let ask = report
+            .tasks
+            .iter()
+            .chain(&report.dependencies)
+            .filter(|t| replayed(t))
+            .fold(sluice_seams::ResultAsk::default(), |ask, t| {
+                ask.key(&t.task, &t.hash)
+            });
+        if ask == sluice_seams::ResultAsk::default() {
+            return Ok((report, Vec::new()));
+        }
+        let results = self.results_for(&plan.branch, &ask)?;
+        let home = self.home_system(&plan.base)?;
+        let v = crate::verdict::read(
+            &report,
+            &results,
+            &plan.rules,
+            home.as_deref(),
+            home.as_deref(),
+            None,
+            &[],
+        );
+        for t in report
+            .tasks
+            .iter_mut()
+            .chain(report.dependencies.iter_mut())
+        {
+            if replayed(t)
+                && v.failed
+                    .iter()
+                    .any(|f| f.task == t.task && f.hash == t.hash)
+            {
+                t.outcome = Outcome::Fail;
+            }
+        }
+        Ok((report, v.unproven))
     }
 
     /// 97: a session run that ended with no report, lost or stopped, leaves
@@ -403,6 +592,44 @@ impl Sluice<'_> {
             self.seams.state.record_results(&bytes)?;
         }
         Ok(n)
+    }
+}
+
+/// Design D5: `first`'s report with the checks `again` ran in place of the
+/// replays it ran them for.
+fn joined(first: &RunReport, again: &RunReport) -> RunReport {
+    let ran = |t: &sluice_seams::TaskResult| {
+        again
+            .tasks
+            .iter()
+            .chain(&again.dependencies)
+            .any(|a| a.task == t.task)
+    };
+    let mut report = first.clone();
+    report.tasks.retain(|t| !ran(t));
+    report.tasks.extend(again.tasks.iter().cloned());
+    report.dependencies.retain(|t| !ran(t));
+    report
+        .dependencies
+        .extend(again.dependencies.iter().cloned());
+    report.failed_by.extend(again.failed_by.iter().cloned());
+    report.missing.extend(again.missing.iter().cloned());
+    report.not_run.extend(again.not_run.iter().cloned());
+    report.kept_out.extend(again.kept_out.iter().cloned());
+    report.timed_out |= again.timed_out;
+    if report.refusals_unread.is_none() {
+        report.refusals_unread = again.refusals_unread.clone();
+    }
+    report
+}
+
+/// Design D5: what two runs recorded, as one: their results written,
+/// counted together, or why the one that wrote none did not.
+fn joined_recorded(first: &Recorded, again: Recorded) -> Recorded {
+    match (first, again) {
+        (Recorded::Written(a), Recorded::Written(b)) => Recorded::Written(a + b),
+        (Recorded::Written(_), again) => again,
+        (first, _) => first.clone(),
     }
 }
 
@@ -628,8 +855,9 @@ impl Sluice<'_> {
 mod tests {
     use chrono::{DateTime, TimeZone, Utc};
     use sluice_fakes::Fakes;
-    use sluice_seams::{Checkout, Settings};
+    use sluice_seams::{Checkout, Outcome, Settings, Source};
 
+    use crate::policy::POLICY_PATH;
     use crate::{Clock, Seams, Sluice};
 
     struct Noon;
@@ -674,5 +902,73 @@ mod tests {
             vec![0],
             "asked once, after both were freed"
         );
+    }
+
+    /// A session run of the checks in the worktree `worktree`, started and
+    /// finished as `sluice exec` does.
+    fn run_checks(s: &Sluice<'_>, worktree: &str) -> super::Finished {
+        let plan = s.session_plan("bolt/x").unwrap().unwrap();
+        let session = s.seams.driver.session(worktree).unwrap();
+        let work = s.session_work(&plan, &session, None).unwrap();
+        let part = s
+            .seams
+            .tests
+            .hold(sluice_seams::RunKind::Session)
+            .unwrap()
+            .unwrap();
+        let started = s
+            .start_session(&plan, worktree, &session.head, &work, part)
+            .unwrap();
+        let report = match s.seams.tests.progress(&started.run).unwrap() {
+            sluice_seams::Progress::Finished(r) => r,
+            other => panic!("{other:?}"),
+        };
+        s.finish_session(&plan, &session, &started, false, &report)
+            .unwrap()
+    }
+
+    /// Design D4 (the exec-checks spec's "A check sluice already passed on
+    /// the same files is replayed"; 19, 108): a worktree's replay proven
+    /// by a counted pass, of a key that holds a counted fail too, reads as
+    /// the branch's `flaky` says: a failed check where it is not `pass`.
+    #[test]
+    fn a_worktrees_replay_of_a_flaky_key_reads_as_the_branch_says() {
+        for (flaky, outcome) in [("fail", Outcome::Fail), ("pass", Outcome::Pass)] {
+            let f = Fakes::new();
+            let policy = format!(
+                "[tests]\nrunner = \"fake\"\n\n[branches.\"bolt/*\"]\n\
+                 required = [\"#gate\"]\nflaky = \"{flaky}\"\ntimeout = \"20m\"\n"
+            );
+            let base = f
+                .world
+                .init("bolt/x", &[(POLICY_PATH, &policy), ("a/lib", "1")]);
+            f.world.task("a:test", "a/");
+            let head = f.world.work(&base, &[("a/lib", Some("2"))]);
+            f.world.session("/w/a", "agent-a", &head);
+            let seams = Seams {
+                checkout: &f.checkout,
+                tests: &f.tests,
+                branch: &f.branch,
+                driver: &f.driver,
+                state: &f.state,
+            };
+            let s = Sluice::new(seams, &Noon);
+            // A fail, then a pass, of one key, both recorded.
+            f.world.flaky("a:test", &[Outcome::Fail, Outcome::Pass]);
+            for _ in 0..2 {
+                let ran = run_checks(&s, "/w/a");
+                assert_eq!(ran.recorded, super::Recorded::Written(1), "{flaky}");
+            }
+            let replayed = run_checks(&s, "/w/a");
+            let t = &replayed.report.tasks[..];
+            assert_eq!(t.len(), 1, "{flaky}: {t:?}");
+            assert!(
+                matches!(t[0].source, Source::Replayed { .. }),
+                "{flaky}: {t:?}"
+            );
+            assert_eq!(t[0].outcome, outcome, "{flaky}");
+            assert!(replayed.unproven.is_empty(), "{flaky}: proven by its pass");
+            assert_eq!(replayed.recorded, super::Recorded::Written(0), "{flaky}");
+        }
     }
 }

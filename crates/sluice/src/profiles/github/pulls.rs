@@ -2875,6 +2875,10 @@ impl Branch for ReadOnce<'_> {
         self.branch.contains(tip, rev)
     }
 
+    fn merge_base(&self, a: &Rev, b: &Rev) -> Result<Option<Rev>> {
+        self.branch.merge_base(a, b)
+    }
+
     fn landed_by(&self, tip: &Rev, rev: &Rev) -> Result<Option<Rev>> {
         self.branch.landed_by(tip, rev)
     }

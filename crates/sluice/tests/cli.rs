@@ -4563,9 +4563,9 @@ fn exec_outside_a_worktree_is_refused() {
     assert_eq!(code, CONFLICT, "{out}");
 }
 
-/// 89: the checks the head affects against the branch run in the
-/// worktree's adopted place, count against the bound only while they run, and the
-/// exit is theirs.
+/// 89, 36: the checks the worktree's own changes affect since it left the
+/// branch run in the worktree's adopted place, count against the bound
+/// only while they run, and the exit is theirs.
 #[test]
 fn exec_runs_the_affected_checks_against_the_branch() {
     let f = setup();
@@ -4581,7 +4581,7 @@ fn exec_runs_the_affected_checks_against_the_branch() {
     let req = f.world.requests().pop().unwrap();
     assert_eq!(req.place.name, "session/unit/a");
     assert_eq!(req.since, Some(base.clone()));
-    assert!(!req.replay);
+    assert!(req.replay, "a check sluice passed is replayed");
     assert_eq!(f.world.observed().len(), 1, "only the affected check ran");
     assert_eq!(f.world.adopted_places(), ["session/unit/a"]);
     assert_eq!(
@@ -4593,11 +4593,7 @@ fn exec_runs_the_affected_checks_against_the_branch() {
     assert_eq!(
         lines[0],
         format!(
-            "running the checks {} affects against {BRANCH} ({})",
-            sluice_seams::Driver::session(&f.driver, "unit/a")
-                .unwrap()
-                .head
-                .short(),
+            "running the checks the worktree's own changes affect since {} on {BRANCH}",
             base.short()
         )
     );
@@ -4605,10 +4601,18 @@ fn exec_runs_the_affected_checks_against_the_branch() {
     assert_eq!(lines[n - 2], "passed: 1 task");
     assert!(lines[n - 1].starts_with("recorded 1 result under its key for "));
 
+    // A new edit the check fails on: no pass is recorded for these files,
+    // so nothing is replayed, the check runs, and its fail is the exit.
+    work(
+        &f,
+        "unit/a",
+        "agent-a",
+        &[("plugin/lib/plan.py", Some("p3"))],
+    );
     f.world
-        .fails_with("plugin:test", "plugin/lib/plan.py", "p2");
+        .fails_with("plugin:test", "plugin/lib/plan.py", "p3");
     let (code, out) = exec(&f, &[BRANCH, "--worktree", "unit/a"]);
-    assert_eq!(code, FAILED);
+    assert_eq!(code, FAILED, "{out}");
     assert!(out.contains("failed: plugin:test\n"), "{out}");
 }
 
