@@ -1686,8 +1686,11 @@ impl Following {
     pub fn start(&mut self, s: &Sluice<'_>) -> Result<()> {
         s.check_host_systems()?;
         if !self.told {
+            // D13 of `sluice-runs-as-a-daemon`: a machine that chooses to
+            // keep the host process running keeps `sluice daemon`.
             telemetry::warn(
-                "sluice: sluice starts its own host process; nothing needs `sluice run`",
+                "sluice: sluice starts its own host process; nothing needs `sluice run`, and \
+                 `sluice daemon` keeps it running on a machine that chooses to",
             );
             self.told = true;
         }

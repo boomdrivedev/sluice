@@ -4346,14 +4346,19 @@ fn sluice_run_follows_the_host_process() {
 }
 
 /// host-driver, "Started by hand": `sluice run` says once on stderr that
-/// nothing needs it, and `sluice --help` names no `run` (135).
+/// nothing needs it and that `sluice daemon` keeps the host process running
+/// on a machine that chooses to, and `sluice --help` names no `run` (135,
+/// 137; design D13 of `sluice-runs-as-a-daemon`).
 #[test]
 fn sluice_run_says_nothing_needs_it() {
     if let Some(err) = stderr_of("sluice_run_says_nothing_needs_it") {
         let said: Vec<&str> = err.lines().filter(|l| l.starts_with("sluice: ")).collect();
         assert_eq!(
             said,
-            ["sluice: sluice starts its own host process; nothing needs `sluice run`"],
+            [
+                "sluice: sluice starts its own host process; nothing needs `sluice run`, and \
+                 `sluice daemon` keeps it running on a machine that chooses to"
+            ],
             "{err}"
         );
         return;
