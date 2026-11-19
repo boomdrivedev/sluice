@@ -13,7 +13,7 @@ Full reference: <https://agentplot.github.io/sluice/reference/commands/>.
 | `--priority N` | Higher goes first, ahead of lower-priority submissions not yet under test; the default is 0. |
 | `--subject <text>` | One line saying what lands: the title of the pull request the submit opens, or of one it opened before, and the name of its landing commit. With several worktrees, once for each, in their order, or not at all. |
 | `--worktree <path>` | Submit from another worktree than the current directory. Given more than once, every worktree's head as one act, in that order: see below. |
-| `--json` | One JSON document: the submission record when it finishes; `{id,branch,ahead}` with `--no-wait`, and `{id,branch,ahead,pull_request}` for a pull request sluice queued at once; `{"conflict":null}` or `{"conflict":{paths,with}}` with `--check`; `{pull_request,branch,state}` for a pull request still waiting for its conditions, with its `head` and `draft` under `--status`, and `taken_in_by`, `{host}` naming the host that keeps the branch, and `queue` where another host keeps the branch and takes its pull requests in; under `--status`, with `sends`, the revision a submit from the worktree would send now; `{branch,submissions}` for several worktrees. |
+| `--json` | One JSON document: the submission record when it finishes; `{id,branch,ahead}` with `--no-wait`, and `{id,branch,ahead,pull_request,wait}` for a pull request sluice queued at once; `{"conflict":null}` or `{"conflict":{paths,with}}` with `--check`; `{pull_request,branch,state,wait}` for a pull request still waiting for its conditions, with its `head` and `draft` under `--status`, and `taken_in_by`, `{host}` naming the host that keeps the branch, and `queue` where another host keeps the branch and takes its pull requests in; under `--status`, with `sends`, the revision a submit from the worktree would send now; `{branch,submissions}` for several worktrees. A pull request's `wait` is the command that follows it by its number from any folder: start it in the background. |
 | `--timeout 9m` | `wt submit` only: submit, then wait at most that long, exit `5` when it runs out; run again, follow the submission already made. See "Who moves the queue". |
 
 ## Refused: a required task kept out of CI
@@ -95,6 +95,10 @@ sluice submit main --worktree ../feature-a --worktree ../feature-b --no-wait --j
 - `--check` and `--status` take one worktree (exit `64` with more).
 - `--subject` is given once per worktree, in their order, or not at all
   (exit `64` otherwise); each names its own submission.
+- On a branch that takes pull requests, each item of `submissions` for a
+  pull request still open gives its `wait`, `sluice wait main
+  --pull-request 41`, and a waiting act stopped or out of time says
+  `still open: #41; sluice wait main --pull-request 41` for each.
 
 ## Who moves the queue
 
@@ -153,6 +157,26 @@ testing main + #38 + #40 + #41
 passed · landed as b7d2e94
 ```
 
+- `--no-wait --json` answers with the pull request's `wait`, the command
+  to start in the background, again for as long as it exits `5`, from any
+  folder of the repository:
+
+  ```
+  $ sluice submit main --no-wait --json
+  {"id":12,"branch":"main","ahead":[],"pull_request":41,"wait":"sluice wait main --pull-request 41"}
+  $ sluice submit main --no-wait --json
+  {"pull_request":41,"branch":"main","state":"waiting: needs 1 review","wait":"sluice wait main --pull-request 41"}
+  $ sluice wait main --pull-request 41 --timeout 9m --json
+  ```
+
+  The first answer is a pull request sluice queued at once, and the
+  second one still waiting for its conditions. In words, the answer ends
+  with `wait: sluice wait main --pull-request 41`.
+- Where another host keeps the branch and takes its pull requests in, the
+  answer gives `taken_in_by` and `queue` too. `queue.submission` is the
+  number on the host that takes the request in, never one to hand to
+  `sluice wait`: on this host it may name another submission, or none.
+  Follow the pull request with its `wait`.
 - Its title is the `--subject`, or your branch's name with none. A later
   `--subject` retitles a pull request sluice opened, never one a person
   opened; a submit with none leaves the title as it is.
