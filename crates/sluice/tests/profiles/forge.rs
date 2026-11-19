@@ -800,11 +800,18 @@ struct OnGitHub {
 #[cfg(feature = "tools")]
 impl OnGitHub {
     fn new(name: &str, forge: Forge) -> OnGitHub {
-        let repo = support::Repo::new(name);
-        repo.write(
-            ".config/sluice.toml",
+        OnGitHub::with_policy(
+            name,
             "[tests]\nrunner = \"command\"\ncommand = \"true\"\n\n[branches.main]\nremote = \"origin\"\n",
-        );
+            forge.start(),
+        )
+    }
+
+    /// A repository whose `main` holds `policy`, on GitHub as `fake`
+    /// answers.
+    fn with_policy(name: &str, policy: &str, fake: Fake) -> OnGitHub {
+        let repo = support::Repo::new(name);
+        repo.write(".config/sluice.toml", policy);
         repo.git(&["add", "-A"]);
         repo.git(&["commit", "-q", "-m", "sluice's policy"]);
         let bare = repo.bare_origin();
@@ -818,7 +825,7 @@ impl OnGitHub {
             repo,
             _bare: bare,
             config: support::Scratch::new(&format!("{name}-config")),
-            fake: forge.start(),
+            fake,
         }
     }
 
@@ -1283,8 +1290,10 @@ fn the_pools_calls() {
                 json!({ "workflow_runs": [
                     { "id": 1, "display_title": "sluice pool/forge/7", "status": "queued" },
                     { "id": 2, "display_title": "sluice pool/forge/9", "status": "in_progress" },
-                    { "id": 3, "display_title": "sluice pool/forge/10", "status": "completed" },
-                    { "id": 4, "display_title": "sluice pool/forge/11", "status": "completed" },
+                    { "id": 3, "display_title": "sluice pool/forge/10", "status": "completed",
+                      "html_url": "https://github.com/o/r/actions/runs/3" },
+                    { "id": 4, "display_title": "sluice pool/forge/11", "status": "completed",
+                      "html_url": "https://github.com/o/r/actions/runs/4" },
                 ] }),
             );
         }
@@ -1385,11 +1394,17 @@ fn the_pools_calls() {
             why: None
         }
     );
+    // 115 as amended 2026-11-18 (record 0031 as amended 2026-11-18): a job
+    // lost names its workflow run, where GitHub keeps its log.
     assert_eq!(
         job("pool/forge/11"),
         Job::Ended {
             recorded: false,
-            why: None
+            why: Some(
+                "pool/forge/11's job ended with no record of its run; its log is at \
+                 https://github.com/o/r/actions/runs/4"
+                    .into()
+            )
         }
     );
     assert_eq!(job("pool/forge/8"), Job::None);
@@ -2467,15 +2482,17 @@ fn a_bundle_no_carried_root_verifies_counts_for_nothing() {
 
 /// Record 0119 (design D14): `main`'s pool on GitHub Actions and its
 /// signer, as `sluice init actions` appends them.
+/// A policy naming a pool on GitHub Actions, `forge`, and its signer, for
+/// `main` and for feature branches made from it.
+const POOL_POLICY: &str = "[tests]\nrunner = \"moon\"\n\n[branches.main]\nrequired = [\"#gate\"]\nremote = \"origin\"\n\
+     \n[branches.\"feature/*\"]\nrequired = [\"#gate\"]\nremote = \"origin\"\n\
+     \n[systems]\nlinux-x64 = { os = \"linux\", arch = \"x86_64\" }\n\
+     \n[signers.forge]\ngithub = { workflow = \".github/workflows/sluice.yml\", ref = \"refs/heads/main\" }\n\
+     \n[pools.forge]\ngithub = { workflow = \".github/workflows/sluice.yml\" }\nsigner = \"forge\"\n\
+     runners = { linux-x64 = \"ubuntu-24.04\" }\n";
+
 fn actions_pool() -> (sluice_core::policy::Pool, (String, sluice_seams::Setting)) {
-    let p = sluice_core::policy::Policy::parse(
-        "[tests]\nrunner = \"moon\"\n\n[branches.main]\nrequired = [\"#gate\"]\nremote = \"origin\"\n\
-         \n[systems]\nlinux-x64 = { os = \"linux\", arch = \"x86_64\" }\n\
-         \n[signers.forge]\ngithub = { workflow = \".github/workflows/sluice.yml\", ref = \"refs/heads/main\" }\n\
-         \n[pools.forge]\ngithub = { workflow = \".github/workflows/sluice.yml\" }\nsigner = \"forge\"\n\
-         runners = { linux-x64 = \"ubuntu-24.04\" }\n",
-    )
-    .expect("the policy parses");
+    let p = sluice_core::policy::Policy::parse(POOL_POLICY).expect("the policy parses");
     (p.pools[0].clone(), p.signers["forge"].identity.clone())
 }
 
@@ -2622,4 +2639,94 @@ fn forge_check_names_an_environment_any_branch_may_use() {
         vec!["o/r's sluice environment may be used from dev, main: let only main deploy from it"]
     );
     assert!(check(custom_environment(), &["main"]).is_empty());
+}
+
+/// satisfies: record 0119 (design D14, as amended 2026-11-18); the
+/// forge-identity spec's "The workflow and the policy disagree" and "A
+/// policy forge check cannot read whole", from the command line: `sluice
+/// forge check` reads the pool from the policy read whole at the branch's
+/// revision, or at main's for a branch not yet made, and names each of its
+/// lines, exiting 1 while main holds no workflow and 0 once it holds the
+/// one init writes (boomdrivedev/sluice-actions-trial on 0.97.1,
+/// 2026-11-18: seven lines, all ok, and none of the pool's, since routing's
+/// reading of the policy passes its pools over).
+#[cfg(feature = "tools")]
+#[test]
+fn forge_check_reads_the_pool_the_policy_names() {
+    let clock = Clock::new();
+    let (pool, _) = actions_pool();
+    let wants = sluice::profiles::github::workflows::sluice(sluice::VERSION, &pool.runners);
+    let pools = [
+        "ok      the signer forge verifies .github/workflows/sluice.yml at refs/heads/main",
+        "ok      the app may run o/r's workflows",
+        "ok      only main may use o/r's sluice environment",
+    ];
+
+    let s = OnGitHub::with_policy(
+        "forge-check-pool",
+        POOL_POLICY,
+        pool_forge(&clock, None, custom_environment(), &["main"]),
+    );
+    s.give_forge();
+    let (code, said) = s.sluice(&["forge", "check", "main"]);
+    assert_eq!(code, 1, "{said}");
+    assert!(
+        said.contains(
+            "failed  main holds no .github/workflows/sluice.yml: sluice init actions writes it, \
+             to land on main"
+        ),
+        "{said}"
+    );
+    for line in pools {
+        assert!(said.contains(line), "{line}\n{said}");
+    }
+    // A branch not yet made: its pools are main's, which it is made from.
+    let (code, said) = s.sluice(&["forge", "check", "feature/x"]);
+    assert_eq!(code, 1, "{said}");
+    assert!(
+        said.contains("feature/x is not made yet; main's policy puts it on its remote"),
+        "{said}"
+    );
+    assert!(
+        said.contains("failed  main holds no .github/workflows/sluice.yml"),
+        "{said}"
+    );
+
+    let s = OnGitHub::with_policy(
+        "forge-check-pool-set",
+        POOL_POLICY,
+        pool_forge(&clock, Some(&wants), custom_environment(), &["main"]),
+    );
+    s.give_forge();
+    let (code, said) = s.sluice(&["forge", "check", "main"]);
+    assert_eq!(code, 0, "{said}");
+    assert!(
+        said.contains(
+            "ok      .github/workflows/sluice.yml on main is as sluice init actions writes it"
+        ),
+        "{said}"
+    );
+    for line in pools {
+        assert!(said.contains(line), "{line}\n{said}");
+    }
+
+    // A policy routing reads, refused whole: named, and its pools unread.
+    let s = OnGitHub::with_policy(
+        "forge-check-pool-refused",
+        &format!("{POOL_POLICY}\n[landing]\nsubject = \"{{nope}}\"\n"),
+        pool_forge(&clock, Some(&wants), custom_environment(), &["main"]),
+    );
+    s.give_forge();
+    let (code, said) = s.sluice(&["forge", "check", "main"]);
+    assert_eq!(code, 1, "{said}");
+    assert!(
+        said.contains("failed  main's policy at ")
+            && said.contains("is refused, so its pools are not read: ")
+            && said.contains("[landing] subject names {nope}"),
+        "{said}"
+    );
+    assert!(
+        !said.contains("verifies .github/workflows/sluice.yml"),
+        "{said}"
+    );
 }
