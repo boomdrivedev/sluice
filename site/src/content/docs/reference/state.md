@@ -991,6 +991,12 @@ Author: sluice <sluice@localhost>
     Sluice-Result: passed (2 run, 31 replayed)
 ```
 
+On a branch sluice pushes to GitHub as
+[its app](/sluice/guides/github-app/), the landing and the commits that
+keep its records name the app's bot, `<app slug>[bot]`, as author and
+committer. GitHub then shows the app on every landing. Every other
+landing names `sluice <sluice@localhost>`, as above.
+
 A landing beside the queue names no combination, since none was run.
 Its `Sluice-Result` says so, then names the result it stands on:
 
