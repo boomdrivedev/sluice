@@ -74,9 +74,14 @@ None.
 - `crates/sluice/src/profiles/local_refs.rs`, `pushed_refs.rs` and
   `remote_refs.rs`: each commit written by the author its remote is
   pushed as.
+- The branch seam, `crates/sluice-seams/src/lib.rs`: `Branch::commit`
+  takes the branch it writes for, which the core's landings in
+  `crates/sluice-core/src/step.rs` give it and the router in
+  `crates/sluice/src/profiles/branches.rs` routes the landing by; each
+  other implementer takes it as it is given.
 - Tests: `tests/profiles/forge.rs` and its fake, `tests/profiles/forge/github.rs`,
   `tests/local_refs.rs`, `tests/pushed_refs.rs`, `tests/remote_refs.rs`,
-  `tests/profiles/pull_requests.rs`.
+  `tests/profiles/pull_requests.rs`, `tests/profiles/conformance.rs`.
 - Site: `reference/state.md` and `guides/github-app.md` say who a
   landing names.
 - Records and rules: record 0019 as amended 2026-11-18, with the
@@ -85,7 +90,13 @@ None.
 ## Touches
 
 ```
+crates/sluice-seams/src/lib.rs
+crates/sluice-core/src/step.rs
+crates/sluice-core/src/ops.rs
+crates/sluice-fakes/src/lib.rs
 crates/sluice/src/identity.rs
+crates/sluice/src/profiles/branches.rs
+crates/sluice/src/profiles/github/pulls.rs
 crates/sluice/src/profiles/github/app.rs
 crates/sluice/src/profiles/github/kept.rs
 crates/sluice/src/profiles/github/mod.rs
@@ -95,10 +106,12 @@ crates/sluice/src/profiles/remote_refs.rs
 crates/sluice/tests/profiles/forge.rs
 crates/sluice/tests/profiles/forge/github.rs
 crates/sluice/tests/profiles/pull_requests.rs
+crates/sluice/tests/profiles/conformance.rs
 crates/sluice/tests/local_refs.rs
 crates/sluice/tests/pushed_refs.rs
 crates/sluice/tests/remote_refs.rs
 site/src/content/docs/reference/state.md
 site/src/content/docs/guides/github-app.md
+docs/adr/0019-sluice-pushes-as-a-github-app-whose-token-reaches-only-its-own-git.md
 openspec/changes/every-merge-names-the-app-as-its-author/**
 ```

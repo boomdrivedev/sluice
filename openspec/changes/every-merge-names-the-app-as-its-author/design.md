@@ -95,12 +95,24 @@ its `Branch::commit` writes `Author::sluice()`. `PushedRefs`'s
 `author()` in place of the fixed name. `LocalRefs::git` keeps sluice's
 name in its environment: no command it runs writes a commit.
 
-The pushed refs profile names no forge and asks the identity's own
-interface (rules core.1, core.2). The seam's `Branch::commit` is
-unchanged: who commits is the profile's to know, not the core's.
+The branch seam's `Branch::commit` takes the branch it writes for,
+`commit(&self, branch, &LandingCommit)`, as `read`, `move_to` and
+`make` take theirs, and the core's two landings in `step.rs`, the one
+beside the chain and the chain's, give it the branch they land on. The
+`Branches` router writes a landing through the profile that branch is
+routed to, as it moves the branch: a landing on a branch on a remote
+reaches that remote's `PushedRefs`, and one in the host's own refs its
+`LocalRefs`. The branch a commit goes to is where it is written, not
+part of the commit, so `LandingCommit` stays what is written, and who
+commits stays the profile's to know, not the core's. The seam is still
+reached through its one interface, and nothing else of it changes. The
+pushed refs profile names no forge and asks the identity's own
+interface (rules core.1, core.2).
 
-Path not taken: an author on `LandingCommit`, decided by the core,
-which knows no identity.
+Paths not taken: an author on `LandingCommit`, decided by the core,
+which knows no identity; the branch on `LandingCommit`, which would
+carry where a commit goes beside what it is, and name a branch one way
+there and another in the seam's other methods.
 
 ### D3. A combination's commit stays sluice's
 
