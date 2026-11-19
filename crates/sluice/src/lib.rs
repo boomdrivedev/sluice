@@ -6168,6 +6168,11 @@ fn submit_pull_group(
                         }
                         last[i] = Some(now);
                     }
+                    // Record 0130 D4: still open and undecided, the wait
+                    // that follows it, after its state.
+                    if no_wait && !json {
+                        writeln!(out, "wait: {}", pull_wait(branch, o.number))?;
+                    }
                 }
                 followed => decided[i] = Some(followed),
             }
@@ -6208,6 +6213,9 @@ fn submit_pull_group(
             };
             item["worktree"] = serde_json::json!(w);
             item["pull_request"] = serde_json::json!(o.number);
+            if decided[i].is_none() {
+                item["wait"] = serde_json::json!(pull_wait(branch, o.number));
+            }
             if let (true, Some(a)) = (no_wait, &o.submission) {
                 item["id"] = serde_json::json!(a.id);
                 item["ahead"] = serde_json::json!(a.ahead);

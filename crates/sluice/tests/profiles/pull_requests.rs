@@ -4039,6 +4039,43 @@ fn a_group_submit_answers_with_each_submission_in_json() {
     }
 }
 
+/// group-submit, "No wait, every condition holding" and "No wait, in
+/// words": under `--json`, each item of `submissions` holds its `id`, its
+/// pull request and the wait that follows that pull request; in words,
+/// the act says each wait on a line of its own (record 0130 D4).
+#[test]
+fn a_group_act_names_each_pull_requests_wait() {
+    let g = OnGitHub::new("pr-group-wait-named", "");
+    let ws = g.sessions(&["n1", "n2"]);
+    let out = g.submit_group(&ws, &["--no-wait", "--json"]);
+    assert_eq!(out.status.code(), Some(0), "{}", text(&out));
+    let doc: Value =
+        serde_json::from_slice(&out.stdout).unwrap_or_else(|_| panic!("{}", text(&out)));
+    let items = doc["submissions"].as_array().expect("submissions");
+    assert_eq!(items.len(), 2, "{doc}");
+    for (item, name) in items.iter().zip(["n1", "n2"]) {
+        let n = g.pull_of(name).number;
+        assert!(item["id"].is_u64(), "{doc}");
+        assert_eq!(item["pull_request"], n, "{doc}");
+        assert_eq!(
+            item["wait"],
+            format!("sluice wait main --pull-request {n}").as_str(),
+            "{doc}"
+        );
+    }
+
+    let ws = g.sessions(&["w1", "w2"]);
+    let out = g.submit_group(&ws, &["--no-wait"]);
+    let said = text(&out);
+    assert_eq!(out.status.code(), Some(0), "{said}");
+    let lines: Vec<&str> = said.lines().collect();
+    for name in ["w1", "w2"] {
+        let n = g.pull_of(name).number;
+        let wait = format!("wait: sluice wait main --pull-request {n}");
+        assert!(lines.contains(&wait.as_str()), "{wait:?} in {said}");
+    }
+}
+
 /// One short of a review: the pull requests of `s1` and `s3` are open at
 /// the heads their worktrees hold, ready and approved there, and `s2`'s is
 /// not open. The act queues nothing and exits 2, naming `s2`'s pull
