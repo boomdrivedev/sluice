@@ -154,16 +154,16 @@ takes, a burst or a system no box runs, in a job of its own, and holds
 no part of any host's bound. sluice has two. GitHub Actions starts one
 workflow run for each run. A CodeBuild fleet of your own starts one
 build on a warm instance for each run. It takes every run of a branch
-whose gate trusts its signer beside a leading hosts' signer that may
-claim no system: [Running checks on a pool](/sluice/guides/pools/).
+whose gate trusts its signer beside the signer the hosts that may run
+its queue sign as, which may claim no system: [Running checks on a pool](/sluice/guides/pools/).
 
 ## Watching it
 
 `sluice overview` lists the hosts serving a remote, by their last sign
 of life: the signer, the system, the runs held, the room left, and a
 host whose sign of life has stood still past `alive`. `sluice step
-<branch>` says `led` on a host that does not keep the branch, and still
-takes its runs. `sluice status <branch>` reads the queue from the remote.
+<branch>` says `elsewhere` on a host that does not run the branch's
+queue, and still takes its runs. `sluice status <branch>` reads the queue from the remote.
 When the remote is out of reach, it shows the queue as last fetched and
 says so.
 
