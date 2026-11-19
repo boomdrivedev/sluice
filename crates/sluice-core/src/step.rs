@@ -165,6 +165,20 @@ struct StartFrom {
     /// 88 (design D2): the claim a pool's job starts its run under, where
     /// it is not this instance's own.
     claim: Option<String>,
+    /// 153 (design D5): the context each submission of the live records
+    /// kept, by its number, which a start links to.
+    traces: BTreeMap<u64, String>,
+}
+
+/// 153 (design D5; rule core.53): `span`, which tests a combination
+/// holding `submissions`, linked to the context each kept, as `kept`
+/// reads it by number; a submission that kept none gets no link.
+fn link_kept(span: &tracing::Span, submissions: &[u64], kept: impl Fn(u64) -> Option<String>) {
+    for &id in submissions {
+        if let Some(trace) = kept(id) {
+            crate::links::link(span, &trace, id);
+        }
+    }
 }
 
 /// 140: how a queued entry's work was read beside the chain.
@@ -245,7 +259,15 @@ impl Sluice<'_> {
         if self.held {
             bail!("a round of {branch} never reads its records as held");
         }
-        let round = info_span!("sluice.round", sluice.branch = branch, sluice.step = "");
+        // 153 (design D3): a round is a trace of its own wherever it runs,
+        // nested under no command's span; it reaches the work's callers by
+        // links alone.
+        let round = info_span!(
+            parent: None,
+            "sluice.round",
+            sluice.branch = branch,
+            sluice.step = ""
+        );
         let _round = round.enter();
         let released = info_span!("sluice.abandoned").in_scope(|| self.release_abandoned())?;
         let previews =
@@ -1366,6 +1388,11 @@ impl Sluice<'_> {
         }
         Ok(Some(StartFrom {
             claim: None,
+            traces: line
+                .subs
+                .values()
+                .filter_map(|s| Some((s.id, s.trace.clone()?)))
+                .collect(),
             home: self.home_system(&base)?,
             verified: line.doc.verified,
             base,
@@ -1402,7 +1429,7 @@ impl Sluice<'_> {
     ) -> Result<Started> {
         let r = &c.runs[i];
         let kind = from.policy.limits.executor.as_deref().unwrap_or("open");
-        let _span = info_span!(
+        let span = info_span!(
             "sluice.start",
             sluice.branch = branch,
             sluice.candidate = %c.revision,
@@ -1411,6 +1438,7 @@ impl Sluice<'_> {
             sluice.system = r.system.as_deref().unwrap_or(""),
         )
         .entered();
+        link_kept(&span, &c.submissions, |id| from.traces.get(&id).cloned());
         let name = r.place.clone().expect("a starting run has a place");
         let checks = if r.checks.is_empty() {
             from.rules.required.clone()
@@ -2519,6 +2547,9 @@ impl Sluice<'_> {
             sluice.ran = 0u64,
             sluice.replayed = 0u64,
         );
+        link_kept(&span, &c.submissions, |id| {
+            line.subs.get(&id).and_then(|s| s.trace.clone())
+        });
         let _span = span.enter();
         // Design D17: the results of the keys this run reported and of its
         // combination alone.
@@ -5715,6 +5746,7 @@ mod tests {
             after: Vec::new(),
             priority: 0,
             subject: None,
+            trace: None,
         };
         s.submit(&req).unwrap().unwrap().id
     }

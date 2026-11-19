@@ -81,6 +81,7 @@ fn places_of_two_lines_on_one_host_never_collide() {
         after: vec![],
         priority: 0,
         subject: None,
+        trace: None,
     })
     .unwrap()
     .unwrap();

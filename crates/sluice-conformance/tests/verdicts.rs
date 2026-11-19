@@ -48,6 +48,7 @@ fn a_key_that_holds_a_pass_is_read_from_it_on_any_line_and_recorded_as_a_replay(
             after: vec![],
             priority: 0,
             subject: None,
+            trace: None,
         })
         .unwrap()
         .unwrap()
@@ -351,6 +352,7 @@ fn live_runs_of_two_branches() -> usize {
                 after: vec![],
                 priority: 0,
                 subject: None,
+                trace: None,
             })
             .unwrap()
             .unwrap();
@@ -688,6 +690,7 @@ fn a_replay_no_trusted_pass_proves_runs_again_with_no_replay() {
             after: vec![],
             priority: 0,
             subject: None,
+            trace: None,
         })
         .unwrap()
         .unwrap()
@@ -950,6 +953,7 @@ fn a_removed_branchs_results_still_count() {
             after: vec![],
             priority: 0,
             subject: None,
+            trace: None,
         })
         .unwrap()
         .unwrap()

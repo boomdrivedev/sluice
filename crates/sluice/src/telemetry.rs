@@ -31,14 +31,16 @@
 //! what reads as a secret. The kept copy on disk is the record (20, 26;
 //! rule core.11); a record lost on the way is never sent again.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
+use std::ffi::OsStr;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::OnceLock;
 use std::time::Duration;
 
 use anyhow::Result;
 use opentelemetry::logs::{AnyValue, LogRecord as _};
-use opentelemetry::trace::{TraceContextExt, TracerProvider as _};
+use opentelemetry::propagation::{Extractor, TextMapPropagator};
+use opentelemetry::trace::{SpanContext, TraceContextExt, TracerProvider as _};
 use opentelemetry::InstrumentationScope;
 use opentelemetry_appender_tracing::layer::OpenTelemetryTracingBridge;
 use opentelemetry_otlp::{LogExporter, MetricExporter, Protocol, SpanExporter, WithExportConfig};
@@ -46,7 +48,8 @@ use opentelemetry_sdk::error::OTelSdkResult;
 use opentelemetry_sdk::logs::{self, LogProcessor, SdkLogRecord, SdkLoggerProvider};
 use opentelemetry_sdk::metrics::exporter::PushMetricExporter;
 use opentelemetry_sdk::metrics::{Instrument, SdkMeterProvider, Stream};
-use opentelemetry_sdk::trace::SdkTracerProvider;
+use opentelemetry_sdk::propagation::TraceContextPropagator;
+use opentelemetry_sdk::trace::{SdkTracer, SdkTracerProvider};
 use opentelemetry_sdk::Resource;
 use sluice_core::{OUTPUT, SECONDS};
 use sluice_seams::LOG_LIMIT;
@@ -62,6 +65,11 @@ static ON: AtomicBool = AtomicBool::new(false);
 /// The settings telemetry started under, which a run's environment is
 /// built from (design D6).
 static SENT: OnceLock<Settings> = OnceLock::new();
+
+/// 153: the tracer telemetry started, while traces go, which an exec's
+/// check spans are built with, over the times their runner gave (design
+/// D6 of `a-sluice-command-shows-inside-its-callers-trace`).
+static TRACER: OnceLock<SdkTracer> = OnceLock::new();
 
 /// How much of a failed check's output is sent (ADR 0022): the flag and
 /// the host's `[telemetry] logs` read one set of words (design D1).
@@ -300,6 +308,181 @@ impl Settings {
     }
 }
 
+/// The trace context a command was started under, as its caller gave it in
+/// `TRACEPARENT` and, where given, `TRACESTATE` (153; design D1): the
+/// caller's span, remote, and its `TRACEPARENT` as W3C writes it, which a
+/// submission keeps (design D4). It names only where sluice's spans nest:
+/// whether sluice sends is never read from it (design D7; rule core.53).
+#[derive(Clone, Debug, PartialEq)]
+pub struct Caller {
+    /// The caller's span, read as a remote span context.
+    pub context: SpanContext,
+    /// Its `TRACEPARENT` as W3C writes it.
+    pub traceparent: String,
+}
+
+impl Caller {
+    /// The context `env`, as name and value pairs, gives in `TRACEPARENT`
+    /// and `TRACESTATE`, read by OpenTelemetry's W3C trace context
+    /// propagator over the names its environment carrier gives them;
+    /// `None` where `TRACEPARENT` is missing or does not read as W3C's
+    /// trace context, said nowhere (design D1).
+    pub fn read<K, V>(env: impl IntoIterator<Item = (K, V)>) -> Option<Caller>
+    where
+        K: AsRef<OsStr>,
+        V: AsRef<OsStr>,
+    {
+        let mut carried = HashMap::new();
+        for (name, value) in env {
+            let name = name.as_ref().to_str();
+            if let (Some(name @ ("TRACEPARENT" | "TRACESTATE")), Some(value)) =
+                (name, value.as_ref().to_str())
+            {
+                carried.insert(name.to_string(), value.to_string());
+            }
+        }
+        let context = extract(&Variables(carried))?;
+        let mut written = HashMap::new();
+        TraceContextPropagator::new().inject_context(
+            &opentelemetry::Context::new().with_remote_span_context(context.clone()),
+            &mut written,
+        );
+        Some(Caller {
+            traceparent: written.remove("traceparent")?,
+            context,
+        })
+    }
+}
+
+/// Run a command named by `words`, as `sluice --help` lists them, in its
+/// `caller`'s trace (153; design D2): started under a caller's context, a
+/// span, `sluice.command` named by its words, whose parent is set to the
+/// caller's span before anything beneath it starts, entered for the
+/// command's whole run, and holding `sluice.exit`, the command's exit, as
+/// it returns, `INTERNAL` where it fails. It is sent only while telemetry
+/// sends traces; started under none, the command makes no span of its
+/// own. An `exec` records `sluice.branch`, `sluice.ran` and
+/// `sluice.replayed` on it (design D6).
+pub fn command(
+    caller: Option<&Caller>,
+    words: &str,
+    run: impl FnOnce() -> Result<i32>,
+) -> Result<i32> {
+    let Some(caller) = caller else {
+        return run();
+    };
+    let span = tracing::info_span!(
+        parent: None,
+        "sluice.command",
+        otel.name = words,
+        sluice.exit = tracing::field::Empty,
+        sluice.branch = tracing::field::Empty,
+        sluice.ran = tracing::field::Empty,
+        sluice.replayed = tracing::field::Empty,
+    );
+    let _ = span
+        .set_parent(opentelemetry::Context::new().with_remote_span_context(caller.context.clone()));
+    let ran = span.in_scope(run);
+    let exit = match &ran {
+        Ok(code) => *code,
+        Err(_) => crate::INTERNAL,
+    };
+    span.record("sluice.exit", exit);
+    ran
+}
+
+/// 153 (design D6): a check an exec's run ran, with its outcome and the
+/// times its runner gave it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Check {
+    /// The check, as the run's report names it.
+    pub task: String,
+    /// `pass` or `fail`, the report's.
+    pub outcome: &'static str,
+    pub started: std::time::SystemTime,
+    pub ended: std::time::SystemTime,
+}
+
+/// 153 (design D6): beneath `parent`, an exec's span, a `sluice.check`
+/// span for each of `checks`, from its start to its end, with
+/// `sluice.task` and `sluice.outcome`. A check's name is scrubbed as a
+/// log's body is, over the environment the settings were chosen from, so
+/// a command after `--` that carries a secret names its span with
+/// `[redacted]` in its place, and a task's name goes as it is. They carry
+/// times sluice did not see, so they are built with the tracer telemetry
+/// started, under `parent`'s context; nothing is sent while traces do not
+/// go, or where `parent` is no span of a trace.
+pub fn checks(parent: &tracing::Span, checks: &[Check]) {
+    use opentelemetry::trace::{Span as _, Tracer as _};
+    let (Some(tracer), Some(settings)) = (TRACER.get(), SENT.get()) else {
+        return;
+    };
+    let cx = parent.context();
+    if !cx.span().span_context().is_valid() {
+        return;
+    }
+    let secrets = crate::scrub::Scrub::new(settings.env.iter().cloned());
+    for check in checks {
+        let mut span = tracer
+            .span_builder("sluice.check")
+            .with_start_time(check.started)
+            .with_attributes(vec![
+                opentelemetry::KeyValue::new("sluice.task", secrets.scrub(&check.task)),
+                opentelemetry::KeyValue::new("sluice.outcome", check.outcome),
+            ])
+            .start_with_context(tracer, &cx);
+        span.end_with_timestamp(check.ended);
+    }
+}
+
+/// 153 (design D5; rule core.53): `span` linked to the span `trace`, a
+/// `TRACEPARENT` a submission kept, names, the link holding
+/// `sluice.submission`, its number; a text that does not read adds
+/// nothing.
+fn link(span: &tracing::Span, trace: &str, submission: u64) {
+    if let Some(context) = traceparent(trace) {
+        span.add_link_with_attributes(
+            context,
+            vec![opentelemetry::KeyValue::new(
+                "sluice.submission",
+                submission as i64,
+            )],
+        );
+    }
+}
+
+/// The span a `TRACEPARENT` kept as text names, read as [`Caller::read`]
+/// reads one, with no trace state; `None` where it does not read (design
+/// D5).
+pub fn traceparent(text: &str) -> Option<SpanContext> {
+    extract(&Variables(HashMap::from([(
+        "TRACEPARENT".to_string(),
+        text.to_string(),
+    )])))
+}
+
+/// The remote span context W3C's propagator reads from `carrier`.
+fn extract(carrier: &Variables) -> Option<SpanContext> {
+    let cx = TraceContextPropagator::new().extract(carrier);
+    let span = cx.span();
+    let context = span.span_context();
+    context.is_valid().then(|| context.clone())
+}
+
+/// Environment variables as OpenTelemetry's environment carrier names
+/// them: a propagator's field in upper case.
+struct Variables(HashMap<String, String>);
+
+impl Extractor for Variables {
+    fn get(&self, key: &str) -> Option<&str> {
+        self.0.get(&key.to_ascii_uppercase()).map(String::as_str)
+    }
+
+    fn keys(&self) -> Vec<&str> {
+        self.0.keys().map(String::as_str).collect()
+    }
+}
+
 /// The meter provider sluice's metrics are sent through, to `exporter`
 /// with `resource`: each instrument [`SECONDS`] names declared with the
 /// unit `s`, OpenTelemetry's own name for seconds, by a view, since the
@@ -464,6 +647,13 @@ impl Telemetry {
             .with(metrics.clone().map(MetricsLayer::new))
             .with(bridge);
         tracing::subscriber::set_global_default(subscriber)?;
+        // 153 (design D5, D6): while traces go, the spans that test a
+        // combination link to the context each of its submissions kept,
+        // and an exec's check spans are built with the tracer kept.
+        if let Some(t) = &traces {
+            sluice_core::links::set(link);
+            let _ = TRACER.set(t.tracer("sluice"));
+        }
         let _ = SENT.set(settings.clone());
         ON.store(true, Ordering::SeqCst);
         Ok(Telemetry {
@@ -1096,6 +1286,80 @@ mod tests {
                 reads_environment: true,
             }
         );
+    }
+
+    /// 153 (design D1): `TRACEPARENT`, beside a `TRACESTATE`, reads as a
+    /// remote context with its trace state and its `TRACEPARENT` as given;
+    /// one W3C's trace context does not read is none.
+    #[test]
+    fn a_trace_context_is_read_as_w3c_reads_it() {
+        let trace = "4bf92f3577b34da6a3ce929d0e0e4736";
+        let span = "00f067aa0ba902b7";
+        let given = format!("00-{trace}-{span}-01");
+        let read = Caller::read([
+            ("PATH", "/bin"),
+            ("TRACEPARENT", given.as_str()),
+            ("TRACESTATE", "agent=a1,flume=f2"),
+        ])
+        .expect("a context");
+        assert_eq!(read.traceparent, given);
+        assert_eq!(read.context.trace_id().to_string(), trace);
+        assert_eq!(read.context.span_id().to_string(), span);
+        assert!(read.context.is_remote() && read.context.is_sampled());
+        assert_eq!(read.context.trace_state().header(), "agent=a1,flume=f2");
+        // A kept `TRACEPARENT` reads as the same span, with no trace state.
+        let kept = traceparent(&given).expect("the kept context");
+        assert_eq!(
+            (kept.trace_id(), kept.span_id(), kept.trace_flags()),
+            (
+                read.context.trace_id(),
+                read.context.span_id(),
+                read.context.trace_flags()
+            )
+        );
+        assert_eq!(kept.trace_state().header(), "");
+
+        for wrong in [
+            format!("00-{}-{span}-01", "0".repeat(32)),
+            format!("00-{}-{span}-01", trace.to_uppercase()),
+            format!("ff-{trace}-{span}-01"),
+            format!("00-{trace}-{span}"),
+            String::new(),
+        ] {
+            assert_eq!(
+                Caller::read([("TRACEPARENT", wrong.as_str())]),
+                None,
+                "{wrong}"
+            );
+            assert_eq!(traceparent(&wrong), None, "{wrong}");
+        }
+        assert_eq!(Caller::read([("TRACESTATE", "agent=a1")]), None);
+    }
+
+    /// 153 (design D7; rule core.53): a caller's context turns nothing on.
+    /// With no choice of the command's and no `[telemetry]`, the settings
+    /// chosen beside a `TRACEPARENT` send nothing, as they would without
+    /// it.
+    #[test]
+    fn a_caller_s_context_turns_nothing_on() {
+        let context = [
+            (
+                "TRACEPARENT",
+                "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01",
+            ),
+            ("TRACESTATE", "agent=a1"),
+        ];
+        let chosen = choose(Choices::default(), None, &context);
+        assert!(!chosen.send, "{chosen:?}");
+        assert_eq!(
+            chosen.signals,
+            choose(Choices::default(), None, &[]).signals
+        );
+        let quiet = HostTelemetry {
+            send: Some(false),
+            ..HostTelemetry::default()
+        };
+        assert!(!choose(Choices::default(), Some(&quiet), &context).send);
     }
 
     /// 151 as amended 2026-11-18, rule core.66 (design D1): a run's tools

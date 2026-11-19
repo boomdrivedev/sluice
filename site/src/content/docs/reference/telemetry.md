@@ -53,6 +53,33 @@ back: the queue never depends on it
   `sluice.submissions`, `sluice.candidate` (the revision tested),
   `sluice.executor`, `sluice.confined`, `sluice.outcome`, `sluice.ran`,
   `sluice.replayed`.
+- **A command inside its caller's trace**: a command started with a W3C
+  trace context in `TRACEPARENT`, and `TRACESTATE` where given, as an
+  agent program hands the commands it runs, sends one span in that
+  trace while traces go, beneath the caller's span. It is named by the
+  command's words as `sluice --help` lists them, `sluice submit`,
+  `sluice exec` or `sluice` for the home view, and holds `sluice.exit`,
+  the command's exit. A command started under none sends no span of its
+  own. A round stays a trace of its own whatever command waits on it,
+  and sluice's host process keeps no caller's context.
+- **A submission keeps its caller's trace**: its record holds the
+  `TRACEPARENT` its submit was started under as `trace`, whether or not
+  the submit sends telemetry. Each `sluice.start` and `sluice.verdict`
+  span of a combination that holds it links to that context, the link
+  holding `sluice.submission`, so a backend leads from an agent's wait
+  to the rounds that tested its work. A pull request's submission keeps
+  none.
+- **An exec's span**: `sluice exec` started under a caller's context
+  holds `sluice.branch`, `sluice.ran` and `sluice.replayed`, and beneath
+  it a `sluice.check` span for each check its run ran, over the times
+  its runner gave, with `sluice.task` and `sluice.outcome`, `pass` or
+  `fail`. A check answered from an earlier run has none. A command after
+  `--` is its run's one check, named by its words with whatever reads as
+  a secret `[redacted]`. The run's checks get `TRACEPARENT` naming the
+  exec's span, as a round's run names its `sluice.start`.
+- **A caller's trace turns nothing on**: it says only where sluice's
+  spans nest. Whether sluice sends is the command's own choice, else the
+  table, as above.
 - **Metrics**, each with `sluice.repository` and `sluice.branch`, and
   `sluice.outcome` where the table names it, and nothing else, so no
   metric carries a value that grows with each run. `sluice.repository`

@@ -32,6 +32,7 @@ fn submit_to(h: &Harness, branch: &str, worktree: &str, path: &str) -> u64 {
             after: vec![],
             priority: 0,
             subject: None,
+            trace: None,
         })
         .expect("submit runs")
         .expect("accepted")

@@ -25,7 +25,7 @@ use opentelemetry_sdk::logs::{InMemoryLogExporter, SdkLogRecord};
 use opentelemetry_sdk::trace::{InMemorySpanExporter, SpanData};
 use sluice::instance::{HostTelemetry, Instance};
 use sluice::profiles::checks::Checks;
-use sluice::telemetry::{Choices, Logs, Settings as Chosen, Telemetry};
+use sluice::telemetry::{Caller, Choices, Logs, Settings as Chosen, Telemetry};
 use sluice::{run, Cli, Followed, Opened, Pause, PullRequests, FAILED, LANDED};
 use sluice_core::{Clock, Seams, SubmitHead, SubmitRefusal, OUTPUT};
 use sluice_fakes::Fakes;
@@ -125,7 +125,13 @@ fn setup() -> Fakes {
 
 /// `sluice <args>` over the fakes, its pull requests from `pulls`.
 fn sluice(f: &Fakes, pulls: &dyn PullRequests, args: &[&str]) -> i32 {
+    under(f, pulls, args, None)
+}
+
+/// `sluice <args>` over the fakes, started under `caller`'s trace context.
+fn under(f: &Fakes, pulls: &dyn PullRequests, args: &[&str], caller: Option<Caller>) -> i32 {
     let cli = Cli::try_parse_from(std::iter::once("sluice").chain(args.iter().copied())).unwrap();
+    let cli = Cli { caller, ..cli };
     run(
         cli,
         f.seams(),
@@ -141,9 +147,29 @@ fn sluice(f: &Fakes, pulls: &dyn PullRequests, args: &[&str]) -> i32 {
 
 /// `changes` on the branch's tip, submitted from `worktree`: its exit.
 fn submit(f: &Fakes, worktree: &str, changes: &[(&str, Option<&str>)]) -> i32 {
+    submit_under(f, worktree, changes, None)
+}
+
+/// `changes` on the branch's tip, submitted from `worktree` under
+/// `caller`'s trace context: its exit.
+fn submit_under(
+    f: &Fakes,
+    worktree: &str,
+    changes: &[(&str, Option<&str>)],
+    caller: Option<Caller>,
+) -> i32 {
     let head = f.world.work(&f.world.tip(BRANCH), changes);
     f.world.session(worktree, "agent-a", &head);
-    sluice(f, &(), &["submit", BRANCH, "--worktree", worktree])
+    under(f, &(), &["submit", BRANCH, "--worktree", worktree], caller)
+}
+
+/// The trace and span a caller's context names.
+const TRACE: &str = "4bf92f3577b34da6a3ce929d0e0e4736";
+const PARENT: &str = "00f067aa0ba902b7";
+
+/// A caller's context, `TRACEPARENT` `00-<TRACE>-<PARENT>-01`.
+fn caller() -> Caller {
+    Caller::read([("TRACEPARENT", format!("00-{TRACE}-{PARENT}-01"))]).unwrap()
 }
 
 /// Pull requests whose forge cannot be read: a round says so as a
@@ -482,6 +508,282 @@ fn a_round_is_one_trace_rooted_at_sluice_round() {
             assert!(phases.contains(&p.as_str()), "{step} is beneath {p}");
         }
     }
+    telemetry.finish();
+}
+
+/// 153 (design D2, D3): a submit started under a caller's context sends
+/// one `sluice submit` span in the caller's trace, beneath the caller's
+/// span and holding its exit; one started under none sends none. Each
+/// round it waits on is a trace of its own, nested under no command.
+#[test]
+fn a_command_nests_under_its_caller_s_trace() {
+    if !alone("a_command_nests_under_its_caller_s_trace") {
+        return;
+    }
+    let (telemetry, spans, _) = start(Logs::Off);
+    let f = setup();
+    assert_eq!(
+        submit_under(
+            &f,
+            "unit/a",
+            &[("tests/t_a.py", Some("broken"))],
+            Some(caller())
+        ),
+        FAILED
+    );
+    assert_eq!(
+        submit(&f, "unit/b", &[("lib/a.py", Some("changed"))]),
+        LANDED
+    );
+    telemetry.flush();
+
+    let all = spans.get_finished_spans().unwrap();
+    let named: Vec<&SpanData> = all.iter().filter(|s| s.name == "sluice submit").collect();
+    assert_eq!(named.len(), 1, "{all:?}");
+    let command = named[0];
+    assert_eq!(command.span_context.trace_id().to_string(), TRACE);
+    assert_eq!(command.parent_span_id.to_string(), PARENT);
+    assert_eq!(
+        value(command, "sluice.exit"),
+        Some(Value::I64(FAILED.into()))
+    );
+    assert!(!all.iter().any(|s| s.name == "sluice.command"), "{all:?}");
+
+    let rounds: Vec<&SpanData> = all.iter().filter(|s| s.name == "sluice.round").collect();
+    assert!(rounds.len() >= 2, "{rounds:?}");
+    let mut traces = HashSet::new();
+    for round in &rounds {
+        assert_eq!(round.parent_span_id, SpanId::INVALID, "{round:?}");
+        let trace = round.span_context.trace_id();
+        assert_ne!(trace.to_string(), TRACE, "{round:?}");
+        assert!(traces.insert(trace), "two rounds share a trace");
+    }
+    telemetry.finish();
+}
+
+/// 153 (design D5; rule core.53): each `sluice.start` and `sluice.verdict`
+/// span of a combination links to the context each of its submissions
+/// kept, naming the submission; a submission that kept none gets no link.
+#[test]
+fn a_round_links_to_the_trace_its_work_was_submitted_under() {
+    if !alone("a_round_links_to_the_trace_its_work_was_submitted_under") {
+        return;
+    }
+    let (telemetry, spans, _) = start(Logs::Off);
+    let f = setup();
+    let tip = f.world.tip(BRANCH);
+    let one = f.world.work(&tip, &[("tests/t_a.py", Some("one"))]);
+    f.world.session("unit/a", "agent-a", &one);
+    let args = ["submit", BRANCH, "--worktree", "unit/a", "--no-wait"];
+    assert_eq!(under(&f, &(), &args, Some(caller())), LANDED);
+    let two = f.world.work(&tip, &[("tests/t_b.py", Some("two"))]);
+    f.world.session("unit/b", "agent-b", &two);
+    let args = ["submit", BRANCH, "--worktree", "unit/b"];
+    assert_eq!(under(&f, &(), &args, None), LANDED);
+    telemetry.flush();
+
+    let all = spans.get_finished_spans().unwrap();
+    let mut seen = 0;
+    for s in all
+        .iter()
+        .filter(|s| s.name == "sluice.start" || s.name == "sluice.verdict")
+    {
+        let holds = |id: u64| {
+            value(s, "sluice.submissions").is_some_and(|v| v.to_string().contains(&id.to_string()))
+        };
+        assert!(holds(1), "{s:?}");
+        let links: Vec<(String, String, Vec<String>)> = s
+            .links
+            .iter()
+            .map(|l| {
+                (
+                    l.span_context.trace_id().to_string(),
+                    l.span_context.span_id().to_string(),
+                    l.attributes
+                        .iter()
+                        .map(|kv| format!("{}={}", kv.key, kv.value))
+                        .collect(),
+                )
+            })
+            .collect();
+        assert_eq!(
+            links,
+            [(
+                TRACE.to_string(),
+                PARENT.to_string(),
+                vec!["sluice.submission=1".to_string()]
+            )],
+            "{} of {:?}",
+            s.name,
+            value(s, "sluice.submissions")
+        );
+        seen += 1;
+    }
+    // A combination holding both was started and read.
+    let both = all.iter().any(|s| {
+        s.name == "sluice.verdict"
+            && value(s, "sluice.submissions").is_some_and(|v| v.to_string() == "[1, 2]")
+    });
+    assert!(both, "{all:?}");
+    assert!(seen >= 2, "{all:?}");
+    telemetry.finish();
+}
+
+/// A branch with three checks, `tests:t-a`, `tests:t-b` and `tests:t-c`,
+/// each reading its own folder, and a worktree `unit/a` whose head
+/// changes each, `tests:t-b`'s so it fails; the runner answers
+/// `tests:t-c` from an earlier run and times each.
+fn three_checks() -> Fakes {
+    let f = Fakes::new();
+    f.world.init(
+        BRANCH,
+        &[
+            (".config/sluice.toml", POLICY),
+            ("tests/a/t.py", "a"),
+            ("tests/b/t.py", "b"),
+            ("tests/c/t.py", "c"),
+        ],
+    );
+    for (task, path) in [
+        ("tests:t-a", "tests/a/"),
+        ("tests:t-b", "tests/b/"),
+        ("tests:t-c", "tests/c/"),
+    ] {
+        f.world.task(task, path);
+    }
+    f.world.fails_with("tests:t-b", "tests/b/t.py", "broken");
+    f.world.replays("tests:t-c");
+    f.world
+        .times("tests:t-a", "2026-11-18T12:00:01Z", "2026-11-18T12:00:04Z");
+    f.world
+        .times("tests:t-b", "2026-11-18T12:00:02Z", "2026-11-18T12:00:06Z");
+    f.world
+        .times("tests:t-c", "2026-11-18T12:00:00Z", "2026-11-18T12:00:01Z");
+    let head = f.world.work(
+        &f.world.tip(BRANCH),
+        &[
+            ("tests/a/t.py", Some("a2")),
+            ("tests/b/t.py", Some("broken")),
+            ("tests/c/t.py", Some("c2")),
+        ],
+    );
+    f.world.session("unit/a", "agent-a", &head);
+    f
+}
+
+/// An RFC 3339 time as the system's.
+fn time(time: &str) -> std::time::SystemTime {
+    chrono::DateTime::parse_from_rfc3339(time).unwrap().into()
+}
+
+/// The value of `key` among `attributes`.
+fn named(attributes: &[opentelemetry::KeyValue], key: &str) -> Option<String> {
+    attributes
+        .iter()
+        .find(|kv| kv.key.as_str() == key)
+        .map(|kv| kv.value.to_string())
+}
+
+/// 153 (design D6): an exec started under a caller's context holds, under
+/// its `sluice exec` span, a `sluice.check` span for each check its run
+/// ran, over the times its runner gave and with the report's outcome, and
+/// none for a check answered from an earlier run; its span holds the
+/// branch and how many ran and were replayed.
+#[test]
+fn an_exec_s_span_holds_each_check_it_ran() {
+    if !alone("an_exec_s_span_holds_each_check_it_ran") {
+        return;
+    }
+    let (telemetry, spans, _) = start(Logs::Off);
+    let f = three_checks();
+    let args = ["exec", BRANCH, "--worktree", "unit/a"];
+    assert_eq!(under(&f, &(), &args, Some(caller())), FAILED);
+    telemetry.flush();
+
+    let exec = span(&spans, "sluice exec");
+    assert_eq!(exec.span_context.trace_id().to_string(), TRACE);
+    assert_eq!(exec.parent_span_id.to_string(), PARENT);
+    assert_eq!(value(&exec, "sluice.branch"), Some(BRANCH.into()));
+    let count = |key| value(&exec, key).map(|v| v.to_string());
+    assert_eq!(count("sluice.ran").as_deref(), Some("2"));
+    assert_eq!(count("sluice.replayed").as_deref(), Some("1"));
+
+    let mut checks: Vec<_> = spans
+        .get_finished_spans()
+        .unwrap()
+        .into_iter()
+        .filter(|s| s.name == "sluice.check")
+        .map(|s| {
+            assert_eq!(s.parent_span_id, exec.span_context.span_id(), "{s:?}");
+            assert_eq!(
+                s.span_context.trace_id(),
+                exec.span_context.trace_id(),
+                "{s:?}"
+            );
+            (
+                named(&s.attributes, "sluice.task").unwrap_or_default(),
+                named(&s.attributes, "sluice.outcome").unwrap_or_default(),
+                s.start_time,
+                s.end_time,
+            )
+        })
+        .collect();
+    checks.sort_by(|a, b| a.0.cmp(&b.0));
+    assert_eq!(
+        checks,
+        [
+            (
+                "tests:t-a".to_string(),
+                "pass".to_string(),
+                time("2026-11-18T12:00:01Z"),
+                time("2026-11-18T12:00:04Z")
+            ),
+            (
+                "tests:t-b".to_string(),
+                "fail".to_string(),
+                time("2026-11-18T12:00:02Z"),
+                time("2026-11-18T12:00:06Z")
+            ),
+        ]
+    );
+    telemetry.finish();
+}
+
+/// 153 (design D6): a command `sluice exec` runs after `--` is its run's
+/// one check, its span named by the command's words with what reads as a
+/// secret `[redacted]`, as a log's body is.
+#[test]
+fn an_exec_s_command_is_one_check_named_scrubbed() {
+    if !alone("an_exec_s_command_is_one_check_named_scrubbed") {
+        return;
+    }
+    let (telemetry, spans, _) = start(Logs::Off);
+    let f = three_checks();
+    let token = "ghp_0123456789abcdefghijABCDEFGHIJ012345";
+    let command = ["env", &format!("API_TOKEN={token}"), "true"].map(String::from);
+    f.world.times(
+        &sluice::exec::shell_line(&command),
+        "2026-11-18T12:00:01Z",
+        "2026-11-18T12:00:02Z",
+    );
+    let args = [
+        &["exec", BRANCH, "--worktree", "unit/a", "--"][..],
+        &command.each_ref().map(String::as_str),
+    ]
+    .concat();
+    assert_eq!(under(&f, &(), &args, Some(caller())), LANDED);
+    telemetry.flush();
+
+    let checks: Vec<SpanData> = spans
+        .get_finished_spans()
+        .unwrap()
+        .into_iter()
+        .filter(|s| s.name == "sluice.check")
+        .collect();
+    assert_eq!(checks.len(), 1, "{checks:?}");
+    let task = named(&checks[0].attributes, "sluice.task").unwrap_or_default();
+    assert!(task.contains("[redacted]"), "{task}");
+    assert!(!task.contains(token), "{task}");
     telemetry.finish();
 }
 

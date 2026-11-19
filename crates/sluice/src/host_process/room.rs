@@ -799,6 +799,10 @@ impl Tests for Roomed<'_> {
         self.inner.tasks(run)
     }
 
+    fn timed(&self, run: &RunHandle) -> Result<Vec<TaskProgress>> {
+        self.inner.timed(run)
+    }
+
     fn kept_out(
         &self,
         worktree: &Path,

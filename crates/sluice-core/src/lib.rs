@@ -10,6 +10,7 @@ pub mod branches;
 pub mod equip;
 pub mod home;
 pub mod line;
+pub mod links;
 pub mod notice;
 pub mod ops;
 pub mod order;

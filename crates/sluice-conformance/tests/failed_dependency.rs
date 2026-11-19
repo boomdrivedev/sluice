@@ -89,6 +89,7 @@ fn passed_on_another_branch(h: &Harness, policy: &str, content: &str) {
             after: Vec::new(),
             priority: 0,
             subject: None,
+            trace: None,
         })
         .expect("submit runs")
         .expect("accepted");

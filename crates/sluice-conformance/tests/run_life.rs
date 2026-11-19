@@ -436,6 +436,7 @@ fn submit_to(h: &Harness, branch: &str, changes: &[(&str, Option<&str>)]) -> u64
             after: vec![],
             priority: 0,
             subject: None,
+            trace: None,
         })
         .unwrap()
         .unwrap()
