@@ -1,0 +1,6 @@
+{"format": "weir-known/1", "reader": "change/sluice-runs-as-a-daemon", "known_at": "2026-11-19T04:24:36Z"}
+{"format": "weir-known/1", "reader": "fix/sluice-keeps-a-gates-queues-moving-1", "known_at": "2026-11-19T14:28:33Z"}
+{"format": "weir-delivery/1", "key": "119:landed", "readers": ["fix/sluice-keeps-a-gates-queues-moving-2"], "message": "[sluice] #119 landed on bolt/sluice-keeps-a-gates-queues-moving as c492ae6.", "recorded_at": "2026-11-19T16:29:22Z", "expires_at": "2026-11-26T16:29:22Z"}
+{"format": "weir-handover/1", "key": "119:landed", "reader": "fix/sluice-keeps-a-gates-queues-moving-2", "by": "inbox", "at": "2026-11-19T16:42:04Z"}
+{"format": "weir-confirmation/1", "key": "119:landed", "reader": "fix/sluice-keeps-a-gates-queues-moving-2", "at": "2026-11-19T16:42:15Z"}
+{"format": "weir-known/1", "reader": "fix/sluice-keeps-a-gates-queues-moving-2", "known_at": "2026-11-19T16:42:15Z"}

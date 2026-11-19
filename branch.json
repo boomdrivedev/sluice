@@ -1,0 +1,22 @@
+{
+  "schema": "sluice/branch@1",
+  "branch": "bolt/sluice-keeps-a-gates-queues-moving",
+  "log": "sluice/log@1",
+  "base": "c492ae60e155a41804e05d673b053adc91bf99dc",
+  "verified": true,
+  "covered_by": {
+    "at": "c492ae60e155a41804e05d673b053adc91bf99dc",
+    "result": "passed",
+    "ran": 11,
+    "replayed": 0
+  },
+  "window": 4,
+  "next_place": 4,
+  "next_candidate": 4,
+  "candidates": [],
+  "landing": null,
+  "release": [],
+  "outbox": [],
+  "lead": "deneb",
+  "landed": "c492ae60e155a41804e05d673b053adc91bf99dc"
+}

@@ -1,0 +1,26 @@
+{
+  "schema": "sluice/submission@1",
+  "id": 117,
+  "branch": "bolt/sluice-keeps-a-gates-queues-moving",
+  "head": "41662125101ac79d94fb6a23ac938e7cadf31351",
+  "from": {
+    "agent": "fix/sluice-keeps-a-gates-queues-moving-1",
+    "worktree": "fix/sluice-keeps-a-gates-queues-moving-1",
+    "path": "/Users/chuck/.local/share/flume/places/2db1db6f889b/fix--sluice-keeps-a-gates-queues-moving-1",
+    "host": "deneb"
+  },
+  "submitted": "2026-11-19T14:03:59Z",
+  "after": [],
+  "priority": 0,
+  "attempt": 1,
+  "state": "landed",
+  "tested": {
+    "combination": "171cb1ae6e72e54d9cb79f1f9d85712d1732b453",
+    "on": "24f46f87b823e51c6376e15728cad635ea4281db",
+    "submissions": [
+      117
+    ]
+  },
+  "result": "passed",
+  "landed_as": "d63013483ad8977ec160038634da460e26e82a67"
+}
