@@ -33,8 +33,9 @@ run and has room takes it first. A pool's runs hold no part of any
 host's bound.
 
 A gate that trusts the pool's signer, and a signer of your hosts that
-may claim no system, sends the pool every run. Your hosts lead the
-branch, since the gate trusts their signer, and take none of its runs.
+may claim no system, sends the pool every run. Your hosts may run the
+branch's queue, since the gate trusts their signer, and take none of its
+runs.
 That is how a branch runs every check on a CodeBuild fleet.
 
 A run the pool can't take either, with no runner named for its system,
@@ -44,8 +45,9 @@ combination is formed again.
 
 sluice claims the run, writes the claim in the branch's state, and then
 starts the pool's job, under the claim, `pool/forge/12`. The next round
-starts a claim written and not started, and never starts one twice. The lead reads the run as
-running from the job's own start, and its time limit counts from there.
+starts a claim written and not started, and never starts one twice.
+The host that runs the queue reads the run as running from the job's
+own start, and its time limit counts from there.
 A job that ends with nothing recorded is a claim that lapsed: its checks
 run again in a run of their own.
 
@@ -291,10 +293,11 @@ policy, and the next round starts the first run on the fleet.
 
 A run is two builds:
 
-- **The run build**, on the system's fleet. The lead starts it with the
-  claim, the branch, the combination, the system and a token of
-  sluice's app that reads the repository for an hour, and nothing else.
-  The lead's role may change nothing the build runs. It clones the
+- **The run build**, on the system's fleet. The host that runs the
+  queue starts it with the claim, the branch, the combination, the
+  system and a token of sluice's app that reads the repository for an
+  hour, and nothing else. The start role it assumes may change nothing
+  the build runs. It clones the
   repository, starts the claimed run as a host would, keeps its report,
   releases its checkout, and hands its report over as a zip. It holds
   no key and no secret.
@@ -306,8 +309,8 @@ A run is two builds:
   out, signs them with the key, and writes the run ended in the
   branch's state.
 
-A run build someone stopped starts no sign build: the lead ends its run
-with no outcome, saying the build was stopped. So does a run build no
+A run build someone stopped starts no sign build: the host that runs
+the queue ends its run with no outcome, saying the build was stopped. So does a run build no
 sign build took within the host's `[peers] alive`, naming the rule.
 
 An instance runs one build at a time. A build releases its checkout,
@@ -327,6 +330,7 @@ The sign builds run on demand, for a minute or two each.
 
 ## With every host off
 
-A pool takes runs; it doesn't run the queue. A round runs on a host of
-yours that leads the branch, so with every host off a submission waits.
+A pool takes runs; it doesn't run the queue. A round runs on the host
+of yours that runs the branch's queue, so with every host off a
+submission waits.
 Rounds run as a job of their own are [designed, not built](/sluice/roadmap/).

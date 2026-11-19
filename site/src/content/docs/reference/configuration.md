@@ -917,7 +917,7 @@ sets either is refused.
 |---|---|
 | `lease` | How long this host waits, having seen a branch's state stand unchanged, before it takes the branch from a host that has gone quiet. It counts by its own clock, never by the time another host wrote. The default is `"5m"`. |
 | `alive` | How often this host rewrites its sign of life. A claim on a run lapses once its host's sign of life has stood unchanged this long, and another host runs it. It must be shorter than `lease`. The default is `"2m"`. |
-| `name` | What this host is called among the hosts that share a remote: in a branch's state as its lead, and on the runs it claims. The default is the host's own name; give two instances on one machine a name each. |
+| `name` | What this host is called among the hosts that share a remote: in a branch's state as the host that runs its queue, and on the runs it claims. The default is the host's own name; give two instances on one machine a name each. |
 
 ### `[deliveries]`
 
