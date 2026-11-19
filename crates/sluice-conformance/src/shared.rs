@@ -1934,7 +1934,7 @@ pub fn a_read_of_a_mended_branch_leaves_its_state_as_it_was(h: &impl Rig) {
 pub fn session_part(s: &sluice_core::Sluice<'_>) -> sluice_seams::Part {
     s.seams()
         .tests
-        .hold(sluice_seams::RunKind::Session)
+        .hold(sluice_seams::RunKind::Session, crate::BRANCH)
         .expect("the host's room answers")
         .expect("room on the host for a session's run")
 }

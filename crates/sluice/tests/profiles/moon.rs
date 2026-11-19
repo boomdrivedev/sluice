@@ -522,6 +522,31 @@ fn a_second_run_replays_under_the_same_keys() {
     assert_eq!(first.executor.processors, Some(4));
 }
 
+/// 153 (design D6): once a moon run has ended, the check seam's times
+/// for it hold each of its checks as moon timed it, its start no later
+/// than its end; its tasks, which answer only a run that goes, say
+/// nothing.
+#[test]
+fn a_finished_moon_run_s_checks_are_timed() {
+    let repo = workspace("moon-timed");
+    let c = checks(&repo);
+    let (run, report) = finish_run(&c, &request(&repo, "p1", &["#check-fast"], None));
+    assert_eq!(names(&report), ["alpha:test", "beta:test"]);
+    assert!(c.tasks(&run).unwrap().is_empty());
+    let timed = c.timed(&run).unwrap();
+    let at = |s: &Option<String>| {
+        chrono::DateTime::parse_from_rfc3339(s.as_deref().expect("a time")).unwrap()
+    };
+    for name in ["alpha:test", "beta:test"] {
+        let t = timed
+            .iter()
+            .find(|t| t.target == name)
+            .unwrap_or_else(|| panic!("no {name} in {timed:?}"));
+        assert_eq!(t.state, TaskState::Passed, "{t:?}");
+        assert!(at(&t.started) <= at(&t.ended), "{t:?}");
+    }
+}
+
 /// 28: a request that may not replay runs every task again, under the
 /// same keys, though each key holds a pass.
 #[test]
@@ -1116,6 +1141,58 @@ fn a_key_is_checked_against_the_tree_without_running() {
     }
     let beta = report.tasks.iter().find(|t| t.task == "beta:test").unwrap();
     assert_eq!(manifest(&beta.hash)["deps"]["alpha:test"], "ignored");
+}
+
+/// Design D9 (C.2 moon row, C.6): moon hashes a task's input that the
+/// tree tracks as a link by the file it names, so the profile's `proven`
+/// reads the combination's tree through the link and keeps the key.
+/// flume's `.claude/rules/core-details.md`, a link to
+/// `docs/architecture/core-details.md`, read as the link's own text,
+/// refused root:format's key on 2026-11-19.
+#[test]
+fn a_key_whose_input_is_a_link_is_proven() {
+    let repo = workspace("moon-link");
+    std::fs::create_dir_all(repo.dir().join("docs")).unwrap();
+    repo.write("docs/notes.md", "the notes\n");
+    std::fs::remove_file(repo.dir().join("alpha/notes.md")).unwrap();
+    std::os::unix::fs::symlink("../docs/notes.md", repo.dir().join("alpha/notes.md")).unwrap();
+    repo.git(&["add", "-A"]);
+    repo.git(&["commit", "-q", "-m", "a link"]);
+    assert_eq!(
+        repo.git(&["ls-tree", "HEAD", "alpha/notes.md"])
+            .split_whitespace()
+            .next(),
+        Some("120000"),
+        "the tree holds alpha/notes.md as a link"
+    );
+
+    let c = checks(&repo);
+    let (run, report) = finish_run(&c, &request(&repo, "p1", &["#check-fast"], None));
+    let alpha = report
+        .tasks
+        .iter()
+        .find(|t| t.task == "alpha:test")
+        .unwrap();
+    let blob = repo
+        .dir()
+        .join(".moon/cache/blobs")
+        .join(&alpha.hash[..2])
+        .join(&alpha.hash[2..]);
+    let manifest: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(blob).unwrap()).unwrap();
+    use sha2::{Digest, Sha256};
+    let target: String = Sha256::digest(b"the notes\n")
+        .iter()
+        .map(|x| format!("{x:02x}"))
+        .collect();
+    assert_eq!(
+        manifest[0]["inputs"]["alpha/notes.md"], target,
+        "moon hashes the link by the file it names"
+    );
+    let proof = c.proven(&run, &report).unwrap();
+    let mut proven = proof.proven;
+    proven.sort();
+    assert_eq!(proven, ["alpha:test", "beta:test"], "{:?}", proof.refused);
 }
 
 /// Design D9: the profile's `proven` keeps every task whose key the

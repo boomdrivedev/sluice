@@ -294,7 +294,7 @@ pub fn step(
     let outcome = match round.step {
         Step::Stepped => "stepped",
         Step::Busy => "busy",
-        Step::Led => "led",
+        Step::Led => "elsewhere",
         Step::Contended => "contended",
         Step::Held => "held",
     };
@@ -314,7 +314,9 @@ pub fn step(
             let word = match round.step {
                 Step::Stepped => "stepped",
                 Step::Busy => "busy: another round holds the lock",
-                Step::Led => "led: another host keeps the branch, and its lease has not passed",
+                Step::Led => {
+                    "elsewhere: another host runs the branch's queue, and its lease has not passed"
+                }
                 Step::Contended => "contended: the records moved; nothing done",
                 Step::Held => "held",
             };

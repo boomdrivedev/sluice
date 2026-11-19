@@ -547,6 +547,7 @@ impl Sluice<'_> {
             if error.is_none() {
                 tracing::info!(
                     monotonic_counter.sluice.abandoned.released = 1u64,
+                    sluice.repository = self.peer.repository.as_str(),
                     sluice.branch = %p.branch,
                 );
                 if !p.branch.is_empty() {

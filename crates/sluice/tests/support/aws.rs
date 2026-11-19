@@ -50,7 +50,7 @@ pub struct FakeAws {
 impl FakeAws {
     pub fn start() -> FakeAws {
         let held = Arc::new(Mutex::new(Held {
-            identity: format!("arn:aws:sts::{ACCOUNT}:assumed-role/sluice-lead/host"),
+            identity: format!("arn:aws:sts::{ACCOUNT}:assumed-role/sluice-start/host"),
             ..Held::default()
         }));
         let at = held.clone();
