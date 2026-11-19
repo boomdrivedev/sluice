@@ -5874,9 +5874,11 @@ fn submit_pull(
                         .map(|x| x.id)
                         .collect();
                     if json {
+                        // Record 0130 D4: the wait that follows the request
+                        // from any folder, beside the submission.
                         let doc = serde_json::json!({
                             "id": sub.id, "branch": branch, "ahead": ahead,
-                            "pull_request": number,
+                            "pull_request": number, "wait": pull_wait(branch, number),
                         });
                         writeln!(out, "{}", with_copy(doc, copy.as_ref())?)?;
                     } else {

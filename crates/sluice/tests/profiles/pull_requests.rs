@@ -2928,8 +2928,9 @@ fn run_again_marks_a_draft_ready() {
 
 /// No wait, its conditions hold: the submit answers with the submission
 /// sluice took the pull request in as, from its checkout `pull/<n>` at the
-/// head pushed, with the pull request beside it; `sluice wait <id>`
-/// follows that submission to its landing.
+/// head pushed, with the pull request and the wait that follows it beside
+/// it (record 0130); `sluice wait <id>` follows that submission to its
+/// landing.
 #[test]
 fn no_wait_answers_with_its_submission() {
     let g = OnGitHub::new("pr-no-wait-id", "");
@@ -2942,6 +2943,11 @@ fn no_wait_answers_with_its_submission() {
     assert_eq!(doc["pull_request"], n, "{doc}");
     assert_eq!(doc["branch"], "main", "{doc}");
     assert_eq!(doc["ahead"], serde_json::json!([]), "{doc}");
+    assert_eq!(
+        doc["wait"],
+        format!("sluice wait main --pull-request {n}").as_str(),
+        "{doc}"
+    );
     let id = doc["id"]
         .as_u64()
         .unwrap_or_else(|| panic!("{doc}"))
