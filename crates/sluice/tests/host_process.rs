@@ -1952,3 +1952,37 @@ fn a_daemon_indexes_the_repository_it_starts_in() {
     answers(&d, &daemon);
     assert_eq!(index.list().unwrap(), Vec::<std::path::PathBuf>::new());
 }
+
+/// host-process, "A daemon" (150; design D1 of `sluice-runs-as-a-daemon`):
+/// with `sluice daemon` running, `sluice overview --json` gives
+/// `host_process.daemon` true and its pid; with a host process a wait
+/// started, `host_process.daemon` is false.
+#[test]
+fn the_overview_names_a_daemon() {
+    let overview = |d: &OnDisk| {
+        let out = d
+            .command(d.repo.dir())
+            .args(["overview", "--json"])
+            .output()
+            .unwrap();
+        assert!(out.status.success(), "{}", text(&out));
+        serde_json::from_slice::<serde_json::Value>(&out.stdout).unwrap()
+    };
+    let d = OnDisk::new("daemon-overview", POLICY);
+    let daemon = Daemon::start(&d, d.repo.dir());
+    answers(&d, &daemon);
+    let doc = overview(&d);
+    assert_eq!(doc["host_process"]["daemon"], true, "{doc}");
+    assert_eq!(doc["host_process"]["pid"], daemon.pid(), "{doc}");
+    drop(daemon);
+
+    let d = OnDisk::new("daemon-overview-wait", POLICY);
+    let repository = d.repository(d.repo.dir());
+    let follow = d
+        .client(d.repo.dir())
+        .follow(Path::new(&repository), FollowKind::Wait)
+        .unwrap();
+    let doc = overview(&d);
+    assert_eq!(doc["host_process"]["daemon"], false, "{doc}");
+    assert_eq!(doc["host_process"]["pid"], follow.named.pid, "{doc}");
+}
