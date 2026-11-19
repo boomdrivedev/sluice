@@ -98,8 +98,8 @@ The documentation tasks (3.7, 4.4, 5.3, 5.4) hold on reading:
   uncommitted and untracked files included. No example opens with
   `running the checks <head> affects against`; the examples open with
   `running the checks the worktree's own changes affect since …`.
-- Record 0130 holds D1, D4 and D5 with their alternatives. Rule core.9's
-  details carry its two clauses, citing record 0130.
+- Record 0131 holds D1, D4 and D5 with their alternatives. Rule core.9's
+  details carry its two clauses, citing record 0131.
 - The skill and its `exec.md` reference say a check sluice passed on the
   same files is replayed and a replay sluice holds no pass for runs
   again, and no longer say "forced past moon's cache". The commands page
