@@ -108,10 +108,10 @@ pub fn check(
              forms nothing: trust the signer its leading hosts sign as beside the pool's, \
              with systems = [] so it claims no run"
         ))),
-        (true, leads) => {
-            let names: Vec<&str> = leads.iter().map(|s| s.as_str()).collect();
+        (true, signers) => {
+            let names: Vec<&str> = signers.iter().map(|s| s.as_str()).collect();
             lines.push(Line::Ok(format!(
-                "{branch} is led by a host signing as {}",
+                "{branch}'s queue is run by a host signing as {}",
                 names.join(" or ")
             )));
         }

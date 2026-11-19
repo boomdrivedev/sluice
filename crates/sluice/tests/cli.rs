@@ -11290,14 +11290,14 @@ fn init_codebuild_from_a_stack_appends_the_pool() {
 }
 
 /// `main` on `origin` trusting the CodeBuild pool `codebuild`, its key's
-/// public half `public`, and `lead`, its leading hosts' signer, which may
-/// claim no system, testing as `rules` say.
+/// public half `public`, and `box`, the signer the hosts that may run its
+/// queue sign as, which may claim no system, testing as `rules` say.
 fn fleet_policy(public: &str, rules: &str) -> String {
     format!(
         "[tests]\nrunner = \"fake\"\n\n[checkout]\n\n\
          [branches.main]\nrequired = [\"#gate\"]\n{rules}timeout = \"45m\"\n\
-         trust = [\"lead\", \"codebuild\"]\nremote = \"origin\"\nsystems = [\"linux-x64\"]\n\
-         \n[signers.lead]\nssh = \"lead ssh-ed25519 AAAA\"\nsystems = []\n\
+         trust = [\"box\", \"codebuild\"]\nremote = \"origin\"\nsystems = [\"linux-x64\"]\n\
+         \n[signers.box]\nssh = \"box ssh-ed25519 AAAA\"\nsystems = []\n\
          \n[signers.codebuild]\nkms = {{ key = \"{key}\", public = \"{public}\" }}\nsystems = [\"linux-x64\"]\n\
          \n[pools.codebuild]\ncodebuild = {{ region = \"us-east-1\", sign = \"sluice-sign\" }}\nsigner = \"codebuild\"\n\
          runners = {{ linux-x64 = \"sluice-run-linux-x64\" }}\n\
@@ -11338,8 +11338,8 @@ fn pool_check_says_a_fleet_tests_side_by_side() {
     assert_eq!(code, 0, "{said}");
     assert!(!said.contains("failed"), "{said}");
     for line in [
-        "ok      main is led by a host signing as lead",
-        "ok      [pools.codebuild] is reached in us-east-1 as arn:aws:sts::111122223333:assumed-role/sluice-lead/host",
+        "ok      main's queue is run by a host signing as box",
+        "ok      [pools.codebuild] is reached in us-east-1 as arn:aws:sts::111122223333:assumed-role/sluice-start/host",
         "ok      sluice-run-linux-x64 runs linux-x64 on the reserved-capacity fleet sluice-linux-x64, LINUX_EC2",
         "ok      sluice-run-linux-x64's buildspec is as sluice",
         "ok      sluice-run-linux-x64 may take 90 minutes, longer than the branch's timeout of 45",
@@ -11386,7 +11386,7 @@ fn pool_check_names_a_branch_no_host_can_lead() {
         "batch = false\nparallel = 10\n",
     )
     .replace(
-        "trust = [\"lead\", \"codebuild\"]",
+        "trust = [\"box\", \"codebuild\"]",
         "trust = [\"codebuild\"]",
     );
     f.world.init("main", &[(POLICY_PATH, policy.as_str())]);
