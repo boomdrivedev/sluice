@@ -390,14 +390,55 @@ fn forge_findings(
     ));
     // Record 0119 (design D14): each pool on GitHub the policy names at
     // the branch's revision, as `sluice init actions` sets it up.
-    if let Some((_, policy)) = branches.policy_of(branch)? {
-        for pool in policy.pools.iter().filter(|p| p.kind.0 == "github") {
-            let wants = github::workflows::sluice(crate::VERSION, &pool.runners);
-            let signer = policy.signers.get(&pool.signer).map(|s| &s.identity);
-            found.extend(github::check::pool(&app, &repo, pool, signer, &wants));
+    match whole_policy(&branches, branch) {
+        Ok(None) => {}
+        Ok(Some(policy)) => {
+            for pool in policy.pools.iter().filter(|p| p.kind.0 == "github") {
+                let wants = github::workflows::sluice(crate::VERSION, &pool.runners);
+                let signer = policy.signers.get(&pool.signer).map(|s| &s.identity);
+                found.extend(github::check::pool(&app, &repo, pool, signer, &wants));
+            }
         }
+        Err(e) => found.push(github::check::Finding {
+            ok: false,
+            what: format!("{e:#}"),
+        }),
     }
     Ok(found)
+}
+
+/// The policy `sluice forge check` reads `branch`'s pools from: read
+/// whole, at the branch's revision as this host holds it, with no fetch
+/// (56; rule core.15), or at main's for a branch not yet made, which it is
+/// made from; `None` where that revision holds no policy. Routing's
+/// reading, [`branches::Branches::policy_of`], passes the pools over
+/// (record 0069), so it is never read for them (record 0119 as amended
+/// 2026-11-18). A policy that cannot be read whole is refused, naming the
+/// revision and that its pools went unread.
+fn whole_policy(
+    branches: &branches::Branches,
+    branch: &str,
+) -> Result<Option<sluice_core::policy::Policy>> {
+    let (name, rev) = match branches.held(branch)? {
+        Some(rev) => (branch, rev),
+        None => match branches.held("main")? {
+            Some(rev) => ("main", rev),
+            None => return Ok(None),
+        },
+    };
+    let Some(bytes) = branches.file_at(&rev, sluice_core::policy::POLICY_PATH)? else {
+        return Ok(None);
+    };
+    std::str::from_utf8(&bytes)
+        .map_err(anyhow::Error::from)
+        .and_then(sluice_core::policy::Policy::parse)
+        .map(Some)
+        .map_err(|e| {
+            e.context(format!(
+                "{name}'s policy at {} is refused, so its pools are not read",
+                rev.short()
+            ))
+        })
 }
 
 /// The repository's default branch, the branch its common directory's
