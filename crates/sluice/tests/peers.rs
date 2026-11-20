@@ -918,10 +918,14 @@ impl Drop for Kept {
 /// are on origin and its signers name the second host, which runs `sluice
 /// daemon`, started in its clone, and no other command; the first host
 /// submits, and the second host's daemon tests and lands the submission,
-/// read from origin with no command run on either host.
+/// read from origin with no command run on either host. The submission is
+/// on origin as the daemon starts, so its first ask of origin finds it,
+/// where a daemon already idle would find it within the minute (129 as
+/// amended 2026-11-19).
 #[test]
 fn a_daemon_lands_what_another_host_submits() {
     let (host_a, host_b, origin) = two_hosts("peers-daemon", "[\"a\", \"b\"]");
+    let id = host_a.submit("x");
     let mut daemon = Kept(
         host_b
             .command(host_b.repo.dir())
@@ -946,7 +950,6 @@ fn a_daemon_lands_what_another_host_submits() {
         std::thread::sleep(Duration::from_millis(100));
     }
 
-    let id = host_a.submit("x");
     let subject = || {
         let out = support::git_command()
             .arg("--git-dir")

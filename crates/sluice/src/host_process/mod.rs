@@ -76,9 +76,18 @@ pub const START_LOCK_FD_VAR: &str = "SLUICE_START_LOCK_FD";
 /// whether its state folder is still there (design D6).
 const LOOK: Duration = Duration::from_millis(100);
 
-/// How often it looks at each repository in its index that it holds no
-/// task for, as an idle tick reads it (129; design D4).
+/// How often it goes through its index, looking at each repository it
+/// holds no task for whose remote is due to be asked, as an idle tick
+/// reads it (129; design D4).
 const SCAN: Duration = Duration::from_secs(3);
+
+/// How often a repository with nothing in play has its remote asked, at
+/// most, by the host process's look or a pass of its task, a watched one's
+/// among them; a submit or another command that tells of a change, a
+/// watch's opening and a forecast's second ask have the next reading ask
+/// at once, and a repository with work in play is asked at every pass
+/// (129 as amended 2026-11-19).
+pub const IDLE_ASK: Duration = Duration::from_secs(60);
 
 /// The tick a reading is current within for a one-shot read (64, 129;
 /// design D16).
@@ -596,11 +605,13 @@ fn run_holding(
             settings.clone(),
             tokens.clone(),
         ),
-        Arc::new(move |r: &Path| {
-            index::in_play(r, looked_with.instance(), &looked_holding).unwrap_or(tasks::Looked {
-                in_play: true,
-                refused: None,
-            })
+        Arc::new(move |r: &Path, asks: bool| {
+            index::in_play(r, looked_with.instance(), &looked_holding, asks).unwrap_or(
+                tasks::Looked {
+                    in_play: true,
+                    refused: None,
+                },
+            )
         }),
     );
     let tasks = match asked_only() {

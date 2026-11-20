@@ -1795,6 +1795,13 @@ reads every branch, its state, the pull requests it follows and the
 results it needs as the host holds them since. A status during a long
 round is answered at once from the reading before it.
 
+A reading asks the repository's remote at every pass while work is in
+play there. Where nothing is, the host process asks the remote once a
+minute at most, and reads every branch on it between as that ask
+fetched it, so a branch only another host moves is shown up to a
+minute late. A submit, or any other command of sluice's that changes a
+queue, and a watch's opening have the next reading ask at once.
+
 A command waits for that answer for the bound a round's calls to a
 remote are tried for and a tick, about half a minute. Past that, it
 reads the repository as the host holds it all the same, and says on
