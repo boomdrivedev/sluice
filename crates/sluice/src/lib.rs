@@ -1679,6 +1679,7 @@ impl Cli {
                     JobCommand::Run { .. } => "job run",
                     JobCommand::Sign { .. } => "job sign",
                     JobCommand::Record { .. } => "job record",
+                    JobCommand::Release { .. } => "job release",
                 },
                 Command::Credential { .. } => "credential",
             },
