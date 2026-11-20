@@ -1,0 +1,30 @@
+{
+  "schema": "sluice/submission@1",
+  "id": 132,
+  "branch": "bolt/sluice-merges-as-the-boomdrive-app",
+  "head": "f747394daba996b6629ffb054f560a6878513e2c",
+  "from": {
+    "agent": "fix/sluice-merges-as-the-boomdrive-app--takes-main",
+    "worktree": "fix/sluice-merges-as-the-boomdrive-app--takes-main",
+    "path": "/Users/chuck/.local/share/boomdrive/repositories/boomdrivedev/sluice/places/fix-sluice-merges-as-the-boomdrive-app--takes-main",
+    "host": "deneb",
+    "session": "herdr:w2:p26@/Users/chuck/.config/herdr/sessions/boomdrive/herdr.sock"
+  },
+  "submitted": "2026-11-20T21:51:34Z",
+  "after": [],
+  "priority": 0,
+  "attempt": 1,
+  "state": "landed",
+  "tested": {
+    "combination": "3d1ce751258ecffedea8404750f7b779ae024646",
+    "on": "353e94f1505d5a1c2c19c9b63163b82081b5dde9",
+    "submissions": [
+      132
+    ]
+  },
+  "result": "passed",
+  "landed_as": "251c97667721a537bed9ab4563c7a87822f1c293",
+  "subject": "main at c2c1359 into the bolt",
+  "trace": "00-42c18b7424b4fbbd963025ff50a362c6-6b0f06f5141d94a5-01",
+  "under_test_ms": 418000
+}

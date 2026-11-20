@@ -1,0 +1,29 @@
+{
+  "schema": "sluice/submission@1",
+  "id": 131,
+  "branch": "bolt/sluice-merges-as-the-boomdrive-app",
+  "head": "9ec7078a4e8ecf45cdea3d677bf2fc881035b059",
+  "from": {
+    "agent": "change/sluices-github-check-covers-every-permission-it-uses",
+    "worktree": "change/sluices-github-check-covers-every-permission-it-uses",
+    "path": "/Users/chuck/.local/share/flume/places/2db1db6f889b/change--sluices-github-check-covers-every-permission-it-uses",
+    "host": "deneb",
+    "session": "herdr:w2:p26@/Users/chuck/.config/herdr/sessions/boomdrive/herdr.sock"
+  },
+  "submitted": "2026-11-20T21:49:23Z",
+  "after": [],
+  "priority": 0,
+  "attempt": 1,
+  "state": "landed",
+  "tested": {
+    "combination": "3f8b9020b47977b9576ed4363658173adf5f5506",
+    "on": "dc9d0487e4bedcdc32d097ad2983b6a14a0203bc",
+    "submissions": [
+      131
+    ]
+  },
+  "result": "passed",
+  "landed_as": "353e94f1505d5a1c2c19c9b63163b82081b5dde9",
+  "trace": "00-6e7ea5d04c134a8c1660559b90875d71-8a0c34645ae0c01e-01",
+  "under_test_ms": 48000
+}

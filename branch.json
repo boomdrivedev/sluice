@@ -1,0 +1,23 @@
+{
+  "schema": "sluice/branch@1",
+  "branch": "bolt/sluice-merges-as-the-boomdrive-app",
+  "log": "sluice/log@1",
+  "base": "251c97667721a537bed9ab4563c7a87822f1c293",
+  "verified": true,
+  "covered_by": {
+    "at": "251c97667721a537bed9ab4563c7a87822f1c293",
+    "result": "passed",
+    "ran": 27,
+    "replayed": 0
+  },
+  "window": 4,
+  "next_place": 5,
+  "next_candidate": 5,
+  "candidates": [],
+  "landing": null,
+  "release": [],
+  "outbox": [],
+  "lead": "deneb",
+  "landed": "251c97667721a537bed9ab4563c7a87822f1c293",
+  "kept": "2026-11-20T21:59:28Z"
+}

@@ -1,0 +1,27 @@
+{
+  "schema": "sluice/submission@1",
+  "id": 129,
+  "branch": "bolt/sluice-merges-as-the-boomdrive-app",
+  "head": "6451065ff0ab7bb747216864543d482a91a51ec4",
+  "from": {
+    "agent": "fix/sluice-merges-as-the-boomdrive-app--take-main",
+    "worktree": "fix/sluice-merges-as-the-boomdrive-app--take-main",
+    "path": "/Users/chuck/.local/share/flume/places/2db1db6f889b/fix--sluice-merges-as-the-boomdrive-app--take-main",
+    "host": "deneb"
+  },
+  "submitted": "2026-11-20T02:27:50Z",
+  "after": [],
+  "priority": 0,
+  "attempt": 1,
+  "state": "landed",
+  "tested": {
+    "combination": "0449cf62075b700d53e739243ac883468ffb6437",
+    "on": "c498ece4eaf2283ad5b7173e1e7b96d07032f339",
+    "submissions": [
+      129
+    ]
+  },
+  "result": "passed",
+  "landed_as": "dc9d0487e4bedcdc32d097ad2983b6a14a0203bc",
+  "under_test_ms": 291000
+}

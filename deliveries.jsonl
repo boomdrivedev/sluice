@@ -1,0 +1,8 @@
+{"format": "weir-known/1", "reader": "change/every-merge-names-the-app-as-its-author", "known_at": "2026-11-19T01:17:13Z"}
+{"format": "weir-delivery/1", "key": "129:landed", "readers": ["fix/sluice-merges-as-the-boomdrive-app--take-main"], "message": "[sluice] #129 landed on bolt/sluice-merges-as-the-boomdrive-app as dc9d048.", "recorded_at": "2026-11-20T02:33:16Z", "expires_at": "2026-11-27T02:33:16Z"}
+{"format": "weir-handover/1", "key": "129:landed", "reader": "fix/sluice-merges-as-the-boomdrive-app--take-main", "by": "inbox", "at": "2026-11-20T02:33:54Z"}
+{"format": "weir-known/1", "reader": "change/sluices-github-check-covers-every-permission-it-uses", "known_at": "2026-11-20T21:50:53Z"}
+{"format": "weir-delivery/1", "key": "132:landed", "readers": ["fix/sluice-merges-as-the-boomdrive-app--takes-main"], "message": "[sluice] #132 landed on bolt/sluice-merges-as-the-boomdrive-app as 251c976.", "recorded_at": "2026-11-20T21:58:57Z", "expires_at": "2026-11-27T21:58:57Z"}
+{"format": "weir-handover/1", "key": "132:landed", "reader": "fix/sluice-merges-as-the-boomdrive-app--takes-main", "by": "notice", "at": "2026-11-20T21:59:01Z"}
+{"format": "weir-confirmation/1", "key": "132:landed", "reader": "fix/sluice-merges-as-the-boomdrive-app--takes-main", "at": "2026-11-20T21:59:28Z"}
+{"format": "weir-known/1", "reader": "fix/sluice-merges-as-the-boomdrive-app--takes-main", "known_at": "2026-11-20T21:59:28Z"}
