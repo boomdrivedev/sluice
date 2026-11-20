@@ -46,6 +46,27 @@ fn read_existing_missing_and_packed() {
     assert_eq!(refs(&repo).read("bolt/x").unwrap(), Some(rev(head)));
 }
 
+/// Rule core.66 (design D3): a repository is named by the `origin` it
+/// configures, its owner and name and nothing else of the URL, and with no
+/// origin by its folder; read with no fetch, so an origin no host answers
+/// for names it all the same.
+#[test]
+fn a_repository_is_named_by_the_origin_it_configures() {
+    let repo = Repo::new("app");
+    repo.git(&[
+        "remote",
+        "add",
+        "origin",
+        "https://user:token@git.example/acme/app.git",
+    ]);
+    assert_eq!(refs(&repo).repository_name().unwrap(), "acme/app");
+    assert!(!repo.dir().join(".git/FETCH_HEAD").exists());
+
+    let alone = Repo::new("alone");
+    let folder = alone.dir().file_name().unwrap().to_str().unwrap();
+    assert_eq!(refs(&alone).repository_name().unwrap(), folder);
+}
+
 /// 124: a branch in this host's refs is its own copy, and a levelling of
 /// it is refused, moving nothing.
 #[test]

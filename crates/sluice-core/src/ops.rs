@@ -47,6 +47,9 @@ pub struct SubmitRequest {
     pub priority: i64,
     /// 23: the submitter's words for what lands.
     pub subject: Option<String>,
+    /// 153: the `TRACEPARENT` of the context the submit was started under,
+    /// which its submission keeps (design D4).
+    pub trace: Option<String>,
 }
 
 /// 125: several heads submitted to one branch as one act.
@@ -61,6 +64,9 @@ pub struct GroupRequest {
     pub priority: i64,
     /// 23, 125: each head's subject, in the heads' order, or none.
     pub subjects: Vec<String>,
+    /// 153: the `TRACEPARENT` of the context the submit was started under,
+    /// which each submission of the act keeps alike (design D4).
+    pub trace: Option<String>,
 }
 
 impl GroupRequest {
@@ -540,6 +546,7 @@ impl Sluice<'_> {
             after: req.after.clone(),
             priority: req.priority,
             subjects: req.subject.iter().cloned().collect(),
+            trace: req.trace.clone(),
         };
         Ok(match self.submit_group(&group)? {
             Ok(mut accepted) => Ok(accepted.remove(0)),
@@ -1796,6 +1803,10 @@ fn admit(
             beside: None,
             covered_by: None,
             act,
+            trace: req.trace.clone(),
+            under_test_ms: 0,
+            under_test_since: None,
+            runs_with_no_outcome: 0,
         },
     );
     l.log(
@@ -1920,6 +1931,7 @@ mod tests {
                 after: after.to_vec(),
                 priority: 0,
                 subjects: Vec::new(),
+                trace: None,
             }
         }
     }
@@ -2211,7 +2223,7 @@ mod tests {
             unreachable!("a submit runs nothing")
         }
 
-        fn hold(&self, _: sluice_seams::RunKind) -> Result<Option<sluice_seams::Part>> {
+        fn hold(&self, _: sluice_seams::RunKind, _: &str) -> Result<Option<sluice_seams::Part>> {
             unreachable!("a submit runs nothing")
         }
 
@@ -2260,6 +2272,10 @@ mod tests {
         }
 
         fn tasks(&self, _: &RunHandle) -> Result<Vec<TaskProgress>> {
+            unreachable!("a submit runs nothing")
+        }
+
+        fn timed(&self, _: &RunHandle) -> Result<Vec<TaskProgress>> {
             unreachable!("a submit runs nothing")
         }
     }
@@ -2919,6 +2935,7 @@ mod tests {
             after: vec![],
             priority: 0,
             subject: None,
+            trace: None,
         })
         .unwrap()
         .unwrap();
@@ -3026,6 +3043,7 @@ mod forecasts {
             after: Vec::new(),
             priority: 0,
             subject: None,
+            trace: None,
         };
         s.submit(&req).unwrap().unwrap().id
     }

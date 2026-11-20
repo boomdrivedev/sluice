@@ -7,9 +7,9 @@ use anyhow::{anyhow, Context, Result};
 use sluice_seams::{Changes, Rev, Snapshot};
 
 use crate::records::{
-    finished_file, parse_lines, submission_file, to_document, to_line, BranchDoc, Candidate, Event,
-    FinishedLine, HomeDoc, LogLine, OutboxItem, RefusedWrite, State, Submission, BRANCH_FILE,
-    DELIVERIES_FILE, FINISHED_INDEX, HOME_FILE, LOG_FILE,
+    finished_file, parse_lines, submission_file, to_document, to_line, BranchDoc, Candidate, Ended,
+    Event, FinishedLine, HomeDoc, LogLine, OutboxItem, RefusedWrite, State, Submission,
+    BRANCH_FILE, DELIVERIES_FILE, FINISHED_INDEX, HOME_FILE, LOG_FILE,
 };
 use crate::refused_writes::{command_of, ends, stands, STANDING};
 
@@ -27,6 +27,9 @@ pub struct Line {
     /// The submissions moved to the finished records, as the live index
     /// keeps them (130).
     pub finished: BTreeMap<u64, FinishedLine>,
+    /// 154: each live submission's state as read, so a write knows which
+    /// it ends (design D1 of `each-submission-shows-its-wait-and-its-test`).
+    read_states: BTreeMap<u64, State>,
     /// 51: the branch's deliveries, weir's records as read and then as
     /// added, in the order added (record 0102; design D3).
     deliveries: Vec<weir_delivery::Record>,
@@ -71,6 +74,7 @@ impl Line {
                 .with_context(|| format!("reading {branch}'s {DELIVERIES_FILE}"))?,
             None => Vec::new(),
         };
+        let read_states = subs.values().map(|s| (s.id, s.state)).collect();
         Ok(Line {
             branch: branch.into(),
             version: snapshot.version,
@@ -78,6 +82,7 @@ impl Line {
             home,
             subs,
             finished,
+            read_states,
             deliveries_read: deliveries.len(),
             deliveries,
             original: snapshot.files,
@@ -95,6 +100,73 @@ impl Line {
     /// nothing is let go of (weir 112, 113; design D3).
     pub fn add_deliveries(&mut self, records: &[weir_delivery::Record]) {
         self.deliveries.extend_from_slice(records);
+    }
+
+    /// 154: each submission this write ends, in an end state it was read in
+    /// none of, or not read at all, as one a submit writes ended (design D1
+    /// of `each-submission-shows-its-wait-and-its-test`).
+    pub fn ended(&self) -> Vec<&Submission> {
+        self.subs
+            .values()
+            .filter(|s| s.state.ends())
+            .filter(|s| !self.read_states.get(&s.id).is_some_and(|r| r.ends()))
+            .collect()
+    }
+
+    /// 154: the submissions a combination on the branch's revision under
+    /// test holds, those in an end state left out, as `derive_states`
+    /// reads it (design D2).
+    fn under_test(&self) -> BTreeSet<u64> {
+        let base = self.doc.base.as_ref();
+        self.doc
+            .candidates
+            .iter()
+            .filter(|c| Some(&c.on) == base && c.state.under_test())
+            .flat_map(|c| c.submissions.iter().copied())
+            .filter(|id| self.subs.get(id).is_some_and(|s| !s.state.ends()))
+            .collect()
+    }
+
+    /// 154: whether any submission's record disagrees with whether it is
+    /// under test, under test with no `under_test_since` or not with one;
+    /// it reads no clock (design D2).
+    pub fn under_test_moved(&self) -> bool {
+        let under = self.under_test();
+        self.subs
+            .values()
+            .any(|s| under.contains(&s.id) != s.under_test_since.is_some())
+    }
+
+    /// 154: keep each submission's time under test at `now`: one that went
+    /// under test is under test since `now`, and one that stopped adds the
+    /// time since then to `under_test_ms` (design D2).
+    pub fn keep_under_test(&mut self, now: &str) {
+        let under = self.under_test();
+        for s in self.subs.values_mut() {
+            match (under.contains(&s.id), s.under_test_since.take()) {
+                (true, None) => s.under_test_since = Some(now.into()),
+                (true, Some(since)) => s.under_test_since = Some(since),
+                (false, Some(since)) => s.under_test_ms += millis_between(&since, now),
+                (false, None) => {}
+            }
+        }
+    }
+
+    /// 114, 154: count one run with no outcome on each submission
+    /// combination `candidate` holds, where `ended` decided nothing (design
+    /// D3).
+    pub fn count_no_outcome(&mut self, candidate: &str, ended: &Ended) {
+        if !ended.decided_nothing() {
+            return;
+        }
+        let Some(held) = self.candidate(candidate).map(|c| c.submissions.clone()) else {
+            return;
+        };
+        for id in held {
+            if let Some(s) = self.subs.get_mut(&id) {
+                s.runs_with_no_outcome += 1;
+            }
+        }
     }
 
     /// Whether the branch has had submission `id`, live or finished.
@@ -609,6 +681,16 @@ fn key_of(record: &weir_delivery::Record) -> Option<&str> {
     }
 }
 
+/// The milliseconds from `since` to `now`, each RFC 3339, never below
+/// zero; nothing where either does not read (154; design D2).
+fn millis_between(since: &str, now: &str) -> u64 {
+    let read = |t: &str| chrono::DateTime::parse_from_rfc3339(t).ok();
+    match (read(since), read(now)) {
+        (Some(a), Some(b)) => u64::try_from((b - a).num_milliseconds()).unwrap_or(0),
+        _ => 0,
+    }
+}
+
 /// 51: the submission an outcome's key `<id>:<outcome>` names (design D2).
 pub fn submission_of(key: &str) -> Option<u64> {
     key.split_once(':')?.0.parse().ok()
@@ -681,6 +763,157 @@ mod tests {
              \"subject\":\"Batch review cards\"}\n\
              {\"id\":13,\"state\":\"landed\",\"worktree\":\"unit/forecast\"}\n"
         );
+    }
+
+    /// A submission to `main` in `state`, as its record reads.
+    fn record(id: u64, state: &str) -> Submission {
+        serde_json::from_str(&format!(
+            "{{\"schema\":\"sluice/submission@1\",\"id\":{id},\"branch\":\"main\",\
+             \"head\":\"h{id}\",\"from\":{{\"agent\":\"a\",\"worktree\":\"unit/{id}\"}},\
+             \"submitted\":\"2026-11-18T11:00:00Z\",\"after\":[],\"priority\":0,\
+             \"attempt\":1,\"state\":\"{state}\"}}"
+        ))
+        .unwrap()
+    }
+
+    /// `main`'s line on revision `b`, read with `subs` and `candidates`,
+    /// each combination `(id, submissions)` under test on `b`.
+    fn reading(subs: &[(u64, &str)], candidates: &[(&str, &[u64])]) -> Line {
+        let mut doc = BranchDoc::new("main");
+        doc.base = Some(Rev::new("b"));
+        doc.candidates = candidates
+            .iter()
+            .map(|(id, held)| Candidate {
+                id: (*id).into(),
+                on: Rev::new("b"),
+                submissions: held.to_vec(),
+                revision: Rev::new(format!("r{id}")),
+                state: crate::records::CandidateState::Testing,
+                runs: Vec::new(),
+                opened: None,
+                failed: Vec::new(),
+                every_check: false,
+                ran: 0,
+                replayed: 0,
+                not_run_runs: 0,
+                passed_at: None,
+                carries: Vec::new(),
+            })
+            .collect();
+        let files = std::iter::once((BRANCH_FILE.to_string(), to_document(&doc)))
+            .chain(
+                subs.iter()
+                    .map(|(id, state)| (submission_file(*id), to_document(&record(*id, state)))),
+            )
+            .collect();
+        Line::load("main", Snapshot { version: 1, files }).unwrap()
+    }
+
+    /// 154, design D1: a write names as ended each submission it moves into
+    /// an end state from none, and one it writes ended, and no other.
+    #[test]
+    fn a_write_names_the_submissions_it_ends() {
+        let mut line = reading(
+            &[(1, "queued"), (2, "testing"), (3, "failed"), (4, "refused")],
+            &[],
+        );
+        assert!(line.ended().is_empty(), "a read ends nothing");
+        line.sub_mut(1).state = State::Landed;
+        line.sub_mut(2).state = State::Withdrawn;
+        line.sub_mut(3).state = State::Withdrawn;
+        line.sub_mut(4).state = State::Queued;
+        line.subs.insert(5, record(5, "landed"));
+        let ended: Vec<(u64, State)> = line.ended().iter().map(|s| (s.id, s.state)).collect();
+        assert_eq!(
+            ended,
+            [
+                (1, State::Landed),
+                (2, State::Withdrawn),
+                (5, State::Landed)
+            ]
+        );
+    }
+
+    /// 154, design D2: a submission's own combination and a deeper one
+    /// under test from 12:00, judged at 12:04 and 12:10, count ten minutes.
+    #[test]
+    fn a_submission_s_time_under_test_counts_overlapping_combinations_once() {
+        let mut line = reading(
+            &[(1, "testing"), (2, "testing")],
+            &[("1", &[1]), ("2", &[1, 2])],
+        );
+        assert!(line.under_test_moved());
+        line.keep_under_test("2026-11-18T12:00:00Z");
+        assert!(!line.under_test_moved());
+        assert_eq!(
+            line.sub(1).unwrap().under_test_since.as_deref(),
+            Some("2026-11-18T12:00:00Z")
+        );
+        line.candidate_mut("1").unwrap().state = crate::records::CandidateState::Passed;
+        line.sub_mut(1).state = State::Passed;
+        assert!(!line.under_test_moved(), "the deeper one still holds it");
+        line.candidate_mut("2").unwrap().state = crate::records::CandidateState::Passed;
+        assert!(line.under_test_moved());
+        line.keep_under_test("2026-11-18T12:10:00Z");
+        let one = line.sub(1).unwrap();
+        assert_eq!(one.under_test_ms, 600_000);
+        assert_eq!(one.under_test_since, None);
+        assert!(!line.under_test_moved());
+    }
+
+    /// 154, design D2: a submission withdrawn three minutes after it went
+    /// under test holds three minutes, its time stopped at its end.
+    #[test]
+    fn a_submission_s_time_under_test_stops_at_its_end() {
+        let mut line = reading(&[(1, "testing")], &[("1", &[1])]);
+        line.keep_under_test("2026-11-18T12:00:00Z");
+        line.sub_mut(1).state = State::Withdrawn;
+        assert!(line.under_test_moved());
+        line.keep_under_test("2026-11-18T12:03:00Z");
+        let one = line.sub(1).unwrap();
+        assert_eq!(one.under_test_ms, 180_000);
+        assert_eq!(one.under_test_since, None);
+        let text = String::from_utf8(to_document(one)).unwrap();
+        assert!(text.contains("\"under_test_ms\": 180000"), "{text}");
+        assert!(!text.contains("under_test_since"), "{text}");
+    }
+
+    /// 114, 154, design D3: the runs that decided nothing, no host took,
+    /// every check none, none and unproven, and given none, each count one
+    /// on every submission their combination holds; a pass, a fail and a
+    /// time limit count none.
+    #[test]
+    fn a_run_that_decided_nothing_is_counted_on_its_submissions() {
+        use crate::records::CheckOutcome::{Failed, None as NoOutcome, Passed, Unproven};
+        let none = || NoOutcome { why: "w".into() };
+        let end = |outcomes: Vec<crate::records::CheckOutcome>, timed_out, untaken| Ended {
+            at: "2026-11-18T12:00:00Z".into(),
+            outcomes: outcomes
+                .into_iter()
+                .enumerate()
+                .map(|(i, o)| (format!("c{i}"), o))
+                .collect(),
+            timed_out,
+            why: None,
+            untaken,
+        };
+        let mut line = reading(&[(1, "testing"), (2, "testing")], &[("1", &[1, 2])]);
+        let ends = [
+            end(vec![none()], false, true),
+            end(vec![none(), none()], false, false),
+            end(vec![none(), Unproven], false, false),
+            end(vec![], false, false),
+            end(vec![Passed, none()], false, false),
+            end(vec![Failed, none()], false, false),
+            end(vec![none()], true, false),
+        ];
+        for ended in &ends {
+            line.count_no_outcome("1", ended);
+        }
+        assert_eq!(line.sub(1).unwrap().runs_with_no_outcome, 4);
+        assert_eq!(line.sub(2).unwrap().runs_with_no_outcome, 4);
+        line.count_no_outcome("gone", &ends[0]);
+        assert_eq!(line.sub(1).unwrap().runs_with_no_outcome, 4);
     }
 
     const DELIVERY: &str = "{\"format\": \"weir-delivery/1\", \"key\": \"12:landed\", \

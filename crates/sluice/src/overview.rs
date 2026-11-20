@@ -105,7 +105,7 @@ fn document_held(
 /// 71, 150 (record 0123; design D12, D13): the host's room as the overview
 /// gives it, the runs waiting by kind, whose turn the next contested run
 /// is and each repository's runs under test and waiting beside the count,
-/// and sluice's host process, `{version, pid, since}`, both read from the
+/// and sluice's host process, `{version, pid, since, daemon}`, both read from the
 /// host process where one answers: where none does, nothing waits and the
 /// process is `null`.
 pub(crate) fn room_and_process(
@@ -130,6 +130,7 @@ pub(crate) fn room_and_process(
                 "version": named.version,
                 "pid": named.pid,
                 "since": named.since,
+                "daemon": named.daemon,
             });
             (room, process)
         }

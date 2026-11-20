@@ -293,7 +293,7 @@ ssh = ".config/sluice.sessions"
 | `github` | A workflow's own identity on GitHub Actions: `{ workflow = ".github/workflows/sluice.yml", ref = "refs/heads/main" }`, the workflow and the branch it runs from, in the repository the branch's remote is. A result counts only when that workflow on that branch signed it, checked against the roots sluice carries ([Running checks on a pool](/sluice/guides/pools/#github-actions)). |
 | `kms` | A key in AWS KMS: `{ key = "arn:aws:kms:us-east-1:111122223333:key/1234abcd-...", public = "MFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAE..." }`, the key by its ARN, never an alias, and its public half, the base64 of its DER public key as KMS gives it, an `ECC_NIST_P256` key. A result counts only when that key signed it, which every host verifies with the public half, asking AWS nothing. A CodeBuild pool's sign build signs with it ([Running checks on a pool](/sluice/guides/pools/#a-codebuild-fleet)). |
 | `confined` | Whether results it signs may count as confined: no agent could reach the checkout or what the test wrote. Say it only of a host that runs no agents; sluice never works it out. The default is `false`. |
-| `systems` | The systems its results may say they ran on. The default is every system. An empty list, `systems = []`, claims no run and counts for no result, whatever the run's system. A branch trusts such a signer so that its hosts lead the branch and run none of its checks, as a branch on a CodeBuild fleet trusts its leading hosts ([Running checks on a pool](/sluice/guides/pools/#test-side-by-side)). |
+| `systems` | The systems its results may say they ran on. The default is every system. An empty list, `systems = []`, claims no run and counts for no result, whatever the run's system. A branch trusts such a signer so that its hosts may run the branch's queue and run none of its checks, as a branch on a CodeBuild fleet trusts the hosts that may run its queue ([Running checks on a pool](/sluice/guides/pools/#test-side-by-side)). |
 
 A signer has exactly one `ssh`, one `github` or one `kms`.
 
@@ -616,7 +616,10 @@ The host process can't swap its telemetry in place, so it takes a change
 of `[telemetry]` up by handing its repositories to a fresh host process
 it starts itself, with nothing to restart. Runs already testing keep
 what they started with. Its log says the file and the tables as it
-hands over, and the fresh host process reads the file itself. A change whose settings don't bind, or whose fresh host process
+hands over, and the fresh host process reads the file itself.
+[`sluice daemon`](/sluice/reference/commands/#sluice-daemon) starts
+afresh in its own process instead, keeping its process ID, so whatever
+keeps it running keeps the new one, and it keeps running. A change whose settings don't bind, or whose fresh host process
 doesn't start, leaves it on the settings it holds, and it says so once,
 with the file and the reason. A `sluice run` still kept running follows
 the host process, and starts itself afresh for a change of `[telemetry]`
@@ -639,7 +642,7 @@ signer = "box"                   # the policy's name for this host's key
 key = "~/.config/sluice/signing" # an SSH private key on this host
 
 [aws]
-profile = "sluice-lead"          # the AWS profile a CodeBuild pool is reached as
+profile = "sluice-start"         # the AWS profile a CodeBuild pool is reached as
 
 [peers]
 lease = "5m"   # how long a quiet host keeps a branch
@@ -665,7 +668,7 @@ collector = "http://localhost:4318"  # a receiver on the host; needed where send
 | [`[runs] systems`](#runs-systems) | The systems the host runs. | It runs only some of the systems a policy names. |
 | [`[forge]`](#forge) | The GitHub App sluice pushes as, its key or a command that gives its token, and how often sluice asks GitHub for a branch's pull requests. | It lands on a branch whose remote is on GitHub. |
 | [`[signing]`](#signing) | The signer the host signs its results as, and its key. | It runs checks for a branch whose state is on its remote. |
-| [`[aws]`](#aws) | The AWS profile sluice reaches a CodeBuild pool as. | It leads a branch whose runs go to a CodeBuild pool. |
+| [`[aws]`](#aws) | The AWS profile sluice reaches a CodeBuild pool as. | It may run the queue of a branch whose runs go to a CodeBuild pool. |
 | [`[peers]`](#peers) | How long a quiet host keeps a branch, how often this host shows it is alive, and its name among the hosts. | It shares a branch's remote with other hosts. |
 | [`[deliveries]`](#deliveries) | How long an outcome is owed to its worktree before it shows as expired. | Its agents confirm their outcomes sooner or later than in a week. |
 | [`[[caches]]`](#caches) | The caches every run on the host shares. | Its builds share a cache, a compile server's or the task runner's. |
@@ -718,6 +721,7 @@ imports = [ inputs.sluice.darwinModules.sluice ]; # nixosModules.sluice on NixOS
 services.sluice = {
   enable = true;
   # user = "alice";  # on NixOS: the user who runs sluice
+  # daemon.enable = true;  # keep `sluice daemon` running, which nothing needs
   settings = {
     runs = { max = 3; cores = 12; };
     forge = { app_id = 123456; key = "~/.config/sluice/app.pem"; };
@@ -745,7 +749,21 @@ A file already there that is no link moves once, to
 `config.toml.before-nix`. The module puts sluice in the system profile:
 set `services.sluice.package` to install your own build, or to `null`
 to install none. It writes nothing else and installs no service, since
-sluice needs none. A configuration may import the module twice, itself
+sluice needs none, unless you turn the daemon on.
+
+`services.sluice.daemon.enable = true` keeps
+[`sluice daemon`](/sluice/reference/commands/#sluice-daemon) running for
+the same user, for a machine that runs queues for other hosts and runs
+no sluice command itself. On nix-darwin it's a launchd agent of the
+primary user, and what it says before it holds the host goes to
+`~/Library/Logs/sluice-daemon.log`. On NixOS it's a systemd user unit of
+`services.sluice.user`, who lingers, so it runs from boot with no one
+logged in. A new package restarts it. It's off unless you set it, and
+nothing needs it. A host that moves sluice's state folder with
+`XDG_STATE_HOME` in its users' shells gives the service the same
+variable, in `launchd.user.agents.sluice.serviceConfig.EnvironmentVariables`
+or `systemd.user.services.sluice.environment`, so the daemon and the
+user's commands reach one host process. A configuration may import the module twice, itself
 and through another flake's module that imports it: it declares
 `services.sluice` once.
 
@@ -901,8 +919,8 @@ The AWS profile, `profile`, every call sluice makes to a CodeBuild pool
 on this host uses, as the AWS tools read it: its credentials, and its
 SSO session or credential command, from your AWS config. sluice uses it
 whatever profile the command that started sluice names, so a host that
-leads a branch on a fleet always reaches AWS as the role you gave it,
-the stack's lead role. Without `[aws]`, sluice finds credentials as the
+runs the queue of a branch on a fleet always reaches AWS as the role you
+gave it, the stack's start role. Without `[aws]`, sluice finds credentials as the
 AWS tools do, from the environment or the profile it names. sluice keeps
 no credential between calls.
 
@@ -917,7 +935,7 @@ sets either is refused.
 |---|---|
 | `lease` | How long this host waits, having seen a branch's state stand unchanged, before it takes the branch from a host that has gone quiet. It counts by its own clock, never by the time another host wrote. The default is `"5m"`. |
 | `alive` | How often this host rewrites its sign of life. A claim on a run lapses once its host's sign of life has stood unchanged this long, and another host runs it. It must be shorter than `lease`. The default is `"2m"`. |
-| `name` | What this host is called among the hosts that share a remote: in a branch's state as its lead, and on the runs it claims. The default is the host's own name; give two instances on one machine a name each. |
+| `name` | What this host is called among the hosts that share a remote: in a branch's state as the host that runs its queue, and on the runs it claims. The default is the host's own name; give two instances on one machine a name each. |
 
 ### `[deliveries]`
 

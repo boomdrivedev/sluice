@@ -74,7 +74,8 @@ pub enum Step {
     /// Another step holds the branch's lock (rule core.14).
     Busy,
     /// Another instance keeps the branch, and its lease has not passed
-    /// (72, 73).
+    /// (72, 73); `sluice step` says `elsewhere`, another host runs the
+    /// branch's queue (core.26).
     Led,
     /// The records were written between this step's read and its write;
     /// nothing was done (62).
@@ -165,6 +166,20 @@ struct StartFrom {
     /// 88 (design D2): the claim a pool's job starts its run under, where
     /// it is not this instance's own.
     claim: Option<String>,
+    /// 153 (design D5): the context each submission of the live records
+    /// kept, by its number, which a start links to.
+    traces: BTreeMap<u64, String>,
+}
+
+/// 153 (design D5; rule core.53): `span`, which tests a combination
+/// holding `submissions`, linked to the context each kept, as `kept`
+/// reads it by number; a submission that kept none gets no link.
+fn link_kept(span: &tracing::Span, submissions: &[u64], kept: impl Fn(u64) -> Option<String>) {
+    for &id in submissions {
+        if let Some(trace) = kept(id) {
+            crate::links::link(span, &trace, id);
+        }
+    }
 }
 
 /// 140: how a queued entry's work was read beside the chain.
@@ -245,7 +260,15 @@ impl Sluice<'_> {
         if self.held {
             bail!("a round of {branch} never reads its records as held");
         }
-        let round = info_span!("sluice.round", sluice.branch = branch, sluice.step = "");
+        // 153 (design D3): a round is a trace of its own wherever it runs,
+        // nested under no command's span; it reaches the work's callers by
+        // links alone.
+        let round = info_span!(
+            parent: None,
+            "sluice.round",
+            sluice.branch = branch,
+            sluice.step = ""
+        );
         let _round = round.enter();
         let released = info_span!("sluice.abandoned").in_scope(|| self.release_abandoned())?;
         let previews =
@@ -331,7 +354,7 @@ impl Sluice<'_> {
             // 75: another instance keeps the branch; this one takes, runs
             // and reports runs of its own.
             info_span!("sluice.claim").in_scope(|| self.execute(branch, releases))?;
-            round.record("sluice.step", "led");
+            round.record("sluice.step", "elsewhere");
             return Ok(Step::Led);
         }
         // Record 0122 (design D5; 73, 77): the lead shows its sign of life
@@ -762,11 +785,13 @@ impl Sluice<'_> {
                             .and_then(|s| seconds_between(&s.submitted, &now));
                         info!(
                             monotonic_counter.sluice.landed = 1u64,
+                            sluice.repository = self.peer.repository.as_str(),
                             sluice.branch = branch,
                         );
                         if let Some(secs) = waited {
                             info!(
                                 histogram.sluice.submission.landed_after = secs,
+                                sluice.repository = self.peer.repository.as_str(),
                                 sluice.branch = branch,
                             );
                         }
@@ -820,6 +845,7 @@ impl Sluice<'_> {
                 span.record("sluice.outcome", "refused");
                 info!(
                     monotonic_counter.sluice.refused = 1u64,
+                    sluice.repository = self.peer.repository.as_str(),
                     sluice.branch = branch
                 );
                 self.update(branch, |l| {
@@ -1058,7 +1084,7 @@ impl Sluice<'_> {
                     if full {
                         continue;
                     }
-                    match self.seams.tests.hold(RunKind::Queue)? {
+                    match self.seams.tests.hold(RunKind::Queue, branch)? {
                         Some(part) => held = Some(part),
                         None => {
                             full = true;
@@ -1092,7 +1118,7 @@ impl Sluice<'_> {
                 // 88, S19: a run a lead marked starting under the claim it
                 // gave this pool's job holds its room at the job's start, as
                 // `start_claimed` holds it (rule core.49).
-                None => match self.seams.tests.hold(RunKind::Queue)? {
+                None => match self.seams.tests.hold(RunKind::Queue, branch)? {
                     Some(part) => part,
                     None => {
                         self.reopen_made(branch, &c.id, i, &name, &given, releases)?;
@@ -1195,7 +1221,7 @@ impl Sluice<'_> {
             return Ok(None);
         };
         from.claim = Some(claim.to_string());
-        let Some(part) = self.seams.tests.hold(RunKind::Queue)? else {
+        let Some(part) = self.seams.tests.hold(RunKind::Queue, branch)? else {
             let name = c.runs[i].place.clone().expect("a starting run has a place");
             let given = given_checks(&c.runs[i], &from.rules);
             self.reopen_made(branch, &c.id, i, &name, &given, releases)?;
@@ -1310,7 +1336,7 @@ impl Sluice<'_> {
             .policy_at(&base)?
             .ok_or_else(|| anyhow!("{branch}'s revision {base} has no {POLICY_PATH}"))?;
         let rules = self.gate(branch, &base)?;
-        let Some(part) = self.seams.tests.hold(RunKind::Queue)? else {
+        let Some(part) = self.seams.tests.hold(RunKind::Queue, branch)? else {
             return Ok(Started::AtBound);
         };
         let name = head_place(head);
@@ -1363,6 +1389,11 @@ impl Sluice<'_> {
         }
         Ok(Some(StartFrom {
             claim: None,
+            traces: line
+                .subs
+                .values()
+                .filter_map(|s| Some((s.id, s.trace.clone()?)))
+                .collect(),
             home: self.home_system(&base)?,
             verified: line.doc.verified,
             base,
@@ -1399,7 +1430,7 @@ impl Sluice<'_> {
     ) -> Result<Started> {
         let r = &c.runs[i];
         let kind = from.policy.limits.executor.as_deref().unwrap_or("open");
-        let _span = info_span!(
+        let span = info_span!(
             "sluice.start",
             sluice.branch = branch,
             sluice.candidate = %c.revision,
@@ -1408,6 +1439,7 @@ impl Sluice<'_> {
             sluice.system = r.system.as_deref().unwrap_or(""),
         )
         .entered();
+        link_kept(&span, &c.submissions, |id| from.traces.get(&id).cloned());
         let name = r.place.clone().expect("a starting run has a place");
         let checks = if r.checks.is_empty() {
             from.rules.required.clone()
@@ -1981,9 +2013,14 @@ impl Sluice<'_> {
         let queued = line.subs.values().filter(|s| !s.state.is_out()).count() as u64;
         let written = matches!(self.write(&line)?, Written::Written(_));
         if written {
-            info!(gauge.sluice.queue.depth = queued, sluice.branch = branch);
+            info!(
+                gauge.sluice.queue.depth = queued,
+                sluice.repository = self.peer.repository.as_str(),
+                sluice.branch = branch
+            );
             info!(
                 gauge.sluice.window = line.doc.window as u64,
+                sluice.repository = self.peer.repository.as_str(),
                 sluice.branch = branch
             );
         }
@@ -2380,12 +2417,17 @@ impl Sluice<'_> {
                                 untaken: true,
                             });
                             r.closed = Some(now.to_string());
-                            closing.push((r.system.clone(), n, why));
+                            closing.push((r.system.clone(), n, why, r.ended.clone()));
                         }
                     }
                     // Record 0122 (design D1): ended and closed in one write,
                     // having made no checkout.
-                    for (system, n, why) in closing {
+                    for (system, n, why, ended) in closing {
+                        // 114, 154 (design D3 of
+                        // `each-submission-shows-its-wait-and-its-test`).
+                        if let Some(ended) = &ended {
+                            line.count_no_outcome(&c.id, ended);
+                        }
                         for event in [
                             Event::Ended {
                                 combination: c.revision.clone(),
@@ -2523,6 +2565,9 @@ impl Sluice<'_> {
             sluice.ran = 0u64,
             sluice.replayed = 0u64,
         );
+        link_kept(&span, &c.submissions, |id| {
+            line.subs.get(&id).and_then(|s| s.trace.clone())
+        });
         let _span = span.enter();
         // Design D17: the results of the keys this run reported and of its
         // combination alone.
@@ -2823,10 +2868,18 @@ impl Sluice<'_> {
         let branch = line.branch.clone();
         info!(
             monotonic_counter.sluice.tasks.ran = v.ran as u64,
+            sluice.repository = self.peer.repository.as_str(),
             sluice.branch = branch.as_str()
         );
         info!(
             monotonic_counter.sluice.tasks.replayed = v.replayed as u64,
+            sluice.repository = self.peer.repository.as_str(),
+            sluice.branch = branch.as_str(),
+        );
+        // Rule core.66, design D5: what the replays saved, in seconds.
+        info!(
+            monotonic_counter.sluice.tasks.time_saved = v.saved_ms as f64 / 1000.0,
+            sluice.repository = self.peer.repository.as_str(),
             sluice.branch = branch.as_str(),
         );
         let ended = Ended {
@@ -2837,6 +2890,9 @@ impl Sluice<'_> {
             untaken: false,
         };
         let ended_why = ended.why.clone();
+        // 114, 154 (design D3 of `each-submission-shows-its-wait-and-its-test`):
+        // a run that decided nothing counts on each submission it held.
+        line.count_no_outcome(&c.id, &ended);
         // Record 0122 (design D3): its end, after its results and before
         // its checkout's release, which [`Sluice::perform_closes`] makes.
         let x = line.candidate_mut(&c.id).expect("polled candidate");
@@ -2893,6 +2949,7 @@ impl Sluice<'_> {
         let branch = branch.as_str();
         info!(
             monotonic_counter.sluice.verdicts = 1u64,
+            sluice.repository = self.peer.repository.as_str(),
             sluice.branch = branch,
             sluice.outcome = word.as_str(),
         );
@@ -2900,6 +2957,7 @@ impl Sluice<'_> {
             if let Some(secs) = self.tested_for(branch, &c.revision, now)? {
                 info!(
                     histogram.sluice.candidate.tested_for = secs,
+                    sluice.repository = self.peer.repository.as_str(),
                     sluice.branch = branch,
                     sluice.outcome = word.as_str(),
                 );
@@ -3153,7 +3211,11 @@ impl Sluice<'_> {
         with: Vec<Contested>,
         now: &str,
     ) -> Result<()> {
-        info!(monotonic_counter.sluice.conflicts = 1u64, sluice.branch = %line.branch);
+        info!(
+            monotonic_counter.sluice.conflicts = 1u64,
+            sluice.repository = self.peer.repository.as_str(),
+            sluice.branch = %line.branch,
+        );
         let s = line.sub_mut(id);
         s.state = State::Conflict;
         s.conflict = Some(ConflictRecord {
@@ -3190,7 +3252,11 @@ impl Sluice<'_> {
             sluice.candidate = %c.revision,
         )
         .entered();
-        info!(monotonic_counter.sluice.culprits = 1u64, sluice.branch = %line.branch);
+        info!(
+            monotonic_counter.sluice.culprits = 1u64,
+            sluice.repository = self.peer.repository.as_str(),
+            sluice.branch = %line.branch,
+        );
         let s = line.sub_mut(id);
         s.state = State::Failed;
         s.tested = Some(Tested {
@@ -3704,6 +3770,9 @@ impl Sluice<'_> {
         chain: &[String],
         now: &str,
     ) -> Result<Parts> {
+        // 154 (design D6 of `each-submission-shows-its-wait-and-its-test`):
+        // each part is held for the line's branch.
+        let branch = &line.branch.clone();
         let mut parts = Parts::new();
         let mut full = false;
         let reopened: Vec<(String, usize)> = chain
@@ -3720,7 +3789,7 @@ impl Sluice<'_> {
             })
             .collect();
         for (id, i) in reopened {
-            let Some(part) = self.seams.tests.hold(RunKind::Queue)? else {
+            let Some(part) = self.seams.tests.hold(RunKind::Queue, branch)? else {
                 full = true;
                 break;
             };
@@ -3812,7 +3881,7 @@ impl Sluice<'_> {
             let part = match mine {
                 Some(_) if full && rules.signed => None,
                 Some(_) if full => break,
-                Some(_) => match self.seams.tests.hold(RunKind::Queue)? {
+                Some(_) => match self.seams.tests.hold(RunKind::Queue, branch)? {
                     Some(part) => Some(part),
                     None if rules.signed => {
                         full = true;
@@ -4704,7 +4773,7 @@ impl Sluice<'_> {
         // first, and none is made once the host holds none.
         self.seams.state.fetch_candidates(branch)?;
         let mut parts = Parts::new();
-        while let Some(part) = self.seams.tests.hold(RunKind::Queue)? {
+        while let Some(part) = self.seams.tests.hold(RunKind::Queue, branch)? {
             let mut part = Some(part);
             let claimed = self.update(branch, |l| {
                 let now = self.now();
@@ -5204,6 +5273,11 @@ const AT_BOUND: &str = "the host had no room for it";
 /// ended with `ended`, and closed in the same write where it holds no
 /// checkout, each logged.
 fn end_run(l: &mut Line, cand: &str, i: usize, ended: Ended, now: &str) {
+    // 114, 154 (design D3 of `each-submission-shows-its-wait-and-its-test`):
+    // a run that decided nothing counts on each submission it held.
+    if l.candidate(cand).is_some_and(|x| i < x.runs.len()) {
+        l.count_no_outcome(cand, &ended);
+    }
     let Some(x) = l.candidate_mut(cand) else {
         return;
     };
@@ -5757,6 +5831,7 @@ mod tests {
             after: Vec::new(),
             priority: 0,
             subject: None,
+            trace: None,
         };
         s.submit(&req).unwrap().unwrap().id
     }
@@ -5774,6 +5849,122 @@ mod tests {
             .iter()
             .find(|c| c.submissions == ids)
             .cloned()
+    }
+
+    /// A clock a test moves on.
+    struct Moving(std::cell::Cell<chrono::DateTime<Utc>>);
+
+    impl Moving {
+        fn at_noon() -> Moving {
+            Moving(std::cell::Cell::new(Noon.now()))
+        }
+
+        fn advance(&self, minutes: i64) {
+            self.0
+                .set(self.0.get() + chrono::Duration::minutes(minutes));
+        }
+    }
+
+    impl Clock for Moving {
+        fn now(&self) -> chrono::DateTime<Utc> {
+            self.0.get()
+        }
+    }
+
+    /// 154, design D2 of `each-submission-shows-its-wait-and-its-test`: a
+    /// submission's combination goes under test, the clock moves four
+    /// minutes, and the round that reads its verdict keeps four minutes on
+    /// its record.
+    #[test]
+    fn every_write_keeps_a_submission_s_time_under_test() {
+        let f = Fakes::new();
+        let tip = f
+            .world
+            .init("main", &[(POLICY_PATH, POLICY), ("a/lib", "1")]);
+        f.world.task("a:test", "a/");
+        let head = f.world.work(&tip, &[("a/lib", Some("2"))]);
+        f.world.session("unit/a", "agent", &head);
+        f.world.hold_runs(true);
+        let clock = Moving::at_noon();
+        let seams = Seams {
+            checkout: &f.checkout,
+            tests: &f.tests,
+            branch: &f.branch,
+            driver: &f.driver,
+            state: &f.state,
+        };
+        let s = Sluice::new(seams, &clock);
+        let one = submit(&s, "unit/a");
+        s.step("main").unwrap();
+        let line = s.read_line("main").unwrap();
+        let held = holding(&line, &[one]).expect("#1 under test");
+        assert!(held.state.under_test());
+        let record = line.sub(one).unwrap();
+        assert_eq!(
+            record.under_test_since.as_deref(),
+            Some("2026-10-30T12:00:00Z")
+        );
+        assert_eq!(record.under_test_ms, 0);
+        clock.advance(4);
+        f.world.complete(&held.revision);
+        s.step("main").unwrap();
+        let record = s.state(one).unwrap().unwrap();
+        assert_eq!(record.state, State::Landed);
+        assert_eq!(record.under_test_ms, 240_000);
+        assert_eq!(record.under_test_since, None);
+    }
+
+    /// 66, 87, 114, 154, design D3 of `each-submission-shows-its-wait-and-
+    /// its-test`: a combination's run no live host may take, ended at its
+    /// time limit, counts one run with no outcome on each submission it
+    /// holds, and blames none.
+    #[test]
+    fn a_run_no_host_took_counts_as_no_outcome_on_its_submissions() {
+        let f = Fakes::new();
+        let policy = "[branches.main]\nrequired = [\"#gate\"]\nparallel = 4\nbatch = true\n\
+                      timeout = \"20m\"\nsystems = [\"macos-arm64\"]\n\n[systems]\n\
+                      linux-x64 = { os = \"linux\", arch = \"x86_64\" }\n\
+                      macos-arm64 = { os = \"macos\", arch = \"aarch64\" }\n";
+        let tip = f.world.init(
+            "main",
+            &[(POLICY_PATH, policy), ("a/lib", "1"), ("b/lib", "1")],
+        );
+        f.world.platform("linux", "x86_64");
+        for p in ["a", "b"] {
+            f.world.task(&format!("{p}:test"), &format!("{p}/"));
+            let head = f.world.work(&tip, &[(&format!("{p}/lib"), Some("2"))]);
+            f.world.session(&format!("unit/{p}"), "agent", &head);
+        }
+        let clock = Moving::at_noon();
+        let seams = Seams {
+            checkout: &f.checkout,
+            tests: &f.tests,
+            branch: &f.branch,
+            driver: &f.driver,
+            state: &f.state,
+        };
+        let s = Sluice::new(seams, &clock).as_peer(crate::Peer {
+            systems: Some(vec!["linux-x64".into()]),
+            ..crate::Peer::default()
+        });
+        let (one, two) = (submit(&s, "unit/a"), submit(&s, "unit/b"));
+        s.step("main").unwrap();
+        let line = s.read_line("main").unwrap();
+        let held = holding(&line, &[one, two]).expect("#1 and #2 under test");
+        assert_eq!(held.runs[0].system.as_deref(), Some("macos-arm64"));
+        clock.advance(21);
+        s.step("main").unwrap();
+        let line = s.read_line("main").unwrap();
+        let read = line
+            .candidate(&held.id)
+            .expect("the combination, not passed");
+        assert_eq!(read.state, CandidateState::NotPassed);
+        assert!(read.runs[0].ended.as_ref().is_some_and(|e| e.untaken));
+        for id in [one, two] {
+            let record = line.sub(id).unwrap();
+            assert_eq!(record.runs_with_no_outcome, 1, "#{id}");
+            assert_ne!(record.state, State::Failed, "#{id} is blamed");
+        }
     }
 
     /// Design D1, D2 (25, 81; rules core.7, core.17): a round drops the

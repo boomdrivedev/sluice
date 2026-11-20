@@ -72,7 +72,7 @@ impl Identity for Named {
         })
     }
 
-    fn renew(&self, url: &str) -> anyhow::Result<Credentials> {
+    fn renew(&self, url: &str, _refused: &str) -> anyhow::Result<Credentials> {
         self.credentials(url)
     }
 

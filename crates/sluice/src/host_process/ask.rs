@@ -89,12 +89,14 @@ pub trait HostProcess {
         kind: FollowKind,
     ) -> Result<Box<dyn Following + 'a>>;
 
-    /// Ask for a session's or a preview's room for the place `place`.
+    /// Ask for a session's or a preview's room for the place `place`, held
+    /// for `branch`, the branch its run is held to (154).
     fn hold<'a>(
         &'a self,
         here: &Here<'a, '_>,
         kind: RunKind,
         place: &str,
+        branch: &str,
     ) -> Result<Box<dyn Holding + 'a>>;
 
     /// The process that answers now and its room; `None` where none
@@ -175,8 +177,11 @@ impl HostProcess for Socketed {
         here: &Here<'a, '_>,
         kind: RunKind,
         place: &str,
+        branch: &str,
     ) -> Result<Box<dyn Holding + 'a>> {
-        let c = self.client()?.hold(kind, &here.repository()?, place)?;
+        let c = self
+            .client()?
+            .hold(kind, &here.repository()?, place, Some(branch))?;
         Ok(Box::new(Asking {
             connection: Some(c),
             kind,
@@ -454,7 +459,13 @@ impl HostProcess for Inside {
         Err(anyhow!("the host process follows nothing of its own"))
     }
 
-    fn hold<'a>(&'a self, _: &Here<'a, '_>, _: RunKind, _: &str) -> Result<Box<dyn Holding + 'a>> {
+    fn hold<'a>(
+        &'a self,
+        _: &Here<'a, '_>,
+        _: RunKind,
+        _: &str,
+        _: &str,
+    ) -> Result<Box<dyn Holding + 'a>> {
         Err(anyhow!(
             "a session's room is asked of the host process, not from within it"
         ))

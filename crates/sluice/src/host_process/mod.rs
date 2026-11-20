@@ -22,6 +22,14 @@
 //! a digest of the state folder's real path, so each state folder has its
 //! own process and a socket's path stays within the 104 bytes macOS binds,
 //! however deep the state folder (design D1).
+//!
+//! `sluice daemon` is the same process with its idle end off, on a machine
+//! that chooses to keep it running (137; record 0093 as amended 2026-11-08
+//! and 2026-11-18). It takes the host's place from a host process that ends
+//! when idle, waits behind another daemon, hands over by starting afresh in
+//! its own process, keeping its pid, so whatever keeps it running keeps the
+//! new image, and stops on `SIGTERM` or `SIGINT` (design D1 to D7 of
+//! `sluice-runs-as-a-daemon`).
 
 pub mod ask;
 pub mod client;
@@ -37,10 +45,11 @@ pub mod tasks;
 use std::ffi::OsString;
 use std::fs::File;
 use std::io::{BufReader, ErrorKind, Read};
+use std::os::fd::{AsRawFd, FromRawFd, RawFd};
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
-use std::sync::{mpsc, Arc};
+use std::sync::{mpsc, Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result};
@@ -58,13 +67,27 @@ use room::{Asked, Asker, Room, Shared};
 /// and passes only when a command asks (design D14).
 pub const ROUND_SLEEP_VAR: &str = "SLUICE_ROUND_SLEEP";
 
+/// The variable a daemon starting afresh in place names its start lock's
+/// descriptor in, so the image started afresh holds it until its socket
+/// answers (design D6 of `sluice-runs-as-a-daemon`).
+pub const START_LOCK_FD_VAR: &str = "SLUICE_START_LOCK_FD";
+
 /// How often the host process looks at whether it should end, and at
 /// whether its state folder is still there (design D6).
 const LOOK: Duration = Duration::from_millis(100);
 
-/// How often it looks at each repository in its index that it holds no
-/// task for, as an idle tick reads it (129; design D4).
+/// How often it goes through its index, looking at each repository it
+/// holds no task for whose remote is due to be asked, as an idle tick
+/// reads it (129; design D4).
 const SCAN: Duration = Duration::from_secs(3);
+
+/// How often a repository with nothing in play has its remote asked, at
+/// most, by the host process's look or a pass of its task, a watched one's
+/// among them; a submit or another command that tells of a change, a
+/// watch's opening and a forecast's second ask have the next reading ask
+/// at once, and a repository with work in play is asked at every pass
+/// (129 as amended 2026-11-19).
+pub const IDLE_ASK: Duration = Duration::from_secs(60);
 
 /// The tick a reading is current within for a one-shot read (64, 129;
 /// design D16).
@@ -196,6 +219,23 @@ pub(crate) struct Hosting {
     /// The host's settings it holds, which every binding it makes is of
     /// (record 0107; design D19).
     pub settings: Arc<tasks::Settings>,
+    /// A daemon asked to hand over: the executable the asker named, or
+    /// `None` where it named none (design D3 of `sluice-runs-as-a-daemon`).
+    pub afresh: Mutex<Option<Afresh>>,
+    /// The tokens of sluice's identity it holds, one for each repository,
+    /// which every binding it makes holds its own in, on every thread, so
+    /// no git call or API call of its gets a repository's token while one
+    /// it holds lasts (record 0108 as amended 2026-11-19).
+    pub tokens: crate::profiles::Tokens,
+}
+
+/// A daemon's ask to start afresh in place, as a newer command made it
+/// (design D3 of `sluice-runs-as-a-daemon`).
+pub(crate) struct Afresh {
+    /// The executable the asker named, resolved through every link.
+    program: Option<PathBuf>,
+    /// The asker's version, as its `hello` said it.
+    by: String,
 }
 
 impl Hosting {
@@ -222,6 +262,18 @@ struct Successor {
     program: Result<PathBuf, String>,
 }
 
+impl Successor {
+    /// This process as it starts.
+    fn now() -> Successor {
+        Successor {
+            env: std::env::vars_os().collect(),
+            program: std::env::current_exe()
+                .and_then(std::fs::canonicalize)
+                .map_err(|e| format!("the executable the host process started as: {e}")),
+        }
+    }
+}
+
 /// How the host process's loop ended.
 enum Ending {
     /// It ends: no work in play, a newer sluice's ask or its state folder
@@ -237,12 +289,7 @@ enum Ending {
 /// design D1). `choices` are the telemetry its own command line and
 /// sluice's variables choose (151; rule core.53). Its exit.
 pub fn run(choices: crate::telemetry::Choices) -> Result<i32> {
-    let successor = Successor {
-        env: std::env::vars_os().collect(),
-        program: std::env::current_exe()
-            .and_then(std::fs::canonicalize)
-            .map_err(|e| format!("the executable the host process started as: {e}")),
-    };
+    let successor = Successor::now();
     let paths = Paths::host()?;
     let folder =
         Folder::open(&paths.dir).with_context(|| format!("opening {}", paths.dir.display()))?;
@@ -250,7 +297,235 @@ pub fn run(choices: crate::telemetry::Choices) -> Result<i32> {
         log("sluice host: another host process holds this host's lock; this one ends");
         return Ok(0);
     };
-    run_holding(paths, Arc::new(folder), lock, choices, successor)
+    run_holding(
+        paths,
+        Arc::new(folder),
+        lock,
+        choices,
+        successor,
+        false,
+        None,
+        false,
+    )
+}
+
+/// The start lock a daemon started afresh in place was handed (design D6
+/// of `sluice-runs-as-a-daemon`): [`START_LOCK_FD_VAR`] taken out of the
+/// environment, so no child inherits its name, and its descriptor set to
+/// close on exec again, so no child inherits it either. `None` where none
+/// was handed, or the variable names no open descriptor. Called first in
+/// `main`, before any thread or child starts.
+pub fn take_start_lock() -> Option<File> {
+    let named = std::env::var_os(START_LOCK_FD_VAR)?;
+    std::env::remove_var(START_LOCK_FD_VAR);
+    let fd: RawFd = named.to_str()?.parse().ok()?;
+    // SAFETY: the descriptor is this process's from its last image, which
+    // named it for this image alone; only one that is open is taken.
+    let held = unsafe { std::os::fd::BorrowedFd::borrow_raw(fd) };
+    nix::fcntl::fcntl(held, nix::fcntl::FcntlArg::F_GETFD).ok()?;
+    nix::fcntl::fcntl(
+        held,
+        nix::fcntl::FcntlArg::F_SETFD(nix::fcntl::FdFlag::FD_CLOEXEC),
+    )
+    .ok()?;
+    // SAFETY: as above; nothing else of this process owns it.
+    Some(unsafe { File::from_raw_fd(fd) })
+}
+
+/// `sluice daemon`: run as the host process of this user's state folder,
+/// in the foreground, never ending for being idle (135, 137; record 0093
+/// as amended 2026-11-08; design D1 of `sluice-runs-as-a-daemon`). It
+/// notes the repository it is started in where that has sluice (D8),
+/// takes the host's place from a host process that ends when idle, or
+/// waits behind another daemon (D2), and stops on `SIGTERM` or `SIGINT`
+/// (D7). `start` is the start lock its last image handed it, held until
+/// its socket answers (D6). Its exit.
+pub fn daemon(choices: crate::telemetry::Choices, start: Option<File>) -> Result<i32> {
+    crate::stop_on_interrupt()?;
+    crate::stop_on_terminate()?;
+    let successor = Successor::now();
+    let paths = Paths::host()?;
+    // Its last image noted it: one started afresh notes nothing, so it
+    // takes no lock on the start lock it holds (D6).
+    let afresh = start.is_some();
+    if !afresh {
+        note_here(&paths);
+    }
+    let folder = Arc::new(
+        Folder::open(&paths.dir).with_context(|| format!("opening {}", paths.dir.display()))?,
+    );
+    let (lock, start) = match folder.try_lock(LOCK)? {
+        Some(lock) => (lock, start),
+        None => {
+            // D6: a start lock it was handed is let go before it waits, so
+            // the host process that holds the host can start afresh itself.
+            drop(start);
+            match take_place(&paths, &folder, &successor)? {
+                Some(placed) => placed,
+                None => return Ok(0),
+            }
+        }
+    };
+    run_holding(paths, folder, lock, choices, successor, true, start, afresh)
+}
+
+/// D8 of `sluice-runs-as-a-daemon`: the repository of the folder the
+/// daemon is started in noted in the host's index where it has sluice, as
+/// every command notes its own (135). A folder in no repository, or one
+/// with no sluice, notes nothing, and the daemon starts all the same.
+fn note_here(paths: &Paths) {
+    let noted = std::env::current_dir()
+        .map_err(anyhow::Error::from)
+        .and_then(|dir| crate::profiles::local_refs::LocalRefs::open(&dir))
+        .and_then(|refs| refs.common_dir())
+        .and_then(|repository| {
+            let index = paths.index();
+            if !index.list()?.contains(&repository) && index::has_sluice(&repository)? {
+                index.note(&repository)?;
+            }
+            Ok(())
+        });
+    drop(noted);
+}
+
+/// How often a daemon looks again at the host's lock while another holds
+/// it (design D2 of `sluice-runs-as-a-daemon`).
+const PLACE_LOOK: Duration = Duration::from_millis(100);
+
+/// D2 of `sluice-runs-as-a-daemon`: the host's place, where another holds
+/// its lock as the daemon starts: its lock, and the start lock where it
+/// holds that too, until its socket answers; `None` where it was stopped
+/// first. A holder that is no daemon, whatever its version, is asked to
+/// hand over, as a newer command asks, and waited for as long; the start
+/// lock is held meanwhile, so a command that meets neither reaches the
+/// daemon. Where the holder still lives then, the daemon fails, naming the
+/// log. A holder that is a daemon is asked nothing: this one says once on
+/// stderr which daemon it waits for, and takes the host's place once its
+/// lock goes, never while a start holds the start lock, so a daemon
+/// starting afresh in place keeps its place (D6).
+fn take_place(
+    paths: &Paths,
+    folder: &Folder,
+    successor: &Successor,
+) -> Result<Option<(File, Option<File>)>> {
+    let client = client::Client::new(
+        successor
+            .program
+            .as_deref()
+            .unwrap_or_else(|_| Path::new("sluice")),
+        successor.env.clone(),
+    )?;
+    let mut said = None;
+    loop {
+        if crate::stopped() {
+            return Ok(None);
+        }
+        if let Some(lock) = folder.try_lock(LOCK)? {
+            return Ok(Some((lock, None)));
+        }
+        let holder = client
+            .answering()?
+            .map(|c| c.named)
+            .or_else(|| paths.named());
+        match holder {
+            Some(named) if named.daemon => {
+                if said != Some(named.pid) {
+                    eprintln!(
+                        "sluice daemon: the daemon {} of sluice {} holds this host; this one waits \
+                         for it to end",
+                        named.pid, named.version
+                    );
+                    said = Some(named.pid);
+                }
+                // Until its lock goes, or `host/version` names another.
+                loop {
+                    std::thread::sleep(PLACE_LOOK);
+                    if crate::stopped() {
+                        return Ok(None);
+                    }
+                    if let Some(lock) = folder.try_lock(LOCK)? {
+                        match folder.try_lock(START_LOCK)? {
+                            Some(start) => {
+                                drop(start);
+                                return Ok(Some((lock, None)));
+                            }
+                            None => drop(lock),
+                        }
+                    }
+                    match paths.named() {
+                        Some(n) if n.daemon && n.pid == named.pid => {}
+                        _ => break,
+                    }
+                }
+            }
+            _ => match handed_over(paths, folder, &client, successor)? {
+                Handed::Placed(placed) => return Ok(Some(placed)),
+                Handed::Daemon => {}
+                Handed::Stopped => return Ok(None),
+            },
+        }
+    }
+}
+
+/// How a host process that is no daemon came to hand over to a daemon.
+enum Handed {
+    /// Its place is the daemon's: the host's lock and the start lock.
+    Placed((File, Option<File>)),
+    /// A daemon holds the host now.
+    Daemon,
+    /// The daemon was stopped first.
+    Stopped,
+}
+
+/// D2 of `sluice-runs-as-a-daemon`: under the start lock, have each host
+/// process that is no daemon and holds the host hand over, and wait for
+/// its lock as long as a newer command waits ([`client::HAND_OVER_WAIT`]).
+fn handed_over(
+    paths: &Paths,
+    folder: &Folder,
+    client: &client::Client,
+    successor: &Successor,
+) -> Result<Handed> {
+    let start = folder.lock(START_LOCK)?;
+    let until = Instant::now() + client::HAND_OVER_WAIT;
+    let mut asked = std::collections::BTreeSet::new();
+    let mut last = None;
+    loop {
+        if crate::stopped() {
+            return Ok(Handed::Stopped);
+        }
+        if let Some(lock) = folder.try_lock(LOCK)? {
+            return Ok(Handed::Placed((lock, Some(start))));
+        }
+        // A holder already asked is waited for, with no connection made to
+        // it again; one `host/version` names afresh, or none, is reached.
+        let known = paths.named().map(|n| n.pid);
+        if known.is_none_or(|pid| !asked.contains(&pid)) {
+            if let Some(mut c) = client.answering()? {
+                if c.named.daemon {
+                    return Ok(Handed::Daemon);
+                }
+                if asked.insert(c.named.pid) {
+                    let program = successor.program.as_ref().ok().cloned();
+                    let _ = c.ask(&Request::HandOver { program });
+                }
+                last = Some(c.named);
+            }
+        }
+        if Instant::now() >= until {
+            let holder = match last.or_else(|| paths.named()) {
+                Some(n) => format!("sluice's host process {} (pid {})", n.version, n.pid),
+                None => "sluice's host process".to_string(),
+            };
+            anyhow::bail!(
+                "{holder} holds this host, was asked to hand over and has not ended within {} \
+                 seconds; see {}",
+                client::HAND_OVER_WAIT.as_secs(),
+                paths.log().display()
+            );
+        }
+        std::thread::sleep(Duration::from_millis(20));
+    }
 }
 
 fn run_holding(
@@ -259,14 +534,18 @@ fn run_holding(
     lock: File,
     choices: crate::telemetry::Choices,
     successor: Successor,
+    daemon: bool,
+    start: Option<File>,
+    afresh: bool,
 ) -> Result<i32> {
     let mut lock = Some(lock);
     take_log(&folder)?;
     let named = Named {
         version: crate::VERSION.to_string(),
         pid: std::process::id(),
-        since: chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
+        since: chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true),
         asked_only: asked_only(),
+        daemon,
     };
     folder.write(VERSION, &serde_json::to_vec(&named)?)?;
     // A socket a dead process left: nothing answers on it while this
@@ -280,6 +559,10 @@ fn run_holding(
     let listener = UnixListener::bind(&paths.socket)
         .with_context(|| format!("binding {}", paths.socket.display()))?;
     listener.set_nonblocking(true)?;
+    // D6 of `sluice-runs-as-a-daemon`: its socket answers, so a command
+    // that waited on the start lock its last image or its taking of the
+    // host's place held reaches it.
+    drop(start);
     // Record 0107 (design D19): the host's settings, held with the sign of
     // their file, which it looks at between its ticks.
     let host_settings = HostSettings::read()?;
@@ -309,14 +592,26 @@ fn run_holding(
         instance.bound,
         instance.reserved,
     ));
+    // Record 0108 as amended 2026-11-19: one token for each repository,
+    // held for the process's life and shared by its tasks and its looks.
+    let tokens = crate::profiles::Tokens::default();
     let looked_with = settings.clone();
+    let looked_holding = tokens.clone();
     let tasks = tasks::Tasks::new(
-        tasks::repository_body(room.clone(), asked_only(), named.clone(), settings.clone()),
-        Arc::new(move |r: &Path| {
-            index::in_play(r, looked_with.instance()).unwrap_or(tasks::Looked {
-                in_play: true,
-                refused: None,
-            })
+        tasks::repository_body(
+            room.clone(),
+            asked_only(),
+            named.clone(),
+            settings.clone(),
+            tokens.clone(),
+        ),
+        Arc::new(move |r: &Path, asks: bool| {
+            index::in_play(r, looked_with.instance(), &looked_holding, asks).unwrap_or(
+                tasks::Looked {
+                    in_play: true,
+                    refused: None,
+                },
+            )
         }),
     );
     let tasks = match asked_only() {
@@ -335,10 +630,18 @@ fn run_holding(
         stopping: AtomicBool::new(false),
         folder,
         settings,
+        afresh: Mutex::new(None),
+        tokens,
     });
     log(&format!(
-        "sluice host {} started, pid {}{}",
+        "sluice {} {} started{}, pid {}{}",
+        if daemon { "daemon" } else { "host" },
         hosting.named.version,
+        match (&successor.program, afresh) {
+            (Ok(program), true) => format!(" afresh in place as {}", program.display()),
+            (Err(_), true) => " afresh in place".to_string(),
+            (_, false) => String::new(),
+        },
         hosting.named.pid,
         if asked_only() {
             "; it passes only when asked"
@@ -376,7 +679,15 @@ fn run_holding(
     if !matches!(ending, Ok(Ending::HandedOver)) {
         let _ = std::fs::remove_file(&hosting.paths.socket);
     }
-    log(&format!("sluice host {} ends", hosting.named.pid));
+    log(&format!(
+        "sluice {} {} ends",
+        if hosting.named.daemon {
+            "daemon"
+        } else {
+            "host"
+        },
+        hosting.named.pid
+    ));
     if let Some(t) = telemetry {
         t.finish();
     }
@@ -501,8 +812,11 @@ impl TakeUp {
                 }
                 let (tx, rx) = mpsc::channel();
                 let checked = instance.clone();
+                let tokens = hosting.tokens.clone();
                 std::thread::spawn(move || {
-                    let _ = tx.send(binds(&checked, &repositories).map_err(|e| format!("{e:#}")));
+                    let _ = tx.send(
+                        binds(&checked, &repositories, &tokens).map_err(|e| format!("{e:#}")),
+                    );
                 });
                 self.binding = Some((instance, tables, rx));
             }
@@ -531,19 +845,25 @@ impl TakeUp {
 }
 
 /// Whether `instance` binds: sluice's identity on the forge where it names
-/// one, and each of `repositories` bound with it, the host's systems
-/// checked against its policies (87; design D19).
-fn binds(instance: &Instance, repositories: &[PathBuf]) -> Result<()> {
+/// one, and each of `repositories` bound with it, holding its tokens in
+/// `tokens`, the host's systems checked against its policies (87; design
+/// D19; record 0108 as amended 2026-11-19).
+fn binds(
+    instance: &Instance,
+    repositories: &[PathBuf],
+    tokens: &crate::profiles::Tokens,
+) -> Result<()> {
     let retry = std::rc::Rc::new(crate::retry::Policy::round().recording_where_set());
     if let Some(forge) = &instance.forge {
         crate::profiles::github::App::open(forge, retry.clone())?;
     }
     for r in repositories {
-        let bound = crate::profiles::Bound::open_with(
+        let bound = crate::profiles::Bound::open_holding(
             &tasks::open_dir(r),
             std::env::current_exe()?,
             instance.clone(),
             retry.clone(),
+            tokens,
         )?;
         sluice_core::Sluice::new(bound.seams(), &sluice_core::SystemClock)
             .as_peer(bound.peer())
@@ -684,6 +1004,89 @@ fn hand_over(
     false
 }
 
+/// D3, D5 and D6 of `sluice-runs-as-a-daemon`: a daemon starts afresh in
+/// its own process as `program`, running `daemon` with the environment it
+/// started with, keeping its pid, so whatever keeps it running keeps the
+/// image started afresh: every task finishes its round and lets its locks
+/// go, its telemetry sends what it holds, and under the start lock, handed
+/// to the image started afresh by its descriptor, it lets its lock and
+/// socket go and replaces its image. It returns only where the start
+/// failed: its lock and socket taken back, its tasks going on, and why.
+fn start_afresh(
+    hosting: &Hosting,
+    listener: &mut UnixListener,
+    lock: &mut Option<File>,
+    successor: &Successor,
+    telemetry: Option<&crate::telemetry::Telemetry>,
+    program: &Path,
+) -> String {
+    let start = match hosting.folder.lock(START_LOCK) {
+        Ok(f) => f,
+        Err(e) => return format!("{e:#}"),
+    };
+    log("sluice daemon: it starts afresh in its own process, keeping its pid");
+    hosting.tasks.stop_all();
+    if let Some(t) = telemetry {
+        t.flush();
+    }
+    let handed = || -> Result<std::process::Command> {
+        nix::fcntl::fcntl(
+            &start,
+            nix::fcntl::FcntlArg::F_SETFD(nix::fcntl::FdFlag::empty()),
+        )?;
+        let mut command = std::process::Command::new(program);
+        command
+            .arg("daemon")
+            .env_clear()
+            .envs(
+                successor
+                    .env
+                    .iter()
+                    .filter(|(name, _)| name != START_LOCK_FD_VAR)
+                    .cloned(),
+            )
+            .env(START_LOCK_FD_VAR, start.as_raw_fd().to_string());
+        Ok(command)
+    };
+    let why = match handed() {
+        Ok(command) => {
+            drop(lock.take());
+            let _ = std::fs::remove_file(&hosting.paths.socket);
+            format!("{:#}", crate::hand_over::replace(&command))
+        }
+        Err(e) => format!("{e:#}"),
+    };
+    // The start failed: the process as it was.
+    let _ = nix::fcntl::fcntl(
+        &start,
+        nix::fcntl::FcntlArg::F_SETFD(nix::fcntl::FdFlag::FD_CLOEXEC),
+    );
+    if lock.is_none() {
+        match hosting.folder.try_lock(LOCK) {
+            Ok(Some(f)) => *lock = Some(f),
+            Ok(None) => log("sluice daemon: another holds the host's lock now"),
+            Err(e) => log(&format!(
+                "sluice daemon: taking the host's lock again: {e:#}"
+            )),
+        }
+        let _ = std::fs::remove_file(&hosting.paths.socket);
+        match UnixListener::bind(&hosting.paths.socket) {
+            Ok(l) => {
+                let _ = l.set_nonblocking(true);
+                *listener = l;
+            }
+            Err(e) => log(&format!(
+                "sluice daemon: binding {} again: {e}",
+                hosting.paths.socket.display()
+            )),
+        }
+    }
+    hosting.tasks.resume();
+    scan(hosting);
+    drop(start);
+    why
+}
+
 /// Accept connections, each answered on a thread of its own, until the
 /// process should end or hands over (design D6, D8, D19, D20).
 fn serve(
@@ -697,6 +1100,11 @@ fn serve(
     let listener = &mut listener;
     let mut looked = Instant::now();
     let mut scanned = Instant::now();
+    // 154 (design D8 of `each-submission-shows-its-wait-and-its-test`): the
+    // rows of the room last sent, and each repository's name as its
+    // binding names it, read once.
+    let mut sent = std::collections::BTreeSet::new();
+    let mut names = std::collections::BTreeMap::new();
     loop {
         accept_all(hosting, listener);
         if looked.elapsed() < LOOK {
@@ -711,13 +1119,33 @@ fn serve(
             log("sluice host: its state folder is gone; it ends");
             hosting.stopping.store(true, Ordering::SeqCst);
         }
+        // D7 of `sluice-runs-as-a-daemon`: a daemon signalled to stop ends
+        // as a hand-over ends it.
+        if hosting.named.daemon && !hosting.stopping.load(Ordering::SeqCst) && crate::stopped() {
+            log("sluice daemon: signalled to stop; it ends");
+            hosting.stopping.store(true, Ordering::SeqCst);
+        }
         if !hosting.stopping.load(Ordering::SeqCst) {
-            if let Taken::HandOver(tables) = take_up.look(hosting) {
-                if hand_over(
-                    hosting, listener, lock, successor, telemetry, &take_up, &tables,
-                ) {
-                    return Ok(Ending::HandedOver);
+            match take_up.look(hosting) {
+                // D5 of `sluice-runs-as-a-daemon`: a daemon starts afresh in
+                // place as the executable it started as.
+                Taken::HandOver(tables) if hosting.named.daemon => {
+                    let why = match &successor.program {
+                        Ok(program) => {
+                            start_afresh(hosting, listener, lock, successor, telemetry, program)
+                        }
+                        Err(why) => why.clone(),
+                    };
+                    take_up.not_handed(&tables, "it could not start afresh", &why);
                 }
+                Taken::HandOver(tables) => {
+                    if hand_over(
+                        hosting, listener, lock, successor, telemetry, &take_up, &tables,
+                    ) {
+                        return Ok(Ending::HandedOver);
+                    }
+                }
+                Taken::Done => {}
             }
             hosting.tasks.tick();
             // D13: a run that ended since the last look frees its part for
@@ -729,11 +1157,47 @@ fn serve(
             if scanned.elapsed() >= SCAN {
                 scanned = Instant::now();
                 scan(hosting);
+                send_room(hosting, telemetry, &mut sent, &mut names);
             }
         }
         if hosting.stopping.load(Ordering::SeqCst) {
+            // D3 of `sluice-runs-as-a-daemon`: a daemon a newer command asked
+            // to hand over starts afresh as the executable the asker named,
+            // or as its own; where it cannot, it goes on as it was, said
+            // once.
+            let asked = hosting
+                .afresh
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .take();
+            if let Some(asked) = asked {
+                let program = match (asked.program, &successor.program) {
+                    (Some(p), _) => Ok(p),
+                    (None, Ok(p)) => Ok(p.clone()),
+                    (None, Err(why)) => Err(why.clone()),
+                };
+                let (shown, why) = match &program {
+                    Ok(p) => (
+                        p.display().to_string(),
+                        start_afresh(hosting, listener, lock, successor, telemetry, p),
+                    ),
+                    Err(why) => ("its own executable".to_string(), why.clone()),
+                };
+                log(&format!(
+                    "sluice daemon: warning: sluice {} asked it to hand over, and it could not \
+                     start afresh as {shown}, so it goes on as it was: {why}",
+                    asked.by
+                ));
+                hosting.stopping.store(false, Ordering::SeqCst);
+                continue;
+            }
             hosting.tasks.stop_all();
             return Ok(Ending::Ended);
+        }
+        // D1 of `sluice-runs-as-a-daemon`: a daemon never ends for being
+        // idle.
+        if hosting.named.daemon {
+            continue;
         }
         if hosting.tasks.any()
             || hosting.connections.load(Ordering::SeqCst) > 0
@@ -777,6 +1241,121 @@ fn scan(hosting: &Hosting) {
     for repository in index.list().unwrap_or_default() {
         hosting.tasks.look(&repository);
     }
+}
+
+/// 154, 71 (design D8 of `each-submission-shows-its-wait-and-its-test`;
+/// rule core.66): at each scan the room's waits are drained, whether or
+/// not anything is sent, so they never gather; and while `telemetry`
+/// sends metrics, the room is measured by repository and branch, each
+/// repository named once as its binding names it, `names` keeping it.
+fn send_room(
+    hosting: &Hosting,
+    telemetry: Option<&crate::telemetry::Telemetry>,
+    sent: &mut std::collections::BTreeSet<(PathBuf, String)>,
+    names: &mut std::collections::BTreeMap<PathBuf, Option<String>>,
+) {
+    let (running, bound, waits) = {
+        let mut room = hosting.room.lock();
+        let running = room.running_by_branch().unwrap_or_else(|e| {
+            log(&format!("sluice host: counting the room by branch: {e:#}"));
+            Default::default()
+        });
+        (running, room.bound(), room.waits())
+    };
+    if !telemetry.is_some_and(|t| t.sends_metrics()) {
+        return;
+    }
+    let repositories: Vec<PathBuf> = running
+        .keys()
+        .chain(sent.iter())
+        .map(|(r, _)| r.clone())
+        .chain(waits.iter().map(|w| w.repository.clone()))
+        .collect();
+    for r in repositories {
+        names
+            .entry(r.clone())
+            .or_insert_with(|| name_of(hosting, &r));
+    }
+    measure_room(
+        &running,
+        bound,
+        &waits,
+        &|r| names.get(r).cloned().flatten(),
+        sent,
+    );
+}
+
+/// The name `repository`'s binding gives it in its metrics (rule core.66);
+/// `None` where it cannot be opened, said in the host process's log.
+fn name_of(hosting: &Hosting, repository: &Path) -> Option<String> {
+    let bound = crate::profiles::Bound::open_holding(
+        &tasks::open_dir(repository),
+        std::env::current_exe().ok()?,
+        hosting.settings.instance(),
+        std::rc::Rc::new(crate::retry::Policy::round()),
+        &hosting.tokens,
+    );
+    match bound {
+        Ok(b) => Some(b.peer().repository),
+        Err(e) => {
+            log(&format!(
+                "sluice host: naming {} for its metrics: {e:#}",
+                repository.display()
+            ));
+            None
+        }
+    }
+}
+
+/// 154, 71 (design D8 of `each-submission-shows-its-wait-and-its-test`;
+/// rule core.66): for each repository and branch with runs counted now
+/// (`running`) or at the last sending (`sent`), `sluice.host.running`, its
+/// runs, and `sluice.host.bound`, the host's bound, a row whose runs ended
+/// reading 0 once; and for each of `waits` that names a branch,
+/// `sluice.run.waited_for_room` in seconds. Each carries the repository as
+/// `name` gives it, and the branch, and nothing else; a repository `name`
+/// gives none is passed by. `sent` becomes the rows with runs now.
+pub(crate) fn measure_room(
+    running: &std::collections::BTreeMap<(PathBuf, String), usize>,
+    bound: usize,
+    waits: &[room::Wait],
+    name: &dyn Fn(&Path) -> Option<String>,
+    sent: &mut std::collections::BTreeSet<(PathBuf, String)>,
+) {
+    let rows: std::collections::BTreeSet<&(PathBuf, String)> =
+        running.keys().chain(sent.iter()).collect();
+    for row in rows {
+        let Some(repository) = name(&row.0) else {
+            continue;
+        };
+        let (repository, branch) = (repository.as_str(), row.1.as_str());
+        let runs = running.get(row).copied().unwrap_or(0);
+        tracing::info!(
+            gauge.sluice.host.running = runs as u64,
+            sluice.repository = repository,
+            sluice.branch = branch,
+        );
+        tracing::info!(
+            gauge.sluice.host.bound = bound as u64,
+            sluice.repository = repository,
+            sluice.branch = branch,
+        );
+    }
+    for wait in waits {
+        let (Some(branch), Some(repository)) = (&wait.branch, name(&wait.repository)) else {
+            continue;
+        };
+        tracing::info!(
+            histogram.sluice.run.waited_for_room = wait.waited.as_secs_f64(),
+            sluice.repository = repository.as_str(),
+            sluice.branch = branch.as_str(),
+        );
+    }
+    *sent = running
+        .iter()
+        .filter(|(_, n)| **n > 0)
+        .map(|(row, _)| row.clone())
+        .collect();
 }
 
 /// Take every connection queued, each answered on a thread of its own:
@@ -884,10 +1463,12 @@ fn answer(hosting: &Arc<Hosting>, stream: UnixStream) -> Result<()> {
             kind,
             repository,
             place: _,
+            branch,
         } => hold(
             hosting,
             kind,
             &repository,
+            branch.as_deref(),
             &stream,
             &mut writer,
             &mut reader,
@@ -911,7 +1492,24 @@ fn answer(hosting: &Arc<Hosting>, stream: UnixStream) -> Result<()> {
             send(&mut writer, &answer)
         }
         Request::Room => send(&mut writer, &Answer::Room(view(hosting)?)),
-        Request::HandOver => {
+        // D3 of `sluice-runs-as-a-daemon`: a daemon starts afresh in place;
+        // a host process that is no daemon ends, whatever the asker named.
+        Request::HandOver { program } if hosting.named.daemon => {
+            log(&format!(
+                "sluice daemon: sluice {} asked this one to hand over; it starts afresh in place",
+                hello.hello
+            ));
+            *hosting
+                .afresh
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(Afresh {
+                program,
+                by: hello.hello.clone(),
+            });
+            hosting.stopping.store(true, Ordering::SeqCst);
+            send(&mut writer, &Answer::Ok)
+        }
+        Request::HandOver { .. } => {
             log(&format!(
                 "sluice host: sluice {} asked this one to hand over; it ends",
                 hello.hello
@@ -932,11 +1530,12 @@ fn results_of(
     branch: &str,
     ask: &sluice_seams::ResultAsk,
 ) -> Result<Vec<u8>> {
-    let bound = crate::profiles::Bound::open_with(
+    let bound = crate::profiles::Bound::open_holding(
         &tasks::open_dir(repository),
         std::env::current_exe()?,
         hosting.settings.instance(),
         std::rc::Rc::new(crate::retry::Policy::round().recording_where_set()),
+        &hosting.tokens,
     )?;
     let state = bound
         .state
@@ -1000,6 +1599,7 @@ fn hold(
     hosting: &Arc<Hosting>,
     kind: sluice_seams::RunKind,
     repository: &Path,
+    branch: Option<&str>,
     stream: &UnixStream,
     writer: &mut UnixStream,
     reader: &mut BufReader<UnixStream>,
@@ -1008,7 +1608,7 @@ fn hold(
     // a profile beside the host process (task 3.4), is answered once, held
     // or refused, as a round's own ask is, and counts as no session's wait.
     let waiter = match kind {
-        sluice_seams::RunKind::Session => Some(hosting.room.lock().wait(repository)),
+        sluice_seams::RunKind::Session => Some(hosting.room.lock().wait(repository, branch)),
         sluice_seams::RunKind::Queue => None,
     };
     let let_go = || {
@@ -1026,7 +1626,10 @@ fn hold(
             let_go();
             return Ok(());
         }
-        let asked = hosting.room.lock().ask(&asker, repository, Instant::now());
+        let asked = hosting
+            .room
+            .lock()
+            .ask(&asker, repository, branch, Instant::now());
         match asked {
             Ok(Asked::Held(id)) => break id,
             Ok(Asked::Refused(why)) => {
@@ -1064,4 +1667,106 @@ fn hold(
     // Its supervisor holds the run directory before the command says so.
     held.started();
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::Mutex;
+    use tracing::field::{Field, Visit};
+    use tracing_subscriber::layer::SubscriberExt;
+
+    /// Each metric event, as `<metric> <value>` and its other fields after
+    /// it as `<field>=<value>`.
+    #[derive(Clone, Default)]
+    struct Seen(Arc<Mutex<Vec<String>>>);
+
+    struct Line(Vec<String>);
+
+    impl Visit for Line {
+        fn record_debug(&mut self, field: &Field, value: &dyn std::fmt::Debug) {
+            let name = field.name();
+            match ["gauge.", "histogram.", "monotonic_counter."]
+                .iter()
+                .any(|p| name.starts_with(p))
+            {
+                true => self.0.insert(0, format!("{name} {value:?}")),
+                false => self.0.push(format!("{name}={value:?}")),
+            }
+        }
+
+        fn record_str(&mut self, field: &Field, value: &str) {
+            self.0.push(format!("{}={value}", field.name()));
+        }
+    }
+
+    impl<S: tracing::Subscriber> tracing_subscriber::Layer<S> for Seen {
+        fn on_event(
+            &self,
+            event: &tracing::Event<'_>,
+            _: tracing_subscriber::layer::Context<'_, S>,
+        ) {
+            let mut line = Line(Vec::new());
+            event.record(&mut line);
+            self.0.lock().unwrap().push(line.0.join(" "));
+        }
+    }
+
+    /// 154, 71, design D8 of `each-submission-shows-its-wait-and-its-test`
+    /// (rule core.66): two runs for `main` under a bound of 4, with a wait
+    /// of 20 s drained, are sent as such; then none, as 0 once; then nothing
+    /// for it; each with the repository and the branch.
+    #[test]
+    fn the_host_s_room_is_measured_by_branch() {
+        let seen = Seen::default();
+        let repo = PathBuf::from("/host/repo.git");
+        let name = |r: &Path| (r == Path::new("/host/repo.git")).then(|| "acme/app".to_string());
+        let main = (repo.clone(), "main".to_string());
+        let mut sent = std::collections::BTreeSet::new();
+        let sending =
+            |running: std::collections::BTreeMap<(PathBuf, String), usize>,
+             waits: Vec<room::Wait>,
+             sent: &mut std::collections::BTreeSet<(PathBuf, String)>| {
+                let at = seen.0.lock().unwrap().len();
+                let subscriber = tracing_subscriber::registry().with(seen.clone());
+                tracing::subscriber::with_default(subscriber, || {
+                    measure_room(&running, 4, &waits, &name, sent)
+                });
+                seen.0.lock().unwrap()[at..].to_vec()
+            };
+        let named = "sluice.repository=acme/app sluice.branch=main";
+        let first = sending(
+            std::collections::BTreeMap::from([(main.clone(), 2)]),
+            vec![room::Wait {
+                repository: repo.clone(),
+                branch: Some("main".into()),
+                waited: Duration::from_secs(20),
+            }],
+            &mut sent,
+        );
+        assert_eq!(
+            first,
+            [
+                format!("gauge.sluice.host.running 2 {named}"),
+                format!("gauge.sluice.host.bound 4 {named}"),
+                format!("histogram.sluice.run.waited_for_room 20.0 {named}"),
+            ]
+        );
+        let second = sending(Default::default(), Vec::new(), &mut sent);
+        assert_eq!(
+            second,
+            [
+                format!("gauge.sluice.host.running 0 {named}"),
+                format!("gauge.sluice.host.bound 4 {named}"),
+            ]
+        );
+        let third = sending(Default::default(), Vec::new(), &mut sent);
+        assert!(third.is_empty(), "{third:?}");
+        for line in first.iter().chain(&second) {
+            for field in line.split(' ').skip(2) {
+                let key = field.split_once('=').map_or(field, |(k, _)| k);
+                assert!(sluice_core::METRIC_KEYS.contains(&key), "{key} in {line}");
+            }
+        }
+    }
 }

@@ -3,15 +3,15 @@
 # claimed run's checks on a reserved-capacity fleet of that system and
 # holds no key; a run build's end starts the sign project, which runs none
 # of the combination's code, signs the keys its tree bears out with the
-# KMS key only its role may use, and records the run's end. The lead role
+# KMS key only its role may use, and records the run's end. The start role
 # may start the run projects with a claim and nothing else.
 # `sluice init codebuild --force` writes it again.
 AWSTemplateFormatVersion: "2010-09-09"
 Description: sluice's CodeBuild pool for {{repository}}, written by sluice {{version}}
 Parameters:
-  LeadPrincipal:
+  StartPrincipal:
     Type: String
-    Description: The ARN of the principal the hosts that lead a branch on the pool reach AWS as, which may assume the lead role
+    Description: The ARN of the principal the hosts that may run a branch's queue on the pool reach AWS as, which may assume the start role
   AppId:
     Type: String
     Description: The id of sluice's GitHub App, whose key the sign build records the run's end with
@@ -209,7 +209,7 @@ Resources:
                 Action: codebuild:StartBuild
                 Resource:
                   Fn::GetAtt: [Sign, Arn]
-  LeadRole:
+  StartRole:
     Type: AWS::IAM::Role
     Properties:
       AssumeRolePolicyDocument:
@@ -218,10 +218,10 @@ Resources:
           - Effect: Allow
             Principal:
               AWS:
-                Ref: LeadPrincipal
+                Ref: StartPrincipal
             Action: sts:AssumeRole
       Policies:
-        - PolicyName: lead
+        - PolicyName: start
           PolicyDocument:
             Version: "2012-10-17"
             Statement:
@@ -546,10 +546,10 @@ Outputs:
   SignProject:
     Value:
       Ref: Sign
-  LeadRole:
-    Description: The role the hosts that lead a branch on the pool assume, as their [aws] profile names it
+  StartRole:
+    Description: The role the hosts that may run a branch's queue on the pool assume, as their [aws] profile names it
     Value:
-      Fn::GetAtt: [LeadRole, Arn]
+      Fn::GetAtt: [StartRole, Arn]
   AppKeySecret:
     Description: The secret to fill with the app's private key
     Value:
