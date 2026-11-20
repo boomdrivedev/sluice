@@ -10,6 +10,10 @@
 
 use std::collections::BTreeMap;
 
+use anyhow::Result;
+
+use crate::own_steps::{self, Carry, Layout, OwnLine, Reading};
+
 /// Where the workflows live in a repository.
 pub const DIR: &str = ".github/workflows";
 
@@ -30,6 +34,76 @@ const RUNNERS_LINE: &str =
 /// The line of `sluice.yml`'s template that stands for the pool's systems,
 /// whose head runs its `sign-head` job signs one each.
 const SYSTEMS_LINE: &str = "        system: [linux-x64] # the pool's systems";
+
+/// The lines that open and close a run job's room for the repository's
+/// own steps (record 0119 as amended 2026-11-18; design D1 of the change
+/// `a-pools-run-job-runs-the-repositorys-own-steps`).
+pub const ROOM_OPEN: &str = "# sluice: your own steps, after the checks, in $SLUICE_CHECKOUT";
+pub const ROOM_CLOSE: &str = "# sluice: end of your own steps";
+
+/// The job a workflow's line at `at` is in: the nearest job's line above
+/// it, a key of `jobs:`.
+fn job_of(lines: &[&str], at: usize) -> String {
+    lines[..at]
+        .iter()
+        .rev()
+        .find_map(|l| {
+            let name = l.strip_prefix("  ")?.trim_end().strip_suffix(':')?;
+            (!name.starts_with([' ', '#']) && !name.contains(' ')).then(|| name.to_string())
+        })
+        .unwrap_or_default()
+}
+
+/// The steps of the job `job`, which its room's entries join.
+fn steps_of(job: &str) -> Vec<own_steps::Seg> {
+    own_steps::keys(&["jobs", job, "steps"])
+}
+
+/// What a workflow's rooms are, and its run job's `packages: write`, the
+/// line the repository may add directly after `contents: read` in the run
+/// job's `permissions` for a store on GitHub's registry (design D4; timber
+/// C.1; rule core.62).
+fn layout() -> Layout<'static> {
+    Layout {
+        open: ROOM_OPEN,
+        close: ROOM_CLOSE,
+        key: &job_of,
+        list: &steps_of,
+        own_line: Some(OwnLine {
+            line: "packages: write",
+            after: "contents: read",
+            key: "run",
+            at: own_steps::keys(&["jobs", "run", "permissions"]),
+        }),
+    }
+}
+
+/// `had`, a workflow, read against `wants`, what this sluice writes it as
+/// (design D3): as sluice writes it, with or without the repository's own
+/// steps; differing; or the repository's own steps leaving the run job's.
+pub fn read(had: &str, wants: &str) -> Result<Reading> {
+    own_steps::read(had, wants, &layout())
+}
+
+/// What a workflow as sluice writes it holds of the repository's own, as
+/// said after "as sluice writes it" or "written" (design D3).
+pub fn holds(reading: &Reading) -> &'static str {
+    match reading {
+        Reading::AsWritten { rooms, own_line } => match (rooms.is_empty(), *own_line) {
+            (true, false) => "",
+            (false, false) => ", with the repository's own steps",
+            (true, true) => ", with the run job's packages: write",
+            (false, true) => ", with the repository's own steps and the run job's packages: write",
+        },
+        _ => "",
+    }
+}
+
+/// `wants` with the repository's own steps in `had` carried into its run
+/// job's room, by the job, and its run job's `packages: write` (design D3).
+pub fn carry(had: &str, wants: &str) -> Result<Carry> {
+    own_steps::carry(had, wants, &layout())
+}
 
 /// `sluice.yml` as sluice `version` writes it, its `sign-head` job signing
 /// a pull request's head run on each system of the pool's `runners`.
@@ -168,5 +242,83 @@ mod tests {
             assert!(!run.contains(held), "the head's run job holds {held}");
         }
         assert!(run.contains("sluice job run --head"));
+    }
+
+    /// Record 0119 as amended 2026-11-18 (design D1, D2 and D6 of the
+    /// change `a-pools-run-job-runs-the-repositorys-own-steps`; timber
+    /// 135; rule core.63): each run job, `sluice.yml`'s and
+    /// `sluice-pr.yml`'s, runs `sluice job run` naming its checkout, then
+    /// names it as `SLUICE_CHECKOUT` unless cancelled, then leaves its room,
+    /// the two `# sluice:` lines with nothing between, at the steps'
+    /// indentation, then releases the checkout and uploads the hand-over,
+    /// each whatever came before.
+    #[test]
+    fn each_run_job_leaves_room_for_the_repositorys_own_steps() {
+        let runners = BTreeMap::from([("linux-x64".to_string(), "ubuntu-24.04".to_string())]);
+        for (name, w) in [
+            ("sluice.yml", sluice("1.2.3", &runners)),
+            ("sluice-pr.yml", sluice_pr("1.2.3", &runners)),
+        ] {
+            let run = &jobs(&w)["run"];
+            let lines: Vec<&str> = run.lines().collect();
+            let at = |what: &dyn Fn(&str) -> bool, said: &str| {
+                lines
+                    .iter()
+                    .position(|l| what(l))
+                    .unwrap_or_else(|| panic!("{name}'s run job has no {said}: {run}"))
+            };
+            let job_run = at(
+                &|l| {
+                    l.contains("sluice job run")
+                        && l.contains("--checkout \"$RUNNER_TEMP/sluice-checkout\"")
+                },
+                "sluice job run --checkout",
+            );
+            let named = at(
+                &|l| l.contains("echo \"SLUICE_CHECKOUT="),
+                "step naming SLUICE_CHECKOUT",
+            );
+            let step = lines[..named]
+                .iter()
+                .rposition(|l| l.starts_with("      - "))
+                .unwrap_or_else(|| panic!("{name}: no step names SLUICE_CHECKOUT: {run}"));
+            assert!(
+                lines[step..named]
+                    .iter()
+                    .any(|l| l.trim() == "if: ${{ !cancelled() }}"),
+                "{name}: SLUICE_CHECKOUT is named unless cancelled: {run}"
+            );
+            let open = at(
+                &|l| l == "      # sluice: your own steps, after the checks, in $SLUICE_CHECKOUT",
+                "room's opening line",
+            );
+            assert_eq!(
+                lines[open + 1],
+                "      # sluice: end of your own steps",
+                "{name}: nothing between the room's lines"
+            );
+            let release = at(
+                &|l| {
+                    l.contains("sluice job release --checkout \"$RUNNER_TEMP/sluice-checkout\"")
+                        && l.contains("--out \"$RUNNER_TEMP/sluice-run\"")
+                },
+                "sluice job release",
+            );
+            assert_eq!(
+                lines[release - 1].trim(),
+                "if: always()",
+                "{name}: the release runs whatever came before"
+            );
+            let upload = at(&|l| l.contains("actions/upload-artifact@"), "upload");
+            assert_eq!(lines[upload + 1].trim(), "if: always()", "{name}");
+            assert!(
+                job_run < named && named < open && open < release && release < upload,
+                "{name}: in order: {run}"
+            );
+            assert!(
+                run.contains("    permissions:\n      contents: read\n    steps:"),
+                "{name}"
+            );
+        }
     }
 }

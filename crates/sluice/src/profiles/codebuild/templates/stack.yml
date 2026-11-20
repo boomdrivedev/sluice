@@ -4,8 +4,13 @@
 # holds no key; a run build's end starts the sign project, which runs none
 # of the combination's code, signs the keys its tree bears out with the
 # KMS key only its role may use, and records the run's end. The start role
-# may start the run projects with a claim and nothing else.
-# `sluice init codebuild --force` writes it again.
+# may start the run projects with a claim and nothing else. After the
+# checks each run project's buildspec leaves room, between its two
+# `# sluice:` lines, for your own commands, which run in the checkout the
+# checks ran in, $SLUICE_CHECKOUT, before it is released, under the
+# policies RunPolicies names, which never reach the signing key, the
+# app's key, a build or a role. `sluice init codebuild --force` writes it
+# again, keeping your own commands.
 AWSTemplateFormatVersion: "2010-09-09"
 Description: sluice's CodeBuild pool for {{repository}}, written by sluice {{version}}
 Parameters:
@@ -39,6 +44,18 @@ Parameters:
     Default: 14
     MinValue: 1
     Description: The days a run build's hand-over is kept
+  RunPolicies:
+    Type: CommaDelimitedList
+    Default: ""
+    Description: The ARNs of managed policies the run builds' role is given for your own commands after the checks, each allowing what they write and nothing else; none by default
+Conditions:
+  HasRunPolicies:
+    Fn::Not:
+      - Fn::Equals:
+          - Fn::Join:
+              - ""
+              - Ref: RunPolicies
+          - ""
 Resources:
   HandOver:
     Type: AWS::S3::Bucket
@@ -122,6 +139,12 @@ Resources:
             Principal:
               Service: codebuild.amazonaws.com
             Action: sts:AssumeRole
+      # Your own commands' policies, where RunPolicies names any.
+      ManagedPolicyArns:
+        Fn::If:
+          - HasRunPolicies
+          - Ref: RunPolicies
+          - Ref: AWS::NoValue
       Policies:
         - PolicyName: hand-over
           PolicyDocument:
@@ -138,6 +161,26 @@ Resources:
                 Action: s3:PutObject
                 Resource:
                   Fn::Sub: ${HandOver.Arn}/*
+              # Whatever RunPolicies allows, a run build never signs, reads
+              # the app's key, starts or changes a build, or changes a role.
+              - Sid: NeverTheSigningKey
+                Effect: Deny
+                Action: kms:*
+                Resource:
+                  Fn::GetAtt: [SignKey, Arn]
+              - Sid: NeverTheAppKey
+                Effect: Deny
+                Action: secretsmanager:*
+                Resource:
+                  Ref: AppKey
+              - Sid: NeverABuild
+                Effect: Deny
+                Action: codebuild:*
+                Resource: "*"
+              - Sid: NeverARole
+                Effect: Deny
+                Action: iam:*
+                Resource: "*"
   SignRole:
     Type: AWS::IAM::Role
     Properties:
@@ -441,7 +484,7 @@ Resources:
                   if command -v docker >/dev/null; then
                     docker ps --all --quiet | xargs --no-run-if-empty docker rm --force
                   fi
-                  rm -rf "/tmp/sluice-$(id -u)" "${XDG_STATE_HOME:-$HOME/.local/state}/sluice" "$CODEBUILD_SRC_DIR/sluice-run"
+                  rm -rf "/tmp/sluice-$(id -u)" "${XDG_STATE_HOME:-$HOME/.local/state}/sluice" "$CODEBUILD_SRC_DIR/sluice-run" "$CODEBUILD_SRC_DIR/sluice-checkout"
                 - |
                   set -eo pipefail
                   if ! command -v nix >/dev/null; then
@@ -457,7 +500,23 @@ Resources:
                   git clone --quiet --filter=blob:none \
                     "https://x-access-token:$SLUICE_READ_TOKEN@github.com/$SLUICE_REPOSITORY.git" repository
                   cd repository
-                  sluice job run --claim "$SLUICE_CLAIM" --branch "$SLUICE_BRANCH" --out "$CODEBUILD_SRC_DIR/sluice-run"
+                  sluice job run --claim "$SLUICE_CLAIM" --branch "$SLUICE_BRANCH" --out "$CODEBUILD_SRC_DIR/sluice-run" --checkout "$CODEBUILD_SRC_DIR/sluice-checkout"
+            post_build:
+              commands:
+                - |
+                  export PATH="$HOME/.local/bin:$PATH"
+                  if [ -s "$CODEBUILD_SRC_DIR/sluice-checkout" ]; then
+                    export SLUICE_CHECKOUT="$(head -n 1 "$CODEBUILD_SRC_DIR/sluice-checkout")"
+                  fi
+                # sluice: your own commands, after the checks, in $SLUICE_CHECKOUT
+                # sluice: end of your own commands
+              finally:
+                - |
+                  export PATH="$HOME/.local/bin:$PATH"
+                  if [ -d "$CODEBUILD_SRC_DIR/repository" ]; then
+                    cd "$CODEBUILD_SRC_DIR/repository"
+                    sluice job release --checkout "$CODEBUILD_SRC_DIR/sluice-checkout" --out "$CODEBUILD_SRC_DIR/sluice-run"
+                  fi
           artifacts:
             base-directory: sluice-run
             files:

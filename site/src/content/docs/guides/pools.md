@@ -114,10 +114,13 @@ and let the pool take what they can't.
 The run has two jobs:
 
 - **run**, on the system's runner, installs sluice and the toolchain,
-  starts the claimed run as a host would, keeps its report, and
-  releases its checkout. It reads the repository and nothing else: it
-  holds no key, no identity and no secret, so nothing the
-  combination's checks do can sign anything.
+  starts the claimed run as a host would, and keeps its report. It
+  keeps the checkout the checks ran in for [your own
+  steps](#your-own-steps-after-the-checks), then releases it after
+  them, whatever they came to, and hands the report over. It reads the
+  repository and nothing else: it holds no key, no identity and no
+  secret of sluice's, so nothing the combination's checks do can sign
+  anything.
 - **sign**, after it, whatever it came to, in the `sluice` environment.
   It runs none of the combination's code. It keeps only the results
   whose keys the combination's tree bears out, signs them with the
@@ -128,6 +131,64 @@ A signed result is checked on every host that reads it against the
 roots sluice carries, with nothing fetched, by the workflow and the
 branch the signer names. A result signed by any other workflow, or by
 this one on another branch, counts for nothing.
+
+### Your own steps after the checks
+
+The run job leaves room for steps of your own after the checks, such as
+pushing what the checks built to a shared cache. Write them between its
+two `# sluice:` lines:
+
+```yaml
+      # sluice: your own steps, after the checks, in $SLUICE_CHECKOUT
+      - name: Push what the checks built
+        if: ${{ !cancelled() && env.SLUICE_CHECKOUT != '' }}
+        working-directory: ${{ env.SLUICE_CHECKOUT }}
+        run: ./scripts/push-cache
+        env:
+          CACHE_KEY: ${{ secrets.CACHE_WRITE_KEY }}
+      # sluice: end of your own steps
+```
+
+They run in the checkout the checks ran in, which the job names as
+`SLUICE_CHECKOUT`: `${{ env.SLUICE_CHECKOUT }}` as a step's
+`working-directory`, or `cd "$SLUICE_CHECKOUT"` in its `run`. The
+checkout still holds what the checks wrote. The job releases it after
+your steps, whatever they came to. A step with no `if:` runs after any
+run that kept its report, whether its checks passed or failed;
+`if: ${{ !cancelled() }}` runs it even where the run kept none.
+
+Your steps hold the credential you give them, never one of sluice's:
+
+- **A secret of the repository's**, `${{ secrets.NAME }}`, allowed to
+  write your store's cache and nothing else.
+- **For a store on GitHub's registry**, the job's own token, given
+  `packages: write` on the line directly after `contents: read` in the
+  run job's `permissions`:
+
+  ```yaml
+      permissions:
+        contents: read
+        packages: write
+  ```
+
+  The token reaches the checks too, so keep the repository's other
+  packages out of its Actions access in each package's settings. No
+  other permission, environment or identity token belongs in the run
+  job.
+
+A pull request from a fork gets no secrets and a token that only reads,
+so its run job's steps push nothing. `sluice-pr.yml`'s run job leaves
+the same room as `sluice.yml`'s.
+
+`sluice init actions` reads a workflow that differs only between those
+lines, and in that `packages: write`, as it writes it, and
+`sluice init actions --force` keeps them when it writes a newer
+release's workflow. A step you added after the step that runs
+`sluice job run` before this room existed would be written over: move
+it between the lines first. A line between them that would reach past
+the run job's steps, such as `environment:` at the job's own
+indentation, is refused, by `sluice init actions` with `--force` or not
+and by `sluice forge check`, which names the line.
 
 ### Pull requests
 
@@ -161,7 +222,7 @@ $ sluice init codebuild
 
 Then, in AWS:
   - deploy it, as `sluice` or a name of your own:
-    aws cloudformation deploy --template-file .config/sluice-codebuild.yml --stack-name sluice --capabilities CAPABILITY_IAM --parameter-overrides StartPrincipal=<the ARN the hosts that may run the branch's queue reach AWS as> AppId=<sluice's app id> MaxCapacity=<the branch's parallel>
+    aws cloudformation deploy --template-file .config/sluice-codebuild.yml --stack-name sluice --capabilities CAPABILITY_IAM --parameter-overrides StartPrincipal=<the ARN the hosts that may run the branch's queue reach AWS as> AppId=<sluice's app id> MaxCapacity=<the branch's parallel> RunPolicies=<the ARNs of the managed policies your own commands after the checks need, comma-separated, or nothing>
   - fill the secret sluice-app-key with the app's private key:
     aws secretsmanager put-secret-value --secret-id sluice-app-key --secret-string file://<the app's key>
   - name the profile that assumes the stack's start role as [aws] profile on each host that may run the branch's queue
@@ -195,7 +256,9 @@ Deploy the template with the command it printed. `StartPrincipal` is
 the ARN the hosts that may run the branch's queue reach AWS as, which
 may assume the start role. `AppId` is sluice's app's id. `MaxCapacity` is the most
 instances a fleet grows to, and `BaseCapacity` the instances it keeps
-warm. Fill the secret with the app's private key.
+warm. `RunPolicies` names the managed policies your [own
+commands](#your-own-commands-after-the-checks) need, none by default.
+Fill the secret with the app's private key.
 
 On each host that may run the branch's queue, name the AWS profile that
 assumes the start role in the host's settings:
@@ -298,9 +361,11 @@ A run is two builds:
   system and a token of sluice's app that reads the repository for an
   hour, and nothing else. The start role it assumes may change nothing
   the build runs. It clones the
-  repository, starts the claimed run as a host would, keeps its report,
-  releases its checkout, and hands its report over as a zip. It holds
-  no key and no secret.
+  repository, starts the claimed run as a host would, and keeps its
+  report. It keeps the checkout the checks ran in for [your own
+  commands](#your-own-commands-after-the-checks), releases it after
+  them, whatever they came to, and hands its report over as a zip. It
+  holds no key and no secret.
 - **The sign build**, which the rule starts when the run build ends,
   whatever it came to, unless someone stopped it. It runs none of the
   combination's code. It keeps the run build's report only where its
@@ -316,10 +381,55 @@ sign build took within the host's `[peers] alive`, naming the rule.
 An instance runs one build at a time. A build releases its checkout,
 and everything the run started in it, before it ends. A build CodeBuild
 stopped may end before that, so each run build starts by ending every
-container the instance runs and removing sluice's scratch and state an
-earlier build left. Images stay, as the instance's caches do. The runs
+container the instance runs and removing sluice's scratch and state, and
+the file naming a checkout it kept, an earlier build left. Images stay, as the instance's caches do. The runs
 an instance takes in turn share it, so a run's result claims no
 confinement.
+
+### Your own commands after the checks
+
+Each run project's buildspec, in `.config/sluice-codebuild.yml`, leaves
+room among its `post_build` commands for commands of your own after the
+checks, such as pushing what the checks built to a shared cache. Write
+them between its two `# sluice:` lines, at their indentation:
+
+```yaml
+                # sluice: your own commands, after the checks, in $SLUICE_CHECKOUT
+                - |
+                  if [ -n "${SLUICE_CHECKOUT:-}" ]; then
+                    cd "$SLUICE_CHECKOUT"
+                    ./scripts/push-cache
+                  fi
+                # sluice: end of your own commands
+```
+
+They run in the checkout the checks ran in, `cd "$SLUICE_CHECKOUT"`,
+which still holds what the checks wrote. CodeBuild runs `post_build`
+whatever the checks came to, so your commands run whether they passed
+or failed; `$CODEBUILD_BUILD_SUCCEEDING` is `0` where a command before
+them failed, a run that kept no report among them. The build releases the checkout in its `post_build` phase's
+`finally` block, after your commands, whatever they came to. Then
+deploy the stack again.
+
+Your commands hold the run build's role, never sluice's keys. Give it a
+managed policy of your own as `RunPolicies` when you deploy, allowing
+writes to your store's cache and nothing else. The role's own policy
+denies itself the signing key, the app's key, every CodeBuild action
+and every IAM action, which no policy you give it can lift. GitHub
+gives no token that writes one repository's packages alone outside
+Actions, so a store on GitHub's registry is for the GitHub Actions
+pool.
+
+`sluice init codebuild` reads a template that differs only between
+those lines as it writes it, and `sluice init codebuild --force` keeps
+each run project's commands for the same system when it writes a newer
+release's template, saying which it drops for a system it no longer
+writes. A command you added after `sluice job run` before this room
+existed would be written over: move it between the lines first. A line
+between them that would reach past the `post_build` commands, such as
+`artifacts:` at the buildspec's top level, is refused, by
+`sluice init codebuild` with `--force` or not and by
+`sluice pool check`, which names the run project and the line.
 
 ### What it costs
 

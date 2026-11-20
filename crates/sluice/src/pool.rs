@@ -3,7 +3,8 @@
 //! at the branch's revision names, read back from AWS as the host reaches
 //! it: who it reaches AWS as; each run project on a reserved-capacity fleet
 //! of its system's environment, its buildspec as `sluice init codebuild`
-//! writes it for this release, and its timeout longer than the branch's;
+//! writes it for this release, the repository's own commands aside (record
+//! 0119 as amended 2026-11-18), and its timeout longer than the branch's;
 //! the sign project's buildspec; and the key's spec, usage and public half
 //! against the policy's. It exits 1 naming each that fails, and says,
 //! failing nothing, where the branch does not test side by side at the
@@ -19,6 +20,7 @@ use sluice_core::policy::{Policy, Rules};
 use sluice_core::Sluice;
 use sluice_seams::Setting;
 
+use crate::own_steps::Reading;
 use crate::profiles::codebuild::aws::{Aws, Fleet, Project};
 use crate::profiles::codebuild::sdk::{Chain, Sdk};
 use crate::profiles::codebuild::template::{self, System};
@@ -237,16 +239,38 @@ fn fleet(
             &sys,
         )
         .0;
-        match had.trim_end() == wants.trim_end() {
-            true => lines.push(Line::Ok(format!(
-                "{name}'s buildspec is as sluice {} writes it, cloning {}",
+        // Record 0119 as amended 2026-11-18 (design D3): read as `sluice
+        // init codebuild` reads its template, the repository's own commands
+        // aside, and failed where they leave the buildspec's `post_build`
+        // commands (rule core.62).
+        let ended = |s: &str| format!("{}\n", s.trim_end());
+        match template::read_buildspec(&ended(&had), &ended(&wants), system) {
+            Ok(reading @ Reading::AsWritten { .. }) => lines.push(Line::Ok(format!(
+                "{name}'s buildspec is as sluice {} writes it, cloning {}{}",
                 crate::VERSION,
-                repo.as_deref().unwrap_or_default()
+                repo.as_deref().unwrap_or_default(),
+                template::holds(&reading)
             ))),
-            false => lines.push(Line::Failed(format!(
-                "{name}'s buildspec is not as sluice init codebuild writes it for sluice {}: {}",
-                crate::VERSION,
-                differs(&had, &wants)
+            Ok(Reading::Leaves(l)) => lines.push(Line::Failed(format!(
+                "{name}'s buildspec: its {l} leaves its post_build commands, where the \
+                 repository's own commands go: move it between its `# sluice:` lines"
+            ))),
+            Ok(Reading::Differs(d)) => {
+                let shown = |l: &Option<String>| match l {
+                    Some(l) => format!("{:?}", l.trim()),
+                    None => "nothing".into(),
+                };
+                lines.push(Line::Failed(format!(
+                    "{name}'s buildspec is not as sluice init codebuild writes it for sluice {}: \
+                     its line {} is {}, where sluice writes {}",
+                    crate::VERSION,
+                    d.line,
+                    shown(&d.had),
+                    shown(&d.wants)
+                )))
+            }
+            Err(e) => lines.push(Line::Failed(format!(
+                "{name}'s buildspec could not be read: {e:#}"
             ))),
         }
         repository = repository.or(repo.map(|r| (r, sys.clone())));

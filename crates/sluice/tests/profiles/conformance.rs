@@ -97,6 +97,10 @@ impl Checkout for RecordedPlaces {
         self.inner.gone(name)
     }
 
+    fn path(&self, name: &str) -> Result<Option<std::path::PathBuf>> {
+        self.inner.path(name)
+    }
+
     fn free(&self, name: &str) -> Result<()> {
         self.inner.free(name)?;
         self.log.borrow_mut().released.push(name.into());

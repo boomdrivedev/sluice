@@ -3528,6 +3528,14 @@ impl Checkout for FakeCheckout {
         Ok(())
     }
 
+    fn path(&self, name: &str) -> Result<Option<std::path::PathBuf>> {
+        let inner = self.0 .0.borrow();
+        Ok(inner
+            .places
+            .contains_key(name)
+            .then(|| format!("/fake/places/{name}").into()))
+    }
+
     fn gone(&self, name: &str) -> Result<bool> {
         let inner = self.0 .0.borrow();
         if let Some(p) = inner.previews.get(name) {

@@ -2852,6 +2852,75 @@ fn forge_check_names_a_pools_missing_workflow() {
     );
 }
 
+/// `wants` with `lines` between its run job's `# sluice:` lines.
+fn with_own_steps(wants: &str, lines: &str) -> String {
+    let open = format!("      {}\n", sluice::profiles::github::workflows::ROOM_OPEN);
+    assert_eq!(wants.matches(&open).count(), 1);
+    wants.replacen(&open, &format!("{open}{lines}"), 1)
+}
+
+/// satisfies: record 0119 as amended 2026-11-18 (design D3); the
+/// repository-steps spec's "A workflow on the signer's branch": a
+/// workflow as init writes it but for a step of the repository's between
+/// the run job's `# sluice:` lines passes, said so
+#[test]
+fn forge_check_reads_a_workflow_with_the_repositorys_own_steps() {
+    let clock = Clock::new();
+    let (pool, signer) = actions_pool();
+    let wants = sluice::profiles::github::workflows::sluice("1.2.3", &pool.runners);
+    let ours = with_own_steps(
+        &wants,
+        "      - run: ./push \"$KEY\"\n        env:\n          KEY: ${{ secrets.STORE_KEY }}\n",
+    );
+    let fake = pool_forge(&clock, Some(&ours), custom_environment(), &["main"]);
+    let found = sluice::profiles::github::check::pool(
+        &app(&fake, &clock),
+        &repo(),
+        &pool,
+        Some(&signer),
+        &wants,
+    );
+    assert!(failures(&found).is_empty(), "{found:?}");
+    assert!(
+        found.iter().any(|f| f.ok
+            && f.what
+                == ".github/workflows/sluice.yml on main is as sluice init actions writes it, with the repository's own steps"),
+        "{found:?}"
+    );
+}
+
+/// satisfies: record 0119 as amended 2026-11-18 (design D3; rule
+/// core.62); the repository-steps spec's "A line that gives the run job
+/// an environment": a line between the run job's `# sluice:` lines that
+/// makes a key of the run job fails, named
+#[test]
+fn forge_check_names_own_steps_that_leave_the_run_job() {
+    let clock = Clock::new();
+    let (pool, signer) = actions_pool();
+    let wants = sluice::profiles::github::workflows::sluice("1.2.3", &pool.runners);
+    let leaving = with_own_steps(&wants, "      - run: ./push\n    environment: sluice\n");
+    let line = leaving
+        .lines()
+        .position(|l| l == "    environment: sluice")
+        .unwrap()
+        + 1;
+    let fake = pool_forge(&clock, Some(&leaving), custom_environment(), &["main"]);
+    let found = sluice::profiles::github::check::pool(
+        &app(&fake, &clock),
+        &repo(),
+        &pool,
+        Some(&signer),
+        &wants,
+    );
+    assert_eq!(
+        failures(&found),
+        vec![format!(
+            ".github/workflows/sluice.yml on main: line {line}, \"environment: sluice\" leaves the run job's steps, where the repository's own steps go: move it between the run job's `# sluice:` lines"
+        )],
+        "{found:?}"
+    );
+}
+
 /// satisfies: record 0119 (design D14); the actions-pool spec's "forge
 /// check names an environment any branch may use"
 #[test]

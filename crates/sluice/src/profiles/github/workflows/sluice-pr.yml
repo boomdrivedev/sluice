@@ -1,8 +1,11 @@
 # Written by `sluice init actions`, sluice {{version}} (record 0119; 113):
 # a pull request's head run on each system the pool's runners name, with no
-# secret and no identity token. `sluice`'s sign job signs the keys its tree
-# bears out, as on the signer's branch. `sluice init actions --force` writes
-# it again.
+# secret and no identity token of sluice's. After the checks the run job
+# leaves room, between its two `# sluice:` lines, for your own steps, which
+# run in the checkout the checks ran in, $SLUICE_CHECKOUT, before it is
+# released. `sluice`'s sign job signs the keys its tree bears out, as on the
+# signer's branch. `sluice init actions --force` writes it again, keeping
+# your own steps.
 name: sluice-pr
 on: pull_request
 permissions: {}
@@ -35,11 +38,22 @@ jobs:
         env:
           SLUICE_VERSION: "{{version}}"
       - name: Run the head's checks
-        run: sluice job run --head "$HEAD" --branch "$BASE" --system "$SYSTEM" --out "$RUNNER_TEMP/sluice-run"
+        run: sluice job run --head "$HEAD" --branch "$BASE" --system "$SYSTEM" --out "$RUNNER_TEMP/sluice-run" --checkout "$RUNNER_TEMP/sluice-checkout"
         env:
           HEAD: ${{ github.event.pull_request.head.sha }}
           BASE: ${{ github.event.pull_request.base.ref }}
           SYSTEM: ${{ matrix.system }}
+      - name: Name the checkout the checks ran in
+        if: ${{ !cancelled() }}
+        run: |
+          if [ -s "$RUNNER_TEMP/sluice-checkout" ]; then
+            echo "SLUICE_CHECKOUT=$(head -n 1 "$RUNNER_TEMP/sluice-checkout")" >> "$GITHUB_ENV"
+          fi
+      # sluice: your own steps, after the checks, in $SLUICE_CHECKOUT
+      # sluice: end of your own steps
+      - name: Release the checkout
+        if: always()
+        run: sluice job release --checkout "$RUNNER_TEMP/sluice-checkout" --out "$RUNNER_TEMP/sluice-run"
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         if: always()
         with:
