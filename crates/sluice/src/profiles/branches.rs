@@ -348,8 +348,14 @@ impl Branch for Branches {
         self.local.form(onto, head)
     }
 
-    fn commit(&self, commit: &LandingCommit) -> Result<Rev> {
-        self.local.commit(commit)
+    /// A landing is written by the profile its branch is routed to, so one
+    /// pushed to a remote names whoever pushes it (record 0019 as amended
+    /// 2026-11-18; rule core.43).
+    fn commit(&self, branch: &str, commit: &LandingCommit) -> Result<Rev> {
+        match self.route(branch)? {
+            Some(p) => p.commit(branch, commit),
+            None => self.local.commit(branch, commit),
+        }
     }
 
     fn contains(&self, tip: &Rev, rev: &Rev) -> Result<bool> {

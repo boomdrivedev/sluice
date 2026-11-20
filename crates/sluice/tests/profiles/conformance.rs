@@ -283,8 +283,8 @@ impl Branch for RecordedRefs {
         self.inner.form(onto, head)
     }
 
-    fn commit(&self, commit: &LandingCommit) -> Result<Rev> {
-        self.inner.commit(commit)
+    fn commit(&self, branch: &str, commit: &LandingCommit) -> Result<Rev> {
+        self.inner.commit(branch, commit)
     }
 
     fn contains(&self, tip: &Rev, rev: &Rev) -> Result<bool> {

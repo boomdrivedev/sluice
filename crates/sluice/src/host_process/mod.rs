@@ -76,9 +76,18 @@ pub const START_LOCK_FD_VAR: &str = "SLUICE_START_LOCK_FD";
 /// whether its state folder is still there (design D6).
 const LOOK: Duration = Duration::from_millis(100);
 
-/// How often it looks at each repository in its index that it holds no
-/// task for, as an idle tick reads it (129; design D4).
+/// How often it goes through its index, looking at each repository it
+/// holds no task for whose remote is due to be asked, as an idle tick
+/// reads it (129; design D4).
 const SCAN: Duration = Duration::from_secs(3);
+
+/// How often a repository with nothing in play has its remote asked, at
+/// most, by the host process's look or a pass of its task, a watched one's
+/// among them; a submit or another command that tells of a change, a
+/// watch's opening and a forecast's second ask have the next reading ask
+/// at once, and a repository with work in play is asked at every pass
+/// (129 as amended 2026-11-19).
+pub const IDLE_ASK: Duration = Duration::from_secs(60);
 
 /// The tick a reading is current within for a one-shot read (64, 129;
 /// design D16).
@@ -213,6 +222,11 @@ pub(crate) struct Hosting {
     /// A daemon asked to hand over: the executable the asker named, or
     /// `None` where it named none (design D3 of `sluice-runs-as-a-daemon`).
     pub afresh: Mutex<Option<Afresh>>,
+    /// The tokens of sluice's identity it holds, one for each repository,
+    /// which every binding it makes holds its own in, on every thread, so
+    /// no git call or API call of its gets a repository's token while one
+    /// it holds lasts (record 0108 as amended 2026-11-19).
+    pub tokens: crate::profiles::Tokens,
 }
 
 /// A daemon's ask to start afresh in place, as a newer command made it
@@ -578,14 +592,26 @@ fn run_holding(
         instance.bound,
         instance.reserved,
     ));
+    // Record 0108 as amended 2026-11-19: one token for each repository,
+    // held for the process's life and shared by its tasks and its looks.
+    let tokens = crate::profiles::Tokens::default();
     let looked_with = settings.clone();
+    let looked_holding = tokens.clone();
     let tasks = tasks::Tasks::new(
-        tasks::repository_body(room.clone(), asked_only(), named.clone(), settings.clone()),
-        Arc::new(move |r: &Path| {
-            index::in_play(r, looked_with.instance()).unwrap_or(tasks::Looked {
-                in_play: true,
-                refused: None,
-            })
+        tasks::repository_body(
+            room.clone(),
+            asked_only(),
+            named.clone(),
+            settings.clone(),
+            tokens.clone(),
+        ),
+        Arc::new(move |r: &Path, asks: bool| {
+            index::in_play(r, looked_with.instance(), &looked_holding, asks).unwrap_or(
+                tasks::Looked {
+                    in_play: true,
+                    refused: None,
+                },
+            )
         }),
     );
     let tasks = match asked_only() {
@@ -605,6 +631,7 @@ fn run_holding(
         folder,
         settings,
         afresh: Mutex::new(None),
+        tokens,
     });
     log(&format!(
         "sluice {} {} started{}, pid {}{}",
@@ -785,8 +812,11 @@ impl TakeUp {
                 }
                 let (tx, rx) = mpsc::channel();
                 let checked = instance.clone();
+                let tokens = hosting.tokens.clone();
                 std::thread::spawn(move || {
-                    let _ = tx.send(binds(&checked, &repositories).map_err(|e| format!("{e:#}")));
+                    let _ = tx.send(
+                        binds(&checked, &repositories, &tokens).map_err(|e| format!("{e:#}")),
+                    );
                 });
                 self.binding = Some((instance, tables, rx));
             }
@@ -815,19 +845,25 @@ impl TakeUp {
 }
 
 /// Whether `instance` binds: sluice's identity on the forge where it names
-/// one, and each of `repositories` bound with it, the host's systems
-/// checked against its policies (87; design D19).
-fn binds(instance: &Instance, repositories: &[PathBuf]) -> Result<()> {
+/// one, and each of `repositories` bound with it, holding its tokens in
+/// `tokens`, the host's systems checked against its policies (87; design
+/// D19; record 0108 as amended 2026-11-19).
+fn binds(
+    instance: &Instance,
+    repositories: &[PathBuf],
+    tokens: &crate::profiles::Tokens,
+) -> Result<()> {
     let retry = std::rc::Rc::new(crate::retry::Policy::round().recording_where_set());
     if let Some(forge) = &instance.forge {
         crate::profiles::github::App::open(forge, retry.clone())?;
     }
     for r in repositories {
-        let bound = crate::profiles::Bound::open_with(
+        let bound = crate::profiles::Bound::open_holding(
             &tasks::open_dir(r),
             std::env::current_exe()?,
             instance.clone(),
             retry.clone(),
+            tokens,
         )?;
         sluice_core::Sluice::new(bound.seams(), &sluice_core::SystemClock)
             .as_peer(bound.peer())
@@ -1252,11 +1288,12 @@ fn send_room(
 /// The name `repository`'s binding gives it in its metrics (rule core.66);
 /// `None` where it cannot be opened, said in the host process's log.
 fn name_of(hosting: &Hosting, repository: &Path) -> Option<String> {
-    let bound = crate::profiles::Bound::open_with(
+    let bound = crate::profiles::Bound::open_holding(
         &tasks::open_dir(repository),
         std::env::current_exe().ok()?,
         hosting.settings.instance(),
         std::rc::Rc::new(crate::retry::Policy::round()),
+        &hosting.tokens,
     );
     match bound {
         Ok(b) => Some(b.peer().repository),
@@ -1493,11 +1530,12 @@ fn results_of(
     branch: &str,
     ask: &sluice_seams::ResultAsk,
 ) -> Result<Vec<u8>> {
-    let bound = crate::profiles::Bound::open_with(
+    let bound = crate::profiles::Bound::open_holding(
         &tasks::open_dir(repository),
         std::env::current_exe()?,
         hosting.settings.instance(),
         std::rc::Rc::new(crate::retry::Policy::round().recording_where_set()),
+        &hosting.tokens,
     )?;
     let state = bound
         .state

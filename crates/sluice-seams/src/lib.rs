@@ -1533,8 +1533,10 @@ pub trait Branch {
     /// 43: `head` merged onto `onto`, or the conflict.
     fn form(&self, onto: &Rev, head: &Rev) -> Result<Formed>;
 
-    /// 44: write one landing commit.
-    fn commit(&self, commit: &LandingCommit) -> Result<Rev>;
+    /// 44: write one landing commit for `branch`, the branch it lands on,
+    /// which a profile that writes as whoever pushes the branch reads it by
+    /// (record 0019 as amended 2026-11-18; rule core.43).
+    fn commit(&self, branch: &str, commit: &LandingCommit) -> Result<Rev>;
 
     /// Whether `rev` is `tip` or in its history: a landing found under a
     /// branch moved again since (24).

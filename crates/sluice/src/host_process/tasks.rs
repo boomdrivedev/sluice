@@ -3,7 +3,11 @@
 //! repository, so a slow fetch or a refused policy in one holds no other's
 //! round. It passes at its tick, a second while a watch follows it and
 //! three otherwise, or, where passes are taken only when asked, at each
-//! ask. It is the repository's reader on the host, and holds its driver's
+//! ask. A pass, as a look, asks the repository's remote at every reading
+//! where work is in play, and where nothing is, once a minute at most, a
+//! command's change, a watch's opening and a forecast's second ask having
+//! the next reading ask at once (129 as amended 2026-11-19). It is the
+//! repository's reader on the host, and holds its driver's
 //! lock, so an older sluice's waits and watches follow it; where an older
 //! `sluice run` holds that lock, it runs no round and follows that run's
 //! document. It ends once its repository has nothing in play and nothing
@@ -28,7 +32,7 @@ use super::room::Shared;
 use crate::exec::Host;
 use crate::instance::Instance;
 use crate::profiles::checks::RoomHandle;
-use crate::profiles::Bound;
+use crate::profiles::{Bound, Tokens};
 use crate::reader::{Driver, Drives, Reader};
 use crate::{Pause, Skipped};
 
@@ -62,13 +66,15 @@ pub struct Looked {
     pub refused: Option<String>,
 }
 
-/// How the host process looks at a repository it holds no task for (129,
-/// 135; design D4).
-pub type InPlay = Arc<dyn Fn(&Path) -> Looked + Send + Sync>;
+/// How the host process looks at a repository it holds no task for, and
+/// whether the look asks the repository's remote or reads it as last
+/// fetched (129 as amended 2026-11-19, 135; design D4).
+pub type InPlay = Arc<dyn Fn(&Path, bool) -> Looked + Send + Sync>;
 
 /// One repository's reading, as the host process marks it: when its last
 /// pass or look began and ended, whether the look made it, what a remote
-/// refused it, and when a command last told of a change to the repository
+/// refused it, when a command last told of a change to the repository,
+/// and when its remote was last asked and whether work was in play then
 /// (129; design D7, D15, D16).
 #[derive(Clone, Debug, Default)]
 struct Marks {
@@ -77,15 +83,41 @@ struct Marks {
     /// When the reading that last ended began.
     ended_began: Option<Instant>,
     ended_at: Option<String>,
+    /// The words the remote refused the last ask with, kept by the
+    /// readings that ask nothing until the next ask.
     refused: Option<String>,
     /// Whether the look made the last reading, which writes no reader's
     /// document.
     looked: bool,
     /// When a command last told of a change, its `serve`.
     told: Option<Instant>,
+    /// 129 as amended 2026-11-19: when a reading last began that asked the
+    /// repository's remote.
+    asked: Option<Instant>,
+    /// Whether the last reading to end found work in play.
+    in_play: bool,
+    /// When something last called for the remote to be asked at once: a
+    /// watch's opening, a forecast's second ask, a binding made afresh.
+    due: Option<Instant>,
 }
 
 impl Marks {
+    /// 129 as amended 2026-11-19: whether a reading beginning at `now`
+    /// asks the repository's remote: where none has asked yet, where the
+    /// last reading found work in play, where the last ask began `every`
+    /// ago or longer, and where a command told of a change or something
+    /// called for an ask since the last ask began. Otherwise it reads the
+    /// remote as the last ask fetched it.
+    fn asks(&self, now: Instant, every: Duration) -> bool {
+        let Some(at) = self.asked else {
+            return true;
+        };
+        self.in_play
+            || now.saturating_duration_since(at) >= every
+            || self.told.is_some_and(|t| t > at)
+            || self.due.is_some_and(|d| d > at)
+    }
+
     /// Whether the reading is current at `now` with `tick`: one that ended
     /// within its tick, or one under way that began within a tick of the
     /// last one's end (64, 129), and in either case one that began after a
@@ -154,8 +186,12 @@ struct Inner {
     body: Body,
     in_play: InPlay,
     stopping: AtomicBool,
-    /// Passes are taken only when asked (D14): a freed part wakes nothing.
+    /// Passes are taken only when asked (D14): a freed part wakes nothing,
+    /// and every reading asks the remote, as a command's ask.
     asked_only: AtomicBool,
+    /// 129 as amended 2026-11-19: how often a repository with nothing in
+    /// play has its remote asked, at most.
+    idle_ask: Duration,
     next: AtomicU64,
 }
 
@@ -179,6 +215,7 @@ impl Tasks {
             in_play,
             stopping: AtomicBool::new(false),
             asked_only: AtomicBool::new(false),
+            idle_ask: super::IDLE_ASK,
             next: AtomicU64::new(1),
         }))
     }
@@ -186,6 +223,14 @@ impl Tasks {
     /// The same tasks, passing only when asked (D14).
     pub fn passes_when_asked(self) -> Tasks {
         self.0.asked_only.store(true, Ordering::SeqCst);
+        self
+    }
+
+    /// The same tasks, a repository with nothing in play having its remote
+    /// asked every `every` at most: a test's minute.
+    #[cfg(test)]
+    fn asking_idle_every(mut self, every: Duration) -> Tasks {
+        Arc::get_mut(&mut self.0).expect("just made").idle_ask = every;
         self
     }
 
@@ -248,54 +293,75 @@ impl Tasks {
             jobs: entry.jobs.clone(),
             followers: entry.followers.clone(),
             tasks: self.clone(),
+            repository: repository.to_path_buf(),
         }
     }
 
     /// Start `repository`'s task where none runs and work is in play there,
-    /// read as an idle tick reads it (129, 135; design D4): the host
-    /// process's look at its index at its start and every few seconds
-    /// after, so an idle repository costs it that read alone. The read is
-    /// made on a thread of its own, one for each repository, and this
-    /// returns at once: a remote that is slow to answer, or a pause the
-    /// read waits out, holds neither the thread that accepts commands'
-    /// connections nor another repository's look (rule core.29). A
-    /// repository still being read, or whose task could not start, is
-    /// passed by, the latter until a command asks for it again.
+    /// read as an idle tick reads it (129 as amended 2026-11-19, 135;
+    /// design D4): the host process's look at its index at its start and
+    /// whenever a repository's remote is due to be asked after, a minute
+    /// after its last ask where nothing is in play, so an idle repository
+    /// costs it that one ask a minute alone. The read is made on a thread
+    /// of its own, one for each repository, and this returns at once: a
+    /// remote that is slow to answer, or a pause the read waits out, holds
+    /// neither the thread that accepts commands' connections nor another
+    /// repository's look (rule core.29). A repository still being read,
+    /// not yet due, or whose task could not start, is passed by, the last
+    /// until a command asks for it again.
     pub fn look(&self, repository: &Path) {
-        if locked(&self.0.refused).contains_key(repository) {
+        if locked(&self.0.refused).contains_key(repository) || !self.asks(repository) {
             return;
         }
         self.look_at(repository, false);
     }
 
+    /// 129 as amended 2026-11-19: whether a reading of `repository`
+    /// beginning now asks its remote ([`Marks::asks`]); every reading does
+    /// where passes are taken only when asked, each a command's ask (D14).
+    fn asks(&self, repository: &Path) -> bool {
+        self.0.asked_only.load(Ordering::SeqCst)
+            || locked(&self.0.readings)
+                .get(repository)
+                .is_none_or(|m| m.asks(Instant::now(), self.0.idle_ask))
+    }
+
     /// The look at `repository`, where none is under way and, unless
     /// `beside` a task, no task runs for it, its reading marked as it
-    /// begins and ends (D16). Its reading begins as the look is taken,
-    /// under the lock that shows it under way, so a look read as under way
-    /// has begun: a command that tells of a change while it is under way
-    /// has it read again, however late its thread starts (D15).
+    /// begins and ends (D16), asking the remote where it is due. Its
+    /// reading begins as the look is taken, under the lock that shows it
+    /// under way, so a look read as under way has begun: a command that
+    /// tells of a change while it is under way has it read again, however
+    /// late its thread starts (D15).
     fn look_at(&self, repository: &Path, beside: bool) {
         if self.0.stopping.load(Ordering::SeqCst) || (!beside && self.holds(repository)) {
             return;
         }
-        {
+        let asks = {
             let mut looking = locked(&self.0.looking);
             if !looking.insert(repository.to_path_buf()) {
                 return;
             }
-            self.begin_reading(repository);
-        }
+            self.begin_reading(repository)
+        };
         let tasks = self.clone();
         let repository = repository.to_path_buf();
         std::thread::spawn(move || {
             let in_play = tasks.0.in_play.clone();
-            let looked =
-                std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| in_play(&repository)))
-                    .unwrap_or(Looked {
-                        in_play: true,
-                        refused: None,
-                    });
-            tasks.end_reading(&repository, looked.refused.clone(), true);
+            let looked = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                in_play(&repository, asks)
+            }))
+            .unwrap_or(Looked {
+                in_play: true,
+                refused: None,
+            });
+            tasks.end_reading(
+                &repository,
+                asks,
+                looked.refused.clone(),
+                looked.in_play,
+                true,
+            );
             // Started before the look is let go, so the process never reads
             // itself idle between the two; a repository whose task could not
             // start is a command's to ask for again.
@@ -309,36 +375,66 @@ impl Tasks {
         });
     }
 
-    /// `repository`'s reading begins now (D16).
-    fn begin_reading(&self, repository: &Path) {
-        locked(&self.0.readings)
-            .entry(repository.to_path_buf())
-            .or_default()
-            .began = Some(Instant::now());
+    /// `repository`'s reading begins now (D16): whether it asks the
+    /// repository's remote, decided and marked as it begins (129 as
+    /// amended 2026-11-19).
+    fn begin_reading(&self, repository: &Path) -> bool {
+        let asked_only = self.0.asked_only.load(Ordering::SeqCst);
+        let mut readings = locked(&self.0.readings);
+        let marks = readings.entry(repository.to_path_buf()).or_default();
+        let now = Instant::now();
+        marks.began = Some(now);
+        let asks = asked_only || marks.asks(now, self.0.idle_ask);
+        if asks {
+            marks.asked = Some(now);
+        }
+        asks
     }
 
-    /// `repository`'s reading ends now, a remote having refused it with
-    /// `refused`, where one did, the look having made it where `looked`
-    /// (D16).
-    fn end_reading(&self, repository: &Path, refused: Option<String>, looked: bool) {
+    /// `repository`'s reading ends now, having found work in play where
+    /// `in_play`, the look having made it where `looked` (D16). Where it
+    /// `asked` the remote, its words are the remote's refusal, `refused`,
+    /// or none; a reading that asked nothing keeps the last ask's.
+    fn end_reading(
+        &self,
+        repository: &Path,
+        asked: bool,
+        refused: Option<String>,
+        in_play: bool,
+        looked: bool,
+    ) {
         let mut readings = locked(&self.0.readings);
         let marks = readings.entry(repository.to_path_buf()).or_default();
         marks.ended = Some(Instant::now());
         marks.ended_began = marks.began;
         marks.ended_at =
             Some(chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true));
-        marks.refused = refused;
+        if asked {
+            marks.refused = refused;
+        }
+        marks.in_play = in_play;
         marks.looked = looked;
     }
 
     /// A command told of a change to `repository`, its `serve`: no reading
     /// begun before now is current, so the next one-shot read waits for
-    /// one that reads the change (D15, D16).
+    /// one that reads the change (D15, D16), and that reading asks the
+    /// remote at once (129 as amended 2026-11-19).
     pub fn told(&self, repository: &Path) {
         locked(&self.0.readings)
             .entry(repository.to_path_buf())
             .or_default()
             .told = Some(Instant::now());
+    }
+
+    /// The next reading of `repository` asks its remote at once, whatever
+    /// is in play: a watch opened, a forecast asks a reading afresh, or a
+    /// task bound the repository afresh (129 as amended 2026-11-19).
+    pub fn due(&self, repository: &Path) {
+        locked(&self.0.readings)
+            .entry(repository.to_path_buf())
+            .or_default()
+            .due = Some(Instant::now());
     }
 
     /// 129 (design D16): `repository` read for a one-shot read: answered
@@ -353,8 +449,12 @@ impl Tasks {
     /// Where passes are taken only when asked, a reading that is not
     /// current is read by the look, which runs no round, so a test's rounds
     /// stay those its commands ask for (D14). With `afresh`, no reading is
-    /// current but one begun after the ask: a forecast's second ask, where
-    /// the first reading lacked what it forms from.
+    /// current but one begun after the ask, and that one asks the remote: a
+    /// forecast's second ask, where the first reading lacked what it forms
+    /// from (129 as amended 2026-11-19). A reading made for a read asks the
+    /// remote only where it is due ([`Marks::asks`]): where nothing is in
+    /// play, a read within a minute of the last ask is answered from the
+    /// records as that ask left them and the host's own files hold them.
     pub fn read(
         &self,
         repository: &Path,
@@ -362,6 +462,9 @@ impl Tasks {
         within: Duration,
         afresh: bool,
     ) -> Reading {
+        if afresh {
+            self.due(repository);
+        }
         let asked = Instant::now();
         let marks = || {
             locked(&self.0.readings)
@@ -472,6 +575,7 @@ pub struct Handle {
     jobs: Sender<Job>,
     followers: Followers,
     tasks: Tasks,
+    repository: PathBuf,
 }
 
 impl Handle {
@@ -505,8 +609,13 @@ impl Handle {
     /// of passes begun after it came. A wait's or a watch's follow asks a
     /// pass at once, so its first report is the host process's pass of
     /// the repository as it stands when it began to follow, whatever its
-    /// timeout (D9); `sluice run` follows the passes as they come.
+    /// timeout (D9), and a watch's opening has that pass ask the remote at
+    /// once, whatever is in play (129 as amended 2026-11-19); `sluice run`
+    /// follows the passes as they come.
     pub fn follow(&self, kind: FollowKind) -> Follower {
+        if kind == FollowKind::Watch {
+            self.tasks.due(&self.repository);
+        }
         let (tx, rx) = mpsc::channel();
         let id = self.tasks.0.next.fetch_add(1, Ordering::SeqCst);
         locked(&self.followers).push(Slot {
@@ -635,18 +744,29 @@ impl Inbox {
         locked(&self.tasks.0.refused).remove(&self.repository);
     }
 
-    /// Its repository's reading begins now: a pass begins (D7, D16).
-    pub fn begin_reading(&self) {
+    /// Its repository's reading begins now: a pass begins (D7, D16), and
+    /// whether it asks the repository's remote (129 as amended
+    /// 2026-11-19).
+    pub fn begin_reading(&self) -> bool {
         for s in locked(&self.followers).iter_mut() {
             s.armed = true;
         }
-        self.tasks.begin_reading(&self.repository);
+        self.tasks.begin_reading(&self.repository)
     }
 
-    /// Its repository's reading ends now, a remote having refused it with
-    /// `refused`, where one did (D7, D16).
-    pub fn end_reading(&self, refused: Option<String>) {
-        self.tasks.end_reading(&self.repository, refused, false);
+    /// Its repository's reading ends now, having found work in play where
+    /// `in_play`; where it `asked` the remote, the remote refused it with
+    /// `refused`, where it did (D7, D16).
+    pub fn end_reading(&self, asked: bool, refused: Option<String>, in_play: bool) {
+        self.tasks
+            .end_reading(&self.repository, asked, refused, in_play, false);
+    }
+
+    /// The next reading asks the repository's remote at once: its binding
+    /// was made afresh, and has asked nothing yet (129 as amended
+    /// 2026-11-19).
+    pub fn due(&self) {
+        self.tasks.due(&self.repository);
     }
 }
 
@@ -688,14 +808,16 @@ impl Settings {
 }
 
 /// The body of a repository's task in the host process: its own binding,
-/// of the host's settings as `settings` holds them, holding its parts of
-/// `room`, passing at its tick or, when `asked_only`, at each ask (design
-/// D5, D14, D19).
+/// of the host's settings as `settings` holds them, its identity's tokens
+/// held in the host process's `tokens`, holding its parts of `room`,
+/// passing at its tick or, when `asked_only`, at each ask (design D5, D14,
+/// D19; record 0108 as amended 2026-11-19).
 pub fn repository_body(
     room: Shared,
     asked_only: bool,
     named: Named,
     settings: Arc<Settings>,
+    tokens: Tokens,
 ) -> Body {
     Arc::new(move |inbox: Inbox| {
         repository(
@@ -704,6 +826,7 @@ pub fn repository_body(
             asked_only,
             named.clone(),
             settings.clone(),
+            tokens.clone(),
         )
     })
 }
@@ -724,17 +847,26 @@ fn tick(watched: bool) -> Duration {
     Duration::from_secs(if watched { 1 } else { 3 })
 }
 
-fn repository(inbox: Inbox, room: Shared, asked_only: bool, named: Named, settings: Arc<Settings>) {
+fn repository(
+    inbox: Inbox,
+    room: Shared,
+    asked_only: bool,
+    named: Named,
+    settings: Arc<Settings>,
+    tokens: Tokens,
+) {
     let common = inbox.repository.clone();
     // Its binding, of the settings `instance`: its parts held of the
-    // host's room, its results from the host process's index (design D12,
-    // D17).
+    // host's room, its results from the host process's index, its tokens
+    // the host process's (design D12, D17; record 0108 as amended
+    // 2026-11-19).
     let bind = |instance: Instance| -> anyhow::Result<Bound> {
-        let bound = Bound::open_with(
+        let bound = Bound::open_holding(
             &open_dir(&common),
             std::env::current_exe()?,
             instance,
             Rc::new(crate::retry::Policy::round().recording_where_set()),
+            &tokens,
         )?;
         Ok(Bound {
             tests: bound.tests.with_room(RoomHandle::Here(room.clone())),
@@ -775,6 +907,9 @@ fn repository(inbox: Inbox, room: Shared, asked_only: bool, named: Named, settin
         return;
     }
     inbox.started();
+    // 129 as amended 2026-11-19: a binding that has asked nothing lists the
+    // branches on a remote by asking it, so its first pass asks.
+    inbox.due();
     let (Ok(readers), repository) = (bound.readers(), common.to_string_lossy().into_owned()) else {
         inbox.end();
         return;
@@ -783,7 +918,11 @@ fn repository(inbox: Inbox, room: Shared, asked_only: bool, named: Named, settin
         driver: None,
         reader: None,
         kept: Kept::default(),
-        in_play: pass::in_play(&sluice_of(&bound, &policies, clock)),
+        // 129 as amended 2026-11-19: where it passes at its tick, its first
+        // pass, at once, asks the remote and reads what is in play; read
+        // now, a binding that has asked nothing would list a remote's
+        // branches by asking it first.
+        in_play: !asked_only || pass::in_play(&sluice_of(&bound, &policies, clock)),
         said_driven: false,
         readers,
         repository,
@@ -832,6 +971,7 @@ fn repository(inbox: Inbox, room: Shared, asked_only: bool, named: Named, settin
                     Ok(b) => {
                         bound = b;
                         policies = sluice_core::Policies::default();
+                        inbox.due();
                     }
                     Err(e) => log(&format!(
                         "sluice host: {}: the host's settings taken up do not bind here, so it \
@@ -926,7 +1066,8 @@ struct Task {
 
 impl Task {
     /// One pass, its reading marked as it begins and ends, so a one-shot
-    /// read beside it is answered from it (129; design D7, D16).
+    /// read beside it is answered from it (129; design D7, D16), asking the
+    /// repository's remote where it is due (129 as amended 2026-11-19).
     fn read(
         &mut self,
         inbox: &Inbox,
@@ -935,9 +1076,13 @@ impl Task {
         clock: &dyn Clock,
         tick: Duration,
     ) -> Result<Report, String> {
-        inbox.begin_reading();
-        let report = self.pass(s, bound, clock, tick);
-        inbox.end_reading(report.as_ref().ok().and_then(|r| r.refused.clone()));
+        let asks = inbox.begin_reading();
+        let report = self.pass(s, bound, clock, tick, asks);
+        inbox.end_reading(
+            asks,
+            report.as_ref().ok().and_then(|r| r.refused.clone()),
+            self.in_play,
+        );
         report
     }
 
@@ -959,6 +1104,7 @@ impl Task {
         bound: &Bound,
         clock: &dyn Clock,
         tick: Duration,
+        asks: bool,
     ) -> Result<Report, String> {
         if !self.drives() {
             if !self.said_driven {
@@ -1009,6 +1155,7 @@ impl Task {
             clock,
             Some(lead),
             tick,
+            asks,
             &mut self.kept,
         )
         .map_err(|e| format!("{e:#}"));
@@ -1051,7 +1198,7 @@ mod tests {
                 // The second start answers its asks, then ends when idle.
                 answer_until_idle(&inbox);
             }),
-            Arc::new(|_: &Path| Looked {
+            Arc::new(|_: &Path, _: bool| Looked {
                 in_play: true,
                 refused: None,
             }),
@@ -1122,7 +1269,7 @@ mod tests {
                         }
                     }
                 }),
-                Arc::new(|_: &Path| Looked {
+                Arc::new(|_: &Path, _: bool| Looked {
                     in_play: true,
                     refused: None,
                 }),
@@ -1169,10 +1316,10 @@ mod tests {
         let body: Body = Arc::new(move |inbox: Inbox| loop {
             match inbox.next(Duration::from_millis(20)) {
                 Some(Job::Wake) => {
-                    inbox.begin_reading();
+                    let asked = inbox.begin_reading();
                     std::thread::sleep(Duration::from_millis(100));
                     passed.fetch_add(1, Ordering::SeqCst);
-                    inbox.end_reading(None);
+                    inbox.end_reading(asked, None, false);
                 }
                 Some(Job::Pass(reply, _)) => {
                     let _ = reply.send(Ok(Report::default()));
@@ -1185,7 +1332,7 @@ mod tests {
                 }
             }
         });
-        let in_play: InPlay = Arc::new(move |_: &Path| {
+        let in_play: InPlay = Arc::new(move |_: &Path, _: bool| {
             counted.fetch_add(1, Ordering::SeqCst);
             std::thread::sleep(Duration::from_millis(100));
             Looked {
@@ -1223,7 +1370,13 @@ mod tests {
         std::thread::sleep(tick);
         let read = tasks.read(&repo, tick, within, false);
         assert!(read.current, "{read:?}");
-        assert_eq!(read.refused, None);
+        // Nothing in play and the remote asked within the minute: the pass
+        // asked nothing, and the last ask's refusal stands (129 as amended
+        // 2026-11-19).
+        assert_eq!(
+            read.refused.as_deref(),
+            Some("origin: 503 Service Unavailable")
+        );
         assert_eq!(passes.load(Ordering::SeqCst), 2);
         assert_eq!(looks.load(Ordering::SeqCst), 2);
 
@@ -1254,8 +1407,8 @@ mod tests {
         let body: Body = Arc::new(move |inbox: Inbox| loop {
             match inbox.next(Duration::from_millis(20)) {
                 Some(Job::Pass(reply, _)) => {
-                    inbox.begin_reading();
-                    inbox.end_reading(None);
+                    let asked = inbox.begin_reading();
+                    inbox.end_reading(asked, None, false);
                     let _ = reply.send(Ok(Report::default()));
                 }
                 Some(_) => {}
@@ -1266,7 +1419,7 @@ mod tests {
                 }
             }
         });
-        let in_play: InPlay = Arc::new(move |_: &Path| {
+        let in_play: InPlay = Arc::new(move |_: &Path, _: bool| {
             counted.fetch_add(1, Ordering::SeqCst);
             Looked::default()
         });
@@ -1303,7 +1456,7 @@ mod tests {
                 return;
             }
         });
-        let in_play: InPlay = Arc::new(move |_: &Path| {
+        let in_play: InPlay = Arc::new(move |_: &Path, _: bool| {
             counted.fetch_add(1, Ordering::SeqCst);
             std::thread::sleep(Duration::from_millis(200));
             Looked::default()
@@ -1356,7 +1509,7 @@ mod tests {
                 inbox.started();
                 answer_until_idle(&inbox);
             }),
-            Arc::new(|r: &Path| Looked {
+            Arc::new(|r: &Path, _: bool| Looked {
                 in_play: r != Path::new("/host/idle.git"),
                 refused: None,
             }),
@@ -1388,6 +1541,167 @@ mod tests {
         assert_eq!(started(&idle), 0);
     }
 
+    /// reader-tick, "A remote's records are asked for once a minute where
+    /// nothing is in play" (129 as amended 2026-11-19): the host process's
+    /// look at an idle repository asks its remote, and is not taken again
+    /// until a minute after that ask; a one-shot read within the minute
+    /// reads it by a look that asks nothing, keeping the last ask's
+    /// refusal; a command's change, a forecast's second ask and the
+    /// minute's end each have the next reading ask. Under passes when
+    /// asked, every reading asks.
+    #[test]
+    fn an_idle_repositorys_remote_is_asked_once_a_minute() {
+        let repo = PathBuf::from("/host/idle-asks.git");
+        let asked: Arc<Mutex<Vec<bool>>> = Arc::default();
+        let recorded = asked.clone();
+        let in_play: InPlay = Arc::new(move |_: &Path, asks: bool| {
+            locked(&recorded).push(asks);
+            Looked {
+                in_play: false,
+                refused: asks.then(|| "origin: 503 Service Unavailable".to_string()),
+            }
+        });
+        let body: Body = Arc::new(|inbox: Inbox| answer_until_idle(&inbox));
+        let minute = Duration::from_millis(600);
+        let tasks = Tasks::new(body.clone(), in_play.clone()).asking_idle_every(minute);
+        let (tick, within) = (Duration::from_millis(50), Duration::from_secs(5));
+        let looks = || locked(&asked).clone();
+        let looked = |n: usize| {
+            soon("the look ends", || {
+                locked(&asked).len() == n && !tasks.looking(&repo)
+            })
+        };
+
+        tasks.look(&repo);
+        looked(1);
+        assert_eq!(looks(), [true], "the first look asks");
+        // Within the minute, the host process's look passes it by.
+        tasks.look(&repo);
+        std::thread::sleep(Duration::from_millis(50));
+        assert_eq!(looks(), [true], "no look within the minute");
+        // A one-shot read past its tick reads by a look that asks nothing,
+        // and keeps the last ask's refusal.
+        std::thread::sleep(tick);
+        let read = tasks.read(&repo, tick, within, false);
+        assert!(read.current, "{read:?}");
+        assert_eq!(
+            read.refused.as_deref(),
+            Some("origin: 503 Service Unavailable")
+        );
+        assert_eq!(looks(), [true, false]);
+        // A command's change has the next reading ask.
+        tasks.told(&repo);
+        tasks.read(&repo, tick, within, false);
+        assert_eq!(looks(), [true, false, true]);
+        // So does a forecast's second ask.
+        tasks.read(&repo, tick, within, true);
+        assert_eq!(looks(), [true, false, true, true]);
+        // A minute after the last ask, the host process's look asks again.
+        tasks.look(&repo);
+        std::thread::sleep(Duration::from_millis(50));
+        assert_eq!(looks().len(), 4, "not yet due");
+        std::thread::sleep(minute);
+        tasks.look(&repo);
+        looked(5);
+        assert!(looks()[4], "the look at the minute's end asks");
+
+        // Under passes when asked, every reading asks.
+        let asked_only = Tasks::new(body, in_play)
+            .asking_idle_every(Duration::from_secs(60))
+            .passes_when_asked();
+        locked(&asked).clear();
+        asked_only.look(&repo);
+        soon("the first look ends", || {
+            looks().len() == 1 && !asked_only.looking(&repo)
+        });
+        asked_only.look(&repo);
+        soon("the second look ends", || {
+            looks().len() == 2 && !asked_only.looking(&repo)
+        });
+        assert_eq!(looks(), [true, true]);
+    }
+
+    /// reader-tick, "A remote's records are asked for once a minute where
+    /// nothing is in play" (129 as amended 2026-11-19): a task's pass asks
+    /// the remote where the last reading found work in play, at a watch's
+    /// opening and after a command's change, and otherwise not within the
+    /// minute, a watched task's passes each second among them.
+    #[test]
+    fn a_tasks_pass_asks_where_work_is_in_play_or_a_watch_opens() {
+        let repo = PathBuf::from("/host/pass-asks.git");
+        let asked: Arc<Mutex<Vec<bool>>> = Arc::default();
+        let recorded = asked.clone();
+        let work = Arc::new(AtomicBool::new(false));
+        let in_play_now = work.clone();
+        // It ends only once the test is done, so no wake finds it ended
+        // between its start and the watch's follow.
+        let done = Arc::new(AtomicBool::new(false));
+        let ending = done.clone();
+        let body: Body = Arc::new(move |inbox: Inbox| loop {
+            match inbox.next(Duration::from_millis(20)) {
+                Some(Job::Wake) => {
+                    let asks = inbox.begin_reading();
+                    locked(&recorded).push(asks);
+                    inbox.end_reading(asks, None, in_play_now.load(Ordering::SeqCst));
+                }
+                Some(_) => {}
+                None if ending.load(Ordering::SeqCst) => {
+                    inbox.end();
+                    return;
+                }
+                None => {}
+            }
+        });
+        let looked: Arc<Mutex<Vec<bool>>> = Arc::default();
+        let looks = looked.clone();
+        let tasks = Tasks::new(
+            body,
+            Arc::new(move |_: &Path, asks: bool| {
+                locked(&looks).push(asks);
+                Looked::default()
+            }),
+        );
+        let passes = || locked(&asked).clone();
+        let pass = |n: usize| {
+            tasks.handle(&repo).wake();
+            soon("the pass", || locked(&asked).len() == n);
+        };
+
+        tasks.look(&repo);
+        soon("the look ends", || {
+            locked(&looked).len() == 1 && !tasks.looking(&repo)
+        });
+        assert_eq!(*locked(&looked), [true]);
+        // A watch's opening asks at once, though the look just asked.
+        let watch = tasks.handle(&repo).follow(FollowKind::Watch);
+        soon("the watch's first pass", || passes().len() == 1);
+        assert_eq!(passes(), [true]);
+        // Its passes after ask nothing while nothing is in play.
+        pass(2);
+        pass(3);
+        assert_eq!(passes(), [true, false, false]);
+        // A pass that finds work in play has the next one ask, and each
+        // after while work stays in play.
+        work.store(true, Ordering::SeqCst);
+        pass(4);
+        pass(5);
+        pass(6);
+        assert_eq!(&passes()[3..], [false, true, true]);
+        // Once nothing is in play, the pass after the last that found work
+        // asks, and none after it within the minute.
+        work.store(false, Ordering::SeqCst);
+        pass(7);
+        pass(8);
+        assert_eq!(&passes()[6..], [true, false]);
+        // A command's change has the next pass ask.
+        tasks.told(&repo);
+        pass(9);
+        pass(10);
+        assert_eq!(&passes()[8..], [true, false]);
+        drop(watch);
+        done.store(true, Ordering::SeqCst);
+    }
+
     /// host-process, "Each repository's queues are moved apart" (135;
     /// rule core.29): a look whose read of one repository waits on its
     /// remote returns at once, holds no other repository's look or task,
@@ -1414,7 +1728,7 @@ mod tests {
                 locked(&starting).push(inbox.repository.clone());
                 answer_until_idle(&inbox);
             }),
-            Arc::new(move |r: &Path| {
+            Arc::new(move |r: &Path, _: bool| {
                 if r == Path::new("/host/slow.git") {
                     counted.fetch_add(1, Ordering::SeqCst);
                     // A remote that does not answer, as long as it takes.
