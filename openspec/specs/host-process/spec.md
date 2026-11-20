@@ -49,9 +49,11 @@ does (135).
 ### Requirement: One host process for each user on a host
 
 A host SHALL run at most one sluice host process for each user, whatever
-repositories that user's commands run in. A second one started while the
-first lives SHALL end at once and move nothing. Several users on a host
-SHALL each have their own, each with its own bound (135).
+repositories that user's commands run in. A second `sluice host` started
+while the first lives SHALL end at once and move nothing, and a `sluice
+daemon` SHALL take the first's place or wait for it (host-daemon).
+Several users on a host SHALL each have their own, each with its own
+bound (135).
 
 #### Scenario: Two repositories, one process
 
@@ -170,12 +172,13 @@ has no sluice, SHALL be taken out of the index (135).
 ### Requirement: The host process ends once nothing is in play and nothing follows it
 
 The host process SHALL end once no repository it holds has work in play
-and nothing follows it. Work in play is a submission queued or under
-test, a checkout to release or a preview to drop. A follower is a watch,
-a wait or a `sluice run`. A run waiting for room or holding it from its
-count to its start also keeps it. It SHALL also end at its next tick once
-its state folder is gone. A command that meets it ending SHALL start a
-new one, so none is lost between the two (135).
+and nothing follows it, unless it is a daemon. Work in play is a
+submission queued or under test, a checkout to release or a preview to
+drop. A follower is a watch, a wait or a `sluice run`. A run waiting for
+room or holding it from its count to its start also keeps it. It SHALL
+also end at its next tick once its state folder is gone. A command that
+meets it ending SHALL start another, so none is lost between the two
+(135).
 
 #### Scenario: The queue empties
 
@@ -195,6 +198,13 @@ new one, so none is lost between the two (135).
 - **WHEN** a host process runs with work in play and its state folder is
   deleted
 - **THEN** it has ended within two ticks, and its socket is gone
+
+#### Scenario: A daemon's queues empty
+
+- **WHEN** the one submission queued on a host whose host process is
+  `sluice daemon` lands, and nothing follows it
+- **THEN** the daemon still runs three ticks after the landing
+  (`an_idle_daemon_keeps_running` in `crates/sluice/tests/host_process.rs`)
 
 ### Requirement: A host process that stops loses nothing
 
@@ -233,12 +243,12 @@ command that started the host process (135).
 ### Requirement: A newer sluice's command has an older host process hand over
 
 A command of a newer sluice that reaches an older host process SHALL
-have it hand its repositories over and end, and SHALL then start its
-own. The older process SHALL finish the round each task is in, start no
-other, and let its locks go as it ends, and the newer command SHALL wait
-for it to end for as long as it gives its tasks to finish their rounds.
-A command of an older sluice that reaches a newer host process SHALL use
-it. Versions SHALL be compared as release numbers.
+have it hand its repositories over and end, finishing the round each
+task is in, starting no other and letting its locks go, then start its
+own, having waited for it to end as long as it gives its tasks to finish
+their rounds; an older daemon starts afresh in place instead
+(host-daemon). A command of an older sluice that reaches a newer host
+process SHALL use it. Versions SHALL be compared as release numbers.
 
 #### Scenario: The host's sluice is upgraded
 
@@ -272,10 +282,10 @@ at its first tick after that run ends.
 ### Requirement: The overview names the host process and the runs waiting
 
 `sluice overview --json` SHALL give `host_process`, the host process's
-`version`, `pid` and `since`, or null where none answers, beside `host`,
-the host's name. Its `room` SHALL give `waiting`, the runs waiting for
-room by kind, `turn`, whose the next room a combination and a session
-both want is, `queue` or `sessions`, and `repositories`, each
+`version`, `pid`, `since` and `daemon`, or null where none answers,
+beside `host`, the host's name. Its `room` SHALL give `waiting`, the runs
+waiting for room by kind, `turn`, whose the next room a combination and
+a session both want is, `queue` or `sessions`, and `repositories`, each
 repository's runs under test and runs waiting. `sluice status` with no
 target SHALL print the same room on its line (150, 71).
 
@@ -292,6 +302,15 @@ target SHALL print the same room on its line (150, 71).
   combination waiting for room
 - **THEN** `sluice overview --json` in either repository gives
   `room.repositories` with A's two runs under test and B's one waiting
+
+#### Scenario: A daemon
+
+- **WHEN** `sluice daemon` runs, and `sluice overview --json` runs in a
+  repository
+- **THEN** it gives `host_process.daemon` true and `host_process.pid` the
+  daemon's pid; with a host process a wait started, `host_process.daemon`
+  is false
+  (`the_overview_names_a_daemon` in `crates/sluice/tests/host_process.rs`)
 
 ### Requirement: The host process reads each result once and answers by key
 

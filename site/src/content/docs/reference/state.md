@@ -488,8 +488,8 @@ a run's state is written before anything acts on it, so a sluice that
 stops at any point leaves the next one what to do:
 
 - `open`, with `opened`, when it was opened. Its time limit counts from
-  `running`, never from here. `no_executor` is `true` while the leading
-  host last found no host or pool that could take it, so a status reads
+  `running`, never from here. `no_executor` is `true` while the host
+  that runs the queue last found no host or pool that could take it, so a status reads
   it as waiting for a host of its system rather than for room.
 - `claimed`, with `claim`: `{"by": "build-1", "at":
   "2026-11-16T09:16:40Z"}`, the host or pool's claim that holds it, and
@@ -959,7 +959,7 @@ release that failed is kept on its record in `.places/` or `.previews/`
 as `release_failed`, since those are the host's alone.
 
 Full example files are in the repository under
-[docs/examples/state](https://github.com/agentplot/sluice/tree/main/docs/examples/state).
+[docs/examples/state](https://github.com/boomdrivedev/sluice/tree/main/docs/examples/state).
 
 ## The version
 
@@ -990,6 +990,12 @@ Author: sluice <sluice@localhost>
     Sluice-Tested: 9ab3d07c11
     Sluice-Result: passed (2 run, 31 replayed)
 ```
+
+On a branch sluice pushes to GitHub as
+[its app](/sluice/guides/github-app/), the landing and the commits that
+keep its records name the app's bot, `<app slug>[bot]`, as author and
+committer. GitHub then shows the app on every landing. Every other
+landing names `sluice <sluice@localhost>`, as above.
 
 A landing beside the queue names no combination, since none was run.
 Its `Sluice-Result` says so, then names the result it stands on:

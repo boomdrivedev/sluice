@@ -2,9 +2,12 @@
 # shellcheck disable=SC2016 # The workflow's lines name their own $TAG.
 # The workflow releases as record 0111 and rule core.55 have it, read from
 # .github/workflows/ci.yml's text, job by job:
-#   binaries      writes the release's version (set-version.sh), builds by a
-#                 plain `nix build .#default`, given nothing, and fails
-#                 unless the binary says that version;
+#   binaries      writes the release's version (set-version.sh), builds by
+#                 cargo for its target, given nothing, and fails unless the
+#                 binary says that version; installs and runs no Nix, so
+#                 that run is on a runner with nothing in /nix/store, and
+#                 builds Linux's against musl alone (record 0111 as amended
+#                 2026-11-18);
 #   release       writes the version, commits the files set-version.sh lists
 #                 by path as `chore(release): $TAG`, tags that commit,
 #                 pushes the tag alone, with no branch and no force, and
@@ -93,12 +96,23 @@ for name in binaries release version conventional; do
   [ -n "$(job "$name")" ] || fail "$name" "the workflow has no such job"
 done
 
-# binaries: the release's tree, built with nothing given, saying its version.
-build=$(printf '%s\n' "$binaries" | grep -nE '^nix build \.#default( --print-build-logs)?$' | head -n 1 | cut -d : -f 1)
+# binaries: the release's tree, built with nothing given, saying its
+# version on a runner with nothing of Nix's, Linux's static.
 ordered binaries \
   "$(at "$binaries" 'sh set-version.sh "${TAG#v}"'):sh set-version.sh \"\${TAG#v}\"" \
-  "$build:nix build .#default, with nothing given" \
-  "$(at "$binaries" 'test "$(./result/bin/sluice --version)" = "sluice ${TAG#v}"'):test that ./result/bin/sluice --version says sluice \${TAG#v}"
+  "$(at "$binaries" 'cargo build --release --locked -p sluice --target "$TARGET"'):cargo build --release --locked -p sluice --target \"\$TARGET\"" \
+  "$(at "$binaries" 'test "$("target/$TARGET/release/sluice" --version)" = "sluice ${TAG#v}"'):test that target/\$TARGET/release/sluice --version says sluice \${TAG#v}"
+if printf '%s\n' "$binaries" | grep -qE 'install-nix-action|(^|[ ;&|(])nix( |$)'; then
+  fail binaries "installs or runs Nix: the binaries it builds must run, and run there, on a runner with nothing in /nix/store"
+fi
+targets=$(printf '%s\n' "$binaries" | sed -n 's/^target: *//p')
+[ -n "$targets" ] || fail binaries "names no target in its matrix"
+for target in $targets; do
+  case $target in
+  *-linux-musl) ;;
+  *-linux-*) fail binaries "builds $target: Linux's binaries are static, against musl" ;;
+  esac
+done
 
 # release: the release commit, its tag pushed alone, the release at the tag.
 commit=$(printf '%s\n' "$release" | grep -nE 'commit .*-m "chore\(release\): \$TAG" .*-- "\$\{files\[@\]\}"$' | head -n 1 | cut -d : -f 1)

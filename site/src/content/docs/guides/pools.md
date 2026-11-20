@@ -33,8 +33,9 @@ run and has room takes it first. A pool's runs hold no part of any
 host's bound.
 
 A gate that trusts the pool's signer, and a signer of your hosts that
-may claim no system, sends the pool every run. Your hosts lead the
-branch, since the gate trusts their signer, and take none of its runs.
+may claim no system, sends the pool every run. Your hosts may run the
+branch's queue, since the gate trusts their signer, and take none of its
+runs.
 That is how a branch runs every check on a CodeBuild fleet.
 
 A run the pool can't take either, with no runner named for its system,
@@ -44,8 +45,9 @@ combination is formed again.
 
 sluice claims the run, writes the claim in the branch's state, and then
 starts the pool's job, under the claim, `pool/forge/12`. The next round
-starts a claim written and not started, and never starts one twice. The lead reads the run as
-running from the job's own start, and its time limit counts from there.
+starts a claim written and not started, and never starts one twice.
+The host that runs the queue reads the run as running from the job's
+own start, and its time limit counts from there.
 A job that ends with nothing recorded is a claim that lapsed: its checks
 run again in a run of their own.
 
@@ -220,10 +222,10 @@ $ sluice init codebuild
 
 Then, in AWS:
   - deploy it, as `sluice` or a name of your own:
-    aws cloudformation deploy --template-file .config/sluice-codebuild.yml --stack-name sluice --capabilities CAPABILITY_IAM --parameter-overrides LeadPrincipal=<the ARN the hosts that lead the branch reach AWS as> AppId=<sluice's app id> MaxCapacity=<the branch's parallel> RunPolicies=<the ARNs of the managed policies your own commands after the checks need, comma-separated, or nothing>
+    aws cloudformation deploy --template-file .config/sluice-codebuild.yml --stack-name sluice --capabilities CAPABILITY_IAM --parameter-overrides StartPrincipal=<the ARN the hosts that may run the branch's queue reach AWS as> AppId=<sluice's app id> MaxCapacity=<the branch's parallel> RunPolicies=<the ARNs of the managed policies your own commands after the checks need, comma-separated, or nothing>
   - fill the secret sluice-app-key with the app's private key:
     aws secretsmanager put-secret-value --secret-id sluice-app-key --secret-string file://<the app's key>
-  - name the profile that assumes the stack's lead role as [aws] profile on each host that leads the branch
+  - name the profile that assumes the stack's start role as [aws] profile on each host that may run the branch's queue
   - then `sluice init codebuild --stack sluice`, which names the pool in .config/sluice.toml
 ```
 
@@ -245,24 +247,25 @@ The template holds:
   `alias/<stack>-sign`, which only the sign build's role may sign with;
 - the **secret** for the app's private key, empty until you fill it;
 - the **rule** that starts the sign build when a run build ends;
-- the **lead role**, which the hosts that lead the branch assume.
+- the **start role**, which the hosts that may run the branch's queue
+  assume to start run builds.
 
 ### Deploy it
 
-Deploy the template with the command it printed. `LeadPrincipal` is the
-ARN the hosts that lead the branch reach AWS as, which may assume the
-lead role. `AppId` is sluice's app's id. `MaxCapacity` is the most
+Deploy the template with the command it printed. `StartPrincipal` is
+the ARN the hosts that may run the branch's queue reach AWS as, which
+may assume the start role. `AppId` is sluice's app's id. `MaxCapacity` is the most
 instances a fleet grows to, and `BaseCapacity` the instances it keeps
 warm. `RunPolicies` names the managed policies your [own
 commands](#your-own-commands-after-the-checks) need, none by default.
 Fill the secret with the app's private key.
 
-On each host that leads the branch, name the AWS profile that assumes
-the lead role in the host's settings:
+On each host that may run the branch's queue, name the AWS profile that
+assumes the start role in the host's settings:
 
 ```toml
 [aws]
-profile = "sluice-lead"
+profile = "sluice-start"
 ```
 
 Every call sluice makes to the fleet uses that profile, whatever profile
@@ -275,7 +278,7 @@ Then name the pool in the policy, from the stack you deployed:
 
 ```console
 $ sluice init codebuild --stack sluice --region us-east-1
-.config/sluice.toml: [signers.codebuild], naming the key arn:aws:kms:us-east-1:111122223333:key/1234abcd-12ab-34cd-56ef-1234567890ab, and [pools.codebuild] appended; a branch's `trust` names codebuild and the signer its leading hosts sign as, that signer's `systems = []` so it claims no run, and the branch's `systems` the systems its runs need
+.config/sluice.toml: [signers.codebuild], naming the key arn:aws:kms:us-east-1:111122223333:key/1234abcd-12ab-34cd-56ef-1234567890ab, and [pools.codebuild] appended; a branch's `trust` names codebuild and the signer the hosts that may run its queue sign as, that signer's `systems = []` so it claims no run, and the branch's `systems` the systems its runs need
 ```
 
 It reads the stack's key with your own AWS credentials, `--profile`
@@ -299,29 +302,29 @@ region, its sign project and the run project for each system.
 
 ### Test side by side
 
-A host of yours leads the branch, running its rounds and starting each
-run on the fleet. A host leads a branch whose queue is on its remote
-only when it signs as a signer the branch's gate trusts. A branch whose
-`trust` names only the pool's signer has no host to lead it, and nothing
-happens. Name the signer your leading hosts sign as, with
-`systems = []`, and trust it beside `codebuild`:
+A host of yours runs the branch's queue: its rounds, and the start of
+each run on the fleet. A host runs the queue of a branch held on its
+remote only when it signs as a signer the branch's gate trusts. A
+branch whose `trust` names only the pool's signer has no host to run
+its queue, and nothing happens. Name the signer the hosts that may run
+its queue sign as, with `systems = []`, and trust it beside `codebuild`:
 
 ```toml
-[signers.lead]
-ssh = ".config/sluice.leads"   # each leading host's key
+[signers.box]
+ssh = ".config/sluice.boxes"   # one line per host's key
 systems = []                   # it may claim no run
 
 [branches.main]
 remote = "origin"
-trust = ["lead", "codebuild"]
+trust = ["box", "codebuild"]
 systems = ["linux-x64"]
 batch = false
 parallel = 8
 ```
 
 A signer whose `systems` is empty claims no run and counts for no
-result, whatever the run's system. So the leading hosts take none of the
-branch's runs, whatever executors they have, and the fleet's results
+result, whatever the run's system. So the hosts that run the queue take
+none of the branch's runs, whatever executors they have, and the fleet's results
 are the only ones that land anything. A host can't sign as `codebuild`:
 its one key is the key in AWS KMS.
 
@@ -335,8 +338,8 @@ combination as it forms, rather than waiting to test the deepest, and
 
 ```console
 $ sluice pool check main
-ok      main is led by a host signing as lead
-ok      [pools.codebuild] is reached in us-east-1 as arn:aws:sts::111122223333:assumed-role/sluice-lead/host-a
+ok      main's queue is run by a host signing as box
+ok      [pools.codebuild] is reached in us-east-1 as arn:aws:sts::111122223333:assumed-role/sluice-start/host-a
 ok      sluice-run-linux-x64 runs linux-x64 on the reserved-capacity fleet sluice-linux-x64, LINUX_EC2
 ok      sluice-run-linux-x64's buildspec is as sluice 1.2.3 writes it, cloning acme/widgets
 ok      sluice-run-linux-x64 may take 90 minutes, longer than the branch's timeout of 45
@@ -353,10 +356,11 @@ policy, and the next round starts the first run on the fleet.
 
 A run is two builds:
 
-- **The run build**, on the system's fleet. The lead starts it with the
-  claim, the branch, the combination, the system and a token of
-  sluice's app that reads the repository for an hour, and nothing else.
-  The lead's role may change nothing the build runs. It clones the
+- **The run build**, on the system's fleet. The host that runs the
+  queue starts it with the claim, the branch, the combination, the
+  system and a token of sluice's app that reads the repository for an
+  hour, and nothing else. The start role it assumes may change nothing
+  the build runs. It clones the
   repository, starts the claimed run as a host would, and keeps its
   report. It keeps the checkout the checks ran in for [your own
   commands](#your-own-commands-after-the-checks), releases it after
@@ -370,8 +374,8 @@ A run is two builds:
   out, signs them with the key, and writes the run ended in the
   branch's state.
 
-A run build someone stopped starts no sign build: the lead ends its run
-with no outcome, saying the build was stopped. So does a run build no
+A run build someone stopped starts no sign build: the host that runs
+the queue ends its run with no outcome, saying the build was stopped. So does a run build no
 sign build took within the host's `[peers] alive`, naming the rule.
 
 An instance runs one build at a time. A build releases its checkout,
@@ -436,6 +440,7 @@ The sign builds run on demand, for a minute or two each.
 
 ## With every host off
 
-A pool takes runs; it doesn't run the queue. A round runs on a host of
-yours that leads the branch, so with every host off a submission waits.
+A pool takes runs; it doesn't run the queue. A round runs on the host
+of yours that runs the branch's queue, so with every host off a
+submission waits.
 Rounds run as a job of their own are [designed, not built](/sluice/roadmap/).

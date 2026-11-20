@@ -76,6 +76,11 @@ pub struct Entry {
     pub pid: u32,
     /// When it was admitted, RFC 3339.
     pub admitted: String,
+    /// 154: the branch its run is held for; `None` for an older sluice's,
+    /// which counts toward the bound under no branch (design D6 of
+    /// `each-submission-shows-its-wait-and-its-test`).
+    #[serde(default)]
+    pub branch: Option<String>,
 }
 
 /// The running checks of the host whose state is under `dir`.
@@ -185,6 +190,22 @@ impl HostCount {
         for (name, e) in self.recorded()? {
             if self.live(&name, &e)? {
                 *out.entry(e.repository).or_default() += 1;
+            }
+        }
+        Ok(out)
+    }
+
+    /// 154: each repository's checks running on the host for a branch, by
+    /// the branch its entry names; an entry naming none counts in no row
+    /// (design D6 of `each-submission-shows-its-wait-and-its-test`).
+    pub fn by_branch(&self) -> Result<std::collections::BTreeMap<(PathBuf, String), usize>> {
+        let mut out = std::collections::BTreeMap::new();
+        for (name, e) in self.recorded()? {
+            let Some(branch) = e.branch.clone() else {
+                continue;
+            };
+            if self.live(&name, &e)? {
+                *out.entry((e.repository, branch)).or_default() += 1;
             }
         }
         Ok(out)
@@ -371,6 +392,7 @@ mod tests {
             run_dir: run_dir.to_path_buf(),
             pid: std::process::id(),
             admitted: "2026-10-23T00:00:00Z".into(),
+            branch: None,
         }
     }
 
@@ -440,11 +462,11 @@ mod tests {
             .expect("the older sluice's exec is admitted");
         let asker = Asker::Queue(repository.clone());
         assert!(matches!(
-            room.ask(&asker, &repository, now).unwrap(),
+            room.ask(&asker, &repository, None, now).unwrap(),
             Asked::Refused(_)
         ));
         drop(admitted);
-        let Asked::Held(id) = room.ask(&asker, &repository, now).unwrap() else {
+        let Asked::Held(id) = room.ask(&asker, &repository, None, now).unwrap() else {
             panic!("the room is free once the older run's start failed");
         };
         assert!(
@@ -480,7 +502,7 @@ mod tests {
         let now = std::time::Instant::now();
         let supervisor = {
             let mut room = Room::over(s.count(), 1, 0);
-            let Asked::Held(id) = room.ask(&asker, &repository, now).unwrap() else {
+            let Asked::Held(id) = room.ask(&asker, &repository, None, now).unwrap() else {
                 panic!("an empty host has room");
             };
             room.begin(id, "sluice/try/main/1", &dir).unwrap();
@@ -493,12 +515,12 @@ mod tests {
         let mut room = Room::over(s.count(), 1, 0);
         assert_eq!(room.running().unwrap().queue, 1);
         assert!(matches!(
-            room.ask(&asker, &repository, now).unwrap(),
+            room.ask(&asker, &repository, None, now).unwrap(),
             Asked::Refused(_)
         ));
         drop(supervisor);
         assert!(matches!(
-            room.ask(&asker, &repository, now).unwrap(),
+            room.ask(&asker, &repository, None, now).unwrap(),
             Asked::Held(_)
         ));
     }

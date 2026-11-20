@@ -94,7 +94,12 @@ claims only runs of branches that trust its signer.
 
 A standing executor is a host whose sluice is moving its queues: its own
 process starts when any command of sluice's there finds work, or when
-whatever wakes the host runs one. Its build cache stays warm between
+whatever wakes the host runs one. A box that runs no sluice command of
+its own keeps [`sluice daemon`](/sluice/reference/commands/#sluice-daemon)
+running instead, the same process, which never ends for being idle. On
+nix-darwin and NixOS, sluice's module keeps it running where you set
+`services.sluice.daemon.enable = true`
+([who writes the host's config](/sluice/reference/configuration/#who-writes-it)). Its build cache stays warm between
 runs, so it is the cheapest place for a check. Its config says what it
 signs as, how many runs it holds, and which systems it runs:
 
@@ -154,16 +159,16 @@ takes, a burst or a system no box runs, in a job of its own, and holds
 no part of any host's bound. sluice has two. GitHub Actions starts one
 workflow run for each run. A CodeBuild fleet of your own starts one
 build on a warm instance for each run. It takes every run of a branch
-whose gate trusts its signer beside a leading hosts' signer that may
-claim no system: [Running checks on a pool](/sluice/guides/pools/).
+whose gate trusts its signer beside the signer the hosts that may run
+its queue sign as, which may claim no system: [Running checks on a pool](/sluice/guides/pools/).
 
 ## Watching it
 
 `sluice overview` lists the hosts serving a remote, by their last sign
 of life: the signer, the system, the runs held, the room left, and a
 host whose sign of life has stood still past `alive`. `sluice step
-<branch>` says `led` on a host that does not keep the branch, and still
-takes its runs. `sluice status <branch>` reads the queue from the remote.
+<branch>` says `elsewhere` on a host that does not run the branch's
+queue, and still takes its runs. `sluice status <branch>` reads the queue from the remote.
 When the remote is out of reach, it shows the queue as last fetched and
 says so.
 

@@ -9,7 +9,7 @@ import { fileURLToPath } from "node:url";
 const here = dirname(fileURLToPath(import.meta.url));
 const source = resolve(here, "../../docs/architecture/core.md");
 const target = resolve(here, "../src/content/docs/architecture/rules.md");
-const blob = "https://github.com/agentplot/sluice/blob/main/docs/architecture/core.md";
+const blob = "https://github.com/boomdrivedev/sluice/blob/main/docs/architecture/core.md";
 
 const text = readFileSync(source, "utf8");
 const start = text.indexOf("\n## Rules\n");
@@ -29,7 +29,7 @@ const page = [
   "# build and dev; change core.md.",
   "title: Rules",
   "description: The rules that bind every change to the repository, cited by clause and decision.",
-  `editUrl: https://github.com/agentplot/sluice/edit/main/docs/architecture/core.md`,
+  `editUrl: https://github.com/boomdrivedev/sluice/edit/main/docs/architecture/core.md`,
   "sidebar:",
   "  order: 2",
   "---",

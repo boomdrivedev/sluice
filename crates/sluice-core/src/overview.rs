@@ -1511,6 +1511,7 @@ mod tests {
                 after: Vec::new(),
                 priority: 0,
                 subject: None,
+                trace: None,
             })
             .unwrap()
             .unwrap()

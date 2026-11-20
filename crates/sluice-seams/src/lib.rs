@@ -1045,8 +1045,10 @@ pub trait Tests {
     /// none: the run's wait is recorded for the host, and nothing is held.
     /// The part is held until [`Tests::start`] takes it, or is dropped,
     /// which gives it back at once. The profile names its own repository
-    /// to the host's room, so the core names none.
-    fn hold(&self, kind: RunKind) -> Result<Option<Part>>;
+    /// to the host's room, so the core names none; the round names the
+    /// branch the run is for, which the room holds it for (154; design D6
+    /// of `each-submission-shows-its-wait-and-its-test`).
+    fn hold(&self, kind: RunKind, branch: &str) -> Result<Option<Part>>;
 
     /// 37: a started run's progress; once finished, every check's key,
     /// outcome, executor and whether it was replayed.
@@ -1200,6 +1202,12 @@ pub trait Tests {
     /// person to read; empty when the runner says nothing until the run
     /// ends. Never a result (37, 38).
     fn tasks(&self, run: &RunHandle) -> Result<Vec<TaskProgress>>;
+
+    /// 153: each check of a run that has ended, as its runner timed it,
+    /// while the run's directory stands, for telemetry to show; nothing
+    /// for a run still going. Never a result (37, 38; design D6 of
+    /// `a-sluice-command-shows-inside-its-callers-trace`).
+    fn timed(&self, run: &RunHandle) -> Result<Vec<TaskProgress>>;
 
     /// ADR 0050: which of `required`, the branch's required checks as its
     /// policy names them, the runner keeps out of its CI mode in
@@ -1526,8 +1534,10 @@ pub trait Branch {
     /// 43: `head` merged onto `onto`, or the conflict.
     fn form(&self, onto: &Rev, head: &Rev) -> Result<Formed>;
 
-    /// 44: write one landing commit.
-    fn commit(&self, commit: &LandingCommit) -> Result<Rev>;
+    /// 44: write one landing commit for `branch`, the branch it lands on,
+    /// which a profile that writes as whoever pushes the branch reads it by
+    /// (record 0019 as amended 2026-11-18; rule core.43).
+    fn commit(&self, branch: &str, commit: &LandingCommit) -> Result<Rev>;
 
     /// Whether `rev` is `tip` or in its history: a landing found under a
     /// branch moved again since (24).

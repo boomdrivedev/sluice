@@ -238,8 +238,9 @@ impl Launcher for CodeBuild {
         let Some(reader) = &self.reader else {
             bail!(
                 "[forge] names no app on this host: a run build on the pool {} reads {}'s \
-                 repository with a token of sluice's app that its lead buys, so a host that \
-                 leads a branch on a CodeBuild pool names the app in [forge]",
+                 repository with a token of sluice's app that the host that runs the branch's \
+                 queue buys, so a host that runs the queue of a branch on a CodeBuild pool names \
+                 the app in [forge]",
                 launch.pool,
                 launch.branch
             );
@@ -453,6 +454,35 @@ mod tests {
             no_app.launch(&launch("pool/codebuild/5")).unwrap_err()
         );
         assert!(e.contains("[forge]"), "{e}");
+        assert!(aws.calls().is_empty());
+    }
+
+    /// Record 0119 (core.26): a launch on a host whose `[forge]` names no
+    /// app starts nothing, saying the token is bought by the host that runs
+    /// the branch's queue, which names the app in `[forge]`.
+    #[test]
+    fn a_launch_on_a_host_with_no_app_names_the_host_that_runs_the_queue() {
+        let scratch = Scratch::new("no-app");
+        let aws = Rc::new(Fake::new());
+        let reach = aws.clone();
+        let no_app = CodeBuild::new(
+            Box::new(move |_| reach.clone() as Rc<dyn Aws>),
+            None,
+            &scratch.0.join("repo.git"),
+            &scratch.0.join("state"),
+            Duration::from_secs(120),
+        );
+        let e = format!(
+            "{:#}",
+            no_app.launch(&launch("pool/codebuild/5")).unwrap_err()
+        );
+        assert_eq!(
+            e,
+            "[forge] names no app on this host: a run build on the pool codebuild reads main's \
+             repository with a token of sluice's app that the host that runs the branch's queue \
+             buys, so a host that runs the queue of a branch on a CodeBuild pool names the app \
+             in [forge]"
+        );
         assert!(aws.calls().is_empty());
     }
 

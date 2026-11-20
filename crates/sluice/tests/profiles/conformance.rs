@@ -191,8 +191,12 @@ impl Tests for RecordedChecks {
         Ok(run)
     }
 
-    fn hold(&self, kind: sluice_seams::RunKind) -> Result<Option<sluice_seams::Part>> {
-        self.inner.hold(kind)
+    fn hold(
+        &self,
+        kind: sluice_seams::RunKind,
+        branch: &str,
+    ) -> Result<Option<sluice_seams::Part>> {
+        self.inner.hold(kind, branch)
     }
 
     fn progress(&self, run: &RunHandle) -> Result<Progress> {
@@ -246,6 +250,10 @@ impl Tests for RecordedChecks {
     fn tasks(&self, run: &RunHandle) -> Result<Vec<TaskProgress>> {
         self.inner.tasks(run)
     }
+
+    fn timed(&self, run: &RunHandle) -> Result<Vec<TaskProgress>> {
+        self.inner.timed(run)
+    }
 }
 
 /// The branch, with every move it made counted.
@@ -279,8 +287,8 @@ impl Branch for RecordedRefs {
         self.inner.form(onto, head)
     }
 
-    fn commit(&self, commit: &LandingCommit) -> Result<Rev> {
-        self.inner.commit(commit)
+    fn commit(&self, branch: &str, commit: &LandingCommit) -> Result<Rev> {
+        self.inner.commit(branch, commit)
     }
 
     fn contains(&self, tip: &Rev, rev: &Rev) -> Result<bool> {

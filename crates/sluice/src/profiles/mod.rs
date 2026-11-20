@@ -32,6 +32,13 @@ use crate::identity::Identity;
 use crate::instance::Instance;
 use crate::retry;
 
+/// The tokens of sluice's identity on the forge a process holds, one for
+/// each repository, which every binding given them shares on any thread:
+/// sluice's host process holds one for its life, so no binding it makes
+/// gets a repository's token while one it holds lasts (record 0108 as
+/// amended 2026-11-19).
+pub use github::app::Tokens;
+
 /// The variables a multiplexer's pane names its session by, as the
 /// driver profile reads them (51): what nothing started outside a pane
 /// carries, sluice's host process among it (135; design D3).
@@ -52,6 +59,9 @@ pub struct Bound {
     /// 135: sluice's host process, reached through its socket, or, in its
     /// own repositories' tasks, read in place.
     pub host_process: Box<dyn crate::host_process::HostProcess>,
+    /// The repository as every sluice made for it names it in its metrics,
+    /// read once at the binding (rule core.66; design D3).
+    pub repository: String,
 }
 
 /// The driver seam as an instance binds it: a pull request's place,
@@ -105,7 +115,20 @@ impl Bound {
         instance: Instance,
         retry: Rc<retry::Policy>,
     ) -> Result<Self> {
-        Bound::bind(dir, program, instance, false, retry)
+        Bound::open_holding(dir, program, instance, retry, &Tokens::default())
+    }
+
+    /// As [`Bound::open_with`], its identity holding its tokens in
+    /// `tokens`, which other bindings of this process hold theirs in too
+    /// (record 0108 as amended 2026-11-19).
+    pub fn open_holding(
+        dir: &Path,
+        program: PathBuf,
+        instance: Instance,
+        retry: Rc<retry::Policy>,
+        tokens: &Tokens,
+    ) -> Result<Self> {
+        Bound::bind(dir, program, instance, false, retry, tokens)
     }
 
     /// 124: bind the repository holding `dir` for branch protection's hook:
@@ -119,6 +142,7 @@ impl Bound {
             Instance::guarding()?,
             true,
             retry,
+            &Tokens::default(),
         )
     }
 
@@ -128,11 +152,15 @@ impl Bound {
         instance: Instance,
         guarding: bool,
         retry: Rc<retry::Policy>,
+        tokens: &Tokens,
     ) -> Result<Self> {
         // C.4: the app the host names is sluice's identity on GitHub, and
-        // C.5: what reads and posts pull requests there.
+        // C.5: what reads and posts pull requests there, holding its
+        // tokens where `tokens` says (record 0108 as amended 2026-11-19).
         let app = match &instance.forge {
-            Some(f) => Some(Rc::new(github::App::open(f, retry.clone())?)),
+            Some(f) => Some(Rc::new(
+                github::App::open(f, retry.clone())?.holding(tokens.clone()),
+            )),
             None => None,
         };
         let app_for_pool = app.clone();
@@ -142,6 +170,8 @@ impl Bound {
         let forge = app.map(|a| a as Rc<dyn github::Forge>);
         let branch = branches::Branches::open_as(dir, identity.clone(), retry.clone())?;
         let common = branch.common_dir()?;
+        // Rule core.66: the repository each metric names, read once.
+        let repository = branch.local().repository_name()?;
         // 136: each branch's open pull requests asked for at the host's
         // interval, what was read of them kept in the host's state.
         let discovery = instance
@@ -153,6 +183,7 @@ impl Bound {
         // takes in (design D21).
         let peer = sluice_core::Peer {
             name: instance.peers.name.clone().unwrap_or_else(checks::hostname),
+            repository: repository.clone(),
             lease: instance.peers.lease,
             alive: instance.peers.alive,
             signer: instance.signing.as_ref().map(|s| s.signer.clone()),
@@ -262,6 +293,7 @@ impl Bound {
             state,
             pulls,
             host_process: Box::new(crate::host_process::Socketed::default()),
+            repository,
         })
     }
 
@@ -390,14 +422,55 @@ fn forge_findings(
     ));
     // Record 0119 (design D14): each pool on GitHub the policy names at
     // the branch's revision, as `sluice init actions` sets it up.
-    if let Some((_, policy)) = branches.policy_of(branch)? {
-        for pool in policy.pools.iter().filter(|p| p.kind.0 == "github") {
-            let wants = github::workflows::sluice(crate::VERSION, &pool.runners);
-            let signer = policy.signers.get(&pool.signer).map(|s| &s.identity);
-            found.extend(github::check::pool(&app, &repo, pool, signer, &wants));
+    match whole_policy(&branches, branch) {
+        Ok(None) => {}
+        Ok(Some(policy)) => {
+            for pool in policy.pools.iter().filter(|p| p.kind.0 == "github") {
+                let wants = github::workflows::sluice(crate::VERSION, &pool.runners);
+                let signer = policy.signers.get(&pool.signer).map(|s| &s.identity);
+                found.extend(github::check::pool(&app, &repo, pool, signer, &wants));
+            }
         }
+        Err(e) => found.push(github::check::Finding {
+            ok: false,
+            what: format!("{e:#}"),
+        }),
     }
     Ok(found)
+}
+
+/// The policy `sluice forge check` reads `branch`'s pools from: read
+/// whole, at the branch's revision as this host holds it, with no fetch
+/// (56; rule core.15), or at main's for a branch not yet made, which it is
+/// made from; `None` where that revision holds no policy. Routing's
+/// reading, [`branches::Branches::policy_of`], passes the pools over
+/// (record 0069), so it is never read for them (record 0119 as amended
+/// 2026-11-18). A policy that cannot be read whole is refused, naming the
+/// revision and that its pools went unread.
+fn whole_policy(
+    branches: &branches::Branches,
+    branch: &str,
+) -> Result<Option<sluice_core::policy::Policy>> {
+    let (name, rev) = match branches.held(branch)? {
+        Some(rev) => (branch, rev),
+        None => match branches.held("main")? {
+            Some(rev) => ("main", rev),
+            None => return Ok(None),
+        },
+    };
+    let Some(bytes) = branches.file_at(&rev, sluice_core::policy::POLICY_PATH)? else {
+        return Ok(None);
+    };
+    std::str::from_utf8(&bytes)
+        .map_err(anyhow::Error::from)
+        .and_then(sluice_core::policy::Policy::parse)
+        .map(Some)
+        .map_err(|e| {
+            e.context(format!(
+                "{name}'s policy at {} is refused, so its pools are not read",
+                rev.short()
+            ))
+        })
 }
 
 /// The repository's default branch, the branch its common directory's
@@ -504,6 +577,7 @@ impl crate::exec::Host for Bound {
         let i = self.tests.instance();
         sluice_core::Peer {
             name: i.peers.name.clone().unwrap_or_else(checks::hostname),
+            repository: self.repository.clone(),
             lease: i.peers.lease,
             alive: i.peers.alive,
             signer: i.signing.as_ref().map(|s| s.signer.clone()),

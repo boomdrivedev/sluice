@@ -11,7 +11,10 @@ git with those same credentials, so GitHub can't tell an agent's
 `git push origin HEAD:main` from sluice's landing. This guide gives
 sluice an identity of its own: a GitHub App. The app is the only bypass
 of `main`'s ruleset, and only sluice's own fetches and pushes carry its
-token.
+token. Each landing sluice pushes as the app names the app's bot,
+`sluice-for-acme[bot]` for an app named `sluice for acme`, as its
+author, so GitHub shows the app on every landing. sluice reads the bot
+from GitHub and keeps it on this machine.
 
 ## 1. Create the app
 

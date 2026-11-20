@@ -312,16 +312,16 @@ mod tests {
             .collect()
     }
 
-    /// Record 0119 (design D3; C.8): the lead role may start the run
+    /// Record 0119 (design D3; C.8): the start role may start the run
     /// projects alone; a start that carries any override CodeBuild keys,
     /// or a variable but the five, is denied; and it holds no use of the
     /// key, no secret and of the sign project only the reading of its
     /// builds.
     #[test]
-    fn the_lead_may_change_nothing_a_run_build_runs() {
+    fn the_start_role_may_change_nothing_a_run_build_runs() {
         let stack = stack();
-        let lead = resource(&stack, "LeadRole");
-        let all = statements(lead);
+        let start = resource(&stack, "StartRole");
+        let all = statements(start);
         let allowed: Vec<&Yaml> = all
             .iter()
             .filter(|s| s["Effect"].as_str() == Some("Allow"))
@@ -392,7 +392,7 @@ mod tests {
                 "SLUICE_READ_TOKEN"
             ]
         );
-        let text = said(lead);
+        let text = said(start);
         assert!(!text.contains("kms:"), "no use of the key");
         assert!(!text.contains("secretsmanager:"), "no secret");
         for s in &all {
@@ -464,7 +464,7 @@ mod tests {
         }
         // Of the roles, the sign role's policy alone signs and reads the
         // secret.
-        let signers: Vec<&str> = ["RunRole", "SignRole", "EventsRole", "LeadRole"]
+        let signers: Vec<&str> = ["RunRole", "SignRole", "EventsRole", "StartRole"]
             .into_iter()
             .filter(|r| said(resource(&stack, r)).contains("kms:Sign"))
             .collect();
@@ -503,10 +503,36 @@ mod tests {
         assert!(!said(&spec).contains("moon") && !said(&spec).contains("job run"));
     }
 
+    /// Record 0058 as amended 2026-11-18 (core.26): the parameter is
+    /// `StartPrincipal`, the role and its output `StartRole`, the role's
+    /// policy `start`, and no name, comment or description says `lead`, in
+    /// any case.
+    #[test]
+    fn the_template_names_the_start_role_and_no_lead() {
+        let text = render("1.2.3", "acme/widgets", &systems());
+        let stack = YamlLoader::load_from_str(&text).unwrap().remove(0);
+        assert!(!stack["Parameters"]["StartPrincipal"].is_badvalue());
+        let start = resource(&stack, "StartRole");
+        assert!(said(&start["Properties"]["AssumeRolePolicyDocument"]).contains("StartPrincipal"));
+        let policies: Vec<&str> = start["Properties"]["Policies"]
+            .as_vec()
+            .into_iter()
+            .flatten()
+            .filter_map(|p| p["PolicyName"].as_str())
+            .collect();
+        assert_eq!(policies, ["start"]);
+        assert_eq!(
+            stack["Outputs"]["StartRole"]["Value"]["Fn::GetAtt"][0].as_str(),
+            Some("StartRole")
+        );
+        assert!(!text.to_lowercase().contains("lead"), "{text}");
+    }
+
     /// Record 0119 (design D2): the rule matches a run project's build that
     /// ended `SUCCEEDED`, `FAILED`, `FAULT` or `TIMED_OUT`, never one
     /// stopped, and starts the sign project with `SLUICE_RUN_BUILD` from
-    /// the event's build, and nothing the lead chose.
+    /// the event's build, and nothing the host that started the run build
+    /// chose.
     #[test]
     fn the_rule_starts_the_sign_build_for_every_end_but_a_stop() {
         let stack = stack();

@@ -44,6 +44,7 @@ fn on<'a>(h: &'a Harness, name: &str) -> Sluice<'a> {
     h.w().be_host(name);
     h.sluice().as_peer(Peer {
         name: name.into(),
+        repository: "this-repository".into(),
         lease: Duration::from_secs(300),
         alive: Duration::from_secs(120),
         signer: Some("box".into()),
@@ -435,6 +436,7 @@ fn submit_to(h: &Harness, branch: &str, changes: &[(&str, Option<&str>)]) -> u64
             after: vec![],
             priority: 0,
             subject: None,
+            trace: None,
         })
         .unwrap()
         .unwrap()
@@ -812,6 +814,7 @@ fn taking<'a>(h: &'a Harness, name: &str, systems: &[&str]) -> Sluice<'a> {
     h.w().be_host(name);
     h.sluice().as_peer(Peer {
         name: name.into(),
+        repository: "this-repository".into(),
         lease: Duration::from_secs(300),
         alive: Duration::from_secs(120),
         signer: Some("box".into()),
@@ -1091,6 +1094,56 @@ fn a_pools_job_ended_with_no_record_is_a_lapsed_claim() {
     assert_eq!(launches[1].claim, again.by);
 }
 
+/// satisfies: 115 as amended 2026-11-18, 77, 88; record 0031 as amended
+/// 2026-11-18; the run-life spec's "A pool's job lost in runs in a row":
+/// each job lost counts toward the runs in a row, and at the bound the
+/// combination reads not passed, each check named with the job's words,
+/// nothing recorded under a key and no job dispatched again
+/// (boomdrivedev/sluice-actions-trial on 0.97.1, 2026-11-18: pool/forge/1
+/// lost, and dispatched again as 3, 4 and 5 until withdrawn)
+#[test]
+fn a_pools_jobs_lost_in_a_row_read_the_combination_not_passed() {
+    let h = with_pool();
+    h.work("unit/a", "agent-a", &[("a/lib", Some("a2"))]);
+    let one = h.submit("unit/a");
+    lead(&h).step(BRANCH).unwrap();
+    let mut whys = Vec::new();
+    for _ in 0..3 {
+        let claim = pool_run(&h).claim.expect("claimed for the pool").by;
+        let why = format!("{claim}'s job ended with no record of its run; its log is at https://github.com/o/r/actions/runs/1");
+        h.w().move_job(
+            &claim,
+            sluice_seams::Job::Ended {
+                recorded: false,
+                why: Some(why.clone()),
+            },
+        );
+        lead(&h).step(BRANCH).unwrap();
+        whys.push(why);
+    }
+    assert_eq!(
+        h.w().launches().len(),
+        3,
+        "no job dispatched past the bound"
+    );
+    assert!(
+        h.events()
+            .iter()
+            .any(|e| matches!(e, Event::Result { result, .. } if result == "failed")),
+        "the combination read failed"
+    );
+    lead(&h).step(BRANCH).unwrap();
+    assert_eq!(h.w().launches().len(), 3, "nor on the next round");
+    assert_eq!(h.sub(one).state, State::Failed);
+    let failed = &h.sub(one).failed;
+    assert!(!failed.is_empty());
+    for f in failed {
+        assert!(f.hash.is_empty(), "no key: it has no result");
+        assert_eq!(f.not_run.as_deref(), Some(whys[2].as_str()), "{f:?}");
+    }
+    assert!(h.results().is_empty(), "nothing of it recorded");
+}
+
 /// satisfies: record 0122; 77, 88; the codebuild-pool spec's "The lead's
 /// lapse gives the pool's why": a pool's job that ended with no record
 /// and says why ends its run with no outcome under the pool's words,
@@ -1228,6 +1281,7 @@ fn leading<'a>(h: &'a Harness, name: &str) -> Sluice<'a> {
     h.w().be_host(name);
     h.sluice().as_peer(Peer {
         name: name.into(),
+        repository: "this-repository".into(),
         lease: Duration::from_secs(300),
         alive: Duration::from_secs(120),
         signer: Some("lead".into()),
