@@ -1,0 +1,23 @@
+{
+  "schema": "sluice/branch@1",
+  "branch": "bolt/sluice-checks-and-waits-on-an-agents-own-work",
+  "log": "sluice/log@1",
+  "base": "2459329fd79cfc0640811a825438b6cc91cb1c9a",
+  "verified": true,
+  "covered_by": {
+    "at": "2459329fd79cfc0640811a825438b6cc91cb1c9a",
+    "result": "passed",
+    "ran": 11,
+    "replayed": 0
+  },
+  "window": 4,
+  "next_place": 6,
+  "next_candidate": 6,
+  "candidates": [],
+  "landing": null,
+  "release": [],
+  "outbox": [],
+  "lead": "deneb",
+  "landed": "2459329fd79cfc0640811a825438b6cc91cb1c9a",
+  "kept": "2026-11-20T23:26:37Z"
+}

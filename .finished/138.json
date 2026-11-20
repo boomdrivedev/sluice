@@ -1,0 +1,30 @@
+{
+  "schema": "sluice/submission@1",
+  "id": 138,
+  "branch": "bolt/sluice-checks-and-waits-on-an-agents-own-work",
+  "head": "f927c0d8846250a60688b2f7692e6b224dbc2dca",
+  "from": {
+    "agent": "fix/sluice-checks-and-waits-on-an-agents-own-work--takes-main",
+    "worktree": "fix/sluice-checks-and-waits-on-an-agents-own-work--takes-main",
+    "path": "/Users/chuck/.local/share/boomdrive/repositories/boomdrivedev/sluice/places/fix-sluice-checks-and-waits-on-an-agents-own-work--takes-main",
+    "host": "deneb",
+    "session": "herdr:w2:p26@/Users/chuck/.config/herdr/sessions/boomdrive/herdr.sock"
+  },
+  "submitted": "2026-11-20T23:19:42Z",
+  "after": [],
+  "priority": 0,
+  "attempt": 1,
+  "state": "landed",
+  "tested": {
+    "combination": "c717c6a6d5966254dfba43d6d7c0f5fb40545c48",
+    "on": "e064596d02a1cb164c81044decdb7311b17ce5df",
+    "submissions": [
+      138
+    ]
+  },
+  "result": "passed",
+  "landed_as": "2459329fd79cfc0640811a825438b6cc91cb1c9a",
+  "subject": "main at 4956bad into the bolt",
+  "trace": "00-45055b76ab61538dae958ea15839e2aa-73640e2b62b7c5c9-01",
+  "under_test_ms": 366000
+}

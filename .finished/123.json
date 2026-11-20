@@ -1,0 +1,26 @@
+{
+  "schema": "sluice/submission@1",
+  "id": 123,
+  "branch": "bolt/sluice-checks-and-waits-on-an-agents-own-work",
+  "head": "d43b2cf3dfa8338f7fea8dbb41d3d1dd0bc80e16",
+  "from": {
+    "agent": "change/a-worktrees-checks-run-only-what-its-own-changes-affect",
+    "worktree": "change/a-worktrees-checks-run-only-what-its-own-changes-affect",
+    "path": "/Users/chuck/.local/share/flume/places/2db1db6f889b/change--a-worktrees-checks-run-only-what-its-own-changes-affect",
+    "host": "deneb"
+  },
+  "submitted": "2026-11-19T18:25:54Z",
+  "after": [],
+  "priority": 0,
+  "attempt": 1,
+  "state": "landed",
+  "tested": {
+    "combination": "e65078d9421e27a884884b97a43ea3db7675b613",
+    "on": "fa2ab89c3b2808bf044c37fff493235ba16168c7",
+    "submissions": [
+      123
+    ]
+  },
+  "result": "passed",
+  "landed_as": "281010a6f6a4ba95401247829c3fe77db1f76c78"
+}
