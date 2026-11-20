@@ -1,0 +1,46 @@
+{
+  "schema": "sluice/submission@1",
+  "id": 135,
+  "branch": "bolt/sluices-pools-run-a-repositorys-own-steps",
+  "head": "95a0e0a6a4621a8af99f7935a1cb43a8c9d34727",
+  "from": {
+    "agent": "fix/sluices-pools-run-a-repositorys-own-steps--takes-main",
+    "worktree": "fix/sluices-pools-run-a-repositorys-own-steps--takes-main",
+    "path": "/Users/chuck/.local/share/boomdrive/repositories/boomdrivedev/sluice/places/fix-sluices-pools-run-a-repositorys-own-steps--takes-main",
+    "host": "deneb",
+    "session": "herdr:w2:p26@/Users/chuck/.config/herdr/sessions/boomdrive/herdr.sock"
+  },
+  "submitted": "2026-11-20T22:27:05Z",
+  "after": [],
+  "priority": 0,
+  "attempt": 1,
+  "state": "withdrawn",
+  "tested": {
+    "combination": "706b813b751beb682db99f2ca25f83058acbe3ef",
+    "on": "4e51b8af26763cf37d6bcd4276cab1b45a962940",
+    "submissions": [
+      135
+    ]
+  },
+  "result": "failed",
+  "failed": [
+    {
+      "task": "cli:test",
+      "log": "/Users/chuck/.local/share/boomdrive/repositories/boomdrivedev/sluice/sluice.git/sluice-remote/origin/.logs/bolt/sluices-pools-run-a-repositorys-own-steps/c3/cli:test.log",
+      "not_run": "sluice's sandbox refused the run network-outbound remote:*:53 (by moon), network-outbound /private/var/run/mDNSResponder (a name lookup, by moon), file-write-data /Users/chuck/.cargo/.package-cache (by cargo) and 4 more"
+    },
+    {
+      "task": "root:lint",
+      "log": "/Users/chuck/.local/share/boomdrive/repositories/boomdrivedev/sluice/sluice.git/sluice-remote/origin/.logs/bolt/sluices-pools-run-a-repositorys-own-steps/c3/root:lint.log",
+      "not_run": "sluice's sandbox refused the run network-outbound remote:*:53 (by moon), network-outbound /private/var/run/mDNSResponder (a name lookup, by moon), file-write-data /Users/chuck/.cargo/.package-cache (by cargo) and 4 more"
+    }
+  ],
+  "withdrawn": {
+    "by": "resubmission",
+    "at": "2026-11-20T22:40:21Z"
+  },
+  "subject": "main at ed3a91e into the bolt",
+  "trace": "00-a4a625939150df033f5bbf582ab01e57-7c4a01e9cba654da-01",
+  "under_test_ms": 650000,
+  "runs_with_no_outcome": 1
+}

@@ -1,0 +1,6 @@
+{"format": "weir-known/1", "reader": "change/a-pools-run-job-runs-the-repositorys-own-steps", "known_at": "2026-11-18T17:15:36Z"}
+{"format": "weir-known/1", "reader": "change/sluices-actions-pool-is-proven-live", "known_at": "2026-11-20T22:26:31Z"}
+{"format": "weir-known/1", "reader": "fix/sluices-pools-run-a-repositorys-own-steps--takes-main", "known_at": "2026-11-20T22:38:59Z"}
+{"format": "weir-delivery/1", "key": "136:landed", "readers": ["fix/sluices-pools-run-a-repositorys-own-steps--takes-main"], "message": "[sluice] #136 landed on bolt/sluices-pools-run-a-repositorys-own-steps as a467df0.", "recorded_at": "2026-11-20T22:47:41Z", "expires_at": "2026-11-27T22:47:41Z"}
+{"format": "weir-handover/1", "key": "136:landed", "reader": "fix/sluices-pools-run-a-repositorys-own-steps--takes-main", "by": "notice", "at": "2026-11-20T22:47:44Z"}
+{"format": "weir-confirmation/1", "key": "136:landed", "reader": "fix/sluices-pools-run-a-repositorys-own-steps--takes-main", "at": "2026-11-20T22:47:59Z"}

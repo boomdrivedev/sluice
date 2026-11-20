@@ -1,0 +1,26 @@
+{
+  "schema": "sluice/submission@1",
+  "id": 97,
+  "branch": "bolt/sluices-pools-run-a-repositorys-own-steps",
+  "head": "8ce28e8ec855094ae24d50b0f0b817bca9157b82",
+  "from": {
+    "agent": "change/a-pools-run-job-runs-the-repositorys-own-steps",
+    "worktree": "change/a-pools-run-job-runs-the-repositorys-own-steps",
+    "path": "/Users/chuck/.local/share/flume/places/2db1db6f889b/change--a-pools-run-job-runs-the-repositorys-own-steps",
+    "host": "deneb"
+  },
+  "submitted": "2026-11-18T17:06:18Z",
+  "after": [],
+  "priority": 0,
+  "attempt": 1,
+  "state": "landed",
+  "tested": {
+    "combination": "0dd7e6ede5d24a868754d5b249295e16a1ed27ec",
+    "on": "15b5cf173674e8ff2a508a94ac00d3462a2300a5",
+    "submissions": [
+      97
+    ]
+  },
+  "result": "passed",
+  "landed_as": "c6828be3187234732387077bdc33110bc18dabf0"
+}

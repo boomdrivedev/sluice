@@ -1,0 +1,30 @@
+{
+  "schema": "sluice/submission@1",
+  "id": 136,
+  "branch": "bolt/sluices-pools-run-a-repositorys-own-steps",
+  "head": "e445679ebed5b2a497d9aca3d3b461852b87f5e2",
+  "from": {
+    "agent": "fix/sluices-pools-run-a-repositorys-own-steps--takes-main",
+    "worktree": "fix/sluices-pools-run-a-repositorys-own-steps--takes-main",
+    "path": "/Users/chuck/.local/share/boomdrive/repositories/boomdrivedev/sluice/places/fix-sluices-pools-run-a-repositorys-own-steps--takes-main",
+    "host": "deneb",
+    "session": "herdr:w2:p26@/Users/chuck/.config/herdr/sessions/boomdrive/herdr.sock"
+  },
+  "submitted": "2026-11-20T22:40:21Z",
+  "after": [],
+  "priority": 0,
+  "attempt": 2,
+  "state": "landed",
+  "tested": {
+    "combination": "bbb5b0dfeda436063578edab1e6edad0d4747b69",
+    "on": "4e51b8af26763cf37d6bcd4276cab1b45a962940",
+    "submissions": [
+      136
+    ]
+  },
+  "result": "passed",
+  "landed_as": "a467df047c8376ce3ef85dda36daea713c227eef",
+  "subject": "main at ed3a91e into the bolt",
+  "trace": "00-6dc1b2a9e2d406139f21cde1af23d15c-50d74a901f162c68-01",
+  "under_test_ms": 414000
+}

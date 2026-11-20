@@ -1,0 +1,23 @@
+{
+  "schema": "sluice/branch@1",
+  "branch": "bolt/sluices-pools-run-a-repositorys-own-steps",
+  "log": "sluice/log@1",
+  "base": "a467df047c8376ce3ef85dda36daea713c227eef",
+  "verified": true,
+  "covered_by": {
+    "at": "a467df047c8376ce3ef85dda36daea713c227eef",
+    "result": "passed",
+    "ran": 27,
+    "replayed": 0
+  },
+  "window": 3,
+  "next_place": 7,
+  "next_candidate": 5,
+  "candidates": [],
+  "landing": null,
+  "release": [],
+  "outbox": [],
+  "lead": "deneb",
+  "landed": "a467df047c8376ce3ef85dda36daea713c227eef",
+  "kept": "2026-11-20T22:48:00Z"
+}

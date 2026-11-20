@@ -1,0 +1,29 @@
+{
+  "schema": "sluice/submission@1",
+  "id": 134,
+  "branch": "bolt/sluices-pools-run-a-repositorys-own-steps",
+  "head": "b682ff10ba4352af33a9b8a0abe7951edf902229",
+  "from": {
+    "agent": "change/sluices-actions-pool-is-proven-live",
+    "worktree": "change/sluices-actions-pool-is-proven-live",
+    "path": "/Users/chuck/.local/share/flume/places/2db1db6f889b/change--sluices-actions-pool-is-proven-live",
+    "host": "deneb",
+    "session": "herdr:w2:p26@/Users/chuck/.config/herdr/sessions/boomdrive/herdr.sock"
+  },
+  "submitted": "2026-11-20T22:24:59Z",
+  "after": [],
+  "priority": 0,
+  "attempt": 1,
+  "state": "landed",
+  "tested": {
+    "combination": "c4628fb1ebb7092ff47a77e0f7accae580fafa9a",
+    "on": "c6828be3187234732387077bdc33110bc18dabf0",
+    "submissions": [
+      134
+    ]
+  },
+  "result": "passed",
+  "landed_as": "4e51b8af26763cf37d6bcd4276cab1b45a962940",
+  "trace": "00-592156a731054b2d227a2183a7a3c067-f08e81bd090a5751-01",
+  "under_test_ms": 43000
+}
