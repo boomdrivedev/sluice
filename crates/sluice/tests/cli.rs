@@ -10250,6 +10250,8 @@ fn job_run_writes_its_report_and_records_nothing() {
             "main",
             "--out",
             dir.to_str().unwrap(),
+            "--checkout",
+            out.path().join("sluice-checkout").to_str().unwrap(),
         ],
     );
     assert_eq!(code, 0, "{said}");
@@ -10278,6 +10280,8 @@ fn job_run_writes_its_report_and_records_nothing() {
             "main",
             "--out",
             none.to_str().unwrap(),
+            "--checkout",
+            out.path().join("none-checkout").to_str().unwrap(),
         ],
     );
     assert_eq!(code, sluice::INTERNAL, "{said}");
@@ -10287,19 +10291,25 @@ fn job_run_writes_its_report_and_records_nothing() {
         "{why}"
     );
     assert!(!none.join("report.json").exists());
+    assert!(
+        !out.path().join("none-checkout").exists(),
+        "no checkout made, no file"
+    );
 }
 
-/// satisfies: record 0016, 123; rule core.10; the place-release spec's "A
-/// run that passed": `sluice job run` releases the checkout it made before
-/// it exits, by the release the policy names, the checkout gone with its
-/// ports and scratch; a release that fails is said in its output and its
-/// hand-over, deciding nothing of the run's outcome
+/// satisfies: record 0119 as amended 2026-11-18; rule core.63; the
+/// place-release spec's "A run that passed" and repository-steps' "A kept
+/// checkout": `sluice job run` keeps the checkout it made for the job's own
+/// steps, with its ports and scratch, its release not run, and names it in
+/// `--checkout`'s file, the checkout's path then its place's name; a run
+/// whose checks failed keeps its checkout the same
 #[test]
-fn job_run_releases_its_checkout_before_it_exits() {
+fn job_run_keeps_its_checkout_for_the_jobs_own_steps() {
     let f = Fakes::new();
     let claim = pooled(&f, &["a"]);
-    let out = support::Scratch::new("job-run-release");
+    let out = support::Scratch::new("job-run-keep");
     let dir = out.path().join("sluice-run");
+    let file = out.path().join("sluice-checkout");
     let args = [
         "job",
         "run",
@@ -10309,6 +10319,8 @@ fn job_run_releases_its_checkout_before_it_exits() {
         "main",
         "--out",
         dir.to_str().unwrap(),
+        "--checkout",
+        file.to_str().unwrap(),
     ];
     let (code, said) = sluice(&f, &args);
     assert_eq!(code, 0, "{said}");
@@ -10318,30 +10330,34 @@ fn job_run_releases_its_checkout_before_it_exits() {
         .last()
         .cloned()
         .expect("a checkout made");
+    let path = format!("/fake/places/{place}");
+    assert_eq!(
+        std::fs::read_to_string(&file).unwrap(),
+        format!("{path}\n{place}\n"),
+        "the file names the checkout and its place"
+    );
     assert!(
-        said.contains(&format!("released its checkout {place}")),
+        said.contains(&format!("kept its checkout {place} at {path}")),
         "{said}"
     );
-    assert_eq!(
-        f.world.release_attempts(),
-        std::slice::from_ref(&place),
-        "its release ran"
-    );
-    assert!(f.world.released_places().contains(&place));
+    assert!(f.world.release_attempts().is_empty(), "its release not run");
     assert!(
-        !f.world.live_places().contains(&place),
-        "gone, ports and all"
+        f.world.live_places().contains(&place),
+        "the checkout stands, with its ports and scratch"
     );
-    assert_eq!(f.world.live_runs(), 0);
-    assert!(dir.join("report.json").exists());
+    assert!(!f.world.released_places().contains(&place));
+    assert!(
+        dir.join("report.json").exists(),
+        "what the run wrote is kept"
+    );
     assert!(!dir.join("why").exists());
 
-    // A release that fails: said, beside the report, and the run's outcome
-    // stands.
+    // A run whose check failed keeps its checkout too.
     let f = Fakes::new();
     let claim = pooled(&f, &["a"]);
-    f.world.release_fails(Some("the stack would not stop"));
-    let dir = out.path().join("failed-release");
+    f.world.fails_with("a:test", "a/lib", "a2");
+    let dir = out.path().join("failed-run");
+    let file = out.path().join("failed-checkout");
     let args = [
         "job",
         "run",
@@ -10351,25 +10367,24 @@ fn job_run_releases_its_checkout_before_it_exits() {
         "main",
         "--out",
         dir.to_str().unwrap(),
+        "--checkout",
+        file.to_str().unwrap(),
     ];
     let (code, said) = sluice(&f, &args);
     assert_eq!(code, 0, "{said}");
-    assert!(said.contains("1 passed, 0 failed"), "{said}");
-    assert!(
-        said.contains("was not released") && said.contains("the stack would not stop"),
-        "{said}"
-    );
-    assert!(dir.join("report.json").exists(), "the report stands");
-    let why = std::fs::read_to_string(dir.join("why")).unwrap();
-    assert!(
-        why.contains("was not released") && why.contains("the stack would not stop"),
-        "{why}"
-    );
+    assert!(said.contains("0 passed, 1 failed"), "{said}");
+    let place = f.world.made_places().last().cloned().unwrap();
+    assert!(std::fs::read_to_string(&file)
+        .unwrap()
+        .ends_with(&format!("\n{place}\n")));
+    assert!(f.world.live_places().contains(&place));
+    assert!(f.world.release_attempts().is_empty());
 }
 
-/// satisfies: record 0016, 123; rule core.10; the place-release spec's "A
-/// job stopped while its run goes": it ends the run's process group, runs
-/// the release, says it kept no report, and exits
+/// satisfies: record 0016, 123; rules core.10, core.63; the place-release
+/// spec's "A job stopped while its run goes": it ends the run's process
+/// group, runs the release, says it kept no report, writes no `--checkout`
+/// file, and exits
 #[test]
 fn job_run_stopped_releases_its_checkout() {
     struct Stop;
@@ -10395,6 +10410,8 @@ fn job_run_stopped_releases_its_checkout() {
             "main",
             "--out",
             dir.to_str().unwrap(),
+            "--checkout",
+            out.path().join("sluice-checkout").to_str().unwrap(),
         ],
     );
     assert_eq!(code, sluice::STOPPED, "{said}");
@@ -10422,6 +10439,129 @@ fn job_run_stopped_releases_its_checkout() {
         why.contains("the job was stopped before its run ended"),
         "{why}"
     );
+    assert!(
+        !out.path().join("sluice-checkout").exists(),
+        "stopped, it names no checkout"
+    );
+}
+
+/// `sluice job run` under `claim` on `main`, keeping its report in
+/// `dir` and naming its checkout in `file`.
+fn job_run_keeping(f: &Fakes, claim: &str, dir: &std::path::Path, file: &std::path::Path) {
+    let (code, said) = sluice(
+        f,
+        &[
+            "job",
+            "run",
+            "--claim",
+            claim,
+            "--branch",
+            "main",
+            "--out",
+            dir.to_str().unwrap(),
+            "--checkout",
+            file.to_str().unwrap(),
+        ],
+    );
+    assert_eq!(code, 0, "{said}");
+}
+
+/// satisfies: record 0119 as amended 2026-11-18; rules core.10, core.63;
+/// the place-release spec's "The release after the repository's own
+/// steps": `sluice job release` releases the checkout `sluice job run`
+/// kept, by the release the policy names, its ports and scratch freed, and
+/// removes the file; a release that fails is said in its output and in
+/// the hand-over's `why` beside the report, keeps the file, and exits 1
+#[test]
+fn job_release_releases_the_kept_checkout() {
+    let f = Fakes::new();
+    let claim = pooled(&f, &["a"]);
+    let out = support::Scratch::new("job-release");
+    let dir = out.path().join("sluice-run");
+    let file = out.path().join("sluice-checkout");
+    job_run_keeping(&f, &claim, &dir, &file);
+    let place = f.world.made_places().last().cloned().unwrap();
+    assert!(f.world.live_places().contains(&place));
+    let (code, said) = sluice(
+        &f,
+        &[
+            "job",
+            "release",
+            "--checkout",
+            file.to_str().unwrap(),
+            "--out",
+            dir.to_str().unwrap(),
+        ],
+    );
+    assert_eq!(code, 0, "{said}");
+    assert!(
+        said.contains(&format!("released its checkout {place}")),
+        "{said}"
+    );
+    assert_eq!(
+        f.world.release_attempts(),
+        std::slice::from_ref(&place),
+        "its release ran"
+    );
+    assert!(f.world.released_places().contains(&place));
+    assert!(
+        !f.world.live_places().contains(&place),
+        "gone, ports and scratch freed"
+    );
+    assert_eq!(f.world.live_runs(), 0);
+    assert!(!file.exists(), "the file is removed");
+    assert!(dir.join("report.json").exists());
+    assert!(!dir.join("why").exists());
+
+    // A release that fails: said, beside the report, the file kept, and
+    // the run's outcome stands.
+    let f = Fakes::new();
+    let claim = pooled(&f, &["a"]);
+    let dir = out.path().join("failed-run");
+    let file = out.path().join("failed-checkout");
+    job_run_keeping(&f, &claim, &dir, &file);
+    f.world.release_fails(Some("the stack would not stop"));
+    let (code, said) = sluice(
+        &f,
+        &[
+            "job",
+            "release",
+            "--checkout",
+            file.to_str().unwrap(),
+            "--out",
+            dir.to_str().unwrap(),
+        ],
+    );
+    assert_eq!(code, FAILED, "{said}");
+    assert!(
+        said.contains("was not released") && said.contains("the stack would not stop"),
+        "{said}"
+    );
+    assert!(dir.join("report.json").exists(), "the report stands");
+    let why = std::fs::read_to_string(dir.join("why")).unwrap();
+    assert!(
+        why.contains("was not released") && why.contains("the stack would not stop"),
+        "{why}"
+    );
+    assert!(file.exists(), "kept for another try");
+}
+
+/// satisfies: record 0119 as amended 2026-11-18; the place-release spec's
+/// "Nothing kept": `sluice job release` with no file releases nothing,
+/// says so and exits 0
+#[test]
+fn job_release_with_nothing_kept_releases_nothing() {
+    let f = Fakes::new();
+    pooled(&f, &["a"]);
+    let out = support::Scratch::new("job-release-none");
+    let file = out.path().join("sluice-checkout");
+    let (code, said) = sluice(
+        &f,
+        &["job", "release", "--checkout", file.to_str().unwrap()],
+    );
+    assert_eq!(code, 0, "{said}");
+    assert!(said.contains("nothing is released"), "{said}");
+    assert!(f.world.release_attempts().is_empty());
 }
 
 /// Whether this is the child `test` runs alone in, where it may set the
@@ -10743,6 +10883,8 @@ fn job_run(f: &Fakes, claim: &str, out: &std::path::Path) -> std::path::PathBuf 
             "main",
             "--out",
             dir.to_str().unwrap(),
+            "--checkout",
+            out.join("sluice-checkout").to_str().unwrap(),
         ],
     );
     assert_eq!(code, 0, "{said}");
@@ -11170,10 +11312,11 @@ fn init_actions_leaves_a_differing_workflow_unless_forced() {
     let edited =
         workflows::sluice(sluice::VERSION, &runners).replace("name: sluice\n", "name: ours\n");
     std::fs::write(at.join("sluice.yml"), &edited).unwrap();
+    let line = edited.lines().position(|l| l == "name: ours").unwrap() + 1;
     let (code, said) = init_actions(&f, dir.path(), false);
     assert_eq!(code, FAILED, "{said}");
     assert!(
-        said.contains("sluice.yml: left as it is; line 8 holds \"name: ours\", where sluice writes \"name: sluice\"; --force writes it"),
+        said.contains(&format!("sluice.yml: left as it is; line {line} holds \"name: ours\", where sluice writes \"name: sluice\"; --force writes it")),
         "{said}"
     );
     assert_eq!(
@@ -11188,6 +11331,164 @@ fn init_actions_leaves_a_differing_workflow_unless_forced() {
         std::fs::read_to_string(at.join("sluice.yml")).unwrap(),
         workflows::sluice(sluice::VERSION, &runners)
     );
+}
+
+/// `sluice.yml` as this sluice writes it for `linux-x64` on
+/// `ubuntu-24.04`, with `lines` between its run job's `# sluice:` lines.
+fn with_own_steps(lines: &str) -> String {
+    use sluice::profiles::github::workflows;
+    let runners =
+        std::collections::BTreeMap::from([("linux-x64".to_string(), "ubuntu-24.04".to_string())]);
+    let open = format!("      {}\n", workflows::ROOM_OPEN);
+    workflows::sluice(sluice::VERSION, &runners).replacen(&open, &format!("{open}{lines}"), 1)
+}
+
+/// Two steps of the repository's, after the checks, in their checkout.
+const OWN_STEPS: &str = "      - name: Push what the checks built\n\
+    \x20       working-directory: ${{ env.SLUICE_CHECKOUT }}\n\
+    \x20       run: ./push \"$STORE\"\n\
+    \x20       env:\n\
+    \x20         STORE: ${{ secrets.STORE_KEY }}\n\
+    \x20     - run: echo pushed\n";
+
+/// satisfies: record 0119 as amended 2026-11-18 (design D3); the
+/// repository-steps spec's "A workflow with the repository's own steps"
+/// and "A workflow an earlier release wrote": a workflow as sluice writes
+/// it but for steps between its run job's `# sluice:` lines is said so and
+/// left; one an earlier release wrote, `--force` writes as this release
+/// writes it with those steps carried into its run job's room
+#[test]
+fn init_actions_keeps_the_repositorys_own_steps() {
+    let f = setup();
+    let dir = copy_with(INIT_POLICY);
+    let (code, said) = init_actions(&f, dir.path(), false);
+    assert_eq!(code, 0, "{said}");
+    let at = dir.path().join(".github/workflows/sluice.yml");
+    let ours = with_own_steps(OWN_STEPS);
+    std::fs::write(&at, &ours).unwrap();
+    let (code, said) = init_actions(&f, dir.path(), false);
+    assert_eq!(code, 0, "{said}");
+    assert!(
+        said.contains("sluice.yml: as sluice writes it, with the repository's own steps"),
+        "{said}"
+    );
+    assert_eq!(std::fs::read_to_string(&at).unwrap(), ours, "left");
+
+    // An earlier release's workflow, with the same steps: left unless
+    // forced, and forced, this release's with the steps carried.
+    let earlier = ours.replace(
+        &format!("sluice {}", sluice::VERSION),
+        "sluice 0.0.1-earlier",
+    );
+    assert_ne!(earlier, ours);
+    std::fs::write(&at, &earlier).unwrap();
+    let (code, said) = init_actions(&f, dir.path(), false);
+    assert_eq!(code, FAILED, "{said}");
+    assert!(
+        said.contains("sluice.yml: left as it is; line 1 holds"),
+        "{said}"
+    );
+    let (code, said) = init_actions(&f, dir.path(), true);
+    assert_eq!(code, 0, "{said}");
+    assert!(
+        said.contains("sluice.yml: written, with the repository's own steps"),
+        "{said}"
+    );
+    assert_eq!(std::fs::read_to_string(&at).unwrap(), ours);
+}
+
+/// satisfies: record 0119 as amended 2026-11-18 (design D3; rule core.62);
+/// the repository-steps spec's "A line that gives the run job an
+/// environment": a line between the run job's `# sluice:` lines that
+/// makes a key of the run job leaves the workflow as it is, named, exit 1,
+/// `--force` or not
+#[test]
+fn init_actions_refuses_own_steps_that_leave_the_run_job() {
+    let f = setup();
+    let dir = copy_with(INIT_POLICY);
+    let (code, said) = init_actions(&f, dir.path(), false);
+    assert_eq!(code, 0, "{said}");
+    let at = dir.path().join(".github/workflows/sluice.yml");
+    let leaving = with_own_steps(&format!("{OWN_STEPS}    environment: sluice\n"));
+    let line = leaving
+        .lines()
+        .position(|l| l == "    environment: sluice")
+        .unwrap()
+        + 1;
+    std::fs::write(&at, &leaving).unwrap();
+    for force in [false, true] {
+        let (code, said) = init_actions(&f, dir.path(), force);
+        assert_eq!(code, FAILED, "{said}");
+        assert!(
+            said.contains(&format!(
+                "sluice.yml: left as it is; line {line}, \"environment: sluice\" leaves the run job's steps"
+            )),
+            "{said}"
+        );
+        assert_eq!(std::fs::read_to_string(&at).unwrap(), leaving, "left");
+    }
+    // An earlier release's, forced: left all the same.
+    let earlier = leaving.replace(
+        &format!("sluice {}", sluice::VERSION),
+        "sluice 0.0.1-earlier",
+    );
+    std::fs::write(&at, &earlier).unwrap();
+    let (code, said) = init_actions(&f, dir.path(), true);
+    assert_eq!(code, FAILED, "{said}");
+    assert!(
+        said.contains(&format!("line {line}, \"environment: sluice\" leaves")),
+        "{said}"
+    );
+    assert_eq!(std::fs::read_to_string(&at).unwrap(), earlier, "left");
+}
+
+/// satisfies: record 0119 as amended 2026-11-18 (design D4; timber C.1;
+/// rule core.62); the actions-pool spec's "A run job whose token writes
+/// the repository's packages": `packages: write` after `contents: read` in
+/// the run job reads as sluice writes it and `--force` keeps it; in the
+/// sign job, or `id-token: write` in its place, the workflow differs
+#[test]
+fn init_actions_takes_the_run_jobs_packages_write_alone() {
+    let f = setup();
+    let dir = copy_with(INIT_POLICY);
+    let (code, said) = init_actions(&f, dir.path(), false);
+    assert_eq!(code, 0, "{said}");
+    let at = dir.path().join(".github/workflows/sluice.yml");
+    let written = std::fs::read_to_string(&at).unwrap();
+    let run = "  run:\n    if: github.event_name == 'workflow_dispatch'\n    runs-on: ${{ inputs.runner }}\n    permissions:\n      contents: read\n";
+    assert_eq!(written.matches(run).count(), 1, "{written}");
+    let packages = written.replacen(run, &format!("{run}      packages: write\n"), 1);
+    std::fs::write(&at, &packages).unwrap();
+    let (code, said) = init_actions(&f, dir.path(), false);
+    assert_eq!(code, 0, "{said}");
+    assert!(
+        said.contains("sluice.yml: as sluice writes it, with the run job's packages: write"),
+        "{said}"
+    );
+    // Forced over an earlier release's, the line is kept.
+    let earlier = packages.replace(
+        &format!("sluice {}", sluice::VERSION),
+        "sluice 0.0.1-earlier",
+    );
+    std::fs::write(&at, &earlier).unwrap();
+    let (code, said) = init_actions(&f, dir.path(), true);
+    assert_eq!(code, 0, "{said}");
+    assert_eq!(std::fs::read_to_string(&at).unwrap(), packages);
+
+    // `id-token: write` there instead differs.
+    let identity = written.replacen(run, &format!("{run}      id-token: write\n"), 1);
+    std::fs::write(&at, &identity).unwrap();
+    let (code, said) = init_actions(&f, dir.path(), false);
+    assert_eq!(code, FAILED, "{said}");
+    assert!(said.contains("holds \"id-token: write\""), "{said}");
+    // In the sign job, `packages: write` differs too.
+    let sign = "    environment: sluice\n    permissions:\n      contents: read\n";
+    assert_eq!(written.matches(sign).count(), 2, "the sign jobs");
+    let signs = written.replacen(sign, &format!("{sign}      packages: write\n"), 1);
+    std::fs::write(&at, &signs).unwrap();
+    let (code, said) = init_actions(&f, dir.path(), false);
+    assert_eq!(code, FAILED, "{said}");
+    assert!(said.contains("holds \"packages: write\""), "{said}");
 }
 
 /// A working copy holding `policy`, its origin `acme/widgets` on GitHub,
@@ -11361,6 +11662,75 @@ fn init_codebuild_leaves_a_differing_template_unless_forced() {
         std::fs::read_to_string(dir.path().join(".config/sluice-codebuild.yml")).unwrap(),
         wants
     );
+}
+
+/// satisfies: record 0119 as amended 2026-11-18 (design D3, D5); the
+/// repository-steps spec's "A template with the repository's own
+/// commands": a template whose linux-x64 run project holds commands of
+/// the repository's between its `# sluice:` lines reads as sluice writes
+/// it; forced for linux-x64 and linux-arm64, linux-x64's run project holds
+/// them and linux-arm64's none; forced for linux-arm64 alone, linux-x64's
+/// are said and not carried; and the deploy command names RunPolicies
+#[test]
+fn init_codebuild_keeps_the_repositorys_own_commands() {
+    use sluice::profiles::codebuild::template::{self, System};
+    let f = setup();
+    let dir = codebuild_copy(INIT_POLICY);
+    let at = dir.path().join(".config/sluice-codebuild.yml");
+    let (code, said) = init_codebuild(&f, dir.path(), &["--systems", "linux-x64"]);
+    assert_eq!(code, 0, "{said}");
+    assert!(
+        said.contains("RunPolicies=<the ARNs of the managed policies your own commands"),
+        "{said}"
+    );
+    let open = format!("                {}\n", template::ROOM_OPEN);
+    let own = "                - ./push \"$SLUICE_CHECKOUT\"\n";
+    let written = std::fs::read_to_string(&at).unwrap();
+    assert_eq!(written.matches(&open).count(), 1, "{written}");
+    let ours = written.replacen(&open, &format!("{open}{own}"), 1);
+    std::fs::write(&at, &ours).unwrap();
+    let (code, said) = init_codebuild(&f, dir.path(), &["--systems", "linux-x64"]);
+    assert_eq!(code, 0, "{said}");
+    assert!(
+        said.contains(
+            "sluice-codebuild.yml: as sluice writes it, with the repository's own commands"
+        ),
+        "{said}"
+    );
+    assert_eq!(std::fs::read_to_string(&at).unwrap(), ours, "left");
+
+    let (code, said) = init_codebuild(
+        &f,
+        dir.path(),
+        &["--systems", "linux-x64", "linux-arm64", "--force"],
+    );
+    assert_eq!(code, 0, "{said}");
+    assert!(
+        said.contains("written, a fleet and a run project for linux-x64, linux-arm64, with the repository's own commands"),
+        "{said}"
+    );
+    let both = std::fs::read_to_string(&at).unwrap();
+    let x64 = System::linux("linux-x64", "linux", "x86_64").unwrap();
+    let arm = System::linux("linux-arm64", "linux", "aarch64").unwrap();
+    let rendered = template::render(sluice::VERSION, "acme/widgets", &[x64, arm]);
+    assert_eq!(both, rendered.replacen(&open, &format!("{open}{own}"), 1));
+    let arm_at = both.find("  # system linux-arm64\n").unwrap();
+    assert!(
+        both[..arm_at].contains(&format!("{open}{own}")),
+        "linux-x64's commands in its own room"
+    );
+    assert!(
+        !both[arm_at..].contains(own),
+        "linux-arm64's room holds none"
+    );
+
+    let (code, said) = init_codebuild(&f, dir.path(), &["--systems", "linux-arm64", "--force"]);
+    assert_eq!(code, 0, "{said}");
+    assert!(
+        said.contains("the repository's own commands of the run project for linux-x64, which it no longer writes, are not carried"),
+        "{said}"
+    );
+    assert!(!std::fs::read_to_string(&at).unwrap().contains(own));
 }
 
 /// satisfies: record 0119 (design D10); the codebuild-pool spec's "A
@@ -11623,6 +11993,87 @@ fn pool_check_names_a_key_the_policy_does_not_list() {
     assert_eq!(said.matches("failed").count(), 1, "{said}");
 }
 
+/// The deployed run project's buildspec with `lines` between its
+/// `# sluice:` lines.
+fn run_buildspec_with(aws: &support::aws::FakeAws, lines: &str) {
+    use sluice::profiles::codebuild::template;
+    let mut held = aws.held.lock().unwrap();
+    let project = held
+        .projects
+        .iter_mut()
+        .find(|p| p["name"] == "sluice-run-linux-x64")
+        .unwrap();
+    let had = project["source"]["buildspec"].as_str().unwrap().to_string();
+    let open = format!("      {}\n", template::ROOM_OPEN);
+    assert_eq!(had.matches(&open).count(), 1, "{had}");
+    project["source"]["buildspec"] =
+        serde_json::Value::String(had.replacen(&open, &format!("{open}{lines}"), 1));
+}
+
+/// satisfies: record 0119 as amended 2026-11-18 (design D3); the
+/// repository-steps spec's "A run project's buildspec": a run project's
+/// buildspec as sluice writes it but for a command of the repository's
+/// between its `# sluice:` lines passes, said so
+#[test]
+fn pool_check_reads_a_buildspec_with_the_repositorys_own_commands() {
+    if !alone("pool_check_reads_a_buildspec_with_the_repositorys_own_commands") {
+        return;
+    }
+    let (aws, key) = fleet_deployed();
+    run_buildspec_with(&aws, "      - ./push \"$SLUICE_CHECKOUT\"\n");
+    let f = Fakes::new();
+    let policy = fleet_policy(
+        &support::aws::public(&key),
+        "batch = false\nparallel = 10\n",
+    );
+    f.world.init("main", &[(POLICY_PATH, policy.as_str())]);
+    let (code, said) = sluice(&f, &["pool", "check", "main"]);
+    assert_eq!(code, 0, "{said}");
+    assert!(
+        said.contains(&format!(
+            "ok      sluice-run-linux-x64's buildspec is as sluice {} writes it, cloning acme/widgets, with the repository's own commands",
+            sluice::VERSION
+        )),
+        "{said}"
+    );
+    assert!(!said.contains("failed"), "{said}");
+}
+
+/// satisfies: record 0119 as amended 2026-11-18 (design D3; rule
+/// core.62); the repository-steps spec's "A command that leaves the
+/// buildspec's commands": a line between a run project's `# sluice:` lines
+/// at the buildspec's top level fails, naming the run project and the line
+#[test]
+fn pool_check_names_own_commands_that_leave_the_buildspec() {
+    if !alone("pool_check_names_own_commands_that_leave_the_buildspec") {
+        return;
+    }
+    let (aws, key) = fleet_deployed();
+    run_buildspec_with(&aws, "      - ./push\nartifacts:\n");
+    let line = aws.held.lock().unwrap().projects[0]["source"]["buildspec"]
+        .as_str()
+        .unwrap()
+        .lines()
+        .position(|l| l == "artifacts:")
+        .unwrap()
+        + 1;
+    let f = Fakes::new();
+    let policy = fleet_policy(
+        &support::aws::public(&key),
+        "batch = false\nparallel = 10\n",
+    );
+    f.world.init("main", &[(POLICY_PATH, policy.as_str())]);
+    let (code, said) = sluice(&f, &["pool", "check", "main"]);
+    assert_eq!(code, FAILED, "{said}");
+    assert!(
+        said.contains(&format!(
+            "failed  sluice-run-linux-x64's buildspec: its line {line}, \"artifacts:\" leaves its post_build commands"
+        )),
+        "{said}"
+    );
+    assert_eq!(said.matches("failed").count(), 1, "{said}");
+}
+
 /// satisfies: record 0119 (design D14); the actions-pool spec's "A pool the
 /// policy names is kept"
 #[test]
@@ -11661,6 +12112,7 @@ fn job_record_of_a_head_adds_its_bundle_with_no_claim() {
     let out = support::Scratch::new("job-head");
     let ran = out.path().join("sluice-run");
     let sign = out.path().join("sluice-sign");
+    let checkout = out.path().join("sluice-checkout");
     let version = f.world.version("main");
     for args in [
         vec![
@@ -11674,6 +12126,8 @@ fn job_record_of_a_head_adds_its_bundle_with_no_claim() {
             "macos-arm64",
             "--out",
             ran.to_str().unwrap(),
+            "--checkout",
+            checkout.to_str().unwrap(),
         ],
         vec![
             "job",

@@ -798,6 +798,7 @@ impl sluice::host_process::HostProcess for FakeProcess {
             here.clock,
             Some(lead),
             sluice::tick(None),
+            true,
             &mut self.kept.borrow_mut(),
         )
     }

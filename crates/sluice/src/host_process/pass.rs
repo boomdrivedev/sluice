@@ -84,9 +84,13 @@ pub struct Report {
 }
 
 /// One pass of the repository `s` and `host` bind, writing `reader`'s
-/// document where it reads for the host, naming `tick` (64, 129). A
-/// branch whose read or round fails is passed by with its words, and the
-/// pass goes on to every other (26; rule core.14).
+/// document where it reads for the host, naming `tick` (64, 129). It asks
+/// each remote that keeps branches' records where `asks`, and otherwise
+/// reads them as the binding's last ask fetched them, which a binding that
+/// has asked nothing must not do (129 as amended 2026-11-19). A branch
+/// whose read or round fails is passed by with its words, and the pass
+/// goes on to every other (26; rule core.14).
+#[allow(clippy::too_many_arguments)]
 pub fn pass(
     s: &Sluice<'_>,
     host: &dyn exec::Host,
@@ -94,6 +98,7 @@ pub fn pass(
     clock: &dyn Clock,
     reader: Option<&mut Lead>,
     tick: Duration,
+    asks: bool,
     kept: &mut Kept,
 ) -> Result<Report> {
     let mut out: Vec<u8> = Vec::new();
@@ -108,11 +113,15 @@ pub fn pass(
         let _ = lead.begin();
     }
     let seams = s.seams();
-    // 129: each remote that keeps branches' records asked once, first; a
-    // refusal is its branches' alone, read as last fetched.
-    if let Err(e) = seams.state.refresh() {
-        telemetry::warn(&format!("sluice: warning: {e:#}"));
-        report.refused = Some(format!("{e:#}"));
+    // 129: each remote that keeps branches' records asked once, first,
+    // where the pass asks; a refusal is its branches' alone, read as last
+    // fetched. Where nothing is in play, it asks once a minute at most, and
+    // reads them as last fetched between (129 as amended 2026-11-19).
+    if asks {
+        if let Err(e) = seams.state.refresh() {
+            telemetry::warn(&format!("sluice: warning: {e:#}"));
+            report.refused = Some(format!("{e:#}"));
+        }
     }
     // 97, previews-1 101: every pass, whether or not a branch has a queue.
     let mut freed: Vec<u8> = Vec::new();

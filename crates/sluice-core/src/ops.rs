@@ -1998,7 +1998,7 @@ mod tests {
             unreachable!("a submit forms nothing")
         }
 
-        fn commit(&self, _: &LandingCommit) -> Result<Rev> {
+        fn commit(&self, _: &str, _: &LandingCommit) -> Result<Rev> {
             unreachable!("a submit commits nothing")
         }
 
@@ -2154,6 +2154,10 @@ mod tests {
         }
 
         fn gone(&self, _: &str) -> Result<bool> {
+            unreachable!("a submit reads no place")
+        }
+
+        fn path(&self, _: &str) -> Result<Option<std::path::PathBuf>> {
             unreachable!("a submit reads no place")
         }
 

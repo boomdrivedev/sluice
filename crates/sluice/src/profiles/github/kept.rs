@@ -32,6 +32,12 @@
 //!   beside it, so that every process of the host reads a request once in
 //!   a quarter of the interval between them (137, design D3, D4).
 //!
+//! - `authors/<app>.json`: the app's bot, its login and its user id, and
+//!   when they were read ([`Bot`]), which every commit sluice pushes as
+//!   the app names as its author and committer, read from GitHub again a
+//!   day after and standing while that read fails (record 0019 as amended
+//!   2026-11-18; rule core.43). The sweep of unused answers leaves it.
+//!
 //! An `intake/` an older sluice kept here is read by nothing, and may be
 //! removed (design D23).
 //!
@@ -160,6 +166,15 @@ pub struct Follow {
     pub from: String,
     /// sluice's check on `head`, as last read; `None` where none stood.
     pub check: Option<Posted>,
+}
+
+/// The app's bot as GitHub last gave it: its login, its user id, and when
+/// they were read (record 0019 as amended 2026-11-18).
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Bot {
+    pub login: String,
+    pub id: u64,
+    pub read_at: DateTime<Utc>,
 }
 
 /// The host's `forge/` directory.
@@ -353,6 +368,21 @@ impl Kept {
         let out = f(&mut follows);
         write(&self.follows_path(repo, base, "json"), &follows)?;
         Ok(out)
+    }
+
+    fn bot_path(&self, app: u64) -> PathBuf {
+        self.dir.join("authors").join(format!("{app}.json"))
+    }
+
+    /// The bot kept for `app`, however old; `None` when none is, or it is
+    /// torn.
+    pub fn bot(&self, app: u64) -> Option<Bot> {
+        read(&self.bot_path(app))
+    }
+
+    /// Keep `bot` for `app`, in place of the one kept.
+    pub fn keep_bot(&self, app: u64, bot: &Bot) -> Result<()> {
+        write(&self.bot_path(app), bot)
     }
 
     /// The pause kept for `allowance`, standing or past; `None` when none

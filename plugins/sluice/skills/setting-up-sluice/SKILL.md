@@ -551,7 +551,13 @@ GitHub. Add `forge` to each branch's `trust` and name its `systems`. Then
 ask the user to give the app Actions read and write, and to make the
 `sluice` environment it prints, deployable from that branch alone,
 holding `SLUICE_APP_KEY` and `SLUICE_APP_ID`. Land the files, then
-`sluice forge check <branch>` reads all of it back.
+`sluice forge check <branch>` reads all of it back. The run job leaves
+room, between its two `# sluice:` lines, for the project's own steps
+after the checks, such as pushing what they built to a shared cache, run
+in the checkout the checks ran in, `SLUICE_CHECKOUT`, with a secret of
+the repository's; `sluice init actions --force` keeps them. [Your own
+steps after the checks](https://agentplot.github.io/sluice/guides/pools/#your-own-steps-after-the-checks)
+says how.
 
 For a queue whose every run goes to a pool, offer a CodeBuild fleet in
 the project's own AWS account, once the app is set up and the policy
@@ -567,7 +573,12 @@ and `[pools.codebuild]`. Give the signer those hosts sign as
 `systems = []`, so they claim no run, and set each branch's `trust` to
 that signer and `codebuild`, with `batch = false` and `parallel` at the
 fleet's maximum. Land the policy, then `sluice pool check <branch>`
-reads the pool back from AWS.
+reads the pool back from AWS. Each run project's buildspec leaves room,
+between its two `# sluice:` lines, for the project's own commands after
+the checks, in `SLUICE_CHECKOUT`, under the managed policies the deploy
+gives as `RunPolicies`; `sluice init codebuild --force` keeps them.
+[Your own commands after the checks](https://agentplot.github.io/sluice/guides/pools/#your-own-commands-after-the-checks)
+says how.
 
 A pattern with `remote = "origin"` needs no push by hand: `sluice branch
 create <branch> --from main` makes each branch under it there as the app,

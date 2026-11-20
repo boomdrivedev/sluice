@@ -9,6 +9,7 @@ mod support;
 use std::collections::BTreeMap;
 use std::rc::Rc;
 
+use sluice::identity::{Author, Credentials, Identity};
 use sluice::profiles::local_files::LocalFiles;
 use sluice::profiles::places::Places;
 use sluice::profiles::pushed_refs::PushedRefs;
@@ -47,6 +48,100 @@ fn host(repo: &Repo, signing: Option<(&str, PrivateKey)>) -> RemoteRefs {
             key,
         }),
     )
+}
+
+/// An identity of the test's own: it reaches each remote at its own
+/// address, gives credentials no remote on the host's disk asks for, and
+/// names `a fake <fake@identity.invalid>` as the author of what it pushes.
+struct Named;
+
+impl Identity for Named {
+    fn name(&self) -> String {
+        "a fake identity".into()
+    }
+
+    fn url(&self, remote_url: &str) -> Option<String> {
+        Some(remote_url.into())
+    }
+
+    fn credentials(&self, _url: &str) -> anyhow::Result<Credentials> {
+        Ok(Credentials {
+            username: "x-fake".into(),
+            password: "tok".into(),
+            about: "the fake's token".into(),
+        })
+    }
+
+    fn renew(&self, url: &str, _refused: &str) -> anyhow::Result<Credentials> {
+        self.credentials(url)
+    }
+
+    fn author(&self, _url: &str) -> anyhow::Result<Author> {
+        Ok(Author {
+            name: "a fake".into(),
+            email: "fake@identity.invalid".into(),
+        })
+    }
+}
+
+/// A host's records of `origin`, reached as [`Named`].
+fn host_as_named(repo: &Repo) -> RemoteRefs {
+    let identity = (
+        Rc::new(Named) as Rc<dyn Identity>,
+        std::path::PathBuf::from(env!("CARGO_BIN_EXE_sluice")),
+    );
+    let pushed =
+        Rc::new(PushedRefs::open_as(repo.dir(), "origin", Some(identity), recorded()).unwrap());
+    RemoteRefs::new(&repo.dir().join(".git"), pushed, None)
+}
+
+/// The forge-identity spec's "A records commit pushed as the identity": a
+/// branch's state written by a host that reaches the remote as an identity
+/// is a commit naming the identity's author as its author and committer,
+/// and one written by a host with its own credentials names sluice (record
+/// 0019 as amended 2026-11-18; rule core.43).
+#[test]
+fn a_records_commit_names_whoever_pushes_it() {
+    let (a, bare, b) = two_hosts("rr-author");
+    let state = |name: &str| {
+        let out = support::git_command()
+            .arg("--git-dir")
+            .arg(bare.path())
+            .args(["cat-file", "-p", name])
+            .output()
+            .unwrap();
+        assert!(out.status.success(), "{out:?}");
+        String::from_utf8(out.stdout).unwrap()
+    };
+    let named = host_as_named(&a);
+    assert_eq!(
+        named
+            .write("main", 0, put(&[("branch.json", "{}\n")]))
+            .unwrap(),
+        Written::Written(1)
+    );
+    let raw = state("refs/sluice/state/main");
+    assert!(
+        raw.contains("\nauthor a fake <fake@identity.invalid> "),
+        "{raw}"
+    );
+    assert!(
+        raw.contains("\ncommitter a fake <fake@identity.invalid> "),
+        "{raw}"
+    );
+
+    let own = host(&b, None);
+    assert_eq!(
+        own.write("main", 1, put(&[("branch.json", "{\"b\":1}\n")]))
+            .unwrap(),
+        Written::Written(2)
+    );
+    let raw = state("refs/sluice/state/main");
+    assert!(raw.contains("\nauthor sluice <sluice@localhost> "), "{raw}");
+    assert!(
+        raw.contains("\ncommitter sluice <sluice@localhost> "),
+        "{raw}"
+    );
 }
 
 /// A command's retry policy whose pauses are skipped, as if taken.

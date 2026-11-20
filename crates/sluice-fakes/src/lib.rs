@@ -2485,7 +2485,7 @@ impl Branch for FakeBranch {
         Ok(Formed::Revision(rev))
     }
 
-    fn commit(&self, c: &LandingCommit) -> Result<Rev> {
+    fn commit(&self, _: &str, c: &LandingCommit) -> Result<Rev> {
         let mut inner = self.0 .0.borrow_mut();
         let tree = inner.commits[&c.tree_of].tree.clone();
         Ok(World::put_commit(
@@ -3530,6 +3530,14 @@ impl Checkout for FakeCheckout {
             return Err(Stopped(format!("crashed after releasing {name}")).into());
         }
         Ok(())
+    }
+
+    fn path(&self, name: &str) -> Result<Option<std::path::PathBuf>> {
+        let inner = self.0 .0.borrow();
+        Ok(inner
+            .places
+            .contains_key(name)
+            .then(|| format!("/fake/places/{name}").into()))
     }
 
     fn gone(&self, name: &str) -> Result<bool> {

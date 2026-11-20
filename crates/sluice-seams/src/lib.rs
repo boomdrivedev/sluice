@@ -462,6 +462,13 @@ pub trait Checkout {
     /// written or released.
     fn gone(&self, name: &str) -> Result<bool>;
 
+    /// Record 0119 as amended 2026-11-18 (design D2 of the change
+    /// `a-pools-run-job-runs-the-repositorys-own-steps`): the folder of the
+    /// place `name`'s working copy, as its record names it; `None` where it
+    /// has no record, or none names a working copy yet. A read: nothing is
+    /// written or released.
+    fn path(&self, name: &str) -> Result<Option<PathBuf>>;
+
     /// 123: free what sluice itself holds for the place `name`, running
     /// nothing in its name: its runs' groups ended and their directories
     /// removed, the checkout sluice made removed, by git where git lists
@@ -1533,8 +1540,10 @@ pub trait Branch {
     /// 43: `head` merged onto `onto`, or the conflict.
     fn form(&self, onto: &Rev, head: &Rev) -> Result<Formed>;
 
-    /// 44: write one landing commit.
-    fn commit(&self, commit: &LandingCommit) -> Result<Rev>;
+    /// 44: write one landing commit for `branch`, the branch it lands on,
+    /// which a profile that writes as whoever pushes the branch reads it by
+    /// (record 0019 as amended 2026-11-18; rule core.43).
+    fn commit(&self, branch: &str, commit: &LandingCommit) -> Result<Rev>;
 
     /// Whether `rev` is `tip` or in its history: a landing found under a
     /// branch moved again since (24).

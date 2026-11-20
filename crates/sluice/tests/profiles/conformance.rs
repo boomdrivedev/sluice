@@ -97,6 +97,10 @@ impl Checkout for RecordedPlaces {
         self.inner.gone(name)
     }
 
+    fn path(&self, name: &str) -> Result<Option<std::path::PathBuf>> {
+        self.inner.path(name)
+    }
+
     fn free(&self, name: &str) -> Result<()> {
         self.inner.free(name)?;
         self.log.borrow_mut().released.push(name.into());
@@ -283,8 +287,8 @@ impl Branch for RecordedRefs {
         self.inner.form(onto, head)
     }
 
-    fn commit(&self, commit: &LandingCommit) -> Result<Rev> {
-        self.inner.commit(commit)
+    fn commit(&self, branch: &str, commit: &LandingCommit) -> Result<Rev> {
+        self.inner.commit(branch, commit)
     }
 
     fn contains(&self, tip: &Rev, rev: &Rev) -> Result<bool> {
