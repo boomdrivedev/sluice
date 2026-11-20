@@ -4,6 +4,13 @@
 //! and bought again five minutes before it ends, or at once for a call
 //! GitHub refused it on. Nothing is written anywhere.
 //!
+//! The tokens are held in [`Tokens`], one for each app and repository,
+//! which every app a process opens may share: sluice's host process holds
+//! one for its life and hands it to every binding it makes, on every
+//! thread, so a repository's token is got once for its hour however many
+//! bindings read the repository, and one got while another call waits on
+//! it is the one that call takes (record 0108 as amended 2026-11-19).
+//!
 //! Where the host names a credential command in place of the app's key,
 //! the token for a repository is the command's, asked as git asks a
 //! credential helper ([`CredentialCommand`]), held as a bought one is
@@ -46,6 +53,7 @@
 use std::cell::{Cell, RefCell};
 use std::collections::BTreeMap;
 use std::rc::Rc;
+use std::sync::{Arc, Mutex, MutexGuard};
 
 use anyhow::{anyhow, bail, Context, Result};
 use chrono::{DateTime, TimeDelta, Utc};
@@ -155,6 +163,34 @@ struct Token {
     about: String,
 }
 
+/// The tokens a process holds, one for each app and repository, shared by
+/// every [`App`] given it, on any thread (record 0108 as amended
+/// 2026-11-19). Each repository's token is got under that repository's
+/// own lock, so two calls that need it at once get it once, and a
+/// repository's token never waits on another's. A clone holds the same
+/// tokens.
+#[derive(Clone, Default)]
+pub struct Tokens(Arc<Mutex<BTreeMap<(u64, Repo), Slot>>>);
+
+/// One app's token for one repository, while it holds one.
+type Slot = Arc<Mutex<Option<Token>>>;
+
+impl Tokens {
+    /// App `app`'s place for its token for `repo`.
+    fn slot(&self, app: u64, repo: &Repo) -> Slot {
+        locked(&self.0)
+            .entry((app, repo.clone()))
+            .or_default()
+            .clone()
+    }
+}
+
+/// `m` locked, whatever a thread that panicked holding it left: a token
+/// is whole or absent, never half written.
+fn locked<T>(m: &Mutex<T>) -> MutexGuard<'_, T> {
+    m.lock().unwrap_or_else(|e| e.into_inner())
+}
+
 /// How the app comes by a token for a repository: minted with its key, or
 /// given by the host's credential command (record 0108).
 enum Mint {
@@ -241,7 +277,9 @@ pub struct App {
     git: String,
     now: Now,
     http: ureq::Agent,
-    tokens: RefCell<BTreeMap<Repo, Token>>,
+    /// The tokens it holds, its own or shared with the process's other
+    /// apps ([`App::holding`]).
+    tokens: Tokens,
     /// The app's bot, once read.
     login: RefCell<Option<String>>,
     /// The bot commits name, where nothing is kept on the host.
@@ -303,7 +341,7 @@ impl App {
             git: GIT.into(),
             now,
             http: http_config().into(),
-            tokens: RefCell::default(),
+            tokens: Tokens::default(),
             login: RefCell::default(),
             bot: RefCell::default(),
             policy,
@@ -356,6 +394,15 @@ impl App {
     /// [`GIT`]: a test's fake.
     pub fn serving_git(mut self, base: &str) -> App {
         self.git = base.trim_end_matches('/').into();
+        self
+    }
+
+    /// `self`, holding its tokens in `tokens`, which other apps of this
+    /// process may hold theirs in too: a token any of them got for a
+    /// repository is the one each takes for it, until it is got again
+    /// (record 0108 as amended 2026-11-19).
+    pub fn holding(mut self, tokens: Tokens) -> App {
+        self.tokens = tokens;
         self
     }
 
@@ -622,21 +669,23 @@ impl App {
         Ok(self.held(repo)?.secret)
     }
 
-    /// A token for `repo` as [`App::token`] gives it, or, `fresh`, one
-    /// bought now whatever this process holds, which replaces it: for a
-    /// call GitHub refused the last one on. Under a credential command the
-    /// refused token is erased and one got afresh, and a command that
-    /// gives the refused token again gives none afresh (record 0108). A
-    /// fresh token is handed over once it is [`SETTLE`] old.
-    pub fn issue(&self, repo: &Repo, fresh: bool) -> Result<Issued> {
-        let t = if fresh {
-            let t = self.renewed(repo)?;
-            if let Ok(wait) = (SETTLE - ((self.now)() - t.bought)).to_std() {
-                std::thread::sleep(wait);
+    /// A token for `repo` as [`App::token`] gives it, or, where GitHub
+    /// `refused` a token, one got in its place: the token held where it is
+    /// another, got since by another call, and otherwise one bought now,
+    /// which replaces it. Under a credential command the refused token is
+    /// erased and one got afresh, and a command that gives the refused
+    /// token again gives none afresh (record 0108). A fresh token is handed
+    /// over once it is [`SETTLE`] old.
+    pub fn issue(&self, repo: &Repo, refused: Option<&str>) -> Result<Issued> {
+        let t = match refused {
+            Some(refused) => {
+                let t = self.renewed(repo, refused)?;
+                if let Ok(wait) = (SETTLE - ((self.now)() - t.bought)).to_std() {
+                    std::thread::sleep(wait);
+                }
+                t
             }
-            t
-        } else {
-            self.held(repo)?
+            None => self.held(repo)?,
         };
         let age = ((self.now)() - t.bought).num_seconds().max(0);
         let about = match (t.installation, t.ends) {
@@ -654,11 +703,14 @@ impl App {
         })
     }
 
-    /// The token this process holds for `repo` while it lasts five
-    /// minutes more, or one given with no end, or one got now.
+    /// The token held for `repo` while it lasts five minutes more, or one
+    /// given with no end, or one got now under the repository's lock, so
+    /// a call that waited on that lock takes the token got there.
     fn held(&self, repo: &Repo) -> Result<Token> {
+        let slot = self.tokens.slot(self.id, repo);
+        let mut held = locked(&slot);
         let now = (self.now)();
-        if let Some(t) = self.tokens.borrow().get(repo) {
+        if let Some(t) = held.as_ref() {
             match t.ends {
                 Some(ends) if ends - now > REFRESH => return Ok(t.clone()),
                 // Held until GitHub refuses it, as git holds a credential
@@ -667,42 +719,51 @@ impl App {
                 Some(_) => {}
             }
         }
-        self.get_token(repo)
+        let t = self.get_token(repo)?;
+        *held = Some(t.clone());
+        Ok(t)
     }
 
     /// A token got now for `repo` alone, bought with the app's key or
-    /// given by the host's command, kept for the next call on `repo`.
+    /// given by the host's command.
     fn get_token(&self, repo: &Repo) -> Result<Token> {
-        let t = match &self.mint {
+        Ok(match &self.mint {
             Mint::Key(_) => self.buy(repo)?,
             Mint::Command(command) => {
                 let given = command.get(&asked(repo))?;
                 self.described(command, repo, given.password, given.ends)?
             }
-        };
-        self.tokens.borrow_mut().insert(repo.clone(), t.clone());
-        Ok(t)
+        })
     }
 
-    /// A token got afresh for `repo` in place of the one held, which
-    /// GitHub refused: under a command, the refused one erased first, and
-    /// the same one given again no fresh token (134; rule core.29; record
-    /// 0108).
-    fn renewed(&self, repo: &Repo) -> Result<Token> {
-        let Mint::Command(command) = &self.mint else {
-            return self.get_token(repo);
+    /// A token for `repo` in place of `refused`, which GitHub refused: the
+    /// one held where another call got it since, and otherwise one got
+    /// afresh in place of the one held; under a command, the refused one
+    /// erased first, and the same one given again no fresh token (134;
+    /// rule core.29; record 0108). It is got under the repository's lock,
+    /// so two calls refused the same token get one afresh between them.
+    fn renewed(&self, repo: &Repo, refused: &str) -> Result<Token> {
+        let slot = self.tokens.slot(self.id, repo);
+        let mut held = locked(&slot);
+        if let Some(t) = held.as_ref().filter(|t| t.secret != refused) {
+            return Ok(t.clone());
+        }
+        *held = None;
+        let t = match &self.mint {
+            Mint::Key(_) => self.buy(repo)?,
+            Mint::Command(command) => {
+                let asked = asked(repo);
+                command.erase(&asked, super::TOKEN_USER, refused);
+                let given = command.get(&asked)?;
+                if given.password == refused {
+                    bail!(
+                        "[forge] credential {command} gave again the token GitHub refused for {repo}"
+                    );
+                }
+                self.described(command, repo, given.password, given.ends)?
+            }
         };
-        let asked = asked(repo);
-        let refused = self.tokens.borrow_mut().remove(repo);
-        if let Some(r) = &refused {
-            command.erase(&asked, super::TOKEN_USER, &r.secret);
-        }
-        let given = command.get(&asked)?;
-        if refused.is_some_and(|r| r.secret == given.password) {
-            bail!("[forge] credential {command} gave again the token GitHub refused for {repo}");
-        }
-        let t = self.described(command, repo, given.password, given.ends)?;
-        self.tokens.borrow_mut().insert(repo.clone(), t.clone());
+        *held = Some(t.clone());
         Ok(t)
     }
 
@@ -858,8 +919,8 @@ impl App {
             bail!(
                 "a run build reads {repo} with a token of contents: read on it alone, which \
                  sluice buys with the app's key; [forge] credential {command} gives tokens \
-                 sluice cannot narrow, so name the app's key as [forge] key on a host that \
-                 leads a branch on a CodeBuild pool"
+                 sluice cannot narrow, so name the app's key as [forge] key on a host that runs \
+                 the queue of a branch on a CodeBuild pool"
             );
         }
         let installation = self.installation(repo)?;
@@ -991,6 +1052,9 @@ impl App {
         // The last failure's words, for a token that could not be bought
         // afresh after it.
         let mut said = String::new();
+        // The installation's token the last try sent, which a renewal
+        // replaces only where it is still the one held.
+        let mut tried: Option<String> = None;
         self.policy
             .run(call.kind(), |t| {
                 // A pause is known before any token is got, so no token is
@@ -1005,13 +1069,16 @@ impl App {
                 let auth = match bearer {
                     Bearer::App => self.jwt(),
                     Bearer::Repo(repo) if t.renew() => {
-                        self.issue(repo, true).map(|i| i.secret).map_err(|e| {
-                            let how = match self.mint {
-                                Mint::Key(_) => "bought",
-                                Mint::Command(_) => "got",
-                            };
-                            anyhow!("{said}; and no token could be {how} afresh: {e:#}")
-                        })
+                        let refused = tried.take();
+                        self.issue(repo, refused.as_deref())
+                            .map(|i| i.secret)
+                            .map_err(|e| {
+                                let how = match self.mint {
+                                    Mint::Key(_) => "bought",
+                                    Mint::Command(_) => "got",
+                                };
+                                anyhow!("{said}; and no token could be {how} afresh: {e:#}")
+                            })
                     }
                     Bearer::Repo(repo) => self.token(repo),
                     Bearer::Token(token) | Bearer::Given(_, token) => Ok(token.to_string()),
@@ -1021,6 +1088,9 @@ impl App {
                     Call::Make => Failed::new(Judged::Answered, anyhow!("{e:#}")),
                     _ => Failed::new(Judged::Answered, e),
                 })?;
+                if let Bearer::Repo(_) = bearer {
+                    tried = Some(auth.clone());
+                }
                 let url = format!("{}{path}", self.api);
                 let kept = match (&self.kept, method) {
                     (Some(k), "GET") => k.answer(&url),
@@ -1617,6 +1687,32 @@ mod tests {
         wider.store(true, std::sync::atomic::Ordering::SeqCst);
         let e = format!("{:#}", app.reading(&repo).unwrap_err());
         assert!(e.contains("also holds contents"), "{e}");
+    }
+
+    /// Record 0119 (design D4; core.26): a host whose `[forge]` names a
+    /// credential command buys no reading token, since it cannot narrow
+    /// what the command gives, and says to name the app's key on a host
+    /// that runs the queue of a branch on a CodeBuild pool; nothing is
+    /// asked of the command or of GitHub.
+    #[test]
+    fn a_credential_command_buys_no_reading_token() {
+        let command = CredentialCommand::new(
+            "/opt/forge/bin/token-helper",
+            vec!["--app".into(), "sluice".into()],
+        );
+        let policy = Rc::new(Policy::command());
+        let app = App::commanded(4242, command, API, Box::new(Utc::now), policy);
+        let repo = Repo {
+            owner: "acme".into(),
+            name: "widgets".into(),
+        };
+        assert_eq!(
+            format!("{:#}", app.reading(&repo).unwrap_err()),
+            "a run build reads acme/widgets with a token of contents: read on it alone, which \
+             sluice buys with the app's key; [forge] credential /opt/forge/bin/token-helper \
+             --app sluice gives tokens sluice cannot narrow, so name the app's key as [forge] \
+             key on a host that runs the queue of a branch on a CodeBuild pool"
+        );
     }
 
     /// A 5xx is GitHub unable to answer just then, told apart from any

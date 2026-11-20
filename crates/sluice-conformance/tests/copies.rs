@@ -203,6 +203,7 @@ fn on<'a>(h: &'a Harness, name: &str) -> Sluice<'a> {
     h.w().be_host(name);
     h.sluice().as_peer(Peer {
         name: name.into(),
+        repository: "this-repository".into(),
         lease: Duration::from_secs(300),
         alive: Duration::from_secs(120),
         signer: Some("box".into()),
@@ -265,6 +266,7 @@ fn submit_to_main(h: &Harness, worktree: &str) -> sluice_core::Accepted {
             after: Vec::new(),
             priority: 0,
             subject: None,
+            trace: None,
         })
         .unwrap()
         .expect("accepted")
@@ -359,6 +361,7 @@ fn a_group_naming_a_bolts_worktree_submits_the_remotes_revision_for_it() {
             after: Vec::new(),
             priority: 0,
             subjects: Vec::new(),
+            trace: None,
         })
         .unwrap()
         .expect("accepted");

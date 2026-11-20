@@ -8,7 +8,10 @@
 //! commands at once take the start lock in turn: the first starts the
 //! process, and the others find it answering. A command newer than the
 //! process that answers has it hand over once, waits for its socket to go,
-//! and starts its own; an older one uses the process as it is.
+//! and starts its own; an older one uses the process as it is. A newer
+//! command has an older `sluice daemon` start afresh in place as the
+//! command's own executable instead, and uses the image started afresh
+//! (design D3, D4 of `sluice-runs-as-a-daemon`).
 
 use std::ffi::OsString;
 use std::fs::{File, OpenOptions};
@@ -143,15 +146,68 @@ impl Client {
     }
 
     /// The host process, started where none answers, and an older one
-    /// handed over once for this newer command's own (D8).
+    /// handed over once for this newer command's own (D8): an older daemon
+    /// started afresh in place as this command's executable, whose image
+    /// started afresh is this command's own start (design D4 of
+    /// `sluice-runs-as-a-daemon`).
     pub fn reach(&self) -> Result<Connection> {
         if let Some(c) = self.answering()? {
             if !older(&c.named.version, &self.version) {
                 return Ok(c);
             }
+            if c.named.daemon {
+                return self.afresh(c);
+            }
             self.hand_over(c)?;
         }
         self.start()
+    }
+
+    /// This command's executable, resolved through every link, which an
+    /// older daemon starts afresh as (design D3 of `sluice-runs-as-a-daemon`).
+    fn program(&self) -> Option<PathBuf> {
+        std::fs::canonicalize(&self.program).ok()
+    }
+
+    /// D4 of `sluice-runs-as-a-daemon`: have the older daemon `c` start
+    /// afresh in place as this command's executable, and wait, as long as
+    /// a hand-over is waited for ([`HAND_OVER_WAIT`]), for a host process
+    /// that is not the image it asked, another pid or the same pid with
+    /// another `since`, which it uses as a start of its own, whatever its
+    /// version. Where the image it asked still answers then, it fails
+    /// naming the log; where none answers, it starts its own.
+    fn afresh(&self, mut c: Connection) -> Result<Connection> {
+        let asked = c.named.clone();
+        send(
+            &mut c.writer,
+            &Request::HandOver {
+                program: self.program(),
+            },
+        )?;
+        let _ = receive::<Answer>(&mut c.reader);
+        drop(c);
+        let until = Instant::now() + HAND_OVER_WAIT;
+        loop {
+            let answered = self.answering()?;
+            if let Some(n) = answered {
+                if n.named.pid != asked.pid || n.named.since != asked.since {
+                    return Ok(n);
+                }
+                if Instant::now() >= until {
+                    bail!(
+                        "sluice daemon {} (pid {}) was asked to start afresh as {} and still answers as it was after {} seconds; see {}",
+                        asked.version,
+                        asked.pid,
+                        self.program.display(),
+                        HAND_OVER_WAIT.as_secs(),
+                        self.paths.log().display()
+                    );
+                }
+            } else if Instant::now() >= until {
+                return self.start();
+            }
+            std::thread::sleep(Duration::from_millis(20));
+        }
     }
 
     /// Have the older process `c` hand over, and wait for it to end, which
@@ -159,7 +215,12 @@ impl Client {
     /// gives its tasks to finish their rounds, and a start's wait after
     /// ([`HAND_OVER_WAIT`]).
     fn hand_over(&self, mut c: Connection) -> Result<()> {
-        send(&mut c.writer, &Request::HandOver)?;
+        send(
+            &mut c.writer,
+            &Request::HandOver {
+                program: self.program(),
+            },
+        )?;
         let _ = receive::<Answer>(&mut c.reader);
         let until = Instant::now() + HAND_OVER_WAIT;
         while alive(c.named.pid) {
@@ -353,9 +414,16 @@ impl Client {
         Ok(c)
     }
 
-    /// Ask for a session's or a preview's room (D12), the connection kept
-    /// while it waits and while it is held.
-    pub fn hold(&self, kind: RunKind, repository: &Path, place: &str) -> Result<Connection> {
+    /// Ask for a session's or a preview's room (D12), for the branch its
+    /// run is held to where it names one (154), the connection kept while
+    /// it waits and while it is held.
+    pub fn hold(
+        &self,
+        kind: RunKind,
+        repository: &Path,
+        place: &str,
+        branch: Option<&str>,
+    ) -> Result<Connection> {
         let mut c = self.reach()?;
         send(
             &mut c.writer,
@@ -363,6 +431,7 @@ impl Client {
                 kind,
                 repository: repository.to_path_buf(),
                 place: place.to_string(),
+                branch: branch.map(str::to_string),
             },
         )?;
         Ok(c)

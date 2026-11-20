@@ -997,7 +997,10 @@ impl Identity for FakeIdentity {
         })
     }
 
-    fn renew(&self, url: &str) -> anyhow::Result<Credentials> {
+    /// Renewed in place of the token it gave last, which is the one the
+    /// remote refused.
+    fn renew(&self, url: &str, refused: &str) -> anyhow::Result<Credentials> {
+        assert_eq!(refused, self.token(self.renewed.get()));
         if let Some(why) = &self.refuses {
             anyhow::bail!("{why}");
         }
@@ -1511,6 +1514,131 @@ fn a_push_refused_on_its_token_is_made_once_more() {
         [(fresh, vec![(zero, head, "refs/heads/unit/u".into())])]
     );
     assert_eq!(identity.renewed.get(), 1);
+}
+
+/// GitHub's answer to a credential that may not write the repository, as
+/// it answered the job's own token in boomdrivedev/sluice-actions-trial.
+fn denied() -> Answer {
+    (
+        403,
+        vec![("Content-Type".into(), "text/plain".into())],
+        "Permission to o/r.git denied to github-actions[bot].\n".into(),
+    )
+}
+
+/// Record 0019 as amended 2026-11-18 (boomdrivedev/sluice-actions-trial,
+/// sluice 0.97.4: the sign job's `sluice job record` sent the job's own
+/// token, which `actions/checkout` stores as a header for the forge's
+/// address, and the App's token was blamed five times): a call as the
+/// identity sends no header git's configuration holds for the remote's
+/// address, and the push is the identity's.
+#[test]
+fn a_header_gits_configuration_holds_is_never_sent_as_the_identity() {
+    let repo = Repo::new("stored-header");
+    let _bare = repo.bare_origin();
+    let base = repo.rev("main");
+    let head = repo.branch("unit/u", "main", &[("a", Some("1"))]);
+    let jobs = format!("Basic {}", base64(b"x-access-token:the-jobs-token"));
+    let fake = {
+        let jobs = jobs.clone();
+        remote(move |a, r| match a == jobs {
+            true => denied(),
+            false => takes(r, &[("refs/heads/main", &base)]),
+        })
+    };
+    let at = format!("{}/", fake.url());
+    repo.git(&[
+        "config",
+        &format!("http.{at}.extraheader"),
+        &format!("AUTHORIZATION: {jobs}"),
+    ]);
+    let identity = Rc::new(FakeIdentity::new(&format!("{at}o/r.git"), "fake-token"));
+    let p = as_identity(&repo, &identity);
+    p.push_branch(&rev(head.clone()), "unit/u").unwrap();
+    let ours = basic("fake-token");
+    assert!(
+        given(&fake).iter().all(|a| *a == ours),
+        "git sent {:?}",
+        given(&fake)
+    );
+    let zero = "0".repeat(40);
+    assert_eq!(
+        pushes(&fake),
+        [(ours, vec![(zero, head, "refs/heads/unit/u".into())])]
+    );
+    assert_eq!(identity.renewed.get(), 0);
+}
+
+/// 134, record 0019 as amended 2026-11-18: a push the remote refused on a
+/// credential git sent of its own, never asking sluice for the
+/// identity's, is the remote's answer: made once, its failure in the
+/// remote's words, naming what git sent and never the identity's token as
+/// refused, and no token bought afresh, since git would send the same.
+/// Here the host's configuration rewrites the remote's address, to one
+/// carrying a token or to one it stores a header for.
+#[test]
+fn a_credential_git_sends_of_its_own_is_named_and_never_blamed_on_the_identity() {
+    for (n, stored) in ["a token in the address", "a header for the address"]
+        .into_iter()
+        .enumerate()
+    {
+        let repo = Repo::new(&format!("own-credential-{n}"));
+        let _bare = repo.bare_origin();
+        let fake = remote(|_, _| denied());
+        let at = format!("{}/", fake.url());
+        let (sent, named) = match n {
+            0 => {
+                let carrying = at.replace("://", "://job:the-jobs-token@");
+                repo.git(&["config", &format!("url.{carrying}.insteadOf"), &at]);
+                (
+                    base64(b"job:the-jobs-token"),
+                    "the user name \"job\" and the password in the address git reached it by"
+                        .to_string(),
+                )
+            }
+            _ => {
+                let elsewhere = format!("{at}mirror/");
+                let jobs = base64(b"x-access-token:the-jobs-token");
+                repo.git(&["config", &format!("url.{elsewhere}.insteadOf"), &at]);
+                repo.git(&[
+                    "config",
+                    &format!("http.{elsewhere}.extraheader"),
+                    &format!("AUTHORIZATION: Basic {jobs}"),
+                ]);
+                (
+                    jobs,
+                    format!("the header git's configuration stores for {elsewhere}o/r.git"),
+                )
+            }
+        };
+        let identity = Rc::new(FakeIdentity::new(&format!("{at}o/r.git"), "fake-token"));
+        let p = as_identity(&repo, &identity);
+        let head = rev(repo.rev("HEAD"));
+        let err = format!("{:#}", p.push_branch(&head, "agent").unwrap_err());
+        assert!(
+            err.contains("Permission to o/r.git denied to github-actions[bot]."),
+            "{stored}: {err}"
+        );
+        assert!(
+            err.ends_with(&format!(
+                "origin refused {named}, which git sent in place of a fake identity's \
+                 credentials, never asking sluice for them"
+            )),
+            "{stored}: {err}"
+        );
+        assert!(!err.contains("the fake's token"), "{stored}: {err}");
+        assert!(!err.contains("the-jobs-token"), "{stored}: {err}");
+        assert_eq!(
+            given(&fake),
+            [format!("Basic {sent}")],
+            "{stored}: one push, on git's own credential"
+        );
+        assert_eq!(
+            identity.renewed.get(),
+            0,
+            "{stored}: no token bought afresh"
+        );
+    }
 }
 
 /// 134: a push refused on every token until the retry policy's time is

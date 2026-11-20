@@ -558,6 +558,7 @@ fn s58_a_bolts_landing_worktree_submits_the_bolt_as_its_remote_holds_it() {
             after: Vec::new(),
             priority: 0,
             subject: None,
+            trace: None,
         })
         .unwrap()
         .expect("accepted");

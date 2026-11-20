@@ -96,11 +96,13 @@ combination passes.
     until it is released. One per landing, side by side, nothing kept
     checked out by hand. [Previews](/sluice/guides/previews/).
   </Card>
-  <Card title="No daemon" icon="setting">
-    Nothing is installed or kept running for sluice. The first command
-    that needs the host's queues moved starts sluice's own process, which
-    moves every repository's queues and ends once none has work. What a
-    preview leaves up, your own tools keep until it is released. Every
+  <Card title="No daemon needed" icon="setting">
+    Nothing needs to be installed or kept running for sluice. The first
+    command that needs the host's queues moved starts sluice's own
+    process, which moves every repository's queues and ends once none has
+    work. A machine that runs queues for other hosts may keep
+    `sluice daemon` running; nothing needs it. What a preview leaves up,
+    your own tools keep until it is released. Every
     decision is written to plain files before it is acted on, so a crash
     at any point resumes from the files.
   </Card>

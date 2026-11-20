@@ -32,6 +32,13 @@ use crate::identity::Identity;
 use crate::instance::Instance;
 use crate::retry;
 
+/// The tokens of sluice's identity on the forge a process holds, one for
+/// each repository, which every binding given them shares on any thread:
+/// sluice's host process holds one for its life, so no binding it makes
+/// gets a repository's token while one it holds lasts (record 0108 as
+/// amended 2026-11-19).
+pub use github::app::Tokens;
+
 /// The variables a multiplexer's pane names its session by, as the
 /// driver profile reads them (51): what nothing started outside a pane
 /// carries, sluice's host process among it (135; design D3).
@@ -52,6 +59,9 @@ pub struct Bound {
     /// 135: sluice's host process, reached through its socket, or, in its
     /// own repositories' tasks, read in place.
     pub host_process: Box<dyn crate::host_process::HostProcess>,
+    /// The repository as every sluice made for it names it in its metrics,
+    /// read once at the binding (rule core.66; design D3).
+    pub repository: String,
 }
 
 /// The driver seam as an instance binds it: a pull request's place,
@@ -105,7 +115,20 @@ impl Bound {
         instance: Instance,
         retry: Rc<retry::Policy>,
     ) -> Result<Self> {
-        Bound::bind(dir, program, instance, false, retry)
+        Bound::open_holding(dir, program, instance, retry, &Tokens::default())
+    }
+
+    /// As [`Bound::open_with`], its identity holding its tokens in
+    /// `tokens`, which other bindings of this process hold theirs in too
+    /// (record 0108 as amended 2026-11-19).
+    pub fn open_holding(
+        dir: &Path,
+        program: PathBuf,
+        instance: Instance,
+        retry: Rc<retry::Policy>,
+        tokens: &Tokens,
+    ) -> Result<Self> {
+        Bound::bind(dir, program, instance, false, retry, tokens)
     }
 
     /// 124: bind the repository holding `dir` for branch protection's hook:
@@ -119,6 +142,7 @@ impl Bound {
             Instance::guarding()?,
             true,
             retry,
+            &Tokens::default(),
         )
     }
 
@@ -128,11 +152,15 @@ impl Bound {
         instance: Instance,
         guarding: bool,
         retry: Rc<retry::Policy>,
+        tokens: &Tokens,
     ) -> Result<Self> {
         // C.4: the app the host names is sluice's identity on GitHub, and
-        // C.5: what reads and posts pull requests there.
+        // C.5: what reads and posts pull requests there, holding its
+        // tokens where `tokens` says (record 0108 as amended 2026-11-19).
         let app = match &instance.forge {
-            Some(f) => Some(Rc::new(github::App::open(f, retry.clone())?)),
+            Some(f) => Some(Rc::new(
+                github::App::open(f, retry.clone())?.holding(tokens.clone()),
+            )),
             None => None,
         };
         let app_for_pool = app.clone();
@@ -142,6 +170,8 @@ impl Bound {
         let forge = app.map(|a| a as Rc<dyn github::Forge>);
         let branch = branches::Branches::open_as(dir, identity.clone(), retry.clone())?;
         let common = branch.common_dir()?;
+        // Rule core.66: the repository each metric names, read once.
+        let repository = branch.local().repository_name()?;
         // 136: each branch's open pull requests asked for at the host's
         // interval, what was read of them kept in the host's state.
         let discovery = instance
@@ -153,6 +183,7 @@ impl Bound {
         // takes in (design D21).
         let peer = sluice_core::Peer {
             name: instance.peers.name.clone().unwrap_or_else(checks::hostname),
+            repository: repository.clone(),
             lease: instance.peers.lease,
             alive: instance.peers.alive,
             signer: instance.signing.as_ref().map(|s| s.signer.clone()),
@@ -262,6 +293,7 @@ impl Bound {
             state,
             pulls,
             host_process: Box::new(crate::host_process::Socketed::default()),
+            repository,
         })
     }
 
@@ -545,6 +577,7 @@ impl crate::exec::Host for Bound {
         let i = self.tests.instance();
         sluice_core::Peer {
             name: i.peers.name.clone().unwrap_or_else(checks::hostname),
+            repository: self.repository.clone(),
             lease: i.peers.lease,
             alive: i.peers.alive,
             signer: i.signing.as_ref().map(|s| s.signer.clone()),

@@ -278,6 +278,7 @@ fn one_collect_finds_the_outcomes_of_every_branch() {
             after: Vec::new(),
             priority: 0,
             subject: None,
+            trace: None,
         })
         .unwrap()
         .unwrap()
@@ -468,6 +469,7 @@ fn blamed_request_from(h: &Harness, from: &str, head: &Rev) -> u64 {
             after: Vec::new(),
             priority: 0,
             subject: None,
+            trace: None,
         })
         .unwrap()
         .unwrap()

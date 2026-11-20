@@ -26,3 +26,10 @@ swap:
   'work tree': 'worktree'
   'work-tree': 'worktree'
   'merge queue bot': 'merge queue'
+  # The host that moves a branch's queue, and the role it starts builds
+  # with, in the reader's words (record 0058 as amended 2026-11-18).
+  'the lead role': 'the start role'
+  'lead role': 'start role'
+  'the lead': 'the host that runs the queue'
+  'a lead': 'a host that runs the queue'
+  '(?:leads|leading|led)': 'runs the queue'

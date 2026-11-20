@@ -686,7 +686,7 @@ fn credentials_say_what_their_token_is_and_renew_buys_one() {
     assert!(c.about.ends_with("s ago"), "{}", c.about);
     assert!(!c.about.contains("token-1"), "{}", c.about);
     assert_eq!(app.credentials(url).unwrap().password, "token-1");
-    let fresh = app.renew(url).unwrap();
+    let fresh = app.renew(url, "token-1").unwrap();
     assert_eq!(fresh.password, "token-2");
     assert!(fresh.about.contains(scope), "{}", fresh.about);
     assert_eq!(app.credentials(url).unwrap().password, "token-2");
@@ -1756,6 +1756,85 @@ fn a_call_refused_a_commands_token_is_made_on_one_got_afresh() {
     assert_eq!(pull_reads(&fake), ["Bearer token-1", "Bearer token-2"]);
     assert_eq!(script_log(&scratch), ["get", "erase token-1", "get"]);
     assert_eq!(app.token(&repo()).unwrap(), "token-2");
+}
+
+/// The forge-identity spec's "Bindings on several threads share one
+/// token": apps opened on eight threads at once, holding one store as the
+/// host process's bindings do, get `o/r`'s token from the command once,
+/// asked once what it reaches, and each takes it; an app of another id
+/// holding the same store gets its own (record 0108 as amended
+/// 2026-11-19).
+#[test]
+fn apps_holding_one_store_get_a_repositorys_token_once() {
+    use sluice::profiles::Tokens;
+    let clock = Clock::new();
+    let fake = Forge::new(&clock).start();
+    let scratch = support::Scratch::new("command-shared");
+    let command = credential_script(
+        &scratch,
+        &counting("echo \"password_expiry_utc=$(( $(date +%s) + 3600 ))\""),
+    );
+    let tokens = Tokens::default();
+    let start = Arc::new(std::sync::Barrier::new(8));
+    let threads: Vec<_> = (0..8)
+        .map(|_| {
+            let (command, tokens, start) = (command.clone(), tokens.clone(), start.clone());
+            let url = fake.url().to_string();
+            std::thread::spawn(move || {
+                let app = App::commanded(APP, command, &url, Box::new(Utc::now), policy())
+                    .holding(tokens);
+                start.wait();
+                app.token(&repo()).unwrap()
+            })
+        })
+        .collect();
+    let got: Vec<String> = threads.into_iter().map(|t| t.join().unwrap()).collect();
+    assert_eq!(got, vec!["token-1"; 8]);
+    assert_eq!(script_log(&scratch), ["get"]);
+    let reaches = || {
+        fake.requests()
+            .iter()
+            .filter(|r| r.path.starts_with("/installation/repositories"))
+            .count()
+    };
+    assert_eq!(reaches(), 1);
+    let again = App::commanded(
+        APP,
+        command.clone(),
+        fake.url(),
+        Box::new(Utc::now),
+        policy(),
+    )
+    .holding(tokens.clone());
+    assert_eq!(again.token(&repo()).unwrap(), "token-1");
+    let other =
+        App::commanded(APP + 1, command, fake.url(), Box::new(Utc::now), policy()).holding(tokens);
+    assert_eq!(other.token(&repo()).unwrap(), "token-2");
+    assert_eq!(script_log(&scratch), ["get", "get"]);
+}
+
+/// The forge-identity spec's "A token got afresh by one binding is the
+/// one another refused takes": two apps hold one store; GitHub refuses
+/// the first token to one, which erases it and gets a second; the other,
+/// refused the first token too, takes the second, and the command is not
+/// asked again (record 0108 as amended 2026-11-19).
+#[test]
+fn a_token_got_afresh_is_the_one_another_refused_takes() {
+    use sluice::profiles::github::forge::Forge as _;
+    use sluice::profiles::Tokens;
+    let clock = Clock::new();
+    let fake = refusing(Forge::new(&clock), "Bearer token-1");
+    let scratch = support::Scratch::new("command-shared-renew");
+    let command = credential_script(&scratch, &counting(""));
+    let tokens = Tokens::default();
+    let one = commanded(fake.url(), command.clone(), ticking(&clock)).holding(tokens.clone());
+    let two = commanded(fake.url(), command, ticking(&clock)).holding(tokens);
+    let url = "https://github.com/o/r.git";
+    assert_eq!(two.credentials(url).unwrap().password, "token-1");
+    assert_eq!(one.pull(&repo(), 7).unwrap().unwrap().number, 7);
+    assert_eq!(pull_reads(&fake), ["Bearer token-1", "Bearer token-2"]);
+    assert_eq!(two.renew(url, "token-1").unwrap().password, "token-2");
+    assert_eq!(script_log(&scratch), ["get", "erase token-1", "get"]);
 }
 
 /// The forge-identity spec's "The command gives the refused token back":
