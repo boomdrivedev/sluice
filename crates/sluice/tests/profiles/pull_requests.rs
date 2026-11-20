@@ -1639,6 +1639,66 @@ fn a_failed_list_ends_intake_and_the_queue_still_lands() {
     );
 }
 
+/// forge-identity, "The host process gets a repository's token once for
+/// its hour": a host process started afresh, held open with nothing in
+/// play, looks at the idle repository every few seconds, each look with a
+/// binding of its own that fetches the records from GitHub as the app;
+/// over four looks it buys one token for o/r (record 0108 as amended
+/// 2026-11-19).
+#[test]
+fn the_host_process_buys_a_repositorys_token_once_across_its_looks() {
+    use sluice::host_process::{client::Client, protocol::Answer};
+    let g = OnGitHub::new("pr-one-token", "");
+    g.settle();
+    support::kill_host_process(&mut g.command(env!("CARGO_BIN_EXE_sluice"), g.repo.dir()));
+    let doc: Value = serde_json::from_slice(&g.sluice(&["overview", "--json"]).stdout).unwrap();
+    let repository = PathBuf::from(doc["repository"].as_str().unwrap());
+    let bought = || {
+        g.gh.calls(
+            "POST",
+            &format!("/app/installations/{}/access_tokens", github::INSTALLATION),
+        )
+    };
+    let before = bought();
+    let git = support::CountingGit::new();
+    let client = Client::new(
+        Path::new(env!("CARGO_BIN_EXE_sluice")),
+        support::env_of(git.on(&mut g.command(env!("CARGO_BIN_EXE_sluice"), g.repo.dir()))),
+    )
+    .unwrap();
+    let mut held = client
+        .hold(
+            sluice_seams::RunKind::Session,
+            &repository,
+            "an-agent",
+            None,
+        )
+        .expect("the host process starts");
+    let answer = held.next(Some(Duration::from_secs(10))).unwrap();
+    assert!(matches!(answer, Some(Answer::Held)), "{answer:?}");
+    // The host process looks at the repository as it starts, and every
+    // three seconds after, each look fetching every branch's records from
+    // GitHub as the app once, and main's again.
+    let looks = || {
+        git.starts()
+            .iter()
+            .filter(|a| a.contains(" fetch ") && a.contains("+refs/sluice/hosts/*"))
+            .count()
+    };
+    let until = Instant::now() + Duration::from_secs(30);
+    while looks() < 4 {
+        assert!(
+            Instant::now() < until,
+            "four looks: {:?}\n{}",
+            git.starts(),
+            g.host_log()
+        );
+        std::thread::sleep(Duration::from_millis(200));
+    }
+    drop(held);
+    assert_eq!(bought() - before, 1, "{:?}", git.starts());
+}
+
 /// 133, rule core.28 (design D27): GitHub no longer finds the app's
 /// installation on the repository, as when it was renamed; the host
 /// process's passes say the round's refusal once, with what to do, and

@@ -38,24 +38,26 @@ impl Identity for App {
     }
 
     fn credentials(&self, url: &str) -> Result<Credentials> {
-        given(self, url, false)
+        given(self, url, None)
     }
 
-    /// A token bought afresh: GitHub sometimes refuses one it has just
-    /// given, and a token held since may have lost what it reached.
-    fn renew(&self, url: &str) -> Result<Credentials> {
-        given(self, url, true)
+    /// A token in place of the refused one: one another call got since,
+    /// or one bought afresh, since GitHub sometimes refuses one it has
+    /// just given, and a token held since may have lost what it reached.
+    fn renew(&self, url: &str, refused: &str) -> Result<Credentials> {
+        given(self, url, Some(refused))
     }
 }
 
-/// Credentials for `url` with a token for its repository alone. A token
-/// GitHub refused to give is [`Withheld`] in its words, so a read that
-/// needed it is a read of the remote refused (133; rule core.28).
-fn given(app: &App, url: &str, fresh: bool) -> Result<Credentials> {
+/// Credentials for `url` with a token for its repository alone, or one in
+/// place of the `refused` token. A token GitHub refused to give is
+/// [`Withheld`] in its words, so a read that needed it is a read of the
+/// remote refused (133; rule core.28).
+fn given(app: &App, url: &str, refused: Option<&str>) -> Result<Credentials> {
     let repo =
         Repo::from_url(url).ok_or_else(|| anyhow::anyhow!("{url} is no repository on GitHub"))?;
     let token = app
-        .issue(&repo, fresh)
+        .issue(&repo, refused)
         .map_err(|e| match app::refused(&e) {
             Some(r) => Withheld {
                 said: r.said.clone(),
