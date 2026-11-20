@@ -51,6 +51,39 @@ pub trait Identity {
     /// `refused`, never those: ones another call got since, or ones made
     /// afresh.
     fn renew(&self, url: &str, refused: &str) -> Result<Credentials>;
+
+    /// The author and committer a commit pushed as this identity to `url`,
+    /// one [`Identity::url`] gave, names: the identity's own account where
+    /// the forge links commits to one. A failure is the commit's, which is
+    /// then not written, under this name or sluice's (record 0019 as
+    /// amended 2026-11-18; rule core.43).
+    fn author(&self, url: &str) -> Result<Author>;
+}
+
+/// Who a commit sluice writes names as its author and committer (record
+/// 0019 as amended 2026-11-18; rule core.43).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Author {
+    pub name: String,
+    pub email: String,
+}
+
+impl Author {
+    /// `sluice <sluice@localhost>`: a combination's on every host, and
+    /// every commit's that no identity pushes.
+    pub fn sluice() -> Author {
+        Author {
+            name: "sluice".into(),
+            email: "sluice@localhost".into(),
+        }
+    }
+}
+
+impl std::fmt::Display for Author {
+    /// `name <email>`, as git writes an author.
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{} <{}>", self.name, self.email)
+    }
 }
 
 /// The forge's answer refusing an identity credentials for a remote: a

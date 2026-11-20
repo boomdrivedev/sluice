@@ -3421,17 +3421,20 @@ impl Sluice<'_> {
                     );
                 }
                 Read::Beside { formed, merged } => {
-                    let commit = self.seams.branch.commit(&LandingCommit {
-                        tree_of: formed.clone(),
-                        parent: tip.clone(),
-                        head: sub.head.clone(),
-                        message: beside_message(
-                            &policy.landing_subject,
-                            &line.branch,
-                            sub,
-                            &covering,
-                        ),
-                    })?;
+                    let commit = self.seams.branch.commit(
+                        &line.branch,
+                        &LandingCommit {
+                            tree_of: formed.clone(),
+                            parent: tip.clone(),
+                            head: sub.head.clone(),
+                            message: beside_message(
+                                &policy.landing_subject,
+                                &line.branch,
+                                sub,
+                                &covering,
+                            ),
+                        },
+                    )?;
                     for (r, m) in reading.iter_mut().zip(merged) {
                         r.1 = m;
                     }
@@ -3661,12 +3664,15 @@ impl Sluice<'_> {
                         c.revision
                     )
                 })?;
-                let commit = self.seams.branch.commit(&LandingCommit {
-                    tree_of,
-                    parent: parent.clone(),
-                    head: sub.head.clone(),
-                    message: landing_message(&subject, &line.branch, &sub, verdict),
-                })?;
+                let commit = self.seams.branch.commit(
+                    &line.branch,
+                    &LandingCommit {
+                        tree_of,
+                        parent: parent.clone(),
+                        head: sub.head.clone(),
+                        message: landing_message(&subject, &line.branch, &sub, verdict),
+                    },
+                )?;
                 let s = line.sub_mut(sub.id);
                 s.state = State::Landing;
                 s.tested = Some(Tested {

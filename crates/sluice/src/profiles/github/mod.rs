@@ -21,7 +21,7 @@ pub use forge::Forge;
 
 use anyhow::Result;
 
-use crate::identity::{Credentials, Identity, Withheld};
+use crate::identity::{Author, Credentials, Identity, Withheld};
 
 /// The username git gives GitHub with an installation token.
 const TOKEN_USER: &str = "x-access-token";
@@ -46,6 +46,14 @@ impl Identity for App {
     /// just given, and a token held since may have lost what it reached.
     fn renew(&self, url: &str, refused: &str) -> Result<Credentials> {
         given(self, url, Some(refused))
+    }
+
+    /// The app's bot, read for the repository `url` names and kept on the
+    /// host ([`App::author`]; record 0019 as amended 2026-11-18).
+    fn author(&self, url: &str) -> Result<Author> {
+        let repo = Repo::from_url(url)
+            .ok_or_else(|| anyhow::anyhow!("{url} is no repository on GitHub"))?;
+        App::author(self, &repo)
     }
 }
 

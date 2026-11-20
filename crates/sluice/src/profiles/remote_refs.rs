@@ -398,12 +398,17 @@ impl RemoteRefs {
 
     /// A commit of `files` (path to blob), with `parent` where there is
     /// one: a tree built in an index of its own, never the repository's.
+    /// Its author and committer are whoever pushes it, the records'
+    /// [`PushedRefs::author`], read before anything is written: an
+    /// author that cannot be read fails the write, as a refused push does
+    /// (record 0019 as amended 2026-11-18; rule core.43).
     fn commit(
         &self,
         files: &BTreeMap<String, String>,
         parent: Option<&str>,
         message: &str,
     ) -> Result<String> {
+        let author = self.pushed.author()?;
         let index = tempfile_path(self.pushed.git_dir(), "index")?;
         let mut info = String::new();
         for (path, oid) in files {
@@ -439,10 +444,10 @@ impl RemoteRefs {
             args.extend(["-p", p]);
         }
         let out = command(self.pushed.git_dir(), &args)
-            .env("GIT_AUTHOR_NAME", "sluice")
-            .env("GIT_AUTHOR_EMAIL", "sluice@localhost")
-            .env("GIT_COMMITTER_NAME", "sluice")
-            .env("GIT_COMMITTER_EMAIL", "sluice@localhost")
+            .env("GIT_AUTHOR_NAME", &author.name)
+            .env("GIT_AUTHOR_EMAIL", &author.email)
+            .env("GIT_COMMITTER_NAME", &author.name)
+            .env("GIT_COMMITTER_EMAIL", &author.email)
             .output()?;
         if !out.status.success() {
             bail!(

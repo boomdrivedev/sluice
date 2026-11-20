@@ -44,6 +44,11 @@
 //! there would go without its token. That answer, and no installation of
 //! the app found on a repository, say to point the remote that names it
 //! at the repository's new address, which the next call reads.
+//!
+//! The app's bot, the author of every commit sluice pushes as the app, is
+//! read with the app's own credential and kept in the host's state for a
+//! day, standing while GitHub cannot be read after it ([`App::author`];
+//! record 0019 as amended 2026-11-18; rule core.43).
 
 use std::cell::{Cell, RefCell};
 use std::collections::BTreeMap;
@@ -57,8 +62,8 @@ use serde::Serialize;
 use serde_json::Value;
 use sluice_seams::Unanswered;
 
-use super::kept::{self, Allowance, Kept, Pause};
-use crate::identity::{Asked, CredentialCommand};
+use super::kept::{self, Allowance, Bot, Kept, Pause};
+use crate::identity::{Asked, Author, CredentialCommand};
 use crate::instance::{Forge, Source};
 use crate::retry::{Failed, Judged, Kind, Limited, Policy};
 
@@ -85,6 +90,9 @@ const SETTLE: TimeDelta = TimeDelta::seconds(5);
 /// such answer in a row, up to [`LONGEST_PAUSE`], as GitHub asks.
 const FIRST_PAUSE: TimeDelta = TimeDelta::minutes(1);
 const LONGEST_PAUSE: TimeDelta = TimeDelta::minutes(30);
+/// How long the app's bot, once read, names the commits sluice pushes as
+/// the app before it is read again (record 0019 as amended 2026-11-18).
+const BOT_FOR: TimeDelta = TimeDelta::days(1);
 
 /// The time now; a test's own clock in tests.
 pub type Now = Box<dyn Fn() -> DateTime<Utc>>;
@@ -274,6 +282,8 @@ pub struct App {
     tokens: Tokens,
     /// The app's bot, once read.
     login: RefCell<Option<String>>,
+    /// The bot commits name, where nothing is kept on the host.
+    bot: RefCell<Option<Bot>>,
     policy: Rc<Policy>,
     /// The host's answers and pauses; none, nothing is kept.
     kept: Option<Kept>,
@@ -333,6 +343,7 @@ impl App {
             http: http_config().into(),
             tokens: Tokens::default(),
             login: RefCell::default(),
+            bot: RefCell::default(),
             policy,
             kept: None,
             told: Cell::new(None),
@@ -464,6 +475,83 @@ impl App {
         };
         *self.login.borrow_mut() = Some(login.clone());
         Ok(login)
+    }
+
+    /// The author and committer of a commit sluice pushes to `repo` as the
+    /// app: its bot, the login at `<user id>+<login>@users.noreply.github.com`,
+    /// the address GitHub links to the bot's account (record 0019 as
+    /// amended 2026-11-18; rule core.43). A bot read less than a day ago by
+    /// the app's clock, kept in the host's state for every process, or in
+    /// this process where the app keeps nothing on the host, is used as it
+    /// is; otherwise it is read afresh ([`App::read_bot`]) and kept. Where
+    /// that read fails, a bot kept, however old, is used and nothing is
+    /// written over it, so the next commit reads again; where none is kept,
+    /// the failure is the commit's, in GitHub's words, and nothing is kept.
+    pub fn author(&self, repo: &Repo) -> Result<Author> {
+        let now = (self.now)();
+        let kept = match &self.kept {
+            Some(k) => k.bot(self.id),
+            None => self.bot.borrow().clone(),
+        };
+        if let Some(bot) = kept.as_ref().filter(|b| now - b.read_at < BOT_FOR) {
+            return Ok(authored(bot));
+        }
+        let bot = match (self.read_bot(repo), kept) {
+            (Ok(bot), _) => bot,
+            (Err(e), Some(bot)) => {
+                tracing::warn!(
+                    "app {}'s bot {} read at {} names the commit, as GitHub could not be read \
+                     for it again: {e:#}",
+                    self.id,
+                    bot.login,
+                    bot.read_at
+                        .to_rfc3339_opts(chrono::SecondsFormat::Secs, true)
+                );
+                return Ok(authored(&bot));
+            }
+            (Err(e), None) => return Err(e),
+        };
+        match &self.kept {
+            Some(k) => {
+                if let Err(e) = k.keep_bot(self.id, &bot) {
+                    tracing::warn!("keeping app {}'s bot {}: {e:#}", self.id, bot.login);
+                }
+            }
+            None => *self.bot.borrow_mut() = Some(bot.clone()),
+        }
+        Ok(authored(&bot))
+    }
+
+    /// The app's bot read from GitHub now with its own credential: its
+    /// login afresh, under a key its slug read with its JWT, then `[bot]`,
+    /// and under a credential command GraphQL's `viewer` read with `repo`'s
+    /// token; then its user id, `GET /users/<login>` with `repo`'s token. A
+    /// login that does not end in `[bot]` is no app's bot, and fails naming
+    /// it before any user is read (record 0019 as amended 2026-11-18).
+    fn read_bot(&self, repo: &Repo) -> Result<Bot> {
+        let login = match self.mint {
+            Mint::Key(_) => format!("{}[bot]", self.slug()?),
+            Mint::Command(_) => self.viewer(repo)?,
+        };
+        if !login.ends_with("[bot]") {
+            bail!("GitHub names {repo}'s token {login}, who is no app's bot");
+        }
+        let path = format!("/users/{}", login.replace('[', "%5B").replace(']', "%5D"));
+        let v = self
+            .get(&path, Bearer::Repo(repo))
+            .with_context(|| format!("reading app {}'s bot {login}", self.id))?;
+        let login = v["login"]
+            .as_str()
+            .ok_or_else(|| anyhow!("GitHub gave the user {login} no login"))?
+            .to_string();
+        let id = v["id"]
+            .as_u64()
+            .ok_or_else(|| anyhow!("GitHub gave the user {login} no id"))?;
+        Ok(Bot {
+            login,
+            id,
+            read_at: (self.now)(),
+        })
     }
 
     /// The app whose token `repo`'s is, by GitHub's word: its id and its
@@ -1296,6 +1384,15 @@ fn sent(e: &ureq::Error) -> Judged {
             Judged::Never
         }
         _ => Judged::Unknown,
+    }
+}
+
+/// The author `bot` names: its login, at the address GitHub links to its
+/// account.
+fn authored(bot: &Bot) -> Author {
+    Author {
+        name: bot.login.clone(),
+        email: format!("{}+{}@users.noreply.github.com", bot.id, bot.login),
     }
 }
 
