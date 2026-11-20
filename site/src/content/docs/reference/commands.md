@@ -19,7 +19,7 @@ sidebar:
 | `sluice amend <id>` | Reorder a queued submission (`--after`, `--priority`) until it is under test. `--branch <branch>` names the branch its number is on, where more than one branch holds it ([below](#sluice-wait)). `--json` for scripts. |
 | `sluice withdraw <id>` | Take a submission out of the queue. One already withdrawn is said so, and exits `0`; one landed is refused. `--branch <branch>` names the branch its number is on, where more than one branch holds it ([below](#sluice-wait)). `--json` for scripts. |
 | `sluice protect` | Install the branch-protection hook; `--remove` takes it out. Warns of a worktree that has checked out a protected branch. `--json` for scripts. |
-| `sluice exec <branch>` | Run the tests this worktree's head affects against the branch, in the worktree, under the host's bound, with the worktree's ports and the branch's limits. `-- <command>` runs a command instead. `--json` for scripts. |
+| `sluice exec <branch>` | Run the tests the worktree's own changes affect since it left the branch, its uncommitted and untracked files included, in the worktree, under the host's bound, with the worktree's ports and the branch's limits. `-- <command>` runs a command instead. `--json` for scripts. |
 | `sluice equip <branch>` | Make this worktree ready for the branch's runner, as sluice makes every checkout ready before it runs anything there: the toolchain, then under moon the tool versions `.prototools` lists installed, moon's version checked and `moon setup`. It holds nothing. `--at <revision>` reads the policy at that revision; `--json` for scripts ([below](#sluice-equip)). |
 | `sluice release` | Release this worktree: run the policy's release command, end what its runs left running, and free its ports. The worktree stays. In a worktree sluice holds nothing for, it runs the default branch's release command all the same ([below](#worktrees-sluice-holds)). `--accept-failure` frees its ports and ends its runs without running the release command. `--json` for scripts. |
 | `sluice preview <branch> <revision>` | Bring up a revision the branch has landed in a checkout of its own, at addresses a person opens, until it is released. `--wait` returns once its command has ended; `--json` for scripts. |
@@ -266,17 +266,46 @@ waiting while the bound is full, and never uses the part
 `[runs] reserved` keeps for submissions. It gets the worktree's ports,
 the same on every run, runs under the branch's executor, memory,
 network and time limit, and ends with its process group. The tests are
-the ones the head affects against the branch, read from the branch's own
-policy, never the worktree's.
+the branch's required tests, read from the branch's own policy, never
+the worktree's, that the worktree's own changes affect, with the tasks
+that depend on them. Its own changes are the files that differ between
+where its head left the branch and the worktree as it stands. Where it
+left the branch is the last commit the two share. The files are its
+commits since then, and every file it holds beyond its head, uncommitted
+edits and untracked files git does not ignore among them. What the
+branch landed since is none of its own. A
+change to the runner's own configuration among them, under moon a
+`moon.yml` or `.moon/`, runs every required test, and so does a head
+that shares no history with the branch. A worktree with nothing of its
+own runs no test and exits `0`.
+
+The first line names the commit its changes are read from, and the
+branch's revision where the branch has moved on past it. A head with no
+commit in common with the branch says `running every required check:
+the worktree's head shares no history with <branch>`.
 
 ```console
 $ sluice exec feature/concurrent-units
-running the checks 8d41b6c affects against feature/concurrent-units (c41e8f2)
+running the checks the worktree's own changes affect since 1a2b3c4 on feature/concurrent-units, now at c41e8f2
 ports: SLUICE_PORT_DB=20001 SLUICE_PORT_WEB=20000
 …what the tests print…
-passed: 2 tasks
-recorded 2 results under their keys for 8d41b6c
+passed: 2 tasks (1 replayed)
+recorded 1 result under its key for 8d41b6c
 ```
+
+The runner may answer a test from its cache, as it may in a
+combination's run. Such a replay stands only where sluice holds a pass
+the branch's gate counts for the test's key, held to the run's limits,
+grant and system, as a combination's replay is. A test sluice passed on
+the same files is so replayed, and the pass line counts it: `passed: 2
+tasks (1 replayed)`. Where the runner replays a test sluice holds no
+such pass for, as one a run of an unclean worktree passed, exec says
+`replayed with no result sluice recorded: <test>, …; running them
+again`. It then runs those tests again in the worktree, with no replay,
+waiting for room in the host's bound as the first run did. Their
+results stand in place of the replays, recorded as the first run's are,
+and the summary, the exit and `--json` are of the two runs together. A
+replay is never recorded as a run.
 
 When the worktree holds exactly its head, with nothing modified, staged
 or untracked, each test's result is recorded under its key as an open
@@ -310,18 +339,21 @@ test as not run: it never ran, and the task is the one to fix.
 
 ```console
 $ sluice exec main
-running the checks 8d41b6c affects against main (c41e8f2)
+running the checks the worktree's own changes affect since c41e8f2 on main
 …what the tests print…
 failed: api:integration
   root:integration failed by api:integration, a task it depends on
 recorded 1 result under its key for 8d41b6c
 ```
 
-Under `--json`, `dependencies` gives each task that failed a test as
-`tasks` gives a test, `{task, hash, outcome, recorded}`, and
-`failed_by` gives each test a task failed, `{task, by}`, `by` naming
-the tasks. Neither is in `missing`, which lists only the required tests the
-run left without a result.
+Under `--json`, `since` is the full revision the worktree's own changes
+are read from, or `null` for a head that shares no history with the
+branch, and for a command. `tasks` gives each test as `{task, hash,
+outcome, recorded, replayed}`, `replayed` true for a test the runner
+answered from its cache. `dependencies` gives each task that failed a
+test as `tasks` gives a test, and `failed_by` gives each test a task
+failed, `{task, by}`, `by` naming the tasks. Neither is in `missing`,
+which lists only the required tests the run left without a result.
 
 `sluice exec <branch> -- <command>` runs any command the same way, with
 `SLUICE_CHECKOUT`, `SLUICE_TMP` and the ports in its environment, and
@@ -505,7 +537,7 @@ its release went, once:
 ```console
 $ sluice exec feature/concurrent-units
 freed /home/me/wt/unit-c: it no longer exists; its release ran once from its scratch directory; its runs ended, its ports free
-running the checks 8d41b6c affects against feature/concurrent-units (c41e8f2)
+running the checks the worktree's own changes affect since 1a2b3c4 on feature/concurrent-units, now at c41e8f2
 …
 ```
 
@@ -883,14 +915,17 @@ beside it:
 $ wt submit main --no-wait --subject "Batch review cards"
 pushed batch-review · opened #41: Batch review cards
 submission 12 to main from #41 · nothing queued ahead
+wait: sluice wait main --pull-request 41
 $ wt submit main --no-wait --json
-{"id":12,"branch":"main","ahead":[],"pull_request":41}
+{"id":12,"branch":"main","ahead":[],"pull_request":41,"wait":"sluice wait main --pull-request 41"}
 ```
 
 Otherwise it answers with the pull request and what it waits for, as
 `wt submit main --status` reports it later: under `--json`,
-`{"pull_request":41,"branch":"main","state":"waiting: needs 1 review"}`,
-with no `id`.
+`{"pull_request":41,"branch":"main","state":"waiting: needs 1 review","wait":"sluice wait main --pull-request 41"}`,
+with no `id`. Either way, `wait` is the command that follows the pull
+request by its number, from any folder and on any host, and the words
+end with it: `wait: sluice wait main --pull-request 41`.
 
 A pull request a submit opened is the agent's. When its submission
 leaves the queue without landing, blamed, in conflict, withdrawn, or on
@@ -1250,6 +1285,18 @@ whatever the round failed after it. A submission already decided is
 reported at once, and nothing runs. `sluice wait <branch>` waits for this worktree's last submission
 to that branch, the one `sluice submit <branch> --status` reports.
 
+`sluice wait <branch> --pull-request <n>` follows pull request `<n>`
+into the branch, from any folder of the repository and on any host. It
+follows the pull request as `sluice wait <branch>` follows the one its
+worktree opened, with the same outcomes, exits and documents, and its
+number is the same on every host from the submit to the landing. Where
+the branch takes no pull requests, or GitHub holds no pull request `<n>`
+into it, the wait follows nothing, says `no pull request #<n> into
+<branch>` and exits `1`. Given a submission's number in place of a
+branch, it exits `64`. A wait by pull request run anywhere but the
+worktree that opened the request hands nothing over: its outcome stays
+owed there, and `sluice inbox` in that worktree collects it.
+
 sluice finds a submission by its number on any branch it can read,
 whatever other branch it cannot. A branch whose policy, revision or
 state sluice cannot read holds up no wait on another branch. When the
@@ -1383,9 +1430,17 @@ submission as `sluice wait <id>` does: out of time or stopped, it
 prints the submission's record under `--json`, and `still waiting:
 sluice wait 12` without. Until then, its document under `--json` is
 the one `sluice submit --status --json` prints,
-`{"pull_request","branch","state"}`, the state saying what the pull
-request waits for. Once its submission is decided, it prints the
-submission's record. Its own submission is the first it reads of the
+`{"pull_request","branch","state","wait"}`, the state saying what the
+pull request waits for, and `wait` the command that follows it by its
+number from any folder, `sluice wait main --pull-request 41`. Out of
+time or stopped before then, it prints that document under `--json`,
+and without it says:
+
+```console
+still open: #41; sluice wait main --pull-request 41
+```
+
+Once its submission is decided, it prints the submission's record. Its own submission is the first it reads of the
 pull request. When sluice takes the pull request in again on a new
 head, as when the branch moves under it, the wait follows the new
 head's submission and ends with its own, as above.
@@ -1420,8 +1475,13 @@ prints, the one a `--no-wait` submit prints and the one at its timeout.
 and `null` where the check carries none:
 
 ```json
-{"pull_request":41,"branch":"main","state":"queued behind #38","taken_in_by":{"host":"b"},"queue":{"host":"b","taken_in":true,"submission":1406,"state":"queued","ahead":[{"submission":1405,"pull_request":38}],"waits_for":[]}}
+{"pull_request":41,"branch":"main","state":"queued behind #38","wait":"sluice wait main --pull-request 41","taken_in_by":{"host":"b"},"queue":{"host":"b","taken_in":true,"submission":1406,"state":"queued","ahead":[{"submission":1405,"pull_request":38}],"waits_for":[]}}
 ```
+
+`queue.submission` is the pull request's number in the queue of the host
+that takes it in. On this host, that number may name another
+submission, or none, so a wait on it here follows the wrong work. Follow
+the pull request with its `wait` instead.
 
 It reports what GitHub shows with the words
 and exit of a submission's outcome. Merged is `passed · landed as
@@ -1468,8 +1528,8 @@ there, so it hands the outcome over once its report is written, as
 it is confirmed. `--confirm` confirms it on receipt, for a caller that
 keeps what it is given. Under `--json`, the record it prints carries its
 `delivery` as the wait leaves it. A wait on another worktree's
-submission hands nothing over, and nor does one that ends out of time
-or stopped. A submission by name came from no worktree, and nor did a
+submission or pull request hands nothing over, and nor does one that
+ends out of time or stopped. A submission by name came from no worktree, and nor did a
 pull request from a branch sluice lands on, so a wait on either hands
 nothing over, wherever it runs. In a bare repository or a git directory,
 which has no files checked out, a wait hands over only what one in a
@@ -1738,7 +1798,7 @@ once those five minutes are spent exits `3` as well, saying it could not
 read and how long it tried, apart from any outcome:
 
 ```console
-could not read #77: sluice wait main
+could not read #77: sluice wait main --pull-request 77
 sluice: could not read #77 for 5m03s, so whether it landed is not known: GET /repos/o/r/pulls/77: 503 Service Unavailable
 ```
 

@@ -208,6 +208,369 @@ fn moon_setup(name: &str, a_check: &str) -> Setup {
     }
 }
 
+/// `bolt/x` holding a moon workspace of two projects whose `test` tasks,
+/// tagged `gate`, the policy requires: `a`'s runs `a_check`, `b`'s passes.
+/// The session's worktree holds exactly `bolt/x`'s revision, nothing of
+/// its own. Needs moon on the path.
+fn moon_at_branch(name: &str, a_check: &str) -> Setup {
+    let repo = Repo::new(name);
+    repo.write(
+        ".config/sluice.toml",
+        "[tests]\nrunner = \"moon\"\n\n\
+         [branches.\"bolt/*\"]\nrequired = [\"#gate\"]\ntimeout = \"5m\"\n",
+    );
+    repo.write(
+        ".moon/workspace.yml",
+        "projects:\n  a: 'a'\n  b: 'b'\n\
+         vcs:\n  client: 'git'\n  defaultBranch: 'main'\ntelemetry: false\n",
+    );
+    repo.write(".gitignore", ".moon/cache/\n");
+    repo.write("a/check.sh", a_check);
+    for (p, command) in [("a", "sh a/check.sh"), ("b", "true")] {
+        repo.write(&format!("{p}/lib"), "1");
+        repo.write(&format!("{p}/moon.yml"), &moon_yml(command));
+    }
+    repo.git(&["add", "-A"]);
+    repo.git(&["commit", "-q", "-m", "two projects"]);
+    repo.git(&["branch", "bolt/x", "main"]);
+    let sessions = Scratch::new(&format!("{name}-sessions"));
+    let worktree = sessions.path().join("a");
+    repo.git(&[
+        "worktree",
+        "add",
+        "-q",
+        "-b",
+        "unit/a",
+        worktree.to_str().unwrap(),
+        "bolt/x",
+    ]);
+    Setup {
+        repo,
+        worktree,
+        config: Scratch::new(&format!("{name}-config")),
+        state: Scratch::new(&format!("{name}-state")),
+        _sessions: sessions,
+    }
+}
+
+/// A project's `moon.yml` of [`moon_at_branch`]: its `test` task runs
+/// `command` from the workspace's root.
+fn moon_yml(command: &str) -> String {
+    format!(
+        "tasks:\n  test:\n    command: '{command}'\n    inputs: ['**/*']\n    \
+         tags: [gate]\n    options: {{runFromWorkspaceRoot: true}}\n"
+    )
+}
+
+impl Setup {
+    /// Write `files` in the worktree and commit them on its branch.
+    fn commit(&self, files: &[(&str, &str)]) -> String {
+        for (path, content) in files {
+            std::fs::write(self.worktree.join(path), content).unwrap();
+        }
+        let dir = self.worktree.to_str().unwrap();
+        self.repo.git(&["-C", dir, "add", "-A"]);
+        self.repo
+            .git(&["-C", dir, "commit", "-q", "-m", "the worktree's own"]);
+        self.repo.git(&["-C", dir, "rev-parse", "HEAD"])
+    }
+
+    /// Land `files` on `bolt/x`, as the branch moving on past the worktree.
+    fn land(&self, files: &[(&str, &str)]) -> String {
+        for (path, content) in files {
+            self.repo.write(path, content);
+        }
+        self.repo.git(&["add", "-A"]);
+        self.repo.git(&["commit", "-q", "-m", "landed"]);
+        self.repo.git(&["branch", "-f", "bolt/x", "main"]);
+        self.repo.rev("bolt/x")
+    }
+}
+
+/// The `--json` document of `sluice exec`.
+fn document(out: &Output) -> serde_json::Value {
+    serde_json::from_slice(&out.stdout).unwrap_or_else(|e| panic!("{e}: {}", text(out)))
+}
+
+/// The checks a `sluice exec --json` ran or replayed, by name, sorted.
+fn checks_of(out: &Output) -> Vec<String> {
+    let doc = document(out);
+    let mut names: Vec<String> = doc["tasks"]
+        .as_array()
+        .unwrap_or_else(|| panic!("no tasks in {doc}"))
+        .iter()
+        .map(|t| t["task"].as_str().unwrap().to_string())
+        .collect();
+    names.sort();
+    names
+}
+
+/// The exec-checks spec's "The branch moved on" (36; design D1): a
+/// worktree's own changes are read from where its head left the branch,
+/// so what the branch landed since is none of its own.
+#[test]
+fn a_worktrees_checks_leave_out_what_its_branch_landed_since() {
+    let s = moon_at_branch("exec-moved-on", "true\n");
+    s.commit(&[("b/lib", "2")]);
+    s.land(&[
+        ("a/lib", "2"),
+        ("a/moon.yml", &moon_yml("sh a/check.sh # moved")),
+    ]);
+    let out = s.sluice(&["exec", "bolt/x", "--json"]);
+    assert!(out.status.success(), "{}", text(&out));
+    assert_eq!(checks_of(&out), ["b:test"], "{}", text(&out));
+}
+
+/// The exec-checks spec's "An edit not committed" (36; design D2): an
+/// unstaged edit is the worktree's own, and its run records nothing (92).
+#[test]
+fn a_worktrees_unstaged_edit_runs_the_checks_it_affects() {
+    let s = moon_at_branch("exec-unstaged", "true\n");
+    std::fs::write(s.worktree.join("a/lib"), "2").unwrap();
+    let out = s.sluice(&["exec", "bolt/x", "--json"]);
+    assert!(out.status.success(), "{}", text(&out));
+    assert_eq!(checks_of(&out), ["a:test"], "{}", text(&out));
+    assert!(
+        text(&out).contains("not recorded: worktree is not clean"),
+        "{}",
+        text(&out)
+    );
+    assert_eq!(s.results(), "", "nothing is recorded");
+}
+
+/// The exec-checks spec's "A file not yet tracked" (36; design D2): an
+/// untracked file git does not ignore is the worktree's own.
+#[test]
+fn a_worktrees_untracked_file_runs_the_checks_it_affects() {
+    let s = moon_at_branch("exec-untracked", "true\n");
+    std::fs::write(s.worktree.join("b/new"), "new").unwrap();
+    let out = s.sluice(&["exec", "bolt/x", "--json"]);
+    assert!(out.status.success(), "{}", text(&out));
+    assert_eq!(checks_of(&out), ["b:test"], "{}", text(&out));
+}
+
+/// The exec-checks spec's "Nothing of its own" (36): a worktree that
+/// holds exactly its branch's revision runs no check, and exits 0.
+#[test]
+fn a_worktree_at_its_branchs_revision_runs_no_check() {
+    let s = moon_at_branch("exec-nothing", "exit 1\n");
+    let out = s.sluice(&["exec", "bolt/x", "--json"]);
+    assert_eq!(out.status.code(), Some(0), "{}", text(&out));
+    assert!(checks_of(&out).is_empty(), "{}", text(&out));
+}
+
+/// The exec-checks spec's "Its own moon.yml" (36, 70): a worktree's own
+/// change to moon's configuration runs every required check.
+#[test]
+fn a_worktrees_own_moon_yml_runs_every_check() {
+    let s = moon_at_branch("exec-own-moon-yml", "true\n");
+    s.commit(&[("b/moon.yml", &moon_yml("true # its own"))]);
+    let out = s.sluice(&["exec", "bolt/x", "--json"]);
+    assert!(out.status.success(), "{}", text(&out));
+    assert_eq!(checks_of(&out), ["a:test", "b:test"], "{}", text(&out));
+}
+
+/// The exec-checks spec's "A worktree behind its branch" and "No history
+/// in common" (36, 70; design D6): the run opens with where the worktree
+/// left its branch, the branch's revision where it moved on past it, and
+/// says a head that shares no history with the branch runs every check.
+#[test]
+fn exec_opens_with_where_the_worktree_left_its_branch() {
+    let s = moon_at_branch("exec-opens", "true\n");
+    let cut = s.repo.rev("bolt/x");
+    s.commit(&[("b/lib", "2")]);
+    let out = s.sluice(&["exec", "bolt/x"]);
+    assert!(out.status.success(), "{}", text(&out));
+    let first = |out: &Output| {
+        String::from_utf8_lossy(&out.stdout)
+            .lines()
+            .next()
+            .map(String::from)
+    };
+    assert_eq!(
+        first(&out).as_deref(),
+        Some(
+            format!(
+                "running the checks the worktree's own changes affect since {} on bolt/x",
+                &cut[..7]
+            )
+            .as_str()
+        ),
+        "{}",
+        text(&out)
+    );
+
+    let now = s.land(&[("a/lib", "2")]);
+    let out = s.sluice(&["exec", "bolt/x"]);
+    assert!(out.status.success(), "{}", text(&out));
+    assert_eq!(
+        first(&out).as_deref(),
+        Some(
+            format!(
+                "running the checks the worktree's own changes affect since {} on bolt/x, \
+                 now at {}",
+                &cut[..7],
+                &now[..7]
+            )
+            .as_str()
+        ),
+        "{}",
+        text(&out)
+    );
+
+    let dir = s.worktree.to_str().unwrap();
+    s.repo
+        .git(&["-C", dir, "switch", "-q", "--orphan", "unit/unrelated"]);
+    s.repo
+        .git(&["-C", dir, "checkout", "-q", "unit/a", "--", "."]);
+    s.commit(&[]);
+    let out = s.sluice(&["exec", "bolt/x", "--json"]);
+    assert!(out.status.success(), "{}", text(&out));
+    let said = String::from_utf8_lossy(&out.stderr).into_owned();
+    assert!(
+        said.lines().any(|l| l
+            == "running every required check: the worktree's head shares no history with bolt/x"),
+        "{said}"
+    );
+    assert_eq!(checks_of(&out), ["a:test", "b:test"], "{}", text(&out));
+}
+
+/// The exec-checks spec's "The same files again" (16, 108; design D4): a
+/// clean worktree's second run on the files its first passed and recorded
+/// replays both checks, counts them, and records nothing more.
+#[test]
+fn a_second_run_on_the_same_files_replays_and_records_nothing() {
+    let s = moon_at_branch("exec-same-files", "true\n");
+    s.commit(&[("a/lib", "2"), ("b/lib", "2")]);
+    let out = s.sluice(&["exec", "bolt/x"]);
+    assert!(out.status.success(), "{}", text(&out));
+    assert!(text(&out).contains("passed: 2 tasks\n"), "{}", text(&out));
+    let mut first = recorded(&s);
+    first.sort();
+    assert_eq!(
+        first,
+        [
+            ("a:test".to_string(), "pass".to_string()),
+            ("b:test".to_string(), "pass".to_string())
+        ]
+    );
+    let results = s.results();
+
+    let out = s.sluice(&["exec", "bolt/x"]);
+    assert!(out.status.success(), "{}", text(&out));
+    assert!(
+        text(&out).contains("passed: 2 tasks (2 replayed)"),
+        "{}",
+        text(&out)
+    );
+    assert_eq!(s.results(), results, "a replay is never recorded as a run");
+}
+
+/// The exec-checks spec's "After a fix" (108; design D4): once a clean
+/// run recorded a pass of `b:test` and a fail of `a:test`, a commit to
+/// `a/lib` alone runs `a:test` again and replays `b:test`.
+#[test]
+fn after_a_fix_exec_runs_the_fixed_check_and_replays_the_rest() {
+    let s = moon_at_branch("exec-after-a-fix", "grep -qx ok a/lib\n");
+    s.commit(&[("a/lib", "broken"), ("b/lib", "2")]);
+    let out = s.sluice(&["exec", "bolt/x"]);
+    assert_eq!(out.status.code(), Some(1), "{}", text(&out));
+    let mut first = recorded(&s);
+    first.sort();
+    assert_eq!(
+        first,
+        [
+            ("a:test".to_string(), "fail".to_string()),
+            ("b:test".to_string(), "pass".to_string())
+        ],
+        "{}",
+        text(&out)
+    );
+
+    s.commit(&[("a/lib", "ok\n")]);
+    let out = s.sluice(&["exec", "bolt/x"]);
+    assert!(out.status.success(), "{}", text(&out));
+    assert!(
+        text(&out).contains("passed: 2 tasks (1 replayed)"),
+        "{}",
+        text(&out)
+    );
+    let then = recorded(&s);
+    assert_eq!(
+        then[first.len()..],
+        [("a:test".to_string(), "pass".to_string())],
+        "a:test ran, and b:test's replay is recorded as nothing: {}",
+        text(&out)
+    );
+}
+
+/// The exec-checks spec's "A pass sluice never recorded" (92, 108;
+/// design D5): a check passed with its change unstaged records nothing, so
+/// once the change is committed as it was, the next run's replay of it is
+/// proven by nothing; exec says so, runs it again and records its pass.
+#[test]
+fn a_pass_sluice_never_recorded_runs_again_and_is_recorded() {
+    let s = moon_at_branch("exec-never-recorded", "true\n");
+    std::fs::write(s.worktree.join("a/lib"), "2").unwrap();
+    let out = s.sluice(&["exec", "bolt/x"]);
+    assert!(out.status.success(), "{}", text(&out));
+    assert!(
+        text(&out).contains("not recorded: worktree is not clean"),
+        "{}",
+        text(&out)
+    );
+    assert_eq!(s.results(), "", "nothing is recorded");
+
+    let head = s.commit(&[]);
+    let out = s.sluice(&["exec", "bolt/x"]);
+    let said = text(&out);
+    assert!(out.status.success(), "{said}");
+    assert!(
+        said.contains("replayed with no result sluice recorded: a:test; running them again\n"),
+        "{said}"
+    );
+    assert!(said.contains("passed: 1 task\n"), "{said}");
+    assert!(
+        said.contains(&format!(
+            "recorded 1 result under its key for {}",
+            &head[..7]
+        )),
+        "{said}"
+    );
+    assert_eq!(recorded(&s), [("a:test".to_string(), "pass".to_string())]);
+}
+
+/// The exec-checks spec's "The document for scripts" (design D6): `--json`
+/// gives `since`, the merge base's full revision, and each task's
+/// `replayed`.
+#[test]
+fn exec_json_gives_since_and_each_tasks_replayed() {
+    let s = moon_at_branch("exec-json-replayed", "true\n");
+    let cut = s.repo.rev("bolt/x");
+    s.commit(&[("a/lib", "2"), ("b/lib", "2")]);
+    let out = s.sluice(&["exec", "bolt/x"]);
+    assert!(out.status.success(), "{}", text(&out));
+
+    s.commit(&[("a/lib", "3")]);
+    let out = s.sluice(&["exec", "bolt/x", "--json"]);
+    assert!(out.status.success(), "{}", text(&out));
+    let doc = document(&out);
+    assert_eq!(doc["since"], cut.as_str(), "{doc}");
+    let task = |name: &str| {
+        doc["tasks"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|t| t["task"] == name)
+            .unwrap_or_else(|| panic!("no {name} in {doc}"))
+            .clone()
+    };
+    assert_eq!(task("b:test")["replayed"], true, "{doc}");
+    assert_eq!(task("b:test")["recorded"], false, "{doc}");
+    assert_eq!(task("a:test")["replayed"], false, "{doc}");
+    assert_eq!(task("a:test")["recorded"], true, "{doc}");
+}
+
 /// Each result `sluice exec` recorded: `(task, outcome)`.
 fn recorded(s: &Setup) -> Vec<(String, String)> {
     s.results()

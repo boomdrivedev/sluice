@@ -2878,6 +2878,10 @@ impl Branch for ReadOnce<'_> {
         self.branch.contains(tip, rev)
     }
 
+    fn merge_base(&self, a: &Rev, b: &Rev) -> Result<Option<Rev>> {
+        self.branch.merge_base(a, b)
+    }
+
     fn landed_by(&self, tip: &Rev, rev: &Rev) -> Result<Option<Rev>> {
         self.branch.landed_by(tip, rev)
     }
@@ -3186,6 +3190,25 @@ impl crate::PullRequests for Pulls {
             .rev()
             .filter(|x| x.head == head)
             .find_map(|x| number(&x.from.worktree)))
+    }
+
+    /// Record 0130 D3: one read of the pull request, conditional as every
+    /// read is and kept for the follows after it (136; rule core.32).
+    fn holds(&self, seams: Seams<'_>, clock: &dyn Clock, branch: &str, n: u64) -> Result<bool> {
+        let s = Sluice::new(seams, clock);
+        let Some(t) = self.target(&s, branch)? else {
+            return Ok(false);
+        };
+        let forge = self.forge(branch)?;
+        let pull = forge.pull(&t.repo, n)?;
+        let held = pull.as_ref().is_some_and(|p| p.base == branch);
+        let seen = Seen {
+            at: clock.now(),
+            pull,
+            readied: None,
+        };
+        self.seen.borrow_mut().insert(n, seen);
+        Ok(held)
     }
 
     fn follow(

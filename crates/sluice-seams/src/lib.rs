@@ -701,6 +701,12 @@ pub struct RunRequest {
     /// against; `None` when that revision is covered by no verdict, so
     /// every required check is affected (70).
     pub since: Option<Rev>,
+    /// The paths a worktree holds beyond `revision`, its uncommitted and
+    /// untracked files, which count among what the run changed since
+    /// `since` (36; design D2 of
+    /// a-worktrees-checks-run-only-what-its-own-changes-affect). Empty for
+    /// a checkout sluice made, which holds nothing beyond its revision.
+    pub beyond: Vec<String>,
     /// The time limit the branch's policy states (66).
     pub limit: Option<Duration>,
     /// 83: the memory and network the branch's policy states, and the
@@ -1542,6 +1548,11 @@ pub trait Branch {
     /// Whether `rev` is `tip` or in its history: a landing found under a
     /// branch moved again since (24).
     fn contains(&self, tip: &Rev, rev: &Rev) -> Result<bool>;
+
+    /// Where `a` and `b` part: their best common ancestor, `None` where
+    /// they share no commit. A worktree's own changes are read from where
+    /// its head left the branch (36, 70).
+    fn merge_base(&self, a: &Rev, b: &Rev) -> Result<Option<Rev>>;
 
     /// 122: the commit that landed `rev` on a branch at `tip`: the oldest
     /// of `tip`'s first-parent line that holds it, `rev` itself where it is

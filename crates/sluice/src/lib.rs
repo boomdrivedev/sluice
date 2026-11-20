@@ -146,11 +146,13 @@ Examples:
   $ sluice wait 12
   $ sluice wait 12 --timeout 9m --json   an agent's loop: again while it exits 5
   $ sluice wait main                     this worktree's last submission to main
+  $ sluice wait main --pull-request 41   pull request 41 into main, from any folder
 
 Exit codes:
   0    landed, whatever failed after the landing (said on stderr)
   1    failed: it was blamed, or its pull request closed; or no such
-       submission on any branch, every branch read
+       submission on any branch, every branch read; or no such pull
+       request into the branch
   2    a conflict
   3    sluice itself failed, or it could not read the forge for 5m and
        whether it landed is not known: the cause is on stderr; or the
@@ -160,7 +162,8 @@ Exit codes:
   5    still waiting: --timeout ran out, and the submission stays queued
   6    held: the forge refused its landing; its words are on stdout
   64   a command line sluice cannot read; or the number is on more than
-       one branch and no --branch names one: each branch is named
+       one branch and no --branch names one: each branch is named; or
+       --pull-request with a submission's number
   130  stopped with Ctrl-C; the submission stays queued";
 
 /// `sluice inbox --help`'s examples and exits (51, 135).
@@ -346,6 +349,11 @@ pub enum Command {
         /// branch holds it.
         #[arg(long)]
         branch: Option<String>,
+        /// A pull request into the branch the target names, by its
+        /// number: follows it from any folder of the repository, on any
+        /// host.
+        #[arg(long, value_name = "N")]
+        pull_request: Option<u64>,
     },
     /// Hand over every outcome still owed to this worktree's submissions,
     /// printing each with the key to confirm it by; each is handed over
@@ -1012,6 +1020,12 @@ pub trait PullRequests {
         worktree: &str,
     ) -> Result<Option<u64>>;
 
+    /// Whether the forge holds pull request `number`, open or closed, into
+    /// `branch`: what a wait by pull request reads before it follows one
+    /// (record 0130 D3).
+    fn holds(&self, seams: Seams<'_>, clock: &dyn Clock, branch: &str, number: u64)
+        -> Result<bool>;
+
     /// Where pull request `number` into `branch` stands, as the last
     /// intake read it.
     fn follow(
@@ -1086,6 +1100,11 @@ impl PullRequests for () {
 
     fn find(&self, _: Seams<'_>, _: &dyn Clock, _: &str, _: &str) -> Result<Option<u64>> {
         Ok(None)
+    }
+
+    /// With no forge, no pull request exists.
+    fn holds(&self, _: Seams<'_>, _: &dyn Clock, _: &str, _: u64) -> Result<bool> {
+        Ok(false)
     }
 
     fn follow(&self, _: Seams<'_>, _: &dyn Clock, branch: &str, _: u64) -> Result<Followed> {
@@ -2139,12 +2158,19 @@ fn dispatch(
             confirm,
             confirm_landing,
             branch,
+            pull_request,
         } => {
             let confirms = Confirms::of(confirm, confirm_landing);
             let deadline = timeout.map(|t| {
                 clock.now() + chrono::Duration::from_std(t).unwrap_or(chrono::Duration::MAX)
             });
             let number = target.parse::<u64>();
+            // Record 0130 D3: a pull request is into a branch, so its
+            // number goes with a branch's name, never a submission's.
+            if number.is_ok() && pull_request.is_some() {
+                writeln!(out, "sluice wait: {PULL_REQUEST_GOES_WITH_A_BRANCH}")?;
+                return Ok(USAGE);
+            }
             if number.is_err() && branch.is_some() {
                 writeln!(out, "sluice wait: {}", branch_goes_with_a_number(&target))?;
                 return Ok(USAGE);
@@ -2163,8 +2189,50 @@ fn dispatch(
                         return refuse_several(id, "sluice wait", &several, json, USAGE, out)
                     }
                 },
+                Err(_) if pull_request.is_some() => {
+                    let n = pull_request.expect("a pull request named");
+                    // Record 0130 D3: a branch that takes no pull requests,
+                    // or a forge that holds no such one into it, follows
+                    // nothing.
+                    let held = match takes_pulls(&s, &target)? {
+                        false => false,
+                        true => match pulls.holds(s.seams(), clock, &target, n) {
+                            Ok(held) => held,
+                            Err(e) => {
+                                if waited_out(&e) && !INTERRUPTED.load(Ordering::SeqCst) {
+                                    return Ok(WAITING);
+                                }
+                                let what = format!("#{n}");
+                                let again = pull_wait(&target, n);
+                                let code = could_not_read(&unread(e)?, &what, &again, json, out)?;
+                                // Ctrl-C ended the retry policy's pauses.
+                                if INTERRUPTED.load(Ordering::SeqCst) {
+                                    return Ok(STOPPED);
+                                }
+                                return Ok(code);
+                            }
+                        },
+                    };
+                    if !held {
+                        let text = format!("no pull request #{n} into {target}");
+                        told::tell(out, json, Kind::NotFound, &text, &[])?;
+                        return Ok(FAILED);
+                    }
+                    let mode = PullMode::Wait {
+                        deadline,
+                        number: Some(n),
+                    };
+                    let worktree = SubmitHead::Worktree(worktree);
+                    return submit_pull(
+                        &s, host, pulls, clock, &worktree, &target, mode, json, confirms, pause,
+                        out,
+                    );
+                }
                 Err(_) if takes_pulls(&s, &target)? => {
-                    let mode = PullMode::Wait { deadline };
+                    let mode = PullMode::Wait {
+                        deadline,
+                        number: None,
+                    };
                     let worktree = SubmitHead::Worktree(worktree);
                     return submit_pull(
                         &s, host, pulls, clock, &worktree, &target, mode, json, confirms, pause,
@@ -5363,6 +5431,10 @@ fn lookup(s: &Sluice<'_>, id: u64, branch: Option<&str>) -> Result<Lookup> {
 
 /// Why `--branch` beside `target`, a branch, is a command line sluice
 /// cannot read (record 0114).
+/// Record 0130 D3: `--pull-request` given a submission's number.
+const PULL_REQUEST_GOES_WITH_A_BRANCH: &str =
+    "--pull-request names a pull request into a branch, as sluice wait <branch> --pull-request <n>";
+
 fn branch_goes_with_a_number(target: &str) -> String {
     format!("--branch names the branch of a submission's number; {target} is a branch")
 }
@@ -5543,9 +5615,12 @@ enum PullMode<'a> {
     /// Only say where it stands.
     Status,
     /// Follow it to its outcome, or until `deadline`: `sluice wait
-    /// <branch>` (ADR 0041).
+    /// <branch>` (ADR 0041); pull request `number` where the wait names
+    /// one, from any folder, in place of the one the worktree's branch
+    /// opened (record 0130 D2).
     Wait {
         deadline: Option<chrono::DateTime<chrono::Utc>>,
+        number: Option<u64>,
     },
     /// Follow pull request `number` as [`PullMode::Wait`] follows the one
     /// open, for `own`: a wait whose submission was withdrawn while the
@@ -5567,10 +5642,17 @@ impl PullMode<'_> {
 
     fn deadline(&self) -> Option<chrono::DateTime<chrono::Utc>> {
         match self {
-            PullMode::Wait { deadline } | PullMode::Follow { deadline, .. } => *deadline,
+            PullMode::Wait { deadline, .. } | PullMode::Follow { deadline, .. } => *deadline,
             _ => None,
         }
     }
+}
+
+/// The wait that follows pull request `n` into `branch` from any folder of
+/// the repository, on any host: the one handle a request's work keeps
+/// from the submit to its landing (record 0130 D1; rule core.48).
+fn pull_wait(branch: &str, n: u64) -> String {
+    format!("sluice wait {branch} --pull-request {n}")
 }
 
 /// `sluice submit` to a branch with pull requests (C.5 pull request):
@@ -5621,6 +5703,8 @@ fn submit_pull(
         PullMode::Follow { own, .. } => Some(own),
         _ => None,
     };
+    // Before a request is found, the wait that finds it again; record 0130
+    // D4 names it by its number once it is known, below.
     let again = match follows_for {
         Some(own) => format!("sluice wait {}", own.id),
         None => format!("sluice wait {branch}"),
@@ -5653,6 +5737,14 @@ fn submit_pull(
     // 124: how the host's copy differed from what the submit opened.
     let mut copy = None;
     let number = if let PullMode::Follow { number, .. } = mode {
+        number
+    } else if let PullMode::Wait {
+        number: Some(number),
+        ..
+    } = mode
+    {
+        // Record 0130 D2: the request named, read already (D3); the
+        // outcome is still delivered to the worktree the wait runs for.
         number
     } else if !opens {
         let found = match pulls.find(seams, clock, branch, worktree) {
@@ -5702,6 +5794,13 @@ fn submit_pull(
                 return Ok(CONFLICT);
             }
         }
+    };
+    // Record 0130 D4: the request known, the wait that follows it by its
+    // number, from any folder; `sluice wait <id>` for a wait that follows
+    // it for submission `<id>`.
+    let again = match follows_for {
+        Some(_) => again,
+        None => pull_wait(branch, number),
     };
     let mut last: Option<(String, Vec<String>)> = None;
     // 137: where the pull request stands on the host that takes it in, as
@@ -5911,9 +6010,11 @@ fn submit_pull(
                         .map(|x| x.id)
                         .collect();
                     if json {
+                        // Record 0130 D4: the wait that follows the request
+                        // from any folder, beside the submission.
                         let doc = serde_json::json!({
                             "id": sub.id, "branch": branch, "ahead": ahead,
-                            "pull_request": number,
+                            "pull_request": number, "wait": pull_wait(branch, number),
                         });
                         writeln!(out, "{}", with_copy(doc, copy.as_ref())?)?;
                     } else {
@@ -5925,6 +6026,7 @@ fn submit_pull(
                             "submission {} to {branch} from #{number} · {ahead}",
                             sub.id
                         )?;
+                        writeln!(out, "wait: {}", pull_wait(branch, number))?;
                     }
                     return Ok(0);
                 }
@@ -5945,13 +6047,14 @@ fn submit_pull(
                         // (record 0065).
                         let doc = serde_json::json!({
                             "pull_request": number, "branch": branch, "state": now.0,
-                            "head": head, "draft": draft,
+                            "head": head, "draft": draft, "wait": pull_wait(branch, number),
                         });
                         let doc = with_sends(There::with(doc, there.as_ref())?, s, worktree)?;
                         writeln!(out, "{}", with_copy(doc, copy.as_ref())?)?;
                     } else if json && no_wait {
                         let doc = serde_json::json!({
                             "pull_request": number, "branch": branch, "state": now.0,
+                            "wait": pull_wait(branch, number),
                         });
                         let doc = There::with(doc, there.as_ref())?;
                         writeln!(out, "{}", with_copy(doc, copy.as_ref())?)?;
@@ -5968,6 +6071,11 @@ fn submit_pull(
             None => {}
         }
         if no_wait || status {
+            // Record 0130 D4: the request still open and undecided, the
+            // wait that follows it, on a line of its own after its state.
+            if !json {
+                writeln!(out, "wait: {}", pull_wait(branch, number))?;
+            }
             return Ok(0);
         }
         // Undecided: taken in, its submission's record as it stands now, as
@@ -6005,11 +6113,12 @@ fn submit_pull(
                 let state = last.as_ref().map_or("waiting", |l| l.0.as_str());
                 let doc = serde_json::json!({
                     "pull_request": number, "branch": branch, "state": state,
+                    "wait": pull_wait(branch, number),
                 });
                 let doc = There::with(doc, there.as_ref())?;
                 writeln!(out, "{}", with_copy(doc, copy.as_ref())?)?;
             } else {
-                writeln!(out, "still open: #{number}; sluice wait {branch}")?;
+                writeln!(out, "still open: #{number}; {}", pull_wait(branch, number))?;
             }
             Ok(code)
         };
@@ -6195,6 +6304,11 @@ fn submit_pull_group(
                         }
                         last[i] = Some(now);
                     }
+                    // Record 0130 D4: still open and undecided, the wait
+                    // that follows it, after its state.
+                    if no_wait && !json {
+                        writeln!(out, "wait: {}", pull_wait(branch, o.number))?;
+                    }
                 }
                 followed => decided[i] = Some(followed),
             }
@@ -6235,6 +6349,9 @@ fn submit_pull_group(
             };
             item["worktree"] = serde_json::json!(w);
             item["pull_request"] = serde_json::json!(o.number);
+            if decided[i].is_none() {
+                item["wait"] = serde_json::json!(pull_wait(branch, o.number));
+            }
             if let (true, Some(a)) = (no_wait, &o.submission) {
                 item["id"] = serde_json::json!(a.id);
                 item["ahead"] = serde_json::json!(a.ahead);
@@ -6274,8 +6391,9 @@ fn submit_pull_group(
                 FAILED
             }
             _ => {
+                // Record 0130 D4: the wait that follows it by its number.
                 if !json {
-                    writeln!(out, "still open: #{n}; sluice wait {branch}")?;
+                    writeln!(out, "still open: #{n}; {}", pull_wait(branch, n))?;
                 }
                 LANDED
             }

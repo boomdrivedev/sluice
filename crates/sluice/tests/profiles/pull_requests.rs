@@ -2879,8 +2879,8 @@ fn no_wait_then_status() {
 }
 
 /// Waiting for a review: `--status --json` names the pull request's head,
-/// that it is no draft, and what a submit from the worktree would send,
-/// beside its number, branch and state.
+/// that it is no draft, what a submit from the worktree would send and the
+/// wait that follows it (record 0130), beside its number, branch and state.
 #[test]
 fn status_names_the_head_waiting_for_a_review() {
     let g = OnGitHub::new("pr-status-head", "reviews = 1");
@@ -2898,6 +2898,7 @@ fn status_names_the_head_waiting_for_a_review() {
             "pull_request": pull.number, "branch": "main",
             "state": "waiting: needs 1 review", "head": pull.head, "draft": false,
             "sends": pull.head,
+            "wait": format!("sluice wait main --pull-request {}", pull.number),
         })
     );
 }
@@ -2953,6 +2954,7 @@ fn run_again_follows_a_pull_request_waiting_for_a_review() {
         doc,
         serde_json::json!({
             "pull_request": n, "branch": "main", "state": "waiting: needs 1 review",
+            "wait": format!("sluice wait main --pull-request {n}"),
         })
     );
     let said = String::from_utf8_lossy(&out.stderr);
@@ -3034,8 +3036,9 @@ fn run_again_marks_a_draft_ready() {
 
 /// No wait, its conditions hold: the submit answers with the submission
 /// sluice took the pull request in as, from its checkout `pull/<n>` at the
-/// head pushed, with the pull request beside it; `sluice wait <id>`
-/// follows that submission to its landing.
+/// head pushed, with the pull request and the wait that follows it beside
+/// it (record 0130); `sluice wait <id>` follows that submission to its
+/// landing.
 #[test]
 fn no_wait_answers_with_its_submission() {
     let g = OnGitHub::new("pr-no-wait-id", "");
@@ -3048,6 +3051,11 @@ fn no_wait_answers_with_its_submission() {
     assert_eq!(doc["pull_request"], n, "{doc}");
     assert_eq!(doc["branch"], "main", "{doc}");
     assert_eq!(doc["ahead"], serde_json::json!([]), "{doc}");
+    assert_eq!(
+        doc["wait"],
+        format!("sluice wait main --pull-request {n}").as_str(),
+        "{doc}"
+    );
     let id = doc["id"]
         .as_u64()
         .unwrap_or_else(|| panic!("{doc}"))
@@ -3070,8 +3078,9 @@ fn no_wait_answers_with_its_submission() {
     assert_eq!(doc["state"], "landed");
 }
 
-/// No wait, waiting for a review: the submit answers with the pull request
-/// and what it waits for, and nothing of it is queued.
+/// No wait, waiting for a review: the submit answers with the pull request,
+/// what it waits for and the wait that follows it (record 0130), and
+/// nothing of it is queued.
 #[test]
 fn no_wait_waiting_for_a_review_answers_with_the_pull_request() {
     let g = OnGitHub::new("pr-no-wait-review", "reviews = 1");
@@ -3085,13 +3094,36 @@ fn no_wait_waiting_for_a_review_answers_with_the_pull_request() {
         doc,
         serde_json::json!({
             "pull_request": n, "branch": "main", "state": "waiting: needs 1 review",
+            "wait": format!("sluice wait main --pull-request {n}"),
         })
     );
     assert!(g.of(n).is_empty(), "{:?}", g.subs());
 }
 
+/// pull-request-submit, "No wait, in words, waiting for a review": after
+/// the pull request's state, the submit says the wait that follows it, on
+/// the last line, and exits 0 (record 0130 D4).
+#[test]
+fn no_wait_waiting_for_a_review_names_its_wait_in_words() {
+    let g = OnGitHub::new("pr-no-wait-review-words", "reviews = 1");
+    let w = g.session("review", &[("r.txt", "r\n")]);
+    let out = g.wt_submit(&w, &["--no-wait"]);
+    assert_eq!(out.status.code(), Some(0), "{}", text(&out));
+    let n = g.pull_from("unit/review").number;
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let lines: Vec<&str> = stdout.lines().filter(|l| !l.trim().is_empty()).collect();
+    let state = lines
+        .iter()
+        .position(|l| *l == "waiting: needs 1 review")
+        .expect(&stdout);
+    let wait = format!("wait: sluice wait main --pull-request {n}");
+    assert_eq!(lines.last().copied(), Some(wait.as_str()), "{stdout}");
+    assert!(state < lines.len() - 1, "{stdout}");
+}
+
 /// No wait, in words: after the line naming the pull request opened, the
-/// submission it was taken in as and what is queued ahead of it.
+/// submission it was taken in as and what is queued ahead of it, then the
+/// wait that follows the pull request (record 0130).
 #[test]
 fn no_wait_says_its_submission() {
     let g = OnGitHub::new("pr-no-wait-words", "");
@@ -3107,6 +3139,11 @@ fn no_wait_says_its_submission() {
     assert_eq!(
         lines.get(at + 1).copied(),
         Some(format!("submission {id} to main from #{n} · nothing queued ahead").as_str()),
+        "{stdout}"
+    );
+    assert_eq!(
+        lines.get(at + 2).copied(),
+        Some(format!("wait: sluice wait main --pull-request {n}").as_str()),
         "{stdout}"
     );
 }
@@ -3153,6 +3190,34 @@ fn wait_follows_a_pull_request() {
     assert_eq!(doc["state"], "landed");
 }
 
+/// submission-wait, "Out of time, waiting for a review, in words": the
+/// agent's pull request waits for a review, and `sluice wait main --timeout
+/// 2s` in its worktree exits 5, its last line naming the wait that follows
+/// the request by its number, never one that reads the folder it runs in
+/// (record 0130).
+#[test]
+fn out_of_time_waiting_for_a_review_names_its_wait() {
+    let g = OnGitHub::new("pr-wait-review-words", "reviews = 1");
+    let w = g.session("reviewed", &[("r.txt", "r\n")]);
+    let out = g.wt_submit(&w, &["--no-wait"]);
+    assert_eq!(out.status.code(), Some(0), "{}", text(&out));
+    let n = g.pull_from("unit/reviewed").number;
+    let out = g
+        .command(env!("CARGO_BIN_EXE_sluice"), &w)
+        .args(["wait", "main", "--timeout", "2s"])
+        .output()
+        .unwrap();
+    assert_eq!(out.status.code(), Some(sluice::WAITING), "{}", text(&out));
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let last = stdout.lines().rfind(|l| !l.trim().is_empty());
+    assert_eq!(
+        last,
+        Some(format!("still open: #{n}; sluice wait main --pull-request {n}").as_str()),
+        "{}",
+        text(&out)
+    );
+}
+
 /// A pull request taken in, out of time: `sluice wait <branch>` follows its
 /// submission, and ends with that submission's record, as `sluice wait
 /// <id>` does.
@@ -3179,6 +3244,185 @@ fn wait_follows_a_pull_requests_submission() {
         "{record}"
     );
     assert!(record.get("pull_request").is_none(), "{record}");
+}
+
+/// submission-wait, "Taken in here, out of time": this host took the
+/// agent's pull request in as submission `<id>`, whose check goes on until
+/// the test ends it. `sluice wait main --timeout 2s --json` in the agent's
+/// worktree exits 5 with `<id>`'s record, which gains no `wait`; in words
+/// it says `still waiting: sluice wait <id>` (record 0130 D5).
+#[test]
+fn a_wait_on_a_request_taken_in_here_out_of_time_prints_its_record() {
+    let g = OnGitHub::new("pr-wait-taken-record", "");
+    let hang = Hang::in_repo(&g);
+    let w = g.session("record", &[("hang", hang.file().as_str())]);
+    let out = g.wt_submit(&w, &["--no-wait", "--json"]);
+    assert_eq!(out.status.code(), Some(0), "{}", text(&out));
+    let doc: Value =
+        serde_json::from_slice(&out.stdout).unwrap_or_else(|e| panic!("{e}: {}", text(&out)));
+    let id = doc["id"].as_u64().unwrap_or_else(|| panic!("{doc}"));
+    let wait = |args: &[&str]| {
+        g.command(env!("CARGO_BIN_EXE_sluice"), &w)
+            .args(["wait", "main", "--timeout", "2s"])
+            .args(args)
+            .output()
+            .unwrap()
+    };
+    let out = wait(&["--json"]);
+    assert_eq!(out.status.code(), Some(sluice::WAITING), "{}", text(&out));
+    let record: Value =
+        serde_json::from_slice(&out.stdout).unwrap_or_else(|e| panic!("{e}: {}", text(&out)));
+    assert_eq!(record["id"], id, "{record}");
+    assert!(
+        record["state"] == "queued" || record["state"] == "testing",
+        "{record}"
+    );
+    assert!(record.get("wait").is_none(), "{record}");
+    let out = wait(&[]);
+    assert_eq!(out.status.code(), Some(sluice::WAITING), "{}", text(&out));
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let last = stdout.lines().rfind(|l| !l.trim().is_empty());
+    assert_eq!(
+        last,
+        Some(format!("still waiting: sluice wait {id}").as_str()),
+        "{}",
+        text(&out)
+    );
+}
+
+/// submission-wait, "Into another branch" and "A branch that takes no
+/// pull requests": pull request `#n` is into `bolt/x`, which takes none.
+/// `sluice wait main --pull-request <n> --json` prints the not-found
+/// document, `no pull request #<n> into main`, and `sluice wait bolt/x
+/// --pull-request <n>` says `no pull request #<n> into bolt/x`; each exits
+/// 1 and follows nothing (record 0130 D3).
+#[test]
+fn a_wait_by_pull_request_into_another_branch_is_not_found() {
+    let g = OnGitHub::with_bolt("pr-wait-by-number-elsewhere");
+    let head = g.push_branch("unit/into-bolt", &[("x.txt", Some("x\n"))]);
+    let n =
+        g.gh.forge
+            .open_by("person", "bolt/x", "unit/into-bolt", &head, false, None)
+            .unwrap();
+    let number = n.to_string();
+    let out = g.sluice(&["wait", "main", "--pull-request", &number, "--json"]);
+    assert_eq!(out.status.code(), Some(sluice::FAILED), "{}", text(&out));
+    let doc: Value =
+        serde_json::from_slice(&out.stdout).unwrap_or_else(|e| panic!("{e}: {}", text(&out)));
+    assert_eq!(doc["error"]["kind"], "not_found", "{doc}");
+    assert_eq!(
+        doc["error"]["message"],
+        format!("no pull request #{n} into main").as_str(),
+        "{doc}"
+    );
+    let out = g.sluice(&["wait", "bolt/x", "--pull-request", &number]);
+    assert_eq!(out.status.code(), Some(sluice::FAILED), "{}", text(&out));
+    assert_eq!(
+        String::from_utf8_lossy(&out.stdout),
+        format!("no pull request #{n} into bolt/x\n"),
+        "{}",
+        text(&out)
+    );
+    assert!(g.subs().is_empty(), "{:?}", g.subs());
+}
+
+/// submission-wait, "Taken in here, out of time", by its number: this host
+/// took the agent's pull request in as submission `<id>`, whose check goes
+/// on until the test ends it, and `sluice wait main --pull-request <n>
+/// --timeout 2s --json` in the repository's main checkout exits 5 with
+/// `<id>`'s record, as `sluice wait <id> --timeout 2s --json` prints it
+/// (record 0130 D2, D5).
+#[test]
+fn a_wait_by_pull_request_taken_in_here_prints_its_record() {
+    let g = OnGitHub::new("pr-wait-by-number-here", "");
+    let hang = Hang::in_repo(&g);
+    let w = g.session("here", &[("hang", hang.file().as_str())]);
+    let out = g.wt_submit(&w, &["--no-wait", "--json"]);
+    assert_eq!(out.status.code(), Some(0), "{}", text(&out));
+    let doc: Value =
+        serde_json::from_slice(&out.stdout).unwrap_or_else(|e| panic!("{e}: {}", text(&out)));
+    let id = doc["id"].as_u64().unwrap_or_else(|| panic!("{doc}"));
+    let n = doc["pull_request"]
+        .as_u64()
+        .unwrap_or_else(|| panic!("{doc}"));
+    // Under test until the test ends it, so both waits read one state.
+    g.step();
+    started(&hang.pid);
+    let wait = |target: &str, rest: &[&str]| {
+        let out = g.sluice(&[&["wait", target, "--timeout", "2s", "--json"][..], rest].concat());
+        assert_eq!(out.status.code(), Some(sluice::WAITING), "{}", text(&out));
+        let record: Value =
+            serde_json::from_slice(&out.stdout).unwrap_or_else(|e| panic!("{e}: {}", text(&out)));
+        record
+    };
+    let record = wait("main", &["--pull-request", &n.to_string()]);
+    assert_eq!(record["id"], id, "{record}");
+    assert_eq!(record["state"], "testing", "{record}");
+    assert!(record.get("wait").is_none(), "{record}");
+    let by_id = wait(&id.to_string(), &[]);
+    assert_eq!(record, by_id);
+}
+
+/// submission-wait, "Another worktree's pull request": worktree `unit/a`
+/// opened one pull request and `unit/b` another, this host took both in,
+/// and GitHub refuses every post of their outcomes, so neither is
+/// confirmed on the request. `sluice wait main --pull-request <a's>` in
+/// `unit/b` reports `unit/a`'s submission landed, never `unit/b`'s, and
+/// hands it over to no one; `sluice inbox` in `unit/a` then hands that
+/// landing over (51; rule core.52; record 0130 D2).
+#[test]
+fn a_wait_by_another_worktrees_pull_request_hands_nothing_over() {
+    let g = OnGitHub::new("pr-wait-by-number-another", "");
+    let submitted = |name: &str| {
+        let file = format!("{name}.txt");
+        let w = g.session(name, &[(file.as_str(), "x\n")]);
+        let out = g.wt_submit(&w, &["--no-wait", "--json"]);
+        assert_eq!(out.status.code(), Some(0), "{}", text(&out));
+        let doc: Value =
+            serde_json::from_slice(&out.stdout).unwrap_or_else(|e| panic!("{e}: {}", text(&out)));
+        let id = doc["id"].as_u64().unwrap_or_else(|| panic!("{doc}"));
+        (w, id, doc["pull_request"].clone())
+    };
+    let (a, a_id, a_n) = submitted("a");
+    let (b, b_id, _) = submitted("b");
+    for (method, path) in [
+        ("POST", "/repos/o/r/check-runs"),
+        ("PATCH", "/repos/o/r/check-runs"),
+        ("POST", "/repos/o/r/issues"),
+        ("PATCH", "/repos/o/r/issues"),
+    ] {
+        g.gh.trouble(method, path, usize::MAX, github::Trouble::Status(422));
+    }
+    let out = g
+        .command(env!("CARGO_BIN_EXE_sluice"), &b)
+        .args(["wait", "main", "--pull-request", &a_n.to_string()])
+        .args(["--timeout", "1m", "--json"])
+        .output()
+        .unwrap();
+    assert_eq!(out.status.code(), Some(sluice::LANDED), "{}", text(&out));
+    let record: Value =
+        serde_json::from_slice(&out.stdout).unwrap_or_else(|e| panic!("{e}: {}", text(&out)));
+    assert_eq!(record["id"], a_id, "{record}");
+    assert_ne!(record["id"], b_id, "{record}");
+    assert_eq!(record["state"], "landed", "{record}");
+    let id = Value::from(a_id);
+    assert_eq!(g.delivery(&id)["state"], "owed", "{}", g.delivery(&id));
+    assert_eq!(g.delivery(&id)["handed"], serde_json::json!([]));
+
+    let out = g
+        .command(env!("CARGO_BIN_EXE_sluice"), &a)
+        .args(["inbox", "--json"])
+        .output()
+        .unwrap();
+    assert_eq!(out.status.code(), Some(0), "{}", text(&out));
+    let doc: Value =
+        serde_json::from_slice(&out.stdout).unwrap_or_else(|e| panic!("{e}: {}", text(&out)));
+    let outcomes = doc["outcomes"]
+        .as_array()
+        .unwrap_or_else(|| panic!("{doc}"));
+    assert_eq!(outcomes.len(), 1, "{doc}");
+    assert_eq!(outcomes[0]["id"], a_id, "{doc}");
+    assert_eq!(outcomes[0]["state"], "landed", "{doc}");
 }
 
 /// 135: beside a live driver, `sluice wait <branch>` takes no pull request
@@ -3899,6 +4143,84 @@ fn a_group_submit_answers_with_each_submission_in_json() {
         assert_eq!(item["pull_request"], n, "{doc}");
         assert_eq!(item["ahead"], serde_json::json!(ahead), "{doc}");
         ahead.push(id);
+    }
+}
+
+/// group-submit, "No wait, every condition holding" and "No wait, in
+/// words": under `--json`, each item of `submissions` holds its `id`, its
+/// pull request and the wait that follows that pull request; in words,
+/// the act says each wait on a line of its own (record 0130 D4).
+#[test]
+fn a_group_act_names_each_pull_requests_wait() {
+    let g = OnGitHub::new("pr-group-wait-named", "");
+    let ws = g.sessions(&["n1", "n2"]);
+    let out = g.submit_group(&ws, &["--no-wait", "--json"]);
+    assert_eq!(out.status.code(), Some(0), "{}", text(&out));
+    let doc: Value =
+        serde_json::from_slice(&out.stdout).unwrap_or_else(|_| panic!("{}", text(&out)));
+    let items = doc["submissions"].as_array().expect("submissions");
+    assert_eq!(items.len(), 2, "{doc}");
+    for (item, name) in items.iter().zip(["n1", "n2"]) {
+        let n = g.pull_of(name).number;
+        assert!(item["id"].is_u64(), "{doc}");
+        assert_eq!(item["pull_request"], n, "{doc}");
+        assert_eq!(
+            item["wait"],
+            format!("sluice wait main --pull-request {n}").as_str(),
+            "{doc}"
+        );
+    }
+
+    let ws = g.sessions(&["w1", "w2"]);
+    let out = g.submit_group(&ws, &["--no-wait"]);
+    let said = text(&out);
+    assert_eq!(out.status.code(), Some(0), "{said}");
+    let lines: Vec<&str> = said.lines().collect();
+    for name in ["w1", "w2"] {
+        let n = g.pull_of(name).number;
+        let wait = format!("wait: sluice wait main --pull-request {n}");
+        assert!(lines.contains(&wait.as_str()), "{wait:?} in {said}");
+    }
+}
+
+/// group-submit, "Stopped while both are open": a waiting act of two pull
+/// requests, every condition holding, one combination at a time, the
+/// first's check going on until the test ends it. Stopped with Ctrl-C
+/// before either is decided, it says each one still open with the wait
+/// that follows it by its number, and exits 130 (record 0130 D4).
+#[test]
+fn a_group_act_stopped_names_each_open_pull_requests_wait() {
+    let g = OnGitHub::checked("pr-group-stopped", "", "1m", "parallel = 1\n");
+    let hang = Hang::in_repo(&g);
+    let ws = [
+        g.session("o1", &[("hang", hang.file().as_str())]),
+        g.session("o2", &[("o2.txt", "x\n")]),
+    ];
+    let mut args = vec!["submit", "main"];
+    for w in &ws {
+        args.extend(["--worktree", w.to_str().unwrap()]);
+    }
+    let act = g
+        .command(env!("CARGO_BIN_EXE_sluice"), g.repo.dir())
+        .args(&args)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    started(&hang.pid);
+    nix::sys::signal::kill(
+        nix::unistd::Pid::from_raw(act.id() as i32),
+        nix::sys::signal::Signal::SIGINT,
+    )
+    .unwrap();
+    let out = act.wait_with_output().unwrap();
+    let said = text(&out);
+    assert_eq!(out.status.code(), Some(sluice::STOPPED), "{said}");
+    let lines: Vec<&str> = said.lines().collect();
+    for name in ["o1", "o2"] {
+        let n = g.pull_of(name).number;
+        let still = format!("still open: #{n}; sluice wait main --pull-request {n}");
+        assert!(lines.contains(&still.as_str()), "{still:?} in {said}");
     }
 }
 
@@ -4757,6 +5079,35 @@ fn a_submit_by_name_opens_the_request_from_the_branch() {
     assert_eq!(held.pulls.len(), 1);
     assert_eq!(held.pulls[0].title, "Batch the review cards");
     assert_eq!(g.bolt_on_github(), remote);
+}
+
+/// pull-request-submit, "Submitted by name": `main` takes pull requests
+/// with `reviews = 1`, and `sluice submit main --head bolt/x --no-wait
+/// --json` in the repository's main checkout opens a pull request from
+/// `bolt/x` and answers with it and the wait that follows it, with no `id`
+/// (124; record 0130).
+#[test]
+fn a_submit_by_name_names_its_pull_requests_wait() {
+    let g = OnGitHub::checked_policy("pr-by-name-wait", "reviews = 1", "1m", "", BOLTS);
+    g.repo.branch("bolt/x", "main", &[("x.txt", Some("x\n"))]);
+    g.repo
+        .git(&["push", "-q", "origin", "bolt/x:refs/heads/bolt/x"]);
+    let out = g
+        .command(env!("CARGO_BIN_EXE_sluice"), g.repo.dir())
+        .args(["submit", "main", "--head", "bolt/x", "--no-wait", "--json"])
+        .output()
+        .unwrap();
+    assert_eq!(out.status.code(), Some(0), "{}", text(&out));
+    let doc: Value =
+        serde_json::from_slice(&out.stdout).unwrap_or_else(|e| panic!("{e}: {}", text(&out)));
+    let n = g.pull_from("bolt/x").number;
+    assert_eq!(doc["pull_request"], n, "{doc}");
+    assert_eq!(
+        doc["wait"],
+        format!("sluice wait main --pull-request {n}").as_str(),
+        "{doc}"
+    );
+    assert!(doc.get("id").is_none(), "{doc}");
 }
 
 /// 124, 51, D6: the request a submit by name opened is blamed while GitHub
@@ -6372,11 +6723,12 @@ fn last_document(out: &Output) -> Value {
     serde_json::from_str(last).unwrap_or_else(|e| panic!("{e}: {}", text(out)))
 }
 
-/// submission-wait, "Out of time, queued on the other host": host B's
+/// submission-wait, "Out of time, held on another host": host B's
 /// `sluice run` holds main's mark and holds host A's pull request as
 /// submission 1406, and A's `sluice wait main --timeout 2s --json` in its
-/// worktree exits 5, naming the request, the mark's host and holder, and
-/// the queue B's check carries.
+/// worktree exits 5, naming the request, the mark's host and holder, the
+/// queue B's check carries, and the wait that follows the request by its
+/// number, never B's 1406 (record 0130).
 #[test]
 fn out_of_time_queued_on_the_other_host() {
     let g = OnGitHub::new("wait-there-timeout", "");
@@ -6393,7 +6745,108 @@ fn out_of_time_queued_on_the_other_host() {
     );
     assert_eq!(doc["queue"]["submission"], 1406, "{doc}");
     assert_eq!(doc["queue"]["host"], "b", "{doc}");
+    assert_eq!(
+        doc["wait"],
+        format!("sluice wait main --pull-request {}", pull.number).as_str(),
+        "{doc}"
+    );
+    assert!(doc.get("id").is_none(), "{doc}");
     assert!(g.of(pull.number).is_empty(), "A took nothing in");
+}
+
+/// submission-wait, "Held on another host, out of time" and "Landed on
+/// another host": host B holds host A's pull request as submission 1406,
+/// and `sluice wait main --pull-request <n> --timeout 2s --json` in the
+/// repository's main checkout on A exits 5, naming the request, the host
+/// that takes it in, B's queue and the wait itself, with no `id`. Once B
+/// lands it and GitHub shows it merged, the same wait on A prints it
+/// landed and exits 0 (record 0130 D2).
+#[test]
+fn a_wait_by_pull_request_from_the_main_checkout_follows_it_on_another_host() {
+    let g = OnGitHub::new("wait-by-number-there", "");
+    let (_w, pull) = g.opened_here_held_by_b("bynumber");
+    let n = pull.number;
+    g.held_there(n, &pull.head, 1406);
+    let number = n.to_string();
+    let wait = ["wait", "main", "--pull-request", &number, "--json"];
+    let out = g.skipping(g.repo.dir(), &[&wait[..], &["--timeout", "2s"]].concat());
+    assert_eq!(out.status.code(), Some(sluice::WAITING), "{}", text(&out));
+    let doc = last_document(&out);
+    assert_eq!(doc["pull_request"], n, "{doc}");
+    assert_eq!(
+        doc["taken_in_by"],
+        serde_json::json!({ "host": "b" }),
+        "{doc}"
+    );
+    assert_eq!(doc["queue"]["submission"], 1406, "{doc}");
+    assert_eq!(doc["queue"]["host"], "b", "{doc}");
+    assert_eq!(
+        doc["wait"],
+        format!("sluice wait main --pull-request {n}").as_str(),
+        "{doc}"
+    );
+    assert!(doc.get("id").is_none(), "{doc}");
+
+    g.gh.forge.merge(n).unwrap();
+    g.follow_due(n);
+    let out = g.skipping(g.repo.dir(), &[&wait[..], &["--timeout", "1m"]].concat());
+    assert_eq!(out.status.code(), Some(sluice::LANDED), "{}", text(&out));
+    let doc = last_document(&out);
+    assert_eq!(doc["pull_request"], n, "{doc}");
+    assert_eq!(doc["state"], "landed", "{doc}");
+    assert!(g.of(n).is_empty(), "A took nothing in");
+}
+
+/// pull-request-submit, "No wait, another host takes it in": host B keeps
+/// main and takes its pull requests in, and `sluice submit main --no-wait
+/// --json` on host A answers with the pull request, its state, the host
+/// that takes it in and the wait that follows it, with no `id`. That wait,
+/// run in the repository's main checkout on A, follows the request to the
+/// landing B gives it (record 0130).
+#[test]
+fn no_wait_on_a_host_that_does_not_take_it_in_names_its_wait() {
+    let g = OnGitHub::new("pr-no-wait-there", "");
+    g.named("a", "");
+    let b = g.other("b", "", "");
+    b.run("1");
+    let w = g.session("two-apps", &[("t.txt", "t\n")]);
+    let out = g
+        .command(env!("CARGO_BIN_EXE_sluice"), &w)
+        .args(["submit", "main", "--no-wait", "--json"])
+        .output()
+        .unwrap();
+    assert_eq!(out.status.code(), Some(0), "{}", text(&out));
+    let doc = last_document(&out);
+    let n = g.pull_from("unit/two-apps").number;
+    assert_eq!(doc["pull_request"], n, "{doc}");
+    assert_eq!(doc["branch"], "main", "{doc}");
+    assert!(doc["state"].is_string(), "{doc}");
+    assert_eq!(
+        doc["taken_in_by"],
+        serde_json::json!({ "host": "b" }),
+        "{doc}"
+    );
+    let wait = format!("sluice wait main --pull-request {n}");
+    assert_eq!(doc["wait"], wait.as_str(), "{doc}");
+    assert!(doc.get("id").is_none(), "{doc}");
+
+    let until = Instant::now() + Duration::from_secs(60);
+    while !b.of(n).first().is_some_and(|s| s["state"] == "landed") {
+        assert!(Instant::now() < until, "B never landed it: {:?}", b.of(n));
+        b.discovery_passes();
+        b.run("2");
+    }
+    g.follow_due(n);
+    let args: Vec<&str> = wait.split(' ').skip(1).collect();
+    let out = g.skipping(
+        g.repo.dir(),
+        &[&args[..], &["--timeout", "1m", "--json"]].concat(),
+    );
+    assert_eq!(out.status.code(), Some(sluice::LANDED), "{}", text(&out));
+    let doc = last_document(&out);
+    assert_eq!(doc["pull_request"], n, "{doc}");
+    assert_eq!(doc["state"], "landed", "{doc}");
+    took_nothing_in(&g, &b, n);
 }
 
 /// submission-wait, "The status a submit reads": the same, and `sluice
@@ -6433,6 +6886,11 @@ fn the_status_a_submit_reads_across_hosts() {
             "host": "b", "taken_in": true, "submission": 1406, "state": "queued",
             "ahead": [], "waits_for": [],
         }),
+        "{doc}"
+    );
+    assert_eq!(
+        doc["wait"],
+        format!("sluice wait main --pull-request {}", pull.number).as_str(),
         "{doc}"
     );
 }
@@ -7184,6 +7642,7 @@ fn run_again_marks_ready_a_draft_another_host_sent_back() {
     // (record 0095 D5).
     let waiting = serde_json::json!({
         "pull_request": n, "branch": "main", "state": "waiting to be taken in by b",
+        "wait": format!("sluice wait main --pull-request {n}"),
         "taken_in_by": { "host": "b" },
         "queue": {
             "host": "b", "taken_in": true, "submission": b.of(n)[0]["id"],

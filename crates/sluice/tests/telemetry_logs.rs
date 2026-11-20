@@ -200,6 +200,10 @@ impl PullRequests for Unreadable {
         Ok(None)
     }
 
+    fn holds(&self, _: Seams<'_>, _: &dyn Clock, branch: &str, _: u64) -> anyhow::Result<bool> {
+        anyhow::bail!("{branch} takes no pull requests")
+    }
+
     fn follow(
         &self,
         _: Seams<'_>,
@@ -886,6 +890,7 @@ fn a_run_s_environment() -> (String, String) {
         revision: Rev::new(revision.clone()),
         required: vec![],
         since: None,
+        beyond: Vec::new(),
         limit: Some(Duration::from_secs(60)),
         limits: Limits::default(),
         tests: Settings::from([

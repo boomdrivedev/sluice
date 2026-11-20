@@ -295,6 +295,10 @@ impl Branch for RecordedRefs {
         self.inner.contains(tip, rev)
     }
 
+    fn merge_base(&self, a: &Rev, b: &Rev) -> Result<Option<Rev>> {
+        self.inner.merge_base(a, b)
+    }
+
     fn landed_by(&self, tip: &Rev, rev: &Rev) -> Result<Option<Rev>> {
         self.inner.landed_by(tip, rev)
     }

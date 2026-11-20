@@ -11,11 +11,13 @@ use std::path::PathBuf;
 use anyhow::Result;
 use sluice_core::overview::OrderFrom;
 use sluice_core::release::{ReleaseOutcome, Releasing};
-use sluice_core::session::{Abandoned, Recorded, SessionPlan, SessionRefusal, SessionStart};
+use sluice_core::session::{
+    path_of, Abandoned, Recorded, SessionPlan, SessionRefusal, SessionStart, SessionWork,
+};
 use sluice_core::{Clock, Forecast, Sluice};
 use sluice_seams::{
-    AtBound, Outcome, Progress, Released, Rev, RunHandle, RunOutcome, RunReport, Source,
-    TaskProgress,
+    AtBound, Outcome, Place, Progress, Released, Rev, RunHandle, RunOutcome, RunReport, Session,
+    Source, TaskProgress,
 };
 
 use crate::sessions::SessionRun;
@@ -374,89 +376,20 @@ impl Exec<'_> {
         }
         let forecast = forecast.as_ref().map(crate::forecast_json);
         let command = (!self.command.is_empty()).then(|| shell_line(&self.command));
-        match &command {
-            None => say(
-                out,
-                json,
-                &format!(
-                    "running the checks {} affects against {} ({})",
-                    session.head.short(),
-                    self.branch,
-                    plan.base.short()
-                ),
-            )?,
-            Some(c) => say(out, json, &format!("running {c}"))?,
-        }
-
-        // 89, 91, 71, 150 (rule core.49; design D12): its room asked of
-        // the host process, which holds the host's bound for every
-        // repository, waiting in its order while it says why; a start
-        // refused at the bound asks again. Ctrl-C gives the room or the
-        // wait back.
-        let here = crate::host_process::Here {
-            s,
-            host: self.host,
-            pulls: &(),
-            clock: self.clock,
+        let work = s.session_work(&plan, &session, command.as_deref())?;
+        say(out, json, &opening(&work, &self.branch, &plan.base))?;
+        // Design D6: where the worktree's own changes are read from.
+        let since = match &work {
+            SessionWork::Checks { since, .. } => since.clone(),
+            SessionWork::Command(_) | SessionWork::Again(_) => None,
         };
+
         let mut told = crate::host_process::room::Told::default();
-        let (place, run) = 'start: loop {
-            let mut holding = self.host.host_process().hold(
-                &here,
-                sluice_seams::RunKind::Session,
-                &worktree,
-                &self.branch,
-            )?;
-            let part = loop {
-                match holding.next(std::time::Duration::from_millis(100))? {
-                    Some(crate::host_process::Holds::Held(part)) => break part,
-                    Some(crate::host_process::Holds::Waiting(why)) => {
-                        if let Some(words) = told.first(why) {
-                            say(out, json, words)?;
-                        }
-                    }
-                    None => {}
-                }
-                if !self.pause.pause() {
-                    say(out, json, "stopped: nothing ran")?;
-                    return Ok(STOPPED);
-                }
-            };
-            drop(holding);
-            let _guard = seams.state.wait_lock(&self.branch)?;
-            match s.start_session(&plan, &worktree, &session.head, command.as_deref(), part) {
-                Ok(started) => {
-                    let (place, run) = (started.place, started.run);
-                    let held = self.host.lock_sessions()?;
-                    self.host.begin_session(
-                        held.as_ref(),
-                        &SessionRun {
-                            worktree: worktree.clone(),
-                            place: place.name.clone(),
-                            branch: self.branch.clone(),
-                            pid: std::process::id(),
-                            started: self
-                                .clock
-                                .now()
-                                .to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
-                            run_dir: self.host.run_dir(&run).unwrap_or_default(),
-                            command: command.clone(),
-                            tasks: Vec::new(),
-                        },
-                    )?;
-                    break 'start (place, run);
-                }
-                Err(e) if e.downcast_ref::<AtBound>().is_some() => {
-                    if let Some(words) = told.first(crate::host_process::room::Why::AtBound) {
-                        say(out, json, words)?;
-                    }
-                    if !self.pause.pause() {
-                        say(out, json, "stopped: nothing ran")?;
-                        return Ok(STOPPED);
-                    }
-                }
-                Err(e) => return Err(e),
-            }
+        let Some((place, run)) =
+            self.start(s, out, &plan, &worktree, &session, &work, &mut told)?
+        else {
+            say(out, json, "stopped: nothing ran")?;
+            return Ok(STOPPED);
         };
         let ports: Vec<(&String, &String)> = place
             .env
@@ -467,68 +400,13 @@ impl Exec<'_> {
             let p: Vec<String> = ports.iter().map(|(k, v)| format!("{k}={v}")).collect();
             say(out, json, &format!("ports: {}", p.join(" ")))?;
         }
-
-        // The run's output, as it comes.
-        let log = self.host.run_dir(&run).map(|d| d.join("out.log"));
-        let mut shown = 0usize;
-        let mut show = |out: &mut dyn Write| -> Result<()> {
-            let Some(bytes) = log.as_ref().and_then(|l| std::fs::read(l).ok()) else {
-                return Ok(());
-            };
-            if bytes.len() > shown {
-                let text = String::from_utf8_lossy(&bytes[shown..]).into_owned();
-                shown = bytes.len();
-                if json {
-                    std::io::stderr().write_all(text.as_bytes())?;
-                } else {
-                    out.write_all(text.as_bytes())?;
-                }
-            }
-            Ok(())
-        };
-        let mut kept: Vec<TaskProgress> = Vec::new();
-        let progress = loop {
-            let p = seams.tests.progress(&run)?;
-            show(out)?;
-            if !matches!(p, Progress::Running) {
-                break p;
-            }
-            // ADR 0035: where its tasks have got, kept on its record for a
-            // person to read. They decide nothing, so one that cannot be read
-            // or kept is passed over.
-            if let Ok(tasks) = seams.tests.tasks(&run) {
-                if tasks != kept && self.host.session_tasks(&worktree, &tasks).is_ok() {
-                    kept = tasks;
-                }
-            }
-            if !self.pause.pause() {
-                self.host.end_run(&run)?;
-                self.host.end_session(&worktree)?;
-                unkept(s.session_ended(
-                    &place.name,
-                    &session.head,
-                    command.is_some(),
-                    RunOutcome::Stopped,
-                ));
+        let report = match self.follow(s, out, &worktree, &session, &place, &run, &work)? {
+            Followed::Finished(r) => r,
+            Followed::Stopped => {
                 say(out, json, "stopped: the run was ended; nothing recorded")?;
                 return Ok(STOPPED);
             }
-        };
-        self.host.end_session(&worktree)?;
-        let report = match progress {
-            Progress::Finished(r) => r,
-            _ => {
-                unkept(s.session_ended(
-                    &place.name,
-                    &session.head,
-                    command.is_some(),
-                    RunOutcome::Lost,
-                ));
-                say(
-                    out,
-                    json,
-                    "lost: the run's supervisor stopped before it reported",
-                )?;
+            Followed::Lost => {
                 self.finish(
                     out,
                     None,
@@ -536,6 +414,7 @@ impl Exec<'_> {
                     false,
                     None,
                     &place.env,
+                    since.as_ref(),
                     forecast.as_ref(),
                     FAILED,
                 )?;
@@ -551,7 +430,61 @@ impl Exec<'_> {
             place: place.clone(),
             run: run.clone(),
         };
-        let finished = s.finish_session(&plan, &session, &started, command.is_some(), &report)?;
+        let mut finished =
+            s.finish_session(&plan, &session, &started, command.is_some(), &report)?;
+        // Design D5: a replay no pass the gate counts proved runs again,
+        // here, with no replay, waiting for room as the first run did; the
+        // two runs are told as one.
+        if !finished.unproven.is_empty() {
+            unkept(
+                finished
+                    .unkept
+                    .take()
+                    .map_or(Ok(()), |e| Err(anyhow::anyhow!(e))),
+            );
+            let again =
+                SessionWork::Again(finished.unproven.iter().map(|u| u.task.clone()).collect());
+            say(out, json, &opening(&again, &self.branch, &plan.base))?;
+            let mut told = crate::host_process::room::Told::default();
+            let Some((place, run)) =
+                self.start(s, out, &plan, &worktree, &session, &again, &mut told)?
+            else {
+                say(out, json, "stopped: the replays were not run again")?;
+                return Ok(STOPPED);
+            };
+            let report = match self.follow(s, out, &worktree, &session, &place, &run, &again)? {
+                Followed::Finished(r) => r,
+                Followed::Stopped => {
+                    say(
+                        out,
+                        json,
+                        "stopped: the run again was ended; nothing of it recorded",
+                    )?;
+                    return Ok(STOPPED);
+                }
+                Followed::Lost => {
+                    self.finish(
+                        out,
+                        None,
+                        &[],
+                        false,
+                        None,
+                        &place.env,
+                        since.as_ref(),
+                        forecast.as_ref(),
+                        FAILED,
+                    )?;
+                    return Ok(FAILED);
+                }
+            };
+            finished = s.finish_again(
+                &plan,
+                &session,
+                &SessionStart { place, run },
+                &report,
+                &finished,
+            )?;
+        }
         let report = finished.report;
         // 153 (design D6): told before the place can be released, while
         // the runner's records in it stand.
@@ -601,10 +534,165 @@ impl Exec<'_> {
             recorded,
             Some(report.timed_out),
             &place.env,
+            since.as_ref(),
             forecast.as_ref(),
             code,
         )?;
         Ok(code)
+    }
+
+    /// 89, 91, 71, 150 (rule core.49; design D12): room for a run of
+    /// `work` asked of the host process, which holds the host's bound for
+    /// every repository, waiting in its order while it says why; a start
+    /// refused at the bound asks again. The run is started and kept on the
+    /// host's records of its session runs. `None` where Ctrl-C gave the
+    /// room or the wait back, nothing started.
+    #[allow(clippy::too_many_arguments)]
+    fn start(
+        &self,
+        s: &Sluice<'_>,
+        out: &mut dyn Write,
+        plan: &SessionPlan,
+        worktree: &str,
+        session: &Session,
+        work: &SessionWork,
+        told: &mut crate::host_process::room::Told,
+    ) -> Result<Option<(Place, RunHandle)>> {
+        let json = self.json;
+        let here = crate::host_process::Here {
+            s,
+            host: self.host,
+            pulls: &(),
+            clock: self.clock,
+        };
+        loop {
+            let mut holding = self.host.host_process().hold(
+                &here,
+                sluice_seams::RunKind::Session,
+                worktree,
+                &self.branch,
+            )?;
+            let part = loop {
+                match holding.next(std::time::Duration::from_millis(100))? {
+                    Some(crate::host_process::Holds::Held(part)) => break part,
+                    Some(crate::host_process::Holds::Waiting(why)) => {
+                        if let Some(words) = told.first(why) {
+                            say(out, json, words)?;
+                        }
+                    }
+                    None => {}
+                }
+                if !self.pause.pause() {
+                    return Ok(None);
+                }
+            };
+            drop(holding);
+            let _guard = s.seams().state.wait_lock(&self.branch)?;
+            match s.start_session(plan, worktree, &session.head, work, part) {
+                Ok(started) => {
+                    let (place, run) = (started.place, started.run);
+                    let held = self.host.lock_sessions()?;
+                    self.host.begin_session(
+                        held.as_ref(),
+                        &SessionRun {
+                            worktree: worktree.to_string(),
+                            place: place.name.clone(),
+                            branch: self.branch.clone(),
+                            pid: std::process::id(),
+                            started: self
+                                .clock
+                                .now()
+                                .to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
+                            run_dir: self.host.run_dir(&run).unwrap_or_default(),
+                            command: work.command().map(str::to_string),
+                            tasks: Vec::new(),
+                        },
+                    )?;
+                    return Ok(Some((place, run)));
+                }
+                Err(e) if e.downcast_ref::<AtBound>().is_some() => {
+                    if let Some(words) = told.first(crate::host_process::room::Why::AtBound) {
+                        say(out, json, words)?;
+                    }
+                    if !self.pause.pause() {
+                        return Ok(None);
+                    }
+                }
+                Err(e) => return Err(e),
+            }
+        }
+    }
+
+    /// A started run followed to its end: its output as it comes and its
+    /// tasks as they go, kept on its record (ADR 0035). Ctrl-C ends it,
+    /// and a run ended so, or lost, is left on the worktree as it ended
+    /// (97).
+    #[allow(clippy::too_many_arguments)]
+    fn follow(
+        &self,
+        s: &Sluice<'_>,
+        out: &mut dyn Write,
+        worktree: &str,
+        session: &Session,
+        place: &Place,
+        run: &RunHandle,
+        work: &SessionWork,
+    ) -> Result<Followed> {
+        let json = self.json;
+        let seams = s.seams();
+        let command = work.command().is_some();
+        let log = self.host.run_dir(run).map(|d| d.join("out.log"));
+        let mut shown = 0usize;
+        let mut show = |out: &mut dyn Write| -> Result<()> {
+            let Some(bytes) = log.as_ref().and_then(|l| std::fs::read(l).ok()) else {
+                return Ok(());
+            };
+            if bytes.len() > shown {
+                let text = String::from_utf8_lossy(&bytes[shown..]).into_owned();
+                shown = bytes.len();
+                if json {
+                    std::io::stderr().write_all(text.as_bytes())?;
+                } else {
+                    out.write_all(text.as_bytes())?;
+                }
+            }
+            Ok(())
+        };
+        let mut kept: Vec<TaskProgress> = Vec::new();
+        let progress = loop {
+            let p = seams.tests.progress(run)?;
+            show(out)?;
+            if !matches!(p, Progress::Running) {
+                break p;
+            }
+            // ADR 0035: where its tasks have got, kept on its record for a
+            // person to read. They decide nothing, so one that cannot be read
+            // or kept is passed over.
+            if let Ok(tasks) = seams.tests.tasks(run) {
+                if tasks != kept && self.host.session_tasks(worktree, &tasks).is_ok() {
+                    kept = tasks;
+                }
+            }
+            if !self.pause.pause() {
+                self.host.end_run(run)?;
+                self.host.end_session(worktree)?;
+                unkept(s.session_ended(&place.name, &session.head, command, RunOutcome::Stopped));
+                return Ok(Followed::Stopped);
+            }
+        };
+        self.host.end_session(worktree)?;
+        match progress {
+            Progress::Finished(r) => Ok(Followed::Finished(r)),
+            _ => {
+                unkept(s.session_ended(&place.name, &session.head, command, RunOutcome::Lost));
+                say(
+                    out,
+                    json,
+                    "lost: the run's supervisor stopped before it reported",
+                )?;
+                Ok(Followed::Lost)
+            }
+        }
     }
 
     fn summary(&self, out: &mut dyn Write, report: &RunReport, command: bool) -> Result<()> {
@@ -652,7 +740,16 @@ impl Exec<'_> {
         if passed(report) {
             let n = report.tasks.len();
             let tasks = if n == 1 { "task" } else { "tasks" };
-            say(out, json, &format!("passed: {n} {tasks}"))?;
+            // Design D6: the replays among them, counted where there are any.
+            let replayed = report
+                .tasks
+                .iter()
+                .filter(|t| matches!(t.source, sluice_seams::Source::Replayed { .. }))
+                .count();
+            match replayed {
+                0 => say(out, json, &format!("passed: {n} {tasks}"))?,
+                k => say(out, json, &format!("passed: {n} {tasks} ({k} replayed)"))?,
+            }
         }
         if !report.not_run.is_empty() {
             say(
@@ -678,6 +775,7 @@ impl Exec<'_> {
         recorded: bool,
         timed_out: Option<bool>,
         env: &std::collections::BTreeMap<String, String>,
+        since: Option<&Rev>,
         forecast: Option<&serde_json::Value>,
         code: i32,
     ) -> Result<()> {
@@ -692,6 +790,7 @@ impl Exec<'_> {
                         "hash": t.hash,
                         "outcome": t.outcome,
                         "recorded": recorded && matches!(t.source, sluice_seams::Source::Ran { .. }),
+                        "replayed": matches!(t.source, sluice_seams::Source::Replayed { .. }),
                     })
                 })
                 .collect()
@@ -714,6 +813,7 @@ impl Exec<'_> {
             "{}",
             serde_json::json!({
                 "branch": self.branch,
+                "since": since.map(Rev::as_str),
                 "tasks": tasks,
                 "dependencies": dependencies,
                 "failed_by": report.map(|r| r.failed_by.as_slice()).unwrap_or_default(),
@@ -940,14 +1040,41 @@ pub fn changed_text(
     format!("not recorded: {}", parts.join("; "))
 }
 
-/// A path of what a worktree holds beyond its head, without the status
-/// `git status --porcelain` puts before it.
-fn path_of(line: &str) -> &str {
-    let b = line.as_bytes();
-    if b.len() > 3 && b[2] == b' ' && b[..2].iter().all(|c| b" MTADRCU?!".contains(c)) {
-        &line[3..]
-    } else {
-        line
+/// How a run followed to its end ended.
+enum Followed {
+    Finished(RunReport),
+    /// Ctrl-C ended it.
+    Stopped,
+    /// Its supervisor stopped before it reported, as said.
+    Lost,
+}
+
+/// Design D6, D5: what a run says it runs, first: a command, the replays
+/// it runs again, or where the worktree's own changes are read from, the
+/// merge base of its head on the branch, and the branch's revision where
+/// it moved on past it (36, 70).
+fn opening(work: &SessionWork, branch: &str, base: &Rev) -> String {
+    match work {
+        SessionWork::Command(c) => format!("running {c}"),
+        SessionWork::Again(checks) => format!(
+            "replayed with no result sluice recorded: {}; running them again",
+            checks.join(", ")
+        ),
+        SessionWork::Checks { since: None, .. } => format!(
+            "running every required check: the worktree's head shares no history with {branch}"
+        ),
+        SessionWork::Checks {
+            since: Some(since), ..
+        } => {
+            let mut line = format!(
+                "running the checks the worktree's own changes affect since {} on {branch}",
+                since.short()
+            );
+            if since != base {
+                line.push_str(&format!(", now at {}", base.short()));
+            }
+            line
+        }
     }
 }
 

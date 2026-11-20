@@ -96,6 +96,7 @@ which follows the host process, in its harness's background:
 sluice submit main --no-wait --json        # {"id":12,"branch":"main","ahead":[...]}
 sluice wait 12 --timeout 9m --json         # in the background, again for as long as it exits 5
 sluice wait main --timeout 9m --json       # this worktree's last submission to main
+sluice wait main --pull-request 41 --timeout 9m --json   # a pull request's answer's `wait`, from any folder
 ```
 
 Start each `sluice wait` as a background command (in Claude Code, the Bash
@@ -132,7 +133,11 @@ withdrawn, is submitted again.
 
 Each `sluice wait --json` prints the submission's record however it ends:
 read its `state` and the exit. Exit `5` leaves it `queued`, `waiting`, `testing`, `passed` or
-`landing`; run `sluice wait` again. Never search `sluice status <branch>`'s
+`landing`; run the same command again. On a branch that takes pull
+requests, a wait that ends with exit `5` before sluice queued the pull
+request here prints the pull request's document, not a record: run the
+command in its `wait`, `sluice wait main --pull-request 41`, which
+follows that pull request from any folder. Never search `sluice status <branch>`'s
 listing for `landed` or `failed`: a decided submission leaves that listing,
 and a loop waiting for it there never ends. `sluice status 12 --json` reads
 the record once without waiting, with `notice`, the inbox's one line, once
@@ -177,19 +182,24 @@ process, which the submit told, runs its rounds. `sluice wait` follows it,
 and `sluice step main` asks the host process for one round of the branch.
 Do not submit again to move it: a second submit from the same worktree
 replaces the first. On a pull-request branch, `--no-wait --json`
-answers `{"id","branch","ahead","pull_request"}` when sluice queued the
-pull request at once, its conditions holding: hand `id` to `sluice wait`.
-Otherwise it answers `{"pull_request","branch","state"}`, `state` what the
-pull request waits for: run `sluice wait main` in the worktree, which
-follows the pull request and, once sluice queues it, its submission, whose
-record it prints under `--json` from then on. Where another host keeps the
+answers `{"id","branch","ahead","pull_request","wait"}` when sluice queued
+the pull request at once, its conditions holding, and otherwise
+`{"pull_request","branch","state","wait"}`, `state` what the pull request
+waits for. Either way, `wait` is the command to start in the background,
+`sluice wait main --pull-request 41`, again for as long as it exits `5`.
+It follows the pull request by its number from any folder of the
+repository, and, once sluice queues it, its submission, whose record it
+prints under `--json` from then on. Where another host keeps the
 branch on its remote, and so takes its pull requests in, that document,
 and the wait's until it ends, also gives `taken_in_by`, `{"host"}`, the
 host that keeps the branch, and `queue`, where that host holds the pull
 request: `submission` and `state` once it is taken in,
 what is `ahead` of it in that host's order, and `waits_for`, what it lacks
-before it is taken in, or taken in again. The wait ends as the pull
-request lands or is sent back there; don't submit again to move it.
+before it is taken in, or taken in again. `queue.submission` is the
+number on the host that takes the request in, never one to hand to
+`sluice wait`: on this host that number may name another submission, or
+none. The wait ends as the pull request lands or is sent back there;
+don't submit again to move it.
 
 A submission that sits at `queued` while another is testing is waiting its
 turn. `sluice status <branch>` says `testing N at once (up to M)`. N is one
@@ -237,9 +247,10 @@ A background agent you start to work in a worktree, with the Agent tool's
 it. Tell it there to commit its work when it is done and submit it through
 sluice from that worktree, with `sluice submit <branch>` naming the branch
 it lands on, waiting as above (`--no-wait --json`, then `sluice wait <id>
---timeout 9m --json`, or under worktrunk `wt submit <branch> --timeout 9m
---json`, in its background, again for as long as it exits `5`), and to
-report the outcome to you. The rest of the prompt is yours, written for
+--timeout 9m --json`, or the answer's `wait` on a branch that takes pull
+requests, or under worktrunk `wt submit <branch> --timeout 9m --json`, in
+its background, again for as long as it exits `5`), and to report the
+outcome to you. The rest of the prompt is yours, written for
 the work.
 
 Work left committed in a worktree whose agent has ended is submitted by an
@@ -303,11 +314,16 @@ Pick the form by what you want from the run:
    sluice exec main
    ```
 
-   It runs the branch's required tasks that your commits since the branch's
-   tip affect, with the tasks that depend on them, forced past moon's cache
-   so the run is observed. That is the whole gate: every task your change
-   does not touch has the same key (the task plus a hash of its inputs) it
-   passed under when the tip landed, so you do not need to run everything.
+   It runs the branch's required tasks that your own changes affect since
+   your worktree left the branch, your uncommitted files included, with
+   the tasks that depend on them. What the branch landed since is not
+   yours. That is the whole gate: every task your change does not touch
+   has the same key (the task plus a hash of its inputs) it passed under
+   when the tip landed, so you do not need to run everything. A task
+   sluice passed on the same files is replayed from moon's cache, and a
+   replay sluice holds no pass for runs again in the same command, so what
+   it says is what the gate would read. Commit first: only a run of a
+   clean worktree is recorded.
 3. **Whether that run saves the submission any work** depends on the
    branch's `trust` in `.config/sluice.toml`. It is recorded, as an `open`
    run, only when the worktree holds exactly its head. A submission reuses

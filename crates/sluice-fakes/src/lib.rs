@@ -2500,6 +2500,10 @@ impl Branch for FakeBranch {
         Ok(World::ancestors(&self.0 .0.borrow(), tip).contains(rev))
     }
 
+    fn merge_base(&self, a: &Rev, b: &Rev) -> Result<Option<Rev>> {
+        Ok(World::merge_base(&self.0 .0.borrow(), a, b))
+    }
+
     /// 122: down `tip`'s first parents to the oldest that holds `rev`.
     fn landed_by(&self, tip: &Rev, rev: &Rev) -> Result<Option<Rev>> {
         let inner = self.0 .0.borrow();
@@ -4767,6 +4771,7 @@ mod tests {
                 revision: rev.clone(),
                 required: vec!["a:test".into()],
                 since: None,
+                beyond: Vec::new(),
                 limit: None,
                 limits: Default::default(),
                 tests: Settings::new(),
@@ -4880,6 +4885,7 @@ mod tests {
                 revision: rev.clone(),
                 required: required.iter().map(|r| r.to_string()).collect(),
                 since: None,
+                beyond: Vec::new(),
                 limit: None,
                 limits: Default::default(),
                 tests: Settings::new(),
@@ -4952,6 +4958,7 @@ mod tests {
             revision: rev2,
             required: vec!["root:integration".into()],
             since: None,
+            beyond: Vec::new(),
             limit: None,
             limits: Default::default(),
             tests: Settings::new(),
@@ -4993,6 +5000,7 @@ mod tests {
                 revision: rev.clone(),
                 required: vec!["a:test".into(), "b:test".into()],
                 since: None,
+                beyond: Vec::new(),
                 limit: None,
                 limits: Default::default(),
                 tests: Settings::new(),
@@ -5053,6 +5061,7 @@ mod tests {
             revision: rev.clone(),
             required: vec!["a:test".into(), "b:test".into()],
             since: None,
+            beyond: Vec::new(),
             limit: None,
             limits: Default::default(),
             tests: Settings::new(),
@@ -5092,6 +5101,7 @@ mod tests {
             revision: rev.clone(),
             required: Vec::new(),
             since: None,
+            beyond: Vec::new(),
             limit: None,
             limits: Default::default(),
             tests: Settings::new(),
@@ -5183,6 +5193,7 @@ mod tests {
             revision: rev.clone(),
             required: Vec::new(),
             since: None,
+            beyond: Vec::new(),
             limit: None,
             limits: Default::default(),
             tests: Settings::new(),

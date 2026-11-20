@@ -520,6 +520,7 @@ fn telemetry_is_off_unless_asked() {
         revision: Rev::new(repo.rev("HEAD")),
         required: vec![],
         since: None,
+        beyond: Vec::new(),
         limit: Some(Duration::from_secs(60)),
         limits: Limits::default(),
         tests: Settings::from([

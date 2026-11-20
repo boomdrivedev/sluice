@@ -84,6 +84,7 @@ fn moon_runs_with_otel_while_telemetry_is_on() {
         revision: Rev::new("0".repeat(40)),
         required: vec!["#check-fast".into()],
         since: None,
+        beyond: Vec::new(),
         limit: Some(Duration::from_secs(60)),
         limits: Limits::default(),
         tests: Settings::new(),

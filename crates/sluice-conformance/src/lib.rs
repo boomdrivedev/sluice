@@ -268,8 +268,11 @@ pub trait Rig {
             .expect("the branch is managed");
         let session = s.seams().driver.session(&place).expect("a session's place");
         let part = shared::session_part(&s);
+        let work = s
+            .session_work(&plan, &session, command)
+            .expect("the work reads");
         let started = s
-            .start_session(&plan, &place, &session.head, command, part)
+            .start_session(&plan, &place, &session.head, &work, part)
             .expect("the session run starts");
         let until = std::time::Instant::now() + std::time::Duration::from_secs(300);
         let report = loop {

@@ -5,7 +5,10 @@
 //!
 //! The project and task graph is read from the place, which holds the
 //! candidate; every moon command gets the run's environment, so nothing of
-//! `MOON_*` in sluice's own reaches it, and stdin from `/dev/null`.
+//! `MOON_*` in sluice's own reaches it, and stdin from `/dev/null`, but
+//! the affected reading of a run's plan, which is handed the files the run
+//! changed on its stdin (36; design D3 of
+//! a-worktrees-checks-run-only-what-its-own-changes-affect).
 //!
 //! A required task moon skipped is read through the dependencies the plan
 //! kept (149; C.2). moon's run report names no edge of its graph, so the
@@ -96,7 +99,7 @@ impl Moon {
         let request = cx.request;
         let place = &request.place.path;
         let cold = cold_tests(&request.tests)?;
-        let tasks = self.tasks(cx, &[])?;
+        let tasks = self.tasks(cx, Affected::All)?;
         let mut wanted = BTreeSet::new();
         for r in &request.required {
             match r.strip_prefix('#') {
@@ -111,23 +114,25 @@ impl Moon {
                 }
             }
         }
-        // 36, 70: what the candidate affects since the branch's verified
-        // revision; every required task when there is none, or when moon's
-        // own configuration changed, since then the graph itself did.
+        // 36, 70: what the run changed since `since`, an ancestor of its
+        // revision, read once, with the paths a worktree holds beyond its
+        // revision (design D2); every required task when there is no
+        // `since`, or when moon's own configuration changed, since then the
+        // graph itself did. moon is handed the files rather than the range
+        // (design D3).
         if let Some(since) = &request.since {
-            let changed = changed_files(place, since.as_str(), request.revision.as_str())?;
+            let mut changed = changed_files(place, since.as_str(), request.revision.as_str())?;
+            for path in &request.beyond {
+                if !changed.contains(path) {
+                    changed.push(path.clone());
+                }
+            }
             let graph_changed = changed
                 .iter()
                 .any(|p| p.starts_with(".moon/") || p == "moon.yml" || p.ends_with("/moon.yml"));
             if !graph_changed {
                 let affected: BTreeSet<String> = self
-                    .tasks(
-                        cx,
-                        &[
-                            ("MOON_BASE", since.as_str()),
-                            ("MOON_HEAD", request.revision.as_str()),
-                        ],
-                    )?
+                    .tasks(cx, Affected::Files(&changed))?
                     .into_keys()
                     .collect();
                 wanted.retain(|t| affected.contains(t));
@@ -195,7 +200,7 @@ impl Moon {
     /// `moon query tasks` in a working copy equipped up to the version
     /// check (147). Runs no task.
     pub fn kept_out(&self, cx: &Context) -> Result<Vec<KeptOutTask>> {
-        let tasks = self.tasks(cx, &[])?;
+        let tasks = self.tasks(cx, Affected::All)?;
         Ok(kept_out(&tasks, &cx.request.required))
     }
 
@@ -208,7 +213,7 @@ impl Moon {
     pub fn reads(&self, cx: &Context, pairs: &[(Rev, Rev)]) -> Result<Vec<Reads>> {
         let place = &cx.request.place.path;
         let at = cx.request.revision.as_str();
-        let tasks = self.tasks(cx, &[])?;
+        let tasks = self.tasks(cx, Affected::All)?;
         let mut wanted = BTreeSet::new();
         for r in &cx.request.required {
             match r.strip_prefix('#') {
@@ -232,10 +237,7 @@ impl Moon {
                 reads.push(Reads::Every);
                 continue;
             }
-            let affected = self.tasks(
-                cx,
-                &[("MOON_BASE", from.as_str()), ("MOON_HEAD", to.as_str())],
-            )?;
+            let affected = self.tasks(cx, Affected::Range(from.as_str(), to.as_str()))?;
             reads.push(Reads::Checks(
                 wanted
                     .iter()
@@ -431,7 +433,7 @@ impl Moon {
     /// 147: `argv` run as [`Moon::run`] runs it, as the step `name`, with
     /// what it printed where it could be run.
     fn step(&self, cx: &Context, name: &str, argv: &[&str]) -> (EquipStep, Option<Output>) {
-        let out = match self.spawn(cx, argv, &[]) {
+        let out = match self.spawn(cx, argv, &[], None) {
             Ok(out) => out,
             Err(e) => return (failed(name, &format!("could not be run: {e}"), ""), None),
         };
@@ -443,15 +445,27 @@ impl Moon {
         (step, Some(out))
     }
 
-    fn command(&self, cx: &Context, args: &[&str], env: &[(&str, &str)]) -> Result<Vec<u8>> {
+    fn command(
+        &self,
+        cx: &Context,
+        args: &[&str],
+        env: &[(&str, &str)],
+        input: Option<&[u8]>,
+    ) -> Result<Vec<u8>> {
         let mut argv = vec!["moon"];
         argv.extend(args);
-        self.run(cx, &argv, env)
+        self.run(cx, &argv, env, input)
     }
 
-    fn run(&self, cx: &Context, argv: &[&str], env: &[(&str, &str)]) -> Result<Vec<u8>> {
+    fn run(
+        &self,
+        cx: &Context,
+        argv: &[&str],
+        env: &[(&str, &str)],
+        input: Option<&[u8]>,
+    ) -> Result<Vec<u8>> {
         let out = self
-            .spawn(cx, argv, env)
+            .spawn(cx, argv, env, input)
             .with_context(|| format!("running {}", cx.argv(argv).join(" ")))?;
         if !out.status.success() {
             let argv = cx.argv(argv);
@@ -466,17 +480,49 @@ impl Moon {
     }
 
     /// `argv` in the place with the toolchain sourced, the run's
-    /// environment and `env` its own, and stdin from `/dev/null`.
-    fn spawn(&self, cx: &Context, argv: &[&str], env: &[(&str, &str)]) -> std::io::Result<Output> {
+    /// environment and `env` its own, and stdin `input` where it is given,
+    /// else `/dev/null`.
+    fn spawn(
+        &self,
+        cx: &Context,
+        argv: &[&str],
+        env: &[(&str, &str)],
+        input: Option<&[u8]>,
+    ) -> std::io::Result<Output> {
         let argv = cx.argv(argv);
-        Command::new(&argv[0])
+        let mut command = Command::new(&argv[0]);
+        command
             .args(&argv[1..])
             .current_dir(&cx.request.place.path)
             .env_clear()
             .envs(cx.env)
-            .envs(env.iter().copied())
-            .stdin(Stdio::null())
-            .output()
+            .envs(env.iter().copied());
+        let Some(input) = input else {
+            return command.stdin(Stdio::null()).output();
+        };
+        let mut child = command
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()?;
+        let mut stdin = child.stdin.take().expect("stdin is piped");
+        // Written beside the read of its output, so a long list never
+        // waits on a pipe moon has not read.
+        std::thread::scope(|s| {
+            let writer = s.spawn(move || {
+                use std::io::Write as _;
+                stdin.write_all(input)
+            });
+            let out = child.wait_with_output();
+            let written = writer.join().expect("the writer of moon's stdin");
+            let out = out?;
+            // A moon that failed says why in what it printed; one that
+            // answered without reading the whole list answered for less.
+            match written {
+                Err(e) if out.status.success() => Err(e),
+                _ => Ok(out),
+            }
+        })
     }
 
     /// The moon the toolchain puts first, refused below `FLOOR`. Its
@@ -501,18 +547,41 @@ impl Moon {
         failed(NAME, &reason, &printed(&[&out.stderr]))
     }
 
-    /// Every task moon knows in the place, with its tags; with
-    /// `MOON_BASE` and `MOON_HEAD`, those the range affects, dependents
-    /// included.
-    fn tasks(&self, cx: &Context, range: &[(&str, &str)]) -> Result<BTreeMap<String, Task>> {
+    /// The tasks moon knows in the place, with their tags, or those
+    /// `affected` names as affected, dependents included.
+    fn tasks(&self, cx: &Context, affected: Affected) -> Result<BTreeMap<String, Task>> {
         let mut args = vec!["query", "tasks"];
-        if !range.is_empty() {
+        if !matches!(affected, Affected::All) {
             args.extend(["--affected", "--downstream", "deep"]);
         }
-        let out = self.command(cx, &args, range)?;
+        let out = match affected {
+            Affected::All => self.command(cx, &args, &[], None)?,
+            Affected::Range(base, head) => {
+                self.command(cx, &args, &[("MOON_BASE", base), ("MOON_HEAD", head)], None)?
+            }
+            // moon reads no file it is handed from an empty list, as from
+            // an empty diff; it is asked nothing.
+            Affected::Files([]) => return Ok(BTreeMap::new()),
+            Affected::Files(files) => {
+                let input = serde_json::to_vec(&serde_json::json!({ "files": files }))?;
+                self.command(cx, &args, &[], Some(&input))?
+            }
+        };
         let json: Value = serde_json::from_slice(&out).context("reading moon query tasks")?;
         Ok(query_tasks(&json))
     }
+}
+
+/// Which of moon's tasks [`Moon::tasks`] reads.
+enum Affected<'a> {
+    /// Every task moon knows.
+    All,
+    /// Those the change from the first revision to the second affects, by
+    /// `MOON_BASE` and `MOON_HEAD` (140).
+    Range(&'a str, &'a str),
+    /// Those the files a run changed affect, handed to moon on its stdin
+    /// as `{"files": [...]}` (36; design D3).
+    Files(&'a [String]),
 }
 
 /// Every task a `moon query tasks` document lists, by its target.
@@ -2859,6 +2928,7 @@ mod tests {
                 revision: Rev::new(""),
                 required: Vec::new(),
                 since: None,
+                beyond: Vec::new(),
                 limit: None,
                 limits: sluice_seams::Limits::default(),
                 tests: sluice_seams::Settings::new(),

@@ -114,6 +114,7 @@ fn request(repo: &Repo, name: &str, required: &[&str], since: Option<&str>) -> R
         revision: Rev::new(repo.rev("HEAD")),
         required: required.iter().map(|s| s.to_string()).collect(),
         since: since.map(Rev::new),
+        beyond: Vec::new(),
         limit: Some(Duration::from_secs(120)),
         limits: Limits::default(),
         tests: moon(),
@@ -187,6 +188,20 @@ fn the_tasks_a_range_affects() {
     );
     let r = finish(&c, &request(&repo, "p3", &fast, Some(&base)));
     assert_eq!(names(&r), ["alpha:test", "beta:test"]);
+}
+
+/// 36; design D2: the paths a worktree holds beyond its revision count
+/// among what it changed, so an unstaged edit affects what reads it.
+#[test]
+fn a_plan_reads_the_paths_a_worktree_holds_beyond_its_revision() {
+    let repo = workspace("moon-beyond");
+    let c = checks(&repo);
+    let head = repo.rev("HEAD");
+    repo.write("beta/value.txt", "ok\n\n");
+    let mut req = request(&repo, "p1", &["#check-fast"], Some(&head));
+    req.beyond = vec!["beta/value.txt".into()];
+    let r = finish(&c, &req);
+    assert_eq!(names(&r), ["beta:test"]);
 }
 
 /// 71, 83; the run-bound spec's "Six cores each": the moon runner hands
