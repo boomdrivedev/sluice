@@ -16,6 +16,7 @@
 //! them with a status, takes them and then answers a status, or cuts the
 //! connection once it read them, taken or not, or answers them as GitHub
 //! does when an allowance is spent, or as the last call of one. It gives
+//! the app's bot user, [`BOT`], to whoever asks. It gives
 //! every answer to a `GET` an ETag, answers `304` to a `GET` whose
 //! `If-None-Match` is the answer's own, and keeps each call's status.
 //! Each test crate that includes it uses a part.
@@ -37,6 +38,8 @@ use crate::support::http::{json, Answer, Fake, Request, CUT};
 pub const APP: u64 = 4242;
 /// The app's slug, which GitHub names its bot user after.
 pub const SLUG: &str = "sluice";
+/// The user id GitHub gives the app's bot, `sluice[bot]`.
+pub const BOT: u64 = 900042;
 pub const INSTALLATION: u64 = 7;
 /// The pull request calls' prefix.
 const REPO: &str = "/repos/o/r";
@@ -645,6 +648,14 @@ fn answer(forge: &FileForge, bare: Option<&Path>, failing: &Failing, r: &Request
     let m = r.method.as_str();
     if path == "/app" {
         return json(200, json!({ "id": APP, "slug": SLUG }));
+    }
+    // The app's bot, which every landing and records commit pushed as the
+    // app names (record 0019 as amended 2026-11-18).
+    if path == "/users/sluice%5Bbot%5D" && m == "GET" {
+        return json(
+            200,
+            json!({ "login": format!("{SLUG}[bot]"), "id": BOT, "type": "Bot" }),
+        );
     }
     if path == format!("{REPO}/installation") {
         return json(

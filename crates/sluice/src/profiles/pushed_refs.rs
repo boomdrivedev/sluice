@@ -24,6 +24,15 @@
 //! each call begins, never kept from the profile's opening: a driver that
 //! runs for days reaches a remote pointed elsewhere since, as at a
 //! repository renamed on its forge, at its next call.
+//!
+//! A landing commit names whoever pushes it, read as the commit is
+//! written: the author the identity names through its own interface, where
+//! sluice reaches the remote as one, and `sluice <sluice@localhost>` where
+//! it reaches it with the host's own credentials. An author the identity
+//! cannot give is the commit's failure, and nothing is written. A
+//! combination is written as sluice on every host, so one combination
+//! forms one commit wherever it is formed (record 0019 as amended
+//! 2026-11-18; rules core.1, core.2, core.6, core.43).
 
 use std::fs::TryLockError;
 use std::path::{Path, PathBuf};
@@ -36,7 +45,9 @@ use sluice_seams::{Branch, Formed, HostCopy, LandingCommit, Moved, ReadRefused, 
 use weir_bounded::span;
 
 use super::local_refs::LocalRefs;
-use crate::identity::{withheld, Credentials, Identity, PASSWORD_VAR, USERNAME_VAR};
+use crate::identity::{
+    withheld, Author, Credentials, Identity, ASKED_VAR, PASSWORD_VAR, USERNAME_VAR,
+};
 use crate::retry::{Failed, Judged, Kind, Policy};
 
 pub struct PushedRefs {
@@ -101,6 +112,18 @@ impl PushedRefs {
     /// `None` for the host's own credentials.
     pub fn identity(&self) -> Result<Option<String>> {
         Ok(self.speaker()?.map(|s| s.identity.name()))
+    }
+
+    /// Who a commit pushed to the remote at its address now names as its
+    /// author and committer: the identity's author where sluice reaches
+    /// the remote as one, else [`Author::sluice`] (record 0019 as amended
+    /// 2026-11-18; rule core.43). The identity's failure to give one is
+    /// this one's.
+    pub fn author(&self) -> Result<Author> {
+        match self.speaker()? {
+            Some(s) => s.identity.author(&s.url),
+            None => Ok(Author::sluice()),
+        }
     }
 
     /// sluice's identity on the remote at its address as the host's
@@ -168,13 +191,19 @@ impl PushedRefs {
         let mut fault = None;
         let mut unrenewed = None;
         let mut refused: Vec<String> = Vec::new();
+        // The password of the credentials the remote refused last, which a
+        // renewal replaces.
+        let mut refused_password = String::new();
+        // What the remote refused where git never asked for the speaker's
+        // credentials.
+        let mut unasked = None;
         let mut last = None;
         // Set while the last try found the fetch lock held past its limit.
         let mut waited = None;
         let ran = self.policy.run(kind, |t| {
             let given = match &speaker {
                 None => None,
-                Some(s) if t.renew() => match s.identity.renew(&s.url) {
+                Some(s) if t.renew() => match s.identity.renew(&s.url, &refused_password) {
                     Ok(c) => Some(c),
                     Err(e) => {
                         unrenewed = Some(e);
@@ -214,11 +243,13 @@ impl PushedRefs {
             let held = fetching.as_ref().map(|(_, path)| path.as_path());
             let ran = self.git_as(speaker.as_ref(), given.as_ref(), &line, held);
             drop(fetching);
-            let out = match ran {
+            let (out, asked) = match ran {
                 // A try git did not end within its limit: whether the remote
                 // judged it is not known, so a read is tried again and a
                 // push is settled by reading what the remote holds (122).
-                Ok((out, true)) => {
+                Ok(Tried {
+                    out, stopped: true, ..
+                }) => {
                     let verb = args.first().copied().unwrap_or("call");
                     last = Some(told(
                         out,
@@ -230,16 +261,28 @@ impl PushedRefs {
                     ));
                     return Err(Failed::new(Judged::Unknown, ()));
                 }
-                Ok((out, false)) if out.status.success() => return Ok(out),
-                Ok((out, false)) => out,
+                Ok(Tried { out, .. }) if out.status.success() => return Ok(out),
+                Ok(Tried { out, asked, .. }) => (out, asked),
                 Err(e) => {
                     fault = Some(e);
                     return Err(Failed::new(Judged::Answered, ()));
                 }
             };
-            let judged = judged(&out, kind, speaker.is_some());
-            if let (Judged::Credential, Some(c)) = (judged, given) {
-                refused.push(c.about);
+            let mut judged = judged(&out, kind, speaker.is_some());
+            match (judged, &speaker, given) {
+                (Judged::Credential, Some(_), Some(c)) if asked => {
+                    refused.push(c.about);
+                    refused_password = c.password;
+                }
+                // The remote refused what git sent of its own, or nothing
+                // sluice gave: its answer, which no credential bought
+                // afresh changes, since git sends the same again (134;
+                // record 0019 as amended 2026-11-18).
+                (Judged::Credential, Some(s), Some(_)) => {
+                    unasked = Some(self.unasked(s, &out));
+                    judged = Judged::Answered;
+                }
+                _ => {}
             }
             last = Some(out);
             Err(Failed::new(judged, ()))
@@ -265,23 +308,74 @@ impl PushedRefs {
             );
         }
         let out = last.expect("a try git failed");
-        let note =
-            match unrenewed {
-                Some(e) => Some(format!(
-                    "{} refused {}, and none could be made afresh: {e:#}",
-                    self.remote,
-                    refused.join(", then ")
-                )),
-                None if stopped.judged == Judged::Credential && !refused.is_empty() => Some(
-                    format!("{} refused {}", self.remote, refused.join(", then ")),
-                ),
-                None => None,
-            };
+        let note = match (unrenewed, unasked) {
+            (Some(e), _) => Some(format!(
+                "{} refused {}, and none could be made afresh: {e:#}",
+                self.remote,
+                refused.join(", then ")
+            )),
+            (None, Some(unasked)) if refused.is_empty() => Some(unasked),
+            (None, Some(unasked)) => Some(format!(
+                "{} refused {}; {unasked}",
+                self.remote,
+                refused.join(", then ")
+            )),
+            (None, None) if stopped.judged == Judged::Credential && !refused.is_empty() => Some(
+                format!("{} refused {}", self.remote, refused.join(", then ")),
+            ),
+            (None, None) => None,
+        };
         Ok(Called {
             out,
             note,
             judged: Some(stopped.judged),
         })
+    }
+
+    /// What a call as `s` that the remote refused was refused on, where git
+    /// never asked sluice's helper for `s`'s credentials: none, git getting
+    /// none from the helper, or a credential git sent of its own in their
+    /// place, named where sluice can find it, in the address git reached
+    /// the remote by once its configuration rewrote the speaker's (134;
+    /// record 0019 as amended 2026-11-18). The remote's own words, before
+    /// it, name whose it was where the remote does, as GitHub's
+    /// `Permission to <repository> denied to <account>` does.
+    fn unasked(&self, s: &Speaker, out: &Output) -> String {
+        let who = s.identity.name();
+        let err = String::from_utf8_lossy(&out.stderr);
+        if err.contains("could not read Username") || err.contains("could not read Password") {
+            return format!(
+                "{} asked for credentials, and git got none from sluice's helper, `{}`, for {who}",
+                self.remote,
+                s.helper.trim_start_matches('!')
+            );
+        }
+        // git's own reading of the address, with nothing sent to the remote.
+        let reached = command(self.local.git_dir(), &["ls-remote", "--get-url", &s.url])
+            .output()
+            .ok()
+            .filter(|o| o.status.success())
+            .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
+            .filter(|u| !u.is_empty())
+            .unwrap_or_else(|| s.url.clone());
+        // A header stored for the address a rewrite reached, which the
+        // header emptied for the speaker's own address does not cover.
+        let header = reached != s.url
+            && command(
+                self.local.git_dir(),
+                &["config", "--get-urlmatch", "http.extraheader", &reached],
+            )
+            .output()
+            .is_ok_and(|o| o.status.success() && !o.stdout.trim_ascii().is_empty());
+        format!(
+            "{} refused {}, which git sent in place of {who}'s credentials, never asking sluice for them",
+            self.remote,
+            own_credential(
+                &reached,
+                header,
+                std::env::var_os("HOME").as_deref().map(Path::new)
+            )
+        )
     }
 
     /// The lock that makes one fetch at a time of this repository's, by any
@@ -413,22 +507,37 @@ impl PushedRefs {
     /// what git printed, and `true` where that limit came first and the
     /// group was ended, the remote's helper and any hook with it (134;
     /// record 0109).
+    ///
+    /// As `speaker`, git is given the speaker's credentials alone: the
+    /// host's helpers are emptied, and the headers git's configuration
+    /// holds for the speaker's address with them, as `actions/checkout`
+    /// stores its job's token there, on the call's command line, the most
+    /// specific match for the address and the last read (record 0019 as
+    /// amended 2026-11-18). The try says whether git asked the speaker's
+    /// helper for the credentials: one that did not sent the remote
+    /// whatever git found itself, the helper marking a file the call made
+    /// for it ([`ASKED_VAR`]).
     fn git_as(
         &self,
         speaker: Option<&Speaker>,
         given: Option<&Credentials>,
         args: &[&str],
         held: Option<&Path>,
-    ) -> Result<(Output, bool)> {
-        let helper;
+    ) -> Result<Tried> {
+        let (helper, headers);
+        let mut asked = None;
         let mut cmd = match (speaker, given) {
             (Some(s), Some(c)) => {
                 helper = format!("credential.helper={}", s.helper);
-                let mut all = vec!["-c", "credential.helper=", "-c", &helper];
+                headers = format!("http.{}.extraheader=", s.url);
+                let mut all = vec!["-c", "credential.helper=", "-c", &helper, "-c", &headers];
                 all.extend(args);
                 let mut cmd = command(self.local.git_dir(), &all);
+                let mark = Asked::make(&self.local.common_dir()?)?;
                 cmd.env(USERNAME_VAR, &c.username)
-                    .env(PASSWORD_VAR, &c.password);
+                    .env(PASSWORD_VAR, &c.password)
+                    .env(ASKED_VAR, &mark.path);
+                asked = Some(mark);
                 cmd
             }
             _ => command(self.local.git_dir(), args),
@@ -443,7 +552,11 @@ impl PushedRefs {
             stdout: ended.stdout,
             stderr: ended.stderr,
         };
-        Ok((out, ended.stopped))
+        Ok(Tried {
+            out,
+            stopped: ended.stopped,
+            asked: asked.is_some_and(|m| m.marked()),
+        })
     }
 
     /// `git push <args> <the remote> <refspec>` under the retry policy,
@@ -564,6 +677,57 @@ struct Called {
     judged: Option<Judged>,
 }
 
+/// One try of a git call to the remote ([`PushedRefs::git_as`]): what git
+/// printed, whether its limit came first, and whether git asked sluice's
+/// helper for the speaker's credentials.
+struct Tried {
+    out: Output,
+    stopped: bool,
+    asked: bool,
+}
+
+/// The file a git call as sluice's identity names to its helper in
+/// [`ASKED_VAR`], which the helper marks once it gives git the
+/// credentials: made empty, for this user alone, in the repository's
+/// common git directory, and removed with the try.
+struct Asked {
+    path: PathBuf,
+}
+
+impl Asked {
+    /// A file of its own in `dir`, made afresh.
+    fn make(dir: &Path) -> Result<Asked> {
+        use std::os::unix::fs::OpenOptionsExt as _;
+        use std::sync::atomic::{AtomicU64, Ordering};
+        static MADE: AtomicU64 = AtomicU64::new(0);
+        loop {
+            let n = MADE.fetch_add(1, Ordering::Relaxed);
+            let path = dir.join(format!("sluice-asked-{}-{n}", std::process::id()));
+            match std::fs::OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .mode(0o600)
+                .open(&path)
+            {
+                Ok(_) => return Ok(Asked { path }),
+                Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => continue,
+                Err(e) => return Err(e).with_context(|| format!("making {}", path.display())),
+            }
+        }
+    }
+
+    /// Whether the helper marked it.
+    fn marked(&self) -> bool {
+        std::fs::metadata(&self.path).is_ok_and(|m| m.len() > 0)
+    }
+}
+
+impl Drop for Asked {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_file(&self.path);
+    }
+}
+
 /// How a push of [`PushedRefs::push`] ended.
 pub(crate) enum Pushed {
     /// The remote took it, or holds what it set though its answer was
@@ -618,6 +782,53 @@ fn judged(out: &Output, kind: Kind, renewable: bool) -> Judged {
     } else {
         Judged::Unknown
     }
+}
+
+/// The credential git sends the remote at `url` of its own, without
+/// asking a helper, where sluice can name it: the user name and password
+/// the address it reached the remote by carries, the header git's
+/// configuration stores for that address where `header` says one is, or
+/// the entry `.netrc` in `home` holds for its host, which git's HTTP
+/// library reads; never the secret itself.
+fn own_credential(url: &str, header: bool, home: Option<&Path>) -> String {
+    let rest = url.split_once("://").map_or(url, |(_, rest)| rest);
+    let authority = rest.split('/').next().unwrap_or_default();
+    let (userinfo, at) = match authority.rsplit_once('@') {
+        Some((userinfo, at)) => (Some(userinfo), at),
+        None => (None, authority),
+    };
+    if let Some(userinfo) = userinfo {
+        let user = userinfo.split(':').next().unwrap_or_default();
+        return format!("the user name {user:?} and the password in the address git reached it by");
+    }
+    if header {
+        let scheme = url.split_once("://").map_or("", |(scheme, _)| scheme);
+        return format!("the header git's configuration stores for {scheme}://{rest}");
+    }
+    let host = match at.rsplit_once(':') {
+        Some((host, port)) if port.bytes().all(|b| b.is_ascii_digit()) => host,
+        _ => at,
+    };
+    if let Some(netrc) = home.map(|h| h.join(".netrc")) {
+        if std::fs::read_to_string(&netrc).is_ok_and(|text| netrc_names(&text, host)) {
+            return format!("the credential {} holds for {host}", netrc.display());
+        }
+    }
+    format!("a credential of git's own for {host} that sluice cannot name")
+}
+
+/// Whether a `.netrc`'s `text` gives a credential for `host`: an entry
+/// for that machine, or a default one.
+fn netrc_names(text: &str, host: &str) -> bool {
+    let mut words = text.split_whitespace();
+    while let Some(word) = words.next() {
+        match word {
+            "default" => return true,
+            "machine" if words.next() == Some(host) => return true,
+            _ => {}
+        }
+    }
+    false
 }
 
 /// What git prints when the remote has no ref a fetch asks for.
@@ -761,6 +972,7 @@ pub(crate) fn command(git_dir: &Path, args: &[&str]) -> Command {
         .env_remove("GIT_ALTERNATE_OBJECT_DIRECTORIES")
         .env_remove(USERNAME_VAR)
         .env_remove(PASSWORD_VAR)
+        .env_remove(ASKED_VAR)
         .env("GIT_TERMINAL_PROMPT", "0")
         .env("GCM_INTERACTIVE", "never")
         .env("GIT_ASKPASS", "")
@@ -815,8 +1027,11 @@ impl Branch for PushedRefs {
         self.local.form(onto, head)
     }
 
-    fn commit(&self, commit: &LandingCommit) -> Result<Rev> {
-        self.local.commit(commit)
+    /// The landing written as whoever pushes it, [`PushedRefs::author`]:
+    /// nothing is written where that cannot be read.
+    fn commit(&self, _: &str, commit: &LandingCommit) -> Result<Rev> {
+        let author = self.author()?;
+        self.local.commit_as(commit, &author)
     }
 
     fn contains(&self, tip: &Rev, rev: &Rev) -> Result<bool> {
@@ -914,7 +1129,50 @@ impl PushedRefs {
 
 #[cfg(test)]
 mod tests {
-    use super::lost_race;
+    use super::{lost_race, netrc_names, own_credential};
+
+    /// Record 0019 as amended 2026-11-18: a credential git sent of its own
+    /// is named by where git found it, the address's user name, a header
+    /// stored for the address or the user's `.netrc`, and never by its
+    /// secret.
+    #[test]
+    fn a_credential_git_sends_of_its_own_is_named_by_where_it_is() {
+        assert_eq!(
+            own_credential("https://job:secret@github.com/o/r.git", true, None),
+            "the user name \"job\" and the password in the address git reached it by"
+        );
+        let home = std::env::temp_dir().join(format!("sluice-netrc-{}", std::process::id()));
+        std::fs::create_dir_all(&home).unwrap();
+        let named = own_credential("https://github.com:443/o/r.git", false, Some(&home));
+        std::fs::write(
+            home.join(".netrc"),
+            "machine gitlab.com login a password b\nmachine github.com\n  login x-access-token\n  password secret\n",
+        )
+        .unwrap();
+        let netrc = own_credential("https://github.com/o/r.git", false, Some(&home));
+        let _ = std::fs::remove_dir_all(&home);
+        assert_eq!(
+            named,
+            "a credential of git's own for github.com that sluice cannot name"
+        );
+        assert_eq!(
+            netrc,
+            format!(
+                "the credential {} holds for github.com",
+                home.join(".netrc").display()
+            )
+        );
+        assert!(!netrc.contains("secret"));
+        assert_eq!(
+            own_credential("https://mirror.example/o/r.git", true, Some(&home)),
+            "the header git's configuration stores for https://mirror.example/o/r.git"
+        );
+        assert!(netrc_names("default login a password b", "github.com"));
+        assert!(!netrc_names(
+            "machine gitlab.com login github.com",
+            "github.com"
+        ));
+    }
 
     /// Rules core.28, core.29: a fetch that lost a race for a ref of this
     /// repository's is told from a remote's refusal by git's own words.

@@ -319,7 +319,7 @@ ruleset with the button left on.
 | how work reaches the queue | straight from a worktree, or pull requests | [pull-requests](references/profiles/pull-requests.md) |
 | running copies of landed revisions (`[preview]`) | a command per repository | [previews](references/profiles/previews.md) |
 | more than one host, or more than one system (`[signers]`, `[systems]`) | peers on the git remote, standing hosts signing with SSH keys | [peers](references/profiles/peers.md) |
-| runs no standing host takes, a burst or a system none runs (`[pools]`) | a pool on GitHub Actions, set up by `sluice init actions`; or a CodeBuild fleet in the project's own AWS account, set up by `sluice init codebuild`, which can take every run of a branch whose `trust` names its signer beside the leading hosts' signer with `systems = []` | [running checks on a pool](https://agentplot.github.io/sluice/guides/pools/) |
+| runs no standing host takes, a burst or a system none runs (`[pools]`) | a pool on GitHub Actions, set up by `sluice init actions`; or a CodeBuild fleet in the project's own AWS account, set up by `sluice init codebuild`, which can take every run of a branch whose `trust` names its signer beside the signer the hosts that may run its queue sign as, with `systems = []` | [running checks on a pool](https://agentplot.github.io/sluice/guides/pools/) |
 
 The rules per branch (`required`, `parallel`, `batch`, `hold`, `flaky`,
 `timeout`, `release_retries`, `trust`) and `[landing] subject` are in the
@@ -405,7 +405,7 @@ branch.
 Before committing it, read it back to the user by
 [read-back](references/read-back.md): each branch pattern, what it matches,
 what must pass there and what a pull request into it waits for. A branch
-on which no test will run leads its part with the warning, in that page's
+on which no test will run opens its part with the warning, in that page's
 words; stop there until the user names a check for it or says it is meant
 to land untested.
 
@@ -566,10 +566,10 @@ at least. In a working copy of the branch, run `sluice init codebuild`:
 it writes `.config/sluice-codebuild.yml`, a fleet and a run project for
 each Linux system `[systems]` names, and prints the deploy command and
 the secret to fill. Ask the user to deploy the stack and fill the
-secret, and to name, on each host that leads the branch, the profile
-that assumes the stack's lead role as `[aws] profile`. Then
+secret, and to name, on each host that may run the branch's queue, the
+profile that assumes the stack's start role as `[aws] profile`. Then
 `sluice init codebuild --stack <name>` appends `[signers.codebuild]`
-and `[pools.codebuild]`. Give the signer the leading hosts sign as
+and `[pools.codebuild]`. Give the signer those hosts sign as
 `systems = []`, so they claim no run, and set each branch's `trust` to
 that signer and `codebuild`, with `batch = false` and `parallel` at the
 fleet's maximum. Land the policy, then `sluice pool check <branch>`

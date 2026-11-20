@@ -1308,6 +1308,7 @@ impl Pulls {
                 after: Vec::new(),
                 priority: 0,
                 subject: Some(p.title.clone()),
+                trace: None,
             })?;
             return Ok(Considered::from(match accepted {
                 Ok(a) => {
@@ -1541,6 +1542,7 @@ impl Pulls {
                     after: Vec::new(),
                     priority: 0,
                     subjects: by_k.values().map(|p| p.title.clone()).collect(),
+                    trace: None,
                 };
                 match s.submit_group(&req)? {
                     Ok(accepted) => {
@@ -1682,6 +1684,7 @@ impl Pulls {
             after: Vec::new(),
             priority: 0,
             subjects: acted.iter().map(|(p, _)| p.title.clone()).collect(),
+            trace: None,
         };
         let accepted = match s.submit_group(&req)? {
             Ok(accepted) => accepted,
@@ -2867,8 +2870,8 @@ impl Branch for ReadOnce<'_> {
         self.branch.form(onto, head)
     }
 
-    fn commit(&self, commit: &LandingCommit) -> Result<Rev> {
-        self.branch.commit(commit)
+    fn commit(&self, branch: &str, commit: &LandingCommit) -> Result<Rev> {
+        self.branch.commit(branch, commit)
     }
 
     fn contains(&self, tip: &Rev, rev: &Rev) -> Result<bool> {

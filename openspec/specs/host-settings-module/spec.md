@@ -263,13 +263,13 @@ core.51).
 ### Requirement: The module installs the package and nothing else
 
 With `services.sluice.enable`, the module SHALL put
-`services.sluice.package` in the system profile. Its default SHALL be
-sluice's flake's package for the host's system. A host MAY replace the
-package, or set it to null to install none. The module SHALL add no
+`services.sluice.package` in the system profile, by default the
+flake's package for the host's system, which a host MAY replace or set
+to null to install none. The module SHALL add no
 launchd agent or daemon, no systemd unit, no file under `/etc`, no user
-and no list of repositories. Beside the link, it SHALL write no file of
-another tool's (135; agentplot/blueprints `design/principles.md` 10;
-rules core.31, core.51).
+and no list of repositories, but the daemon's where the host turns it
+on (daemon-service). Beside the link it SHALL write no other tool's
+file (135; principle 10; rules core.31, core.51).
 
 #### Scenario: The flake's sluice
 
@@ -308,6 +308,15 @@ rules core.31, core.51).
   `systemd.user.services` are equal, each user's `linger` is equal, and
   the user activations' names differ by `sluice` alone ("Nothing else on
   the host" in `nix/tests/nixos.nix`)
+
+#### Scenario: Only the daemon's service with the daemon on
+
+- **WHEN** the nix-darwin system with the module and the daemon enabled
+  is compared with the same system with the module alone enabled
+- **THEN** `launchd.user.agents` differs by `sluice` alone, and the names
+  under `environment.etc`, `launchd.agents`, `launchd.daemons` and
+  `users.users` are equal ("Only the daemon's service" in
+  `nix/tests/darwin.nix`)
 
 ### Requirement: A module imported twice is taken once
 

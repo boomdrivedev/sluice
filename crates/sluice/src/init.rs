@@ -453,8 +453,8 @@ pub fn codebuild(dir: &Path, systems: &[String], force: bool, out: &mut dyn Writ
         out,
         "  - deploy it, as `sluice` or a name of your own:\n    aws cloudformation deploy \
          --template-file {shown} --stack-name sluice --capabilities CAPABILITY_IAM \
-         --parameter-overrides LeadPrincipal=<the ARN the hosts that lead the branch reach AWS \
-         as> AppId=<sluice's app id> MaxCapacity=<the branch's parallel> \
+         --parameter-overrides StartPrincipal=<the ARN the hosts that may run the branch's queue \
+         reach AWS as> AppId=<sluice's app id> MaxCapacity=<the branch's parallel> \
          RunPolicies=<the ARNs of the managed policies your own commands after the checks \
          need, comma-separated, or nothing>"
     )?;
@@ -466,8 +466,8 @@ pub fn codebuild(dir: &Path, systems: &[String], force: bool, out: &mut dyn Writ
     )?;
     writeln!(
         out,
-        "  - name the profile that assumes the stack's lead role as [aws] profile on each \
-         host that leads the branch"
+        "  - name the profile that assumes the stack's start role as [aws] profile on each \
+         host that may run the branch's queue"
     )?;
     writeln!(
         out,
@@ -584,9 +584,9 @@ pub fn codebuild_stack(
     writeln!(
         out,
         "{POLICY_PATH}: [signers.codebuild], naming the key {}, and [pools.codebuild] appended; \
-         a branch's `trust` names codebuild and the signer its leading hosts sign as, that \
-         signer's `systems = []` so it claims no run, and the branch's `systems` the systems \
-         its runs need",
+         a branch's `trust` names codebuild and the signer the hosts that may run its queue \
+         sign as, that signer's `systems = []` so it claims no run, and the branch's `systems` \
+         the systems its runs need",
         key.arn
     )?;
     for system in left {

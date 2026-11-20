@@ -89,6 +89,7 @@ fn passed_on_another_branch(h: &Harness, policy: &str, content: &str) {
             after: Vec::new(),
             priority: 0,
             subject: None,
+            trace: None,
         })
         .expect("submit runs")
         .expect("accepted");
@@ -363,6 +364,7 @@ fn a_failed_dependency_outweighs_one_that_could_not_run() {
 fn signer(h: &Harness) -> Sluice<'_> {
     h.sluice().as_peer(Peer {
         name: "fake-host".into(),
+        repository: "this-repository".into(),
         lease: Duration::from_secs(300),
         alive: Duration::from_secs(120),
         signer: Some("box".into()),

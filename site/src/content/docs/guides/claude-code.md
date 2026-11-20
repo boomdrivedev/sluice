@@ -15,7 +15,7 @@ describes.
 At the prompt of a Claude Code session in a terminal:
 
 ```
-/plugin marketplace add agentplot/sluice
+/plugin marketplace add boomdrivedev/sluice
 /plugin install sluice@sluice
 ```
 

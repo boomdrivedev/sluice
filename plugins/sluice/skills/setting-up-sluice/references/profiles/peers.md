@@ -79,7 +79,7 @@ key = "~/.config/sluice/signing"   # an SSH private key, mode 0600
 systems = ["linux-x64"]            # default: the one system the host is
 
 [peers]
-lease = "5m"   # how long a quiet lead keeps a branch before another takes it
+lease = "5m"   # how long a quiet host that runs the queue keeps it before another takes it
 alive = "2m"   # how often this host shows it is alive; a claim lapses after it
 name = "build-1" # default: the host name; set it when two hosts share one
 ```
@@ -154,5 +154,5 @@ What can go wrong:
 - **A host's results never count.** Its signer is not in the branch's
   `trust`, or its key's line is not in the policy on the branch's current
   revision, or the branch has `confined = true` and its signer does not.
-- **Two hosts both think they lead.** They share a host name: set
+- **Two hosts both think they run the queue.** They share a host name: set
   `[peers] name` on one.

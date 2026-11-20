@@ -1639,6 +1639,66 @@ fn a_failed_list_ends_intake_and_the_queue_still_lands() {
     );
 }
 
+/// forge-identity, "The host process gets a repository's token once for
+/// its hour": a host process started afresh, held open with nothing in
+/// play, looks at the idle repository every few seconds, each look with a
+/// binding of its own that fetches the records from GitHub as the app;
+/// over four looks it buys one token for o/r (record 0108 as amended
+/// 2026-11-19).
+#[test]
+fn the_host_process_buys_a_repositorys_token_once_across_its_looks() {
+    use sluice::host_process::{client::Client, protocol::Answer};
+    let g = OnGitHub::new("pr-one-token", "");
+    g.settle();
+    support::kill_host_process(&mut g.command(env!("CARGO_BIN_EXE_sluice"), g.repo.dir()));
+    let doc: Value = serde_json::from_slice(&g.sluice(&["overview", "--json"]).stdout).unwrap();
+    let repository = PathBuf::from(doc["repository"].as_str().unwrap());
+    let bought = || {
+        g.gh.calls(
+            "POST",
+            &format!("/app/installations/{}/access_tokens", github::INSTALLATION),
+        )
+    };
+    let before = bought();
+    let git = support::CountingGit::new();
+    let client = Client::new(
+        Path::new(env!("CARGO_BIN_EXE_sluice")),
+        support::env_of(git.on(&mut g.command(env!("CARGO_BIN_EXE_sluice"), g.repo.dir()))),
+    )
+    .unwrap();
+    let mut held = client
+        .hold(
+            sluice_seams::RunKind::Session,
+            &repository,
+            "an-agent",
+            None,
+        )
+        .expect("the host process starts");
+    let answer = held.next(Some(Duration::from_secs(10))).unwrap();
+    assert!(matches!(answer, Some(Answer::Held)), "{answer:?}");
+    // The host process looks at the repository as it starts, and every
+    // three seconds after, each look fetching every branch's records from
+    // GitHub as the app once, and main's again.
+    let looks = || {
+        git.starts()
+            .iter()
+            .filter(|a| a.contains(" fetch ") && a.contains("+refs/sluice/hosts/*"))
+            .count()
+    };
+    let until = Instant::now() + Duration::from_secs(30);
+    while looks() < 4 {
+        assert!(
+            Instant::now() < until,
+            "four looks: {:?}\n{}",
+            git.starts(),
+            g.host_log()
+        );
+        std::thread::sleep(Duration::from_millis(200));
+    }
+    drop(held);
+    assert_eq!(bought() - before, 1, "{:?}", git.starts());
+}
+
 /// 133, rule core.28 (design D27): GitHub no longer finds the app's
 /// installation on the repository, as when it was renamed; the host
 /// process's passes say the round's refusal once, with what to do, and
@@ -1809,6 +1869,37 @@ fn landed_and_merged_by_landing() {
         .report(n)
         .unwrap()
         .contains("## sluice: landed on main as "));
+}
+
+/// forge-identity spec, "A landing and its records pushed as the app"
+/// (record 0019 as amended 2026-11-18; rule core.43): a request landed on
+/// `main`, which sluice pushes to GitHub as its app, is a landing commit
+/// whose author and committer are the app's bot, and so is the commit of
+/// `main`'s records on `refs/sluice/state/main`.
+#[test]
+fn a_landing_and_its_records_name_the_apps_bot() {
+    let g = OnGitHub::new("pr-landed-by-bot", "");
+    let (n, _) = g.by_hand("unit/bot", &[("b.txt", Some("b\n"))], false);
+    g.step_until("landed", |g| {
+        g.of(n).first().is_some_and(|s| s["state"] == "landed")
+    });
+    let bot = format!(
+        "{}[bot] <{}+{}[bot]@users.noreply.github.com> ",
+        github::SLUG,
+        github::BOT,
+        github::SLUG
+    );
+    for name in ["refs/heads/main", "refs/sluice/state/main"] {
+        let out = support::git_command()
+            .arg("--git-dir")
+            .arg(g.bare.path())
+            .args(["cat-file", "-p", name])
+            .output()
+            .unwrap();
+        let raw = String::from_utf8_lossy(&out.stdout);
+        assert!(raw.contains(&format!("\nauthor {bot}")), "{name}: {raw}");
+        assert!(raw.contains(&format!("\ncommitter {bot}")), "{name}: {raw}");
+    }
 }
 
 /// 51, C.5; outcome-delivery spec, "A request's landing is posted" and "A
@@ -2286,6 +2377,20 @@ fn the_description_still_carries_the_commits() {
     assert_eq!(pull.title, "Batch review cards");
 }
 
+/// The host keeps the app's bot, read just now, as a host that has run a
+/// day holds it, so no commit of a test's reads it and the calls that
+/// read the app's login are the pull requests' alone (record 0019 as
+/// amended 2026-11-18; design D7).
+fn keeps_the_bot(g: &OnGitHub) {
+    let dir = g.state.path().join("sluice/forge/authors");
+    std::fs::create_dir_all(&dir).unwrap();
+    let bot = serde_json::json!({
+        "login": format!("{}[bot]", github::SLUG), "id": github::BOT,
+        "read_at": chrono::Utc::now().to_rfc3339(),
+    });
+    std::fs::write(dir.join(format!("{}.json", github::APP)), bot.to_string()).unwrap();
+}
+
 /// The calls that read the app's login.
 fn logins(g: &OnGitHub) -> usize {
     g.gh.fake
@@ -2324,6 +2429,7 @@ fn a_new_head_with_a_subject_retitles_it() {
 #[test]
 fn a_new_head_with_no_subject_keeps_the_title() {
     let g = OnGitHub::new("pr-keep-title", "reviews = 1");
+    keeps_the_bot(&g);
     let w = g.session("review", &[("r.txt", "r\n")]);
     let out = g.wt_submit(&w, &["--no-wait", "--subject", "Batch review cards"]);
     assert_eq!(out.status.code(), Some(0), "{}", text(&out));
@@ -2369,6 +2475,7 @@ fn opened_by(g: &OnGitHub, author: &str, name: &str, message: &str, title: &str)
 #[test]
 fn a_request_opened_before_titles_changed_is_retitled() {
     let g = OnGitHub::new("pr-old-title", "reviews = 1");
+    keeps_the_bot(&g);
     let proposal = "docs(openspec): propose review";
     let (w, n) = opened_by(&g, "sluice", "review", proposal, proposal);
     let out = g.wt_submit(&w, &["--no-wait", "--subject", "Batch review cards"]);
@@ -5188,14 +5295,20 @@ fn a_queued_pull_request_that_stands_is_read_by_the_list_alone() {
 
 /// forge-reads, "The state moves": the pull request's submission goes
 /// from queued to testing, and its check is posted once, saying testing,
-/// with no read of GitHub's copy first.
+/// with no read of GitHub's copy first. Its check goes on until the test
+/// ends it, so it is under test at the second round however long a round
+/// takes on a loaded host. A check of five seconds left room for it to
+/// land between them: deneb, 2026-11-18, main at 15b5cf173, the second
+/// round posting its check as a success.
 #[test]
 fn the_state_moves_and_is_posted_unread() {
     let g = OnGitHub::new("pr-discovery-moves", "");
-    let (n, head) = g.by_hand("unit/moves", &[("slow", Some("x\n"))], false);
+    let hang = Hang::in_repo(&g);
+    let (n, head) = g.by_hand("unit/moves", &[("hang", Some(&hang.file()))], false);
     g.discovery_passes();
     let out = g.sluice(&["step", "main"]);
     assert!(out.status.success(), "{}", text(&out));
+    started(&hang.pid);
     assert_eq!(g.of(n).len(), 1, "{:?}", g.subs());
     let (read_back, posts) = (g.posted_reads(&head), g.posts());
     // The round started its test: the records moved, and the next pass
@@ -5286,7 +5399,12 @@ fn a_new_head_is_read_again() {
 /// minute of a clock its pauses move, its twenty rounds three seconds
 /// apart, nothing on the host moving, reads the request from GitHub no
 /// more often than once in a quarter of the host's interval: four times,
-/// at most.
+/// at most. The host's interval has passed as it begins, so its first
+/// pass asks for main's pull requests at the wait's own time, and its
+/// last, fifty-seven seconds on, finds nothing due however long the
+/// commands before it took. Asked last by the step before it, at that
+/// step's time, it had three seconds of the host's minute to begin in:
+/// deneb, 2026-11-18, main at 15b5cf173, its last passes asking again.
 #[test]
 fn a_wait_reads_its_pull_request_once_in_a_quarter_of_the_interval() {
     let g = OnGitHub::new("pr-discovery-follow", "reviews = 1");
@@ -5297,12 +5415,14 @@ fn a_wait_reads_its_pull_request_once_in_a_quarter_of_the_interval() {
     g.settle();
     let before = g.pull_reads(n);
     let lists = g.lists();
+    g.discovery_passes();
     let out = g.skipping(&w, &["wait", "main", "--timeout", "57s"]);
     assert_eq!(out.status.code(), Some(sluice::WAITING), "{}", text(&out));
     let reads = g.pull_reads(n) - before;
     assert!((1..=4).contains(&reads), "{reads} reads: {}", text(&out));
-    // Its own asking found nothing due: only the wait's finding of it.
-    assert_eq!(g.lists(), lists + 1, "{}", text(&out));
+    // Its own asking asked at its first pass and found nothing due after
+    // it; beside that, only the wait's finding of it.
+    assert_eq!(g.lists(), lists + 2, "{}", text(&out));
 }
 
 /// Another host over `main`'s remote and GitHub: its own clone, config and

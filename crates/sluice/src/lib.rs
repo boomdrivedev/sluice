@@ -259,6 +259,11 @@ pub struct Cli {
     /// else 8192.
     #[arg(long, global = true, hide = true, env = "SLUICE_OTEL_LOGS_LIMIT")]
     pub otel_logs_limit: Option<usize>,
+    /// 153: the trace context the command was started under, which `main`
+    /// reads from the environment it started with and clap never parses;
+    /// it names only where the command's span nests (design D1, D7).
+    #[arg(skip)]
+    pub caller: Option<telemetry::Caller>,
 }
 
 #[derive(Subcommand, Debug)]
@@ -604,6 +609,17 @@ pub enum Command {
     /// it (135).
     #[command(hide = true)]
     Host,
+    /// Keep this user's sluice host process running, on a machine that
+    /// chooses to; nothing needs it.
+    ///
+    /// sluice starts its own host process when work arrives and lets it end
+    /// once nothing is in play, so nothing needs `sluice daemon`. A machine
+    /// that runs queues for others, and runs no sluice command itself, may
+    /// keep it running under its service manager: it is the host process,
+    /// in the foreground, and never ends for being idle (135, 137). It
+    /// stops on SIGTERM or SIGINT, its runs going on.
+    #[command(after_help = "Example:\n  $ sluice daemon")]
+    Daemon,
     /// Install the hook that refuses updates to protected branches by
     /// anything but sluice; `submit`, `step` and `run` install it too.
     #[command(after_help = "Examples:\n  $ sluice protect\n  $ sluice protect --remove")]
@@ -1487,6 +1503,11 @@ extern "C" fn interrupted(_: nix::libc::c_int) {
     INTERRUPTED.store(true, Ordering::SeqCst);
 }
 
+/// Whether Ctrl-C, or a stop where [`stop_on_terminate`] is in force, came.
+pub(crate) fn stopped() -> bool {
+    INTERRUPTED.load(Ordering::SeqCst)
+}
+
 /// Ctrl-C ends a wait and nothing else: the submission stays queued (5)
 /// and its run, in a session of its own, goes on.
 pub fn stop_on_interrupt() -> Result<()> {
@@ -1610,6 +1631,62 @@ impl Cli {
         }
     }
 
+    /// The command's words as `sluice --help` lists them: `sluice exec`,
+    /// `sluice job run`, and `sluice` for the home view, which name its
+    /// span in its caller's trace (153; design D2).
+    pub fn words(&self) -> String {
+        let words = match &self.command {
+            None => return "sluice".into(),
+            Some(command) => match command {
+                Command::Submit { .. } => "submit",
+                Command::Wait { .. } => "wait",
+                Command::Inbox { .. } => "inbox",
+                Command::Confirm { .. } => "confirm",
+                Command::Push { .. } => "push",
+                Command::Step { .. } => "step",
+                Command::Run { .. } => "run",
+                Command::Status { .. } => "status",
+                Command::Overview { .. } => "overview",
+                Command::Amend { .. } => "amend",
+                Command::Withdraw { .. } => "withdraw",
+                Command::SetAside { .. } => "set-aside",
+                Command::Exec { .. } => "exec",
+                Command::Equip { .. } => "equip",
+                Command::Preview { .. } => "preview",
+                Command::Previews { .. } => "previews",
+                Command::Release { .. } => "release",
+                Command::Supervise { .. } => "supervise",
+                Command::Host => "host",
+                Command::Daemon => "daemon",
+                Command::Protect { .. } => "protect",
+                Command::Hook { .. } => "hook",
+                Command::Branch { command } => match command {
+                    BranchCommand::Create { .. } => "branch create",
+                    BranchCommand::Delete { .. } => "branch delete",
+                    BranchCommand::Accept { .. } => "branch accept",
+                },
+                Command::Forge { command } => match command {
+                    ForgeCommand::Check { .. } => "forge check",
+                },
+                Command::Init { command } => match command {
+                    InitCommand::Actions { .. } => "init actions",
+                    InitCommand::Codebuild { .. } => "init codebuild",
+                },
+                Command::Pool { command } => match command {
+                    PoolCommand::Check { .. } => "pool check",
+                },
+                Command::Job { command } => match command {
+                    JobCommand::Run { .. } => "job run",
+                    JobCommand::Sign { .. } => "job sign",
+                    JobCommand::Record { .. } => "job record",
+                    JobCommand::Release { .. } => "job release",
+                },
+                Command::Credential { .. } => "credential",
+            },
+        };
+        format!("sluice {words}")
+    }
+
     /// Whether the command was asked for JSON, so that even a failure
     /// before or outside it is said as JSON.
     pub fn json(&self) -> bool {
@@ -1699,8 +1776,11 @@ impl Following {
     pub fn start(&mut self, s: &Sluice<'_>) -> Result<()> {
         s.check_host_systems()?;
         if !self.told {
+            // D13 of `sluice-runs-as-a-daemon`: a machine that chooses to
+            // keep the host process running keeps `sluice daemon`.
             telemetry::warn(
-                "sluice: sluice starts its own host process; nothing needs `sluice run`",
+                "sluice: sluice starts its own host process; nothing needs `sluice run`, and \
+                 `sluice daemon` keeps it running on a machine that chooses to",
             );
             self.told = true;
         }
@@ -1761,8 +1841,28 @@ pub enum Driven {
     Ended(i32),
 }
 
-/// Run one command; returns its exit code.
+/// Run one command; returns its exit code. Started under a caller's trace
+/// context, its whole run is one span in the caller's trace (153; design
+/// D2).
 pub fn run(
+    cli: Cli,
+    seams: Seams<'_>,
+    host: &dyn exec::Host,
+    pushers: &dyn Pushers,
+    pulls: &dyn PullRequests,
+    clock: &dyn Clock,
+    pause: &dyn Pause,
+    out: &mut dyn Write,
+) -> Result<i32> {
+    let words = cli.words();
+    let caller = cli.caller.clone();
+    telemetry::command(caller.as_ref(), &words, || {
+        dispatch(cli, seams, host, pushers, pulls, clock, pause, out)
+    })
+}
+
+/// The command `cli` names, run.
+fn dispatch(
     cli: Cli,
     seams: Seams<'_>,
     host: &dyn exec::Host,
@@ -1828,6 +1928,9 @@ pub fn run(
     let Some(command) = cli.command else {
         return home::run(&s, host, &cli.worktree, cli.json, documented, out);
     };
+    // 153 (design D4): the context the command was started under, which
+    // each submission it makes keeps, whether or not it sends telemetry.
+    let trace = cli.caller.as_ref().map(|c| c.traceparent.clone());
     // 135 (design D4): the repository, where it has sluice, listed for the
     // host process to find again.
     if matches!(
@@ -1931,6 +2034,7 @@ pub fn run(
                     after,
                     priority,
                     subjects: subject,
+                    trace,
                 };
                 if takes_pulls(&s, &req.branch)? {
                     return submit_pull_group(
@@ -1980,6 +2084,7 @@ pub fn run(
                         after,
                         priority,
                         subject,
+                        trace,
                     },
                     no_wait,
                     json,
@@ -2017,6 +2122,7 @@ pub fn run(
                     after,
                     priority,
                     subject,
+                    trace,
                 },
                 no_wait,
                 json,
@@ -2698,6 +2804,7 @@ pub fn run(
             Ok(0)
         }
         Command::Host => host_process::run(telemetry::Choices::default()),
+        Command::Daemon => host_process::daemon(telemetry::Choices::default(), None),
         Command::Protect { remove, json } => {
             let dir = std::env::current_dir()?;
             if remove {
