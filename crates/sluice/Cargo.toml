@@ -54,6 +54,9 @@ tokio.workspace = true
 zip.workspace = true
 sigstore-verify.workspace = true
 sigstore-trust-root.workspace = true
+# The reading of a file sluice writes by its parse (design D3 of the change
+# `a-pools-run-job-runs-the-repositorys-own-steps`).
+yaml-rust2.workspace = true
 
 # A profile's acceptance tests that name its tool live under a profile
 # directory (rule core.1).
@@ -104,7 +107,6 @@ aws-config = { workspace = true, features = ["test-util"] }
 aws-types.workspace = true
 aws-smithy-types.workspace = true
 http.workspace = true
-yaml-rust2.workspace = true
 aws-smithy-http-client = { workspace = true, features = ["test-util"] }
 
 [lib]

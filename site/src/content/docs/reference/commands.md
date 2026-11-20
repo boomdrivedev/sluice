@@ -32,7 +32,7 @@ sidebar:
 | `sluice push <branch>` | Push again a landing the forge refused, on your word, once the forge's rule allows it: it lands as the same landing, or is held again with the forge's new words ([below](#sluice-push)). `--json` for scripts. |
 | `sluice init actions` | Set up a pool on GitHub Actions in this working copy: write its two workflows and append its signer and pool to the policy where it names none ([below](#sluice-init-actions)). `--force` writes a workflow that differs. |
 | `sluice init codebuild` | Write the CloudFormation template of a pool on a CodeBuild fleet and say how to deploy it; `--stack <name>` reads the deployed stack's key and appends its signer and pool to the policy ([below](#sluice-init-codebuild)). |
-| `sluice job run`, `sign`, `record` | A pool's job, as the workflow `sluice init actions` writes or the builds of `sluice init codebuild`'s stack run it; you don't run them yourself ([below](#sluice-job)). |
+| `sluice job run`, `release`, `sign`, `record` | A pool's job, as the workflow `sluice init actions` writes or the builds of `sluice init codebuild`'s stack run it; you don't run them yourself ([below](#sluice-job)). |
 | `sluice pool check <branch>` | Read each CodeBuild pool the branch's policy names back from AWS: its projects, fleets, buildspecs, timeout and key, and whether the branch tests side by side at the fleet's size ([below](#sluice-pool-check)). |
 
 ## Forecasting a conflict
@@ -1196,15 +1196,26 @@ note    a branch on a fleet tests side by side: batch = false, with parallel = 1
 The workflow `sluice init actions` writes, and the builds of the stack
 `sluice init codebuild` writes, run these; you don't run them yourself.
 
-- `sluice job run --claim <claim> --branch <branch> --out <dir>`, in
-  the run job, starts the run its claim holds and keeps its report and
-  what proves its keys in `<dir>`, recording nothing, writing no state
-  and holding no key. `--head <revision> --system <system>` runs a pull
-  request's head with no claim. It releases the checkout it made before
-  it exits, whatever its run came to and when it is stopped, and says a
-  release that failed in its output and in `<dir>`'s `why`. It exits `0`
-  once the report is kept, and `3` with why where the run reported
-  nothing.
+- `sluice job run --claim <claim> --branch <branch> --out <dir>
+  --checkout <file>`, in the run job, starts the run its claim holds and
+  keeps its report and what proves its keys in `<dir>`, recording
+  nothing, writing no state and holding no key. `--head <revision>
+  --system <system>` runs a pull request's head with no claim. Whatever
+  its run came to, it keeps the checkout it made, with its ports and
+  scratch, for the job's own steps after it, and names it in `<file>`:
+  the checkout's path on the first line and its place's name on the
+  second. Where it made no checkout it writes no file. Stopped, by
+  Ctrl-C or by the pool's SIGTERM, it releases the checkout at once,
+  writes no file, and says a release that failed in its output and in
+  `<dir>`'s `why`. It exits `0` once the report is kept, and `3` with why where
+  the run reported nothing.
+- `sluice job release --checkout <file> --out <dir>`, after the job's
+  own steps, whatever they came to, releases the checkout `<file>`
+  names, by the release the policy names, its ports and scratch freed,
+  and removes `<file>`. A release that fails is said in its output and
+  appended to `<dir>`'s `why`, and exits `1`; it decides nothing of the
+  run's outcome. Where `<file>` does not exist it releases nothing, says
+  so and exits `0`.
 - `sluice job sign --claim <claim> --branch <branch> --from <dir> --out
   <dir>`, in the sign job, keeps of that report only the keys the
   combination's tree bears out, running nothing of it, and writes what

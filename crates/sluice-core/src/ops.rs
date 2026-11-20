@@ -2157,6 +2157,10 @@ mod tests {
             unreachable!("a submit reads no place")
         }
 
+        fn path(&self, _: &str) -> Result<Option<std::path::PathBuf>> {
+            unreachable!("a submit reads no place")
+        }
+
         fn free(&self, _: &str) -> Result<()> {
             unreachable!("a submit releases no place")
         }
