@@ -7,13 +7,13 @@ layer: 'application'
 tasks:
   # The hooks on a scratch repository.
   hooks:
-    command: 'bash tests/hooks.sh'
-    inputs: ['scripts/**/*', 'tests/**/*', '/devenv.nix', '/devenv.lock']
+    command: 'sh $workspaceRoot/tests/leaks.sh bash tests/hooks.sh'
+    inputs: ['scripts/**/*', 'tests/**/*', '/tests/leaks.sh', '/devenv.nix', '/devenv.lock']
     tags: [check-fast]
   # The plain-clone conversion on scratch clones, with a stand-in lsof.
   lay-out:
-    command: 'bash tests/lay-out.sh'
-    inputs: ['scripts/**/*', 'tests/**/*', '/devenv.nix', '/devenv.lock']
+    command: 'sh $workspaceRoot/tests/leaks.sh bash tests/lay-out.sh'
+    inputs: ['scripts/**/*', 'tests/**/*', '/tests/leaks.sh', '/devenv.nix', '/devenv.lock']
     tags: [check-fast]
   # The manifest and its skills, by the pinned Claude Code.
   validate:

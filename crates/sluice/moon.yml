@@ -34,9 +34,9 @@ tasks:
   # S1 to S4 through wt submit on scratch repositories: the check-e2e tier.
   # It reads the tools it drives from outside the tree, so it never replays.
   e2e:
-    command: 'bash e2e/check.sh'
+    command: 'sh tests/leaks.sh bash e2e/check.sh'
     # What check.sh builds and drives: without them, a change to e2e/ would
     # keep a key that passed before it (15).
-    inputs: ['/e2e/**/*', '/crates/sluice/**/*', '/crates/sluice-seams/**/*', '/crates/sluice-core/**/*', '/Cargo.toml', '/Cargo.lock', '/devenv.nix', '/devenv.lock']
+    inputs: ['/e2e/**/*', '/tests/leaks.sh', '/crates/sluice/**/*', '/crates/sluice-seams/**/*', '/crates/sluice-core/**/*', '/Cargo.toml', '/Cargo.lock', '/devenv.nix', '/devenv.lock']
     tags: [check-e2e]
     options: {runFromWorkspaceRoot: true, cache: false}

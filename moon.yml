@@ -102,6 +102,15 @@ tasks:
     inputs: ['/openspec/changes/**/*', '!/openspec/changes/archive/**/*', '/openspec/specs/**/*', '/openspec/config.yaml', '/check-changes.sh', '/devenv.nix', '/devenv.lock']
     tags: [check-fast]
     options: {runFromWorkspaceRoot: true}
+  # The shell test tasks of the plugins and the check-e2e tier run under
+  # tests/leaks.sh, which fails a task that leaves a process: its cases, a
+  # test that leaves a watcher and one that leaves nothing
+  # (`a-leaked-child-fails-its-test@9a82a5147ba6`).
+  leaks-cases:
+    command: 'sh tests/leaks-cases.sh'
+    inputs: ['/tests/leaks.sh', '/tests/leaks-cases.sh']
+    tags: [check-fast]
+    options: {runFromWorkspaceRoot: true}
   # check-changes.sh does what core.61 asks of each open change: its cases,
   # each a scratch tree of its own holding the changes a scenario of
   # repository-gate's requirement names, a requirement past OpenSpec's 500
