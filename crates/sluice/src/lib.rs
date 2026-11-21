@@ -1558,7 +1558,7 @@ pub fn stop_on_terminate() -> Result<()> {
 /// interval's among them, as the wait would have read it.
 pub struct Skipped {
     every: std::time::Duration,
-    start: chrono::DateTime<chrono::Utc>,
+    start: std::cell::Cell<chrono::DateTime<chrono::Utc>>,
     moved: std::cell::Cell<std::time::Duration>,
 }
 
@@ -1566,7 +1566,7 @@ impl Skipped {
     pub fn new(every: std::time::Duration) -> Skipped {
         Skipped {
             every,
-            start: chrono::Utc::now(),
+            start: std::cell::Cell::new(chrono::Utc::now()),
             moved: std::cell::Cell::default(),
         }
     }
@@ -1578,8 +1578,15 @@ impl Skipped {
     /// command that asked for it, however many ask, and a command started
     /// later starts from its own time.
     pub fn set(&self, at: chrono::DateTime<chrono::Utc>) {
-        self.moved
-            .set((at - self.start).to_std().unwrap_or_default());
+        match (at - self.start.get()).to_std() {
+            Ok(moved) => self.moved.set(moved),
+            // A command's time before the clock's start: the clock starts
+            // there, so the pass is at the command's own time.
+            Err(_) => {
+                self.start.set(at);
+                self.moved.set(std::time::Duration::ZERO);
+            }
+        }
     }
 }
 
@@ -1592,7 +1599,7 @@ impl Pause for Skipped {
 
 impl Clock for Skipped {
     fn now(&self) -> chrono::DateTime<chrono::Utc> {
-        self.start + chrono::TimeDelta::from_std(self.moved.get()).unwrap_or_default()
+        self.start.get() + chrono::TimeDelta::from_std(self.moved.get()).unwrap_or_default()
     }
 }
 

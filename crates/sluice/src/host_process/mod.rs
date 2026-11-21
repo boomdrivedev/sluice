@@ -125,6 +125,12 @@ const BLOCKING_THREADS: usize = 256;
 /// The longest line a connection reads.
 const LINE_MAX: usize = 1 << 20;
 
+/// How long a host process that is no daemon stays idle before it ends:
+/// a command that closes one connection and opens the next within it
+/// meets the same process. It is the time the host process looked at
+/// whether it was idle before it ran on tokio.
+const IDLE_LINGER: Duration = Duration::from_millis(100);
+
 /// How long a connection waits for its hello and its request.
 const ASK_WAIT: Duration = Duration::from_secs(10);
 
@@ -1349,12 +1355,21 @@ async fn serve(
     let mut sent = std::collections::BTreeSet::new();
     let mut names = std::collections::BTreeMap::new();
     let far = Instant::now() + Duration::from_secs(86_400 * 365);
+    // When a host process that is no daemon, idle since, ends.
+    let mut ends_at: Option<Instant> = None;
     loop {
-        // D6: a host process that is no daemon ends once it is idle,
-        // decided under the start lock after taking every connection
-        // already queued. Where another holds the start lock, the holder
-        // connects to it, and its connection's end has it look again.
-        if !hosting.named.daemon && idle(hosting) {
+        // D6: a host process that is no daemon ends once it has been idle
+        // for [`IDLE_LINGER`], decided under the start lock after taking
+        // every connection already queued. Where another holds the start
+        // lock, the holder connects to it, and its connection's end has it
+        // look again.
+        let idle_now = !hosting.named.daemon && idle(hosting);
+        ends_at = match (idle_now, ends_at) {
+            (false, _) => None,
+            (true, None) => Some(Instant::now() + IDLE_LINGER),
+            (true, at) => at,
+        };
+        if ends_at.is_some_and(|at| at <= Instant::now()) {
             if let Ok(Some(start)) = hosting.folder.try_lock(START_LOCK) {
                 if accept_queued(hosting, &listener) == 0 {
                     let _ = std::fs::remove_file(&hosting.paths.socket);
@@ -1367,7 +1382,11 @@ async fn serve(
         }
         let lapse = hosting.room.lock().next_lapse();
         let again = take_up.again;
+        let ending = ends_at.filter(|at| *at > Instant::now());
         tokio::select! {
+            () = tokio::time::sleep_until(ending.unwrap_or(far)), if ending.is_some() => {
+                count(&EDGE.timers);
+            }
             accepted = listener.accept() => {
                 count(&EDGE.events);
                 match accepted {

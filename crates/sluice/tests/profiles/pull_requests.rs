@@ -1653,6 +1653,9 @@ fn the_host_process_buys_a_repositorys_token_once_across_its_looks() {
     support::kill_host_process(&mut g.command(env!("CARGO_BIN_EXE_sluice"), g.repo.dir()));
     let doc: Value = serde_json::from_slice(&g.sluice(&["overview", "--json"]).stdout).unwrap();
     let repository = PathBuf::from(doc["repository"].as_str().unwrap());
+    // The host process the overview started ends, so the client's own,
+    // which counts its git, holds the repository.
+    support::kill_host_process(&mut g.command(env!("CARGO_BIN_EXE_sluice"), g.repo.dir()));
     let bought = || {
         g.gh.calls(
             "POST",
@@ -1676,9 +1679,9 @@ fn the_host_process_buys_a_repositorys_token_once_across_its_looks() {
         .expect("the host process starts");
     let answer = held.next(Some(Duration::from_secs(10))).unwrap();
     assert!(matches!(answer, Some(Answer::Held)), "{answer:?}");
-    // The host process looks at the repository as it starts, and every
-    // three seconds after, each look fetching every branch's records from
-    // GitHub as the app once, and main's again.
+    // The host process looks at the repository as it starts, and at each
+    // reading a one-shot read asks afresh, each look fetching every
+    // branch's records from GitHub as the app once, and main's again.
     let looks = || {
         git.starts()
             .iter()
@@ -1693,7 +1696,7 @@ fn the_host_process_buys_a_repositorys_token_once_across_its_looks() {
             git.starts(),
             g.host_log()
         );
-        std::thread::sleep(Duration::from_millis(200));
+        client.read(&repository, true).unwrap();
     }
     drop(held);
     assert_eq!(bought() - before, 1, "{:?}", git.starts());

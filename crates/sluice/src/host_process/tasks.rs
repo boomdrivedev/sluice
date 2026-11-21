@@ -953,7 +953,10 @@ impl Scheduler {
     /// after the last that asked the remote, for a change no event told
     /// of; at once where none has asked yet.
     fn backstop_at(&self) -> Option<Instant> {
-        if self.in_play || (self.worker.is_none() && self.refused()) {
+        if self.in_play
+            || (self.worker.is_none() && self.refused())
+            || (self.worker.is_some() && self.asked_only())
+        {
             return None;
         }
         let asked = self.marks.borrow().asked;
@@ -1014,8 +1017,11 @@ impl Scheduler {
                 let _ = reply.send(true);
             }
             Job::Event => {
-                let passes = self.worker.is_some() && self.in_play;
-                if !passes && !(self.worker.is_none() && self.refused()) {
+                // While work is in play the worker passes at its tick, and
+                // where passes are taken only when asked, a worker's
+                // repository is read only at an ask (D14).
+                let held = self.worker.is_some() && (self.in_play || self.asked_only());
+                if !held && !(self.worker.is_none() && self.refused()) {
                     self.reading_due = true;
                 }
             }
