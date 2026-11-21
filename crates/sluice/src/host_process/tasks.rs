@@ -409,6 +409,7 @@ impl Tasks {
             broken: false,
             ended: false,
             flight: None,
+            looking: None,
             commands: VecDeque::new(),
             wants_worker: false,
             reading_due: false,
@@ -758,10 +759,6 @@ enum Flight {
         rx: oneshot::Receiver<(Result<serde_json::Value, String>, bool)>,
         reply: oneshot::Sender<Result<serde_json::Value, String>>,
     },
-    Look {
-        join: JoinHandle<Looked>,
-        asks: bool,
-    },
     /// The worker is let go: its thread's end.
     Unbind(oneshot::Receiver<Result<WorkerEnd, String>>),
 }
@@ -802,15 +799,6 @@ async fn land(flight: &mut Option<Flight>) -> Landed {
             };
             return Landed::Stepped(stepped, reply);
         }
-        Flight::Look { join, asks } => {
-            let asks = *asks;
-            let looked = join.await.unwrap_or(Looked {
-                in_play: true,
-                refused: None,
-            });
-            flight.take();
-            return Landed::Looked(looked, asks);
-        }
         Flight::Unbind(join) => {
             let ended = join
                 .await
@@ -849,7 +837,13 @@ struct Scheduler {
     broken: bool,
     /// The repository is gone.
     ended: bool,
+    /// The worker's lane: a binding, a pass, a step or a worker let go.
     flight: Option<Flight>,
+    /// The look's lane: a look, and whether it asks the remote. A look runs
+    /// beside work of the worker's lane that is no reading, a step among
+    /// it, so a one-shot read during a long step is answered at once. A
+    /// pass and a look never run at once: one reading is in flight.
+    looking: Option<(JoinHandle<Looked>, bool)>,
     commands: VecDeque<Command>,
     wants_worker: bool,
     reading_due: bool,
@@ -865,11 +859,13 @@ impl Scheduler {
             if self.flight.is_none() {
                 self.start_next();
             }
+            self.look_beside();
             self.publish();
-            if self.flight.is_none() && (self.stopping || self.ended) {
+            let idle = self.flight.is_none() && self.looking.is_none();
+            if idle && (self.stopping || self.ended) {
                 break;
             }
-            let ready = self.flight.is_none() && !self.stopping;
+            let ready = idle && !self.stopping;
             let tick = self.tick_at().filter(|_| ready);
             let backstop = self.backstop_at().filter(|_| ready);
             let far = Instant::now() + Duration::from_secs(86_400);
@@ -878,6 +874,20 @@ impl Scheduler {
                 landed = land(&mut self.flight), if self.flight.is_some() => {
                     wakes.landed.fetch_add(1, Ordering::SeqCst);
                     self.landed(landed);
+                }
+                looked = async {
+                    match self.looking.as_mut() {
+                        Some((join, _)) => join.await,
+                        None => std::future::pending().await,
+                    }
+                }, if self.looking.is_some() => {
+                    wakes.landed.fetch_add(1, Ordering::SeqCst);
+                    let (_, asks) = self.looking.take().expect("a look");
+                    let looked = looked.unwrap_or(Looked {
+                        in_play: true,
+                        refused: None,
+                    });
+                    self.landed(Landed::Looked(looked, asks));
                 }
                 () = self.token.cancelled(), if !self.stopping => {
                     self.stopping = true;
@@ -966,13 +976,16 @@ impl Scheduler {
     /// Show what the scheduler holds and does in its marks, and move the
     /// tasks' activity where whether it is busy changed.
     fn publish(&mut self) {
-        let busy = self.worker.is_some() || self.flight.is_some() || !self.jobs.is_empty();
+        let busy = self.worker.is_some()
+            || self.flight.is_some()
+            || self.looking.is_some()
+            || !self.jobs.is_empty();
         let held = self.worker.is_some()
             && !matches!(
                 self.flight,
                 Some(Flight::Unbind(_)) | Some(Flight::Bind(..))
             );
-        let looking = matches!(self.flight, Some(Flight::Look { .. }));
+        let looking = self.looking.is_some();
         let mut moved = false;
         self.marks.send_if_modified(|m| {
             let changed = m.busy != busy || m.held != held || m.looking != looking;
@@ -1013,7 +1026,16 @@ impl Scheduler {
                 }
             }
             Job::Read(reply) => {
-                self.reading_due = true;
+                // A reading in flight that began after a command last told
+                // of a change answers the read as it ends (D15, D16).
+                let m = self.marks.borrow().clone();
+                let in_flight =
+                    self.looking.is_some() || matches!(self.flight, Some(Flight::Pass { .. }));
+                let answers =
+                    in_flight && m.told.is_none_or(|t| m.began.is_some_and(|b| b.n > t.n));
+                if !answers {
+                    self.reading_due = true;
+                }
                 let _ = reply.send(true);
             }
             Job::Event => {
@@ -1056,6 +1078,11 @@ impl Scheduler {
             return;
         }
         if let Some(command) = self.commands.pop_front() {
+            // A pass is a reading: it waits for the look in flight.
+            if matches!(command, Command::Pass(..)) && self.looking.is_some() {
+                self.commands.push_front(command);
+                return;
+            }
             if self.worker.is_none() {
                 self.commands.push_front(command);
                 self.bind();
@@ -1085,11 +1112,14 @@ impl Scheduler {
         if self.reading_due {
             let asked_only = self.asked_only();
             if self.worker.is_some() && !asked_only {
+                if self.looking.is_some() {
+                    return;
+                }
                 self.reading_due = false;
                 self.pass(None, Vec::new());
             } else if self.worker.is_none() && self.in_play && !asked_only && !self.refused() {
                 self.bind();
-            } else {
+            } else if self.looking.is_none() {
                 self.reading_due = false;
                 self.look();
             }
@@ -1199,13 +1229,30 @@ impl Scheduler {
         self.flight = Some(Flight::Pass { rx, asks, replies });
     }
 
+    /// Where passes are taken only when asked, a reading due is a look,
+    /// made beside work under way in the worker's lane that is no reading,
+    /// a step among it (D14).
+    fn look_beside(&mut self) {
+        if self.reading_due
+            && self.asked_only()
+            && self.flight.is_some()
+            && !matches!(self.flight, Some(Flight::Pass { .. }))
+            && self.looking.is_none()
+            && !self.stopping
+            && !self.ended
+        {
+            self.reading_due = false;
+            self.look();
+        }
+    }
+
     /// A look, on tokio's pool for blocking work.
     fn look(&mut self) {
         let asks = self.begin_reading();
         let look = self.tasks.0.look.clone();
         let repository = self.repository.clone();
         let join = tokio::task::spawn_blocking(move || look(&repository, asks));
-        self.flight = Some(Flight::Look { join, asks });
+        self.looking = Some((join, asks));
     }
 
     /// Take in work that ended.
