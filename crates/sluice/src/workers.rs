@@ -35,6 +35,7 @@ use std::os::unix::ffi::OsStrExt;
 use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Mutex, OnceLock};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
@@ -110,6 +111,13 @@ type Hook = Box<dyn Fn() + Send + Sync>;
 /// What this process calls when a worker that it waits on ends.
 static ENDED: OnceLock<Hook> = OnceLock::new();
 
+/// Whether this process stops: from then, no worker of it starts.
+static STOPPING: AtomicBool = AtomicBool::new(false);
+
+/// How long [`stop`] waits after it ends the workers, for a worker that
+/// started just before the stop to write its record.
+const SETTLE: Duration = Duration::from_millis(100);
+
 /// Make `sluice host` the owner of each worker that this process starts
 /// from now. `ended` is called when a child worker ends. Its records are
 /// in `<host>/workers/`.
@@ -153,8 +161,9 @@ pub fn var(owner: &Owner) -> String {
 
 /// Make `command` a worker of this process's owner: it starts in a process
 /// group of its own, and it records itself before it does its work. A
-/// command whose record cannot be written does not start. Where this
-/// process has no owner, `command` is not changed.
+/// command whose record cannot be written does not start, and a command
+/// does not start once [`stop`] has started. Where this process has no
+/// owner, `command` is not changed.
 pub fn take(command: &mut Command, what: &str) {
     let Some(owner) = owner() else {
         return;
@@ -169,12 +178,22 @@ pub fn take(command: &mut Command, what: &str) {
     dir.push(b'/');
     command.process_group(0);
     // SAFETY: the closure runs in the child between fork and exec. It
-    // calls only getpid, open, write and close, which are
-    // async-signal-safe, and it allocates nothing: the path is put
+    // reads an atomic and calls only getpid, open, write and close, which
+    // are async-signal-safe, and it allocates nothing: the path is put
     // together in a buffer on the stack.
     unsafe {
-        command.pre_exec(move || record_self(&dir, &body));
+        command.pre_exec(move || start_unless(&STOPPING, &dir, &body));
     }
+}
+
+/// In the child, between fork and exec: refuse to start where `stopping`
+/// is set, else write the record. The child reads `stopping` as its
+/// parent held it at the fork.
+fn start_unless(stopping: &AtomicBool, dir: &[u8], body: &[u8]) -> std::io::Result<()> {
+    if stopping.load(Ordering::SeqCst) {
+        return Err(std::io::Error::from_raw_os_error(libc::ECANCELED));
+    }
+    record_self(dir, body)
 }
 
 /// A command for `program` that is a worker of this process's owner of the
@@ -353,10 +372,16 @@ pub fn sweep(owner: &Owner) -> Swept {
 /// As `sluice host` stops for a reason other than a hand-over: each child
 /// worker's group is asked to end, and given [`STOP_GRACE`]. A run's
 /// supervisor ends its checks and writes no result. Then each group that a
-/// record of `owner` still names is ended, its grace given first. Each
-/// record goes. The groups it ended.
+/// record of `owner` still names is ended, its grace given first. From
+/// the start of the stop, no worker starts, and after [`SETTLE`] the stop
+/// ends each group that a record written meanwhile names. Each record
+/// goes. The groups it ended.
 pub fn stop(owner: &Owner) -> Vec<Record> {
-    let mine: Vec<Record> = records(&owner.dir)
+    // A thread of this process that is still at work starts no worker
+    // after this point. A worker that it forked before this point writes
+    // its record at once, and the second look below finds it.
+    STOPPING.store(true, Ordering::SeqCst);
+    let mut mine: Vec<Record> = records(&owner.dir)
         .into_iter()
         .filter(|r| r.live() && r.of(owner))
         .collect();
@@ -381,6 +406,20 @@ pub fn stop(owner: &Owner) -> Vec<Record> {
         &left.iter().map(|r| r.pid).collect::<Vec<_>>(),
         weir_bounded::GRACE,
     );
+    std::thread::sleep(SETTLE);
+    let late: Vec<Record> = records(&owner.dir)
+        .into_iter()
+        .filter(|r| r.live() && r.of(owner))
+        .collect();
+    end_groups(
+        &late.iter().map(|r| r.pid).collect::<Vec<_>>(),
+        weir_bounded::GRACE,
+    );
+    for r in late {
+        if !mine.iter().any(|m| m.pid == r.pid) {
+            mine.push(r);
+        }
+    }
     // A child its waiter did not reap yet is reaped here.
     let until = Instant::now() + Duration::from_secs(1);
     while children() > 0 && Instant::now() < until {
@@ -599,6 +638,34 @@ mod tests {
         end_groups(&[pid], Duration::from_secs(1));
         let _ = child.wait();
         assert!(!is_there(pid));
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// Once its owner stops, a worker does not start, and writes no
+    /// record.
+    #[test]
+    fn a_worker_does_not_start_once_its_owner_stops() {
+        static STOPS: AtomicBool = AtomicBool::new(false);
+        let dir = scratch("stopping");
+        let mut prefix = dir.as_os_str().as_bytes().to_vec();
+        prefix.push(b'/');
+        let spawn = |prefix: Vec<u8>| {
+            let mut command = Command::new("/bin/sh");
+            command.args(["-c", "exit 0"]).process_group(0);
+            // SAFETY: as in `take`.
+            unsafe {
+                command.pre_exec(move || start_unless(&STOPS, &prefix, b"{}"));
+            }
+            command.spawn()
+        };
+        let mut started = spawn(prefix.clone()).unwrap();
+        started.wait().unwrap();
+        assert_eq!(records(&dir).len(), 1);
+        std::fs::remove_file(dir.join(started.id().to_string())).unwrap();
+        STOPS.store(true, Ordering::SeqCst);
+        let refused = spawn(prefix).unwrap_err();
+        assert_eq!(refused.raw_os_error(), Some(libc::ECANCELED), "{refused}");
+        assert!(records(&dir).is_empty());
         std::fs::remove_dir_all(&dir).unwrap();
     }
 }
