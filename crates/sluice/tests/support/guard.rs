@@ -8,9 +8,10 @@
 //!
 //! When the test ends, the guard first notes each process of the test that
 //! is no `sluice host` and no git or credential worker of one. Then it
-//! stops each `sluice host` of the test, and waits for it to exit. Then it
-//! lists the test's processes again. It ends each process that it found,
-//! and the test fails where it found any.
+//! stops each `sluice host` of the test, and waits for it to exit. It gives
+//! the processes that it noted one second to end by themselves. Then it
+//! lists the test's processes again. It ends each process that it found
+//! still running, and the test fails where it found any.
 
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
@@ -19,6 +20,10 @@ use sysinfo::{Pid, ProcessRefreshKind, ProcessesToUpdate, System, UpdateKind};
 
 /// How long the guard waits for a test's `sluice host` to exit.
 const HOST_STOP: Duration = Duration::from_secs(30);
+
+/// How long a process of the test has to end by itself after the test
+/// ends.
+const SETTLE: Duration = Duration::from_secs(1);
 
 /// How long a process that the guard asks to end has before it is killed.
 const GRACE: Duration = Duration::from_secs(2);
@@ -81,6 +86,13 @@ impl Guard {
         while hosts.iter().any(|h| runs(h.pid)) && Instant::now() < until {
             std::thread::sleep(Duration::from_millis(50));
         }
+        // A process that ends by itself within [`SETTLE`] does not continue
+        // to run: the far side of a fetch that just ended, for example.
+        let until = Instant::now() + SETTLE;
+        while left.iter().any(|p| runs(p.pid)) && Instant::now() < until {
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        left.retain(|p| runs(p.pid));
         for p in self.find() {
             if !left.iter().any(|l| l.pid == p.pid) && !host_worker(p.pid) {
                 left.push(p);

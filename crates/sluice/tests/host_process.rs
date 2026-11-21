@@ -2948,6 +2948,25 @@ fn the_guard_ends_a_process_that_ignores_sigterm() {
     assert!(guard.find().is_empty(), "{:?}", guard.find());
 }
 
+/// `a-leaked-child-fails-its-test@9a82a5147ba6`: a process of the test
+/// that ends by itself just after the test ends does not continue to run,
+/// and the guard passes it over. The far side of a git fetch that just
+/// ended is such a process.
+#[test]
+fn the_guard_passes_over_a_process_that_ends_by_itself() {
+    let scratch = support::Scratch::new("guard-ending");
+    let mut child = std::process::Command::new("/bin/sh")
+        .args(["-c", "sleep 0.4 &"])
+        .current_dir(scratch.path())
+        .stdin(std::process::Stdio::null())
+        .spawn()
+        .unwrap();
+    child.wait().unwrap();
+    let guard = support::guard::Guard::new(&[scratch.path()]);
+    assert!(!guard.find().is_empty(), "the sleep runs as the test ends");
+    assert!(guard.check().is_empty());
+}
+
 /// The edge of the host process on tokio (the change
 /// `sluice-host-runs-on-a-tokio-edge`): its schedulers on a clock a test
 /// pauses, with a fake worker and a fake look.

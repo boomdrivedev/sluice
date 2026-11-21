@@ -74,7 +74,7 @@ Not taken: a variable that the guard sets and that each process inherits. A run'
 
 ### D7. Stop the host processes first, then judge
 
-At the test's end, the guard first notes the test's processes. Then it sends `SIGTERM` to each `sluice host` of the test and waits for it to exit, up to thirty seconds. A test that ends with its host process running is normal, and so is a git or credential worker that the host's stop ends. A test that ends with a run, a supervisor or another process still running is a leak. The guard then lists the test's processes again. It fails the test where any was left, and ends each of them, `SIGTERM` first and `SIGKILL` after two seconds.
+At the test's end, the guard first notes the test's processes. Then it sends `SIGTERM` to each `sluice host` of the test and waits for it to exit, up to thirty seconds. A test that ends with its host process running is normal, and so is a git or credential worker that the host's stop ends. A test that ends with a run, a supervisor or another process still running is a leak. A process that ends by itself within one second, such as the far side of a git fetch that just ended, does not continue to run, and is no leak. The guard then lists the test's processes again. It fails the test where any was left, and ends each of them, `SIGTERM` first and `SIGKILL` after two seconds.
 
 The guard reports the failure after it ends the processes, so a failed test leaves nothing behind.
 
