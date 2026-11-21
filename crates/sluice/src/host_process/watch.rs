@@ -329,18 +329,19 @@ impl Watch {
             self.names.remove(&r);
         }
         for r in repositories {
-            self.repository(r);
+            let _ = self.repository(r);
         }
     }
 
     /// Watch `common`'s refs and records, its branches' folders as they
-    /// stand now.
-    pub fn repository(&mut self, common: &Path) {
+    /// stand now: whether it was watched by none of them before.
+    pub fn repository(&mut self, common: &Path) -> bool {
+        let new = !self.repositories.contains_key(common);
         let wanted = repository_paths(common);
         let had = self.repositories.get(common).cloned().unwrap_or_default();
         let wanted_paths: Vec<PathBuf> = wanted.iter().map(|(p, _)| p.clone()).collect();
-        if had == wanted_paths {
-            return;
+        if had == wanted_paths && !new {
+            return false;
         }
         for p in had.iter().filter(|p| !wanted_paths.contains(p)) {
             self.remove(p);
@@ -353,6 +354,7 @@ impl Watch {
         }
         self.repositories.insert(common.to_path_buf(), watched);
         self.names.insert(common.to_path_buf(), aliases(common));
+        new
     }
 
     /// Watch `registry`, the host's registry of running checks, and each

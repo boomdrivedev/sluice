@@ -219,10 +219,13 @@ fn readers_doc(state: &Path) -> Option<std::path::PathBuf> {
         .find(|p| p.extension().is_some_and(|x| x == "json"))
 }
 
-/// 129: a watch that is the reader over a repository where nothing moves
-/// writes its document once and marks each read's end on it all the same:
-/// after three of its ticks the bytes are as after the first, its time is
-/// within a tick and a read of now, and it names its tick.
+/// 129, and the change `sluice-host-runs-on-a-tokio-edge`: the host
+/// process, the reader over a repository where nothing moves, writes its
+/// document once and reads nothing more while nothing moves: after three
+/// seconds its bytes and its mark are as after the first read, and the
+/// watch prints nothing. A ref that moves is a file event: the host
+/// process reads the repository again and marks the read's end, its
+/// document's bytes standing.
 #[test]
 fn a_readers_marks_move_while_its_document_stands() {
     let repo = Repo::new("marks");
@@ -237,17 +240,23 @@ fn a_readers_marks_move_while_its_document_stands() {
     let bytes = std::fs::read(&path).unwrap();
     let doc: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
     assert_eq!(doc["tick"], 1, "{doc}");
+    let marked = || std::fs::metadata(&path).unwrap().modified().unwrap();
+    let first_mark = marked();
     std::thread::sleep(Duration::from_millis(3500));
     assert_eq!(std::fs::read(&path).unwrap(), bytes, "rewritten");
-    let ended = std::fs::metadata(&path).unwrap().modified().unwrap();
-    let since = std::time::SystemTime::now()
-        .duration_since(ended)
-        .unwrap_or_default();
-    assert!(since < Duration::from_secs(2), "last marked {since:?} ago");
+    assert_eq!(marked(), first_mark, "read again though nothing moved");
     assert!(
         watch.lines.try_recv().is_err(),
         "a line though nothing moved"
     );
+    let head = repo.rev("HEAD");
+    repo.git(&["update-ref", "refs/heads/moved", &head]);
+    let until = Instant::now() + Duration::from_secs(5);
+    while marked() == first_mark {
+        assert!(Instant::now() < until, "no read after the ref moved");
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    assert_eq!(std::fs::read(&path).unwrap(), bytes, "rewritten");
 }
 
 /// A policy a branch's records can be kept under.

@@ -272,6 +272,9 @@ pub(crate) enum Control {
         /// The asker's version, as its `hello` said it.
         by: String,
     },
+    /// A command named a repository: the edge watches it, where it does
+    /// not yet.
+    Noted(PathBuf),
 }
 
 impl Hosting {
@@ -1382,7 +1385,18 @@ async fn serve(
             }
             control = controls.recv() => {
                 count(&EDGE.events);
-                let Some(Control::HandOver { program, by }) = control else { continue };
+                let (program, by) = match control {
+                    Some(Control::HandOver { program, by }) => (program, by),
+                    Some(Control::Noted(repository)) => {
+                        // A repository the watch takes in now is read once
+                        // more, for a change made before its watch began.
+                        if watch.as_mut().is_some_and(|w| w.repository(&repository)) {
+                            hosting.tasks.event(&repository);
+                        }
+                        continue;
+                    }
+                    None => continue,
+                };
                 if !hosting.named.daemon {
                     log(&format!(
                         "sluice host: sluice {by} asked this one to hand over; it ends"
@@ -1536,7 +1550,7 @@ async fn take_events(
         runs_changed(hosting, registry, Some(w));
     }
     for repository in &seen.repositories {
-        w.repository(repository);
+        let _ = w.repository(repository);
         hosting.tasks.event(repository);
     }
     None
@@ -1971,6 +1985,11 @@ fn results_of(
 
 /// Note `repository` in the index (design D4).
 fn note(hosting: &Hosting, repository: &Path) {
+    // The edge watches it at once, where it does not yet: a change made
+    // before the index's own event would come is read all the same.
+    let _ = hosting
+        .control
+        .send(Control::Noted(repository.to_path_buf()));
     if let Err(e) = hosting.index().note(repository) {
         log(&format!(
             "sluice host: noting {} in the index: {e:#}",
