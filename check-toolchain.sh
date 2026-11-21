@@ -33,3 +33,11 @@ same() {
 same clippy "$(cargo clippy --version)"
 same rustfmt "$(rustfmt --version)"
 echo "rustc, cargo, clippy and rustfmt are $pin"
+
+# cargo-nextest, which runs the crates' test tasks, is the version
+# devenv.nix pins.
+nextest=$(sed -n 's/^ *nextestVersion *= *"\(.*\)";$/\1/p' devenv.nix)
+[ -n "$nextest" ] || fail "devenv.nix pins no cargo-nextest"
+[ "$(cargo nextest --version | sed -n 's/^release: //p')" = "$nextest" ] ||
+  fail "cargo-nextest is not $nextest: $(cargo nextest --version | head -n 1)"
+echo "cargo-nextest is $nextest"

@@ -1,0 +1,7 @@
+# cargo-nextest, which runs the Rust crates' test tasks (the change
+# `sluice-host-owns-its-workers`, design D9;
+# `a-leaked-child-fails-its-test@9a82a5147ba6`). Each test runs in a
+# process of its own. A test that leaves a process that holds its output
+# fails half a second after the test ends.
+[profile.default]
+leak-timeout = { period = "500ms", result = "fail" }

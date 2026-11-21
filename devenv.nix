@@ -235,6 +235,13 @@ let
   nixVersion = "2.34.8";
   statixVersion = "0.5.8-unstable-2026-07-17";
 
+  # The Rust crates' test tasks run under cargo-nextest, which runs each
+  # test in a process of its own and fails a test that leaves a process
+  # holding its output (the change `sluice-host-owns-its-workers`, design
+  # D9): nixpkgs' build, pinned by devenv.lock and asserted to be this
+  # version, so every host that runs the gate runs the same (core.24).
+  nextestVersion = "0.9.143";
+
   # The linter of the CloudFormation template `sluice init codebuild`
   # writes, which treefmt.nix runs over its source as actionlint runs over
   # the workflows' (record 0119; core.21): nixpkgs' build, pinned by
@@ -326,6 +333,10 @@ in
     (
       assert pkgs.statix.version == statixVersion;
       pkgs.statix
+    )
+    (
+      assert pkgs.cargo-nextest.version == nextestVersion;
+      pkgs.cargo-nextest
     )
   ];
 

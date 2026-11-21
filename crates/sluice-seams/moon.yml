@@ -4,7 +4,7 @@ dependsOn: []
 
 tasks:
   test:
-    command: 'cargo test -p sluice-seams'
-    inputs: ['/crates/sluice-seams/**/*', '/Cargo.toml', '/Cargo.lock', '/devenv.nix', '/devenv.lock']
+    command: 'cargo nextest run -p sluice-seams'
+    inputs: ['/crates/sluice-seams/**/*', '/Cargo.toml', '/Cargo.lock', '/.config/nextest.toml', '/devenv.nix', '/devenv.lock']
     tags: [cargo-test, check-fast]
     options: {runFromWorkspaceRoot: true}

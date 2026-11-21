@@ -5,20 +5,20 @@ dependsOn: [seams, core, fakes]
 tasks:
   # Everything but the tests that start a sandbox (`sandbox` task).
   test:
-    command: 'cargo test -p sluice -- --skip sandbox'
+    command: "cargo nextest run -p sluice -E 'not test(sandbox)'"
     # The flake module's rendered files, which a unit test reads as sluice
     # reads the host's settings (record 0098), and the module's options,
     # whose `prefixes` a unit test holds to the scrub's GitHub token
     # prefixes (record 0108), among them.
-    inputs: ['/crates/sluice/**/*', '/crates/sluice-seams/**/*', '/crates/sluice-core/**/*', '/crates/sluice-fakes/**/*', '/plugins/sluice/skills/**/*', '/nix/tests/files/**/*', '/nix/modules/options.nix', '/Cargo.toml', '/Cargo.lock', '/devenv.nix', '/devenv.lock']
+    inputs: ['/crates/sluice/**/*', '/crates/sluice-seams/**/*', '/crates/sluice-core/**/*', '/crates/sluice-fakes/**/*', '/plugins/sluice/skills/**/*', '/nix/tests/files/**/*', '/nix/modules/options.nix', '/Cargo.toml', '/Cargo.lock', '/.config/nextest.toml', '/devenv.nix', '/devenv.lock']
     tags: [cargo-test, check-fast]
     options: {runFromWorkspaceRoot: true}
   # The profiles against real tools (git, moon, wt, a container engine,
   # Playwright), and the conformance scenarios that need no fault on them:
   # the check-tools tier.
   tools:
-    command: 'cargo test -p sluice --features tools --test instance --test local_refs --test pushed_refs --test remote_refs --test peers --test forge --test pull_requests --test remote_branch --test moon --test places --test worktrunk --test protect --test conformance --test stack --test exec --test previews_tools --test equip_tools --test landed --test overview_watch -- --skip sandbox'
-    inputs: ['/crates/sluice/**/*', '/crates/sluice-seams/**/*', '/crates/sluice-core/**/*', '/crates/sluice-fakes/**/*', '/crates/sluice-conformance/src/**/*', '/crates/sluice-conformance/Cargo.toml', '/Cargo.toml', '/Cargo.lock', '/devenv.nix', '/devenv.lock']
+    command: 'cargo nextest run -p sluice --features tools --test instance --test local_refs --test pushed_refs --test remote_refs --test peers --test forge --test pull_requests --test remote_branch --test moon --test places --test worktrunk --test protect --test conformance --test stack --test exec --test previews_tools --test equip_tools --test landed --test overview_watch -E "not test(sandbox)"'
+    inputs: ['/crates/sluice/**/*', '/crates/sluice-seams/**/*', '/crates/sluice-core/**/*', '/crates/sluice-fakes/**/*', '/crates/sluice-conformance/src/**/*', '/crates/sluice-conformance/Cargo.toml', '/Cargo.toml', '/Cargo.lock', '/.config/nextest.toml', '/devenv.nix', '/devenv.lock']
     tags: [check-tools]
     options: {runFromWorkspaceRoot: true}
   # The tests of the sandbox executor start a sandbox themselves, which
@@ -27,8 +27,8 @@ tasks:
   # Every test whose name holds `sandbox` is here and nowhere else, the
   # sandbox scenarios of `sluice exec` (`--test exec`) among them.
   sandbox:
-    command: 'cargo test -p sluice --features tools --test checks --test moon --test stack --test exec -- sandbox'
-    inputs: ['/crates/sluice/**/*', '/crates/sluice-seams/**/*', '/crates/sluice-core/**/*', '/crates/sluice-fakes/**/*', '/Cargo.toml', '/Cargo.lock', '/devenv.nix', '/devenv.lock']
+    command: "cargo nextest run -p sluice --features tools --test checks --test moon --test stack --test exec -E 'test(sandbox)'"
+    inputs: ['/crates/sluice/**/*', '/crates/sluice-seams/**/*', '/crates/sluice-core/**/*', '/crates/sluice-fakes/**/*', '/Cargo.toml', '/Cargo.lock', '/.config/nextest.toml', '/devenv.nix', '/devenv.lock']
     tags: [cargo-test, starts-a-sandbox, needs-localhost]
     options: {runFromWorkspaceRoot: true}
   # S1 to S4 through wt submit on scratch repositories: the check-e2e tier.
