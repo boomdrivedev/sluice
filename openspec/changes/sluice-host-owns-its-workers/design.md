@@ -86,9 +86,15 @@ Not taken: a test that must stop its own host process. Each test would then repe
 
 ### D9. cargo-nextest for the Rust crates
 
-The `test`, `tools` and `sandbox` tasks of the five crates run `cargo nextest run` with the same filters. A nextest profile at the root sets `leak-timeout` to `{ period = "500ms", result = "fail" }`. nextest runs each test in a process of its own, so a test that leaves a process that holds its output fails. The devenv shell pins cargo-nextest, as it pins the tree's other tools.
+The `test`, `tools` and `sandbox` tasks of the five crates run `cargo nextest run` with the same filters. A nextest profile at the root sets `leak-timeout` to `{ period = "500ms", result = "pass" }`. nextest runs each test in a process of its own, and reports a test that leaves a process that holds its output as leaky. The guard fails a test that leaves a process (D6). The devenv shell pins cargo-nextest, as it pins the tree's other tools.
 
-Not taken: the guard alone. It does not see a process that a test starts outside its folders, such as a plain `sleep`.
+nextest's report does not fail a test, because on macOS it also names a test that left nothing. When nextest starts two test processes at one time, the second can inherit the first's output pipe at a high descriptor. The second test, and the commands that it starts, then hold the first test's output until the second test ends, 15 to 40 seconds later in the peers tests. A longer period does not prevent this: the other test can run for any time.
+
+Not taken: nextest's report as a failure. The gate would fail tests that left nothing.
+
+Not taken: one test at a time, which prevents the inherited pipe. The tools tier alone took 14 minutes with its tests in parallel.
+
+Not taken: the guard alone, with no report. The report names a process that a test starts outside its folders, such as a plain `sleep`, which the guard does not see.
 
 ### D10. One shell wrapper for the shell test tasks
 

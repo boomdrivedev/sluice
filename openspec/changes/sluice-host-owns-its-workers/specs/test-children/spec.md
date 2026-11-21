@@ -41,14 +41,14 @@ The guard SHALL find each process of a test, detached or not. A process of a tes
 - **WHEN** two tests run at one time, and the first ends while the second's `sluice host` runs
 - **THEN** the first test's guard does not name or end the second test's process
 
-### Requirement: The Rust test tasks fail on a leaked process
+### Requirement: The Rust test tasks report a leaked process
 
-The test tasks of each Rust crate of sluice SHALL run each test in a process group of its own. Their runner SHALL fail a test that leaves a process that holds its output. (`a-leaked-child-fails-its-test@9a82a5147ba6`)
+The test tasks of each Rust crate of sluice SHALL run each test in a process of its own. Their runner SHALL report a test that leaves a process that holds its output. The runner SHALL NOT fail a test for that alone: the guard fails a test that leaves a process. (`a-leaked-child-fails-its-test@9a82a5147ba6`)
 
 #### Scenario: A leaked sleep
 
 - **WHEN** a test starts `sleep 60` with its output inherited, and returns
-- **THEN** the crate's test task fails and names that test as one that leaked
+- **THEN** the crate's test task names that test as one that leaked
 
 ### Requirement: The shell test tasks fail on a leaked process
 

@@ -15,8 +15,8 @@
 
 ## 3. The Rust test tasks
 
-- [x] 3.1 Pin cargo-nextest in the devenv shell, and add the root's nextest profile with `leak-timeout` set to fail. Check: `sluice exec main -- moon run root:toolchain`.
-- [x] 3.2 Run the `test`, `tools` and `sandbox` tasks of the five crates with `cargo nextest run`. Check: a fixture test that leaks `sleep 60` fails `cargo nextest run`, and the suite passes without it.
+- [x] 3.1 Pin cargo-nextest in the devenv shell, and add the root's nextest profile with `leak-timeout` set to report. Check: `sluice exec main -- moon run root:toolchain`.
+- [x] 3.2 Run the `test`, `tools` and `sandbox` tasks of the five crates with `cargo nextest run`. Check: `cargo nextest run` names a fixture test that leaks `sleep 60` as leaky, and the suite passes.
 - [x] 3.3 Change each test that the guard or nextest fails so that it ends its processes before it ends. Check: `sluice exec main -- moon run cli:tools`, then `moon run cli:sandbox` outside the gate's sandbox, as the pre-merge hook runs it, one at a time.
 
 ## 4. The shell test tasks

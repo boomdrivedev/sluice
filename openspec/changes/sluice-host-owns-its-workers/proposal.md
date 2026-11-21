@@ -28,7 +28,7 @@ Claims that it keeps holding:
 - A daemon that takes the host's place asks the host process to end, and its runs end with it.
 - `[runs] max` stays the one limit of sluice's checks, session runs and previews, by the user's answer of 2026-11-21. git and credential workers run outside it.
 - A guard in the test support fails each test that leaves a process, and ends that process.
-- The test tasks of each Rust crate run under cargo-nextest, which fails a test that leaves a process that holds its output.
+- The test tasks of each Rust crate run under cargo-nextest, which reports a test that leaves a process that holds its output.
 - The shell test tasks of the plugins and the check-e2e tier run under one script that fails where a process of the test is left.
 
 Out of scope:

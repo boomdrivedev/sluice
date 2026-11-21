@@ -2,6 +2,9 @@
 # `sluice-host-owns-its-workers`, design D9;
 # `a-leaked-child-fails-its-test@9a82a5147ba6`). Each test runs in a
 # process of its own. A test that leaves a process that holds its output
-# fails half a second after the test ends.
+# half a second after the test ends is reported as leaky. It does not fail
+# for that: on macOS, nextest sees a test's output pipe that another test
+# process inherited when nextest started the two at once. The test
+# support's guard fails a test that leaves a process.
 [profile.default]
-leak-timeout = { period = "500ms", result = "fail" }
+leak-timeout = { period = "500ms", result = "pass" }
