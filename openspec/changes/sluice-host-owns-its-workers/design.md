@@ -31,33 +31,35 @@ This change gives each worker an owner that ends it, and adds the guard that pro
 
 ## Decisions
 
-### D1. Each worker in a process group of its own, through process-wrap
+### D1. Each worker in a process group of its own, recorded before it works
 
-`sluice host` starts each worker through process-wrap's `ProcessGroup` on tokio's `Command`, with `KillOnDrop`. A run's supervisor is one worker, and the checks are in its group. The supervisor no longer calls `setsid`. weir-bounded keeps the groups, the limits and the grace of remote calls, as now. Before a worker does its work, `sluice host` writes its process group, its pid and its start time to the host's state, under `host/workers/`. When the worker ends, `sluice host` removes the record. (`workers-end-with-their-owner@292e869158d6`)
+`sluice host` starts each worker with std's `Command` in a process group of its own. A run's supervisor is one worker, and the checks are a group that the supervisor starts. The supervisor no longer calls `setsid`. weir-bounded keeps the limits and the grace of remote calls, as now. `crate::workers` makes a command a worker: between its fork and its exec, the child writes its record to `host/workers/<pid>`, with the owner's pid and start time. A write that fails stops the start, so no work runs unrecorded. A run's supervisor records the run's checks and watch for the same owner, by the variable `SLUICE_WORKERS`. When a child worker ends, `sluice host` removes its record. A record of a worker that is not its child goes at the next prune. (`workers-end-with-their-owner@292e869158d6`)
 
-Not taken: tokio's `kill_on_drop` alone. It ends the direct child only, and git and the checks start children of their own.
+Not taken: the process-wrap crate. std's process group and the record before the exec do the same with no new crate. Not taken: tokio's `kill_on_drop` alone. It ends the direct child only, and git and the checks start children of their own.
 
 ### D2. A stop ends the workers
 
-A stop of `sluice host`, by a signal or by a state folder that is gone, cancels the root token of the tokio edge. Each task finishes its round. `sluice host` then ends each worker's process group, `SIGTERM` first and `SIGKILL` after the grace that weir-bounded gives, and removes its record. A run that ended so has no outcome. It blames no one, and its combination is open for the next host process. It counts toward the runs in a row as a run whose claim lapsed does. So a stop or a crash that repeats ends at a bound. (`sluices-runs-end-with-its-host-process@e814b716f3b1`)
+A stop of `sluice host`, by a signal or by a state folder that is gone, cancels the root token of the tokio edge. Each task finishes its round. `sluice host` then sends `SIGTERM` to each child worker's group, and gives it 15 seconds. A run's supervisor that is told to stop ends its checks and writes no result. Then `sluice host` ends each group that a record still names, `SIGTERM` first and `SIGKILL` after the grace that weir-bounded gives, and removes its record. A run that ended so has no outcome. It blames no one, and its combination is open for the next host process. It counts toward the runs in a row as a run whose claim lapsed does. So a stop or a crash that repeats ends at a bound. (`sluices-runs-end-with-its-host-process@e814b716f3b1`)
 
 Not taken: a run that outlives its owner. The accepted decision rules it out.
 
 ### D3. Every hand-over starts afresh in place
 
-Each host process hands over as a daemon does now. It cancels its tasks, waits for them, lets its lock and socket go, and replaces its image with the newer program by `execve`. The pid stays the same, so each worker stays its child, and launchd and systemd see the same job. The new image reads `host/workers/` and waits on each worker by its pid. A take-up of `[telemetry]` uses the same path. The start lock is carried across the `execve`, as the daemon does now. An older command still uses a newer host process, so no client breaks. (`sluices-runs-end-with-its-host-process@e814b716f3b1`, `nothing-detached@f807c7f5fcea`)
+Each host process hands over as a daemon does now. It cancels its tasks, waits for them, lets its lock go, and replaces its image with the newer program by `execve`. The pid stays the same, so each worker stays its child, and launchd and systemd see the same job. The new image reads `host/workers/` and waits on each worker by its pid. A take-up of `[telemetry]` uses the same path. The start lock and the socket are carried across the `execve`, as the daemon does now. A newer command waits for a host process of another pid, or of the same pid with another `since`. Where the process that it asked ends, as an older sluice's does, it starts its own. A host process still writes to `SLUICE_READY_FD` where an older sluice's host process hands over to it. An older command still uses a newer host process, so no client breaks. (`sluices-runs-end-with-its-host-process@e814b716f3b1`, `nothing-detached@f807c7f5fcea`, `never-break-an-existing-client@ed293965fc5c`)
+
+A daemon is another process, so it cannot take a host process's runs. A daemon that starts while a host process that is no daemon holds the host sends `hand-over` with `ends`. That host process ends, and its runs end with it. The daemon tests their combinations again. A host process of an older sluice reads the request as a `hand-over`, and ends as before. A host process with a running child worker is not idle, since its workers would end with it.
 
 Not taken: a successor of another pid that adopts the runs. A process cannot take another process's children, so the runs would have no parent that owns them.
 
 ### D4. A sweep at start
 
-A `sluice host` that starts reads `host/workers/` before it claims a run or starts a worker. A record can name a pid that still runs with the recorded start time, under no live host process. For each such record, it ends the process group and gives the run no outcome. A record whose pid is gone, or runs with another start time, is removed with nothing ended. (`workers-end-with-their-owner@292e869158d6`, `nothing-detached@f807c7f5fcea`)
+A `sluice host` that starts reads `host/workers/` before it claims a run or starts a worker. A record is of a live worker only where its pid runs and started within two seconds of the record's write. For each live record of another owner, it ends the process group, and the run has no outcome. It waits again on each live child that an earlier image of its own process started. A record whose pid is gone, or runs with another start time, is removed with nothing ended. (`workers-end-with-their-owner@292e869158d6`, `nothing-detached@f807c7f5fcea`)
 
 On Linux, systemd's cgroup also ends every worker of a unit that stops. On macOS, a worker in its own group is outside launchd's reach, so the sweep covers a `SIGKILL` there.
 
 ### D5. The services end the job, and a new package is a hand-over
 
-The launchd agent sets `AbandonProcessGroup` false, and the systemd unit sets `KillMode` `control-group`. The service runs sluice by the user's profile's `bin/sluice`, so a new package changes no service and no restart ends the runs. The user's activation asks the running host process to hand over to the profile's program, where the program differs. (`sluices-runs-end-with-its-host-process@e814b716f3b1`)
+The launchd agent sets `AbandonProcessGroup` false, and the systemd unit sets `KillMode` `control-group`. The service runs the system profile's `bin/sluice`, where the module installs its package, so a new package changes no service and no restart ends the runs. `hello`'s answer names the executable that the host process runs. `sluice hand-over` has a host process that runs another sluice start afresh as this one, and starts none. The user's activation runs it: on nix-darwin after the link, and on NixOS where the unit runs. (`sluices-runs-end-with-its-host-process@e814b716f3b1`)
 
 Not taken: a restart of the service on a new package. With the job's group ended at a stop, a restart would end the runs.
 
@@ -72,7 +74,7 @@ Not taken: a variable that the guard sets and that each process inherits. A run'
 
 ### D7. Stop the host processes first, then judge
 
-At the test's end, the guard first sends `SIGTERM` to each `sluice host` of the test and waits for it to exit, up to ten seconds. A test that ends with its host process running is normal. A test that ends with a run, a supervisor or a git command still running is a leak. The guard then lists the test's processes again. It fails the test where any is left, and ends each of them, `SIGTERM` first and `SIGKILL` after two seconds.
+At the test's end, the guard first notes the test's processes. Then it sends `SIGTERM` to each `sluice host` of the test and waits for it to exit, up to thirty seconds. A test that ends with its host process running is normal, and so is a git or credential worker that the host's stop ends. A test that ends with a run, a supervisor or another process still running is a leak. The guard then lists the test's processes again. It fails the test where any was left, and ends each of them, `SIGTERM` first and `SIGKILL` after two seconds.
 
 The guard reports the failure after it ends the processes, so a failed test leaves nothing behind.
 
@@ -80,7 +82,7 @@ Not taken: a test that must stop its own host process. Each test would then repe
 
 ### D8. The guard is part of the test's setup
 
-`OnDisk` in the test support holds a guard. Each test that builds an `OnDisk` gets the guard with no other line. A test that starts sluice without `OnDisk` builds a guard of its own from its folders. The guard's check runs in `Drop`. Where the test already panicked, the guard ends the processes and does not panic again.
+`OnDisk` in the test support holds a guard of all its folders, and each `Scratch` holds a guard of its own folder. So each test that builds an `OnDisk` or a scratch folder gets the guard with no other line. The guard's check runs in `Drop`. Where the test already panicked, the guard ends the processes and does not panic again.
 
 ### D9. cargo-nextest for the Rust crates
 
@@ -90,7 +92,13 @@ Not taken: the guard alone. It does not see a process that a test starts outside
 
 ### D10. One shell wrapper for the shell test tasks
 
-A script, `tests/leaks.sh` at the root, runs a test command with a new scratch folder and state folder in its environment. When the command ends, the script lists the processes of those folders by their environment and their working folder. It fails where one is left, and ends it. The plugins' shell test tasks and the check-e2e tier run through it.
+A script, `tests/leaks.sh` at the root, runs a test command in a process group of its own, with a new scratch folder and state folder in its environment. When the command ends, it stops each `sluice host` that a state folder in the scratch folder names. Then it lists what is left of the command's process group, and each worker that a state folder records. It fails where one is left, and ends it. It reads processes with pgrep alone, since the gate's sandbox refuses `ps`, which is set-user-ID on macOS. The plugins' shell test tasks and the check-e2e tier run through it. `root:leaks-cases` runs it on a test that leaves a watcher and on one that leaves nothing.
+
+Not taken: a listing by environment and working folder, as the guard does. The sandbox refuses `ps`, and `lsof` takes minutes on a host with many processes.
+
+### D11. A lost run that names no check is tested again
+
+A run that is given no check by name, on a branch that names no required check, ends with no outcome when its owner stops. The core named no check of such a run with no outcome, so it read the run as passed. Now such a run has every check of the run with no outcome, and its follow-up is given every check again. A follow-up's pass decides the run. (`sluices-runs-end-with-its-host-process@e814b716f3b1`)
 
 ## Risks / Trade-offs
 
@@ -103,6 +111,6 @@ A script, `tests/leaks.sh` at the root, runs a test command with a new scratch f
 
 ## Migration Plan
 
-- The first command of this version has the older host process hand over in place. Runs that an older host process started detached keep going until they end. The new host process reads their results as before, and owns each run that it starts.
-- A host with the daemon's service takes the new module. Its first switch keeps the service's program path stable from then on.
+- The first command of this version has the older host process hand over. A host process that is no daemon ends, as it did, and the command starts its own. An older daemon starts afresh in place, as it did. Runs that an older host process started detached keep going until they end. The new host process reads their results as before, and owns each run that it starts.
+- A host with the daemon's service takes the new module. Its first switch restarts the service once, since the program path changes to the system profile's. The path stays the same from then on, and later switches are hand-overs.
 - The change replaces `cargo test` with `cargo nextest run` in the crates' tasks. A person who runs `cargo test` by hand still can. Only the tasks and `sluice exec` use nextest.

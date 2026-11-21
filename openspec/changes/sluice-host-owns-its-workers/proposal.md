@@ -24,7 +24,8 @@ Claims that it keeps holding:
 - A stop of `sluice host` ends its workers' groups. A run that ended with its owner has no outcome.
 - Each hand-over and each settings take-up starts the next host process in place, with the same pid, so the runs stay its children. An older command still uses a newer host process.
 - A host process that starts ends the groups that a killed host process left.
-- The daemon's services end the job's process group. A new package is a hand-over, not a restart of the service.
+- The daemon's services end the job's process group. A new package is a hand-over by `sluice hand-over`, not a restart of the service.
+- A daemon that takes the host's place asks the host process to end, and its runs end with it.
 - `[runs] max` stays the one limit of sluice's checks, session runs and previews, by the user's answer of 2026-11-21. git and credential workers run outside it.
 - A guard in the test support fails each test that leaves a process, and ends that process.
 - The test tasks of each Rust crate run under cargo-nextest, which fails a test that leaves a process that holds its output.
@@ -58,4 +59,6 @@ Out of scope:
 - The devenv shell: cargo-nextest at a pinned version.
 - The plugins' shell tests and the check-e2e tier: one wrapper script.
 - The flake's nix modules: `AbandonProcessGroup` false and `KillMode` `control-group`.
-- New crate dependencies: process-wrap, and a dev-dependency to list processes with their environment and working folder.
+- New crate dependencies: libc, for the record that a worker writes before its exec, and sysinfo, a dev-dependency to list processes with their environment and working folder.
+- A new command, `sluice hand-over`, which a service's activation runs in place of a restart.
+- The core: a lost run that names no check is tested again.

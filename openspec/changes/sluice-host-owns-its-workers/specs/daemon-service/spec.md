@@ -24,9 +24,9 @@ Before: the unit's stop ended the daemon alone. Now: it ends each process of the
 
 ### Requirement: The daemon's service runs the module's sluice
 
-The service SHALL run sluice by the user's profile's `bin/sluice`, so a new package changes no service. The user's activation SHALL ask the running host process to hand over to the new program. Where the package is null, the service SHALL run the `sluice` that its `PATH` finds.
+The service SHALL run the system profile's `bin/sluice`, so a new package changes no service. The user's activation SHALL run its `sluice hand-over`, which has a host process of another sluice start afresh as it. With no package, the service SHALL run the `sluice` that its `PATH` finds.
 
-Before: a new package restarted the daemon, and its runs lost their owner. Now: a new package is a hand-over, and the runs pass on. (`sluices-runs-end-with-its-host-process@e814b716f3b1`)
+Before: a new package restarted the daemon, and its runs lost their owner. Now: it is a hand-over, and the runs pass on. (`sluices-runs-end-with-its-host-process@e814b716f3b1`)
 
 #### Scenario: A new package
 
