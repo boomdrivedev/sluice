@@ -7,6 +7,8 @@
 #
 # runs the command in a process group of its own, with a scratch folder
 # of its own as TMPDIR and a state folder of its own as XDG_STATE_HOME.
+# The scratch folder's name is short: it adds 10 characters to each path
+# under TMPDIR, and a socket's path holds 103 at most.
 # When the command ends, it stops each sluice host process that a state
 # folder in the scratch folder names, which ends that process's workers,
 # and waits for it. Then a process of the test is one of the command's
@@ -24,17 +26,17 @@ set -eu
   exit 2
 }
 
-scratch=$(mktemp -d "${TMPDIR:-/tmp}/sluice-leaks.XXXXXX")
+scratch=$(mktemp -d "${TMPDIR:-/tmp}/lk.XXXXXX")
 scratch=$(cd "$scratch" && pwd -P)
-mkdir "$scratch/tmp" "$scratch/state"
+mkdir "$scratch/state"
 trap 'rm -rf "$scratch"' EXIT
 
 # The command in a process group of its own, its standard input kept.
 exec 3<&0
 if command -v setsid >/dev/null 2>&1; then
-  TMPDIR=$scratch/tmp XDG_STATE_HOME=$scratch/state setsid "$@" <&3 &
+  TMPDIR=$scratch XDG_STATE_HOME=$scratch/state setsid "$@" <&3 &
 else
-  TMPDIR=$scratch/tmp XDG_STATE_HOME=$scratch/state \
+  TMPDIR=$scratch XDG_STATE_HOME=$scratch/state \
     perl -e 'setpgrp(0, 0) or die "setpgrp: $!\n"; exec @ARGV or die "$ARGV[0]: $!\n"' "$@" <&3 &
 fi
 group=$!

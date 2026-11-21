@@ -8,7 +8,7 @@ cd "$(dirname "$0")/.."
 cargo build -p sluice --bins
 PATH="$PWD/target/debug:$PATH"
 export PATH
-scratch=$(mktemp -d "${TMPDIR:-/tmp}/sluice-e2e.XXXXXX")
+scratch=$(mktemp -d "${TMPDIR:-/tmp}/e2e.XXXXXX")
 if ! bash e2e/e2e.sh "$scratch/repo" sluice; then
   echo "check-e2e: failed; its repository is in $scratch/repo" >&2
   exit 1
