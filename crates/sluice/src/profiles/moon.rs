@@ -34,7 +34,7 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
-use std::process::{Command, Output, Stdio};
+use std::process::{Output, Stdio};
 
 use anyhow::{anyhow, bail, Context as _, Result};
 use serde_json::Value;
@@ -490,7 +490,7 @@ impl Moon {
         input: Option<&[u8]>,
     ) -> std::io::Result<Output> {
         let argv = cx.argv(argv);
-        let mut command = Command::new(&argv[0]);
+        let mut command = crate::workers::command(&argv[0], "equip");
         command
             .args(&argv[1..])
             .current_dir(&cx.request.place.path)
@@ -734,7 +734,7 @@ fn parse_version(text: &str) -> Option<(u64, u64)> {
 /// out.
 pub fn file_at(place: &Path, revision: &str, path: &str) -> Option<Vec<u8>> {
     use std::io::Write;
-    let mut child = Command::new("git")
+    let mut child = crate::workers::command("git", "git")
         .current_dir(place)
         .args(["cat-file", "--batch", "--follow-symlinks", "-Z"])
         .env_remove("GIT_DIR")
@@ -774,7 +774,7 @@ fn blob_of_batch(out: &[u8]) -> Option<Vec<u8>> {
 
 /// The files that differ between two revisions, by git, in the place.
 fn changed_files(place: &Path, base: &str, head: &str) -> Result<Vec<String>> {
-    let out = Command::new("git")
+    let out = crate::workers::command("git", "git")
         .current_dir(place)
         .args(["diff", "--name-only", "-z", "--no-renames", base, head])
         .env_remove("GIT_DIR")
@@ -1778,7 +1778,7 @@ mod tests {
                 link("loop-b", "loop-a");
                 link("loop-a", "loop-b");
                 let git = |args: &[&str]| {
-                    let out = Command::new("git")
+                    let out = std::process::Command::new("git")
                         .current_dir(&dir)
                         .args(args)
                         .env("GIT_CONFIG_GLOBAL", "/dev/null")

@@ -7,7 +7,7 @@
 //! acceptance is the delivery.
 
 use std::io::Read as _;
-use std::process::{Command, Stdio};
+use std::process::Stdio;
 use std::time::{Duration, Instant};
 
 use anyhow::{Context as _, Result};
@@ -52,7 +52,7 @@ pub enum Answer {
 /// a round run from another pane reaches the recorded server; one that
 /// does not answer within `bound` is ended.
 pub fn prompt(pane: &str, socket: &str, line: &str, bound: Duration) -> Result<Answer> {
-    let mut c = Command::new("herdr");
+    let mut c = crate::workers::command("herdr", "notify");
     for (k, _) in std::env::vars_os() {
         if k.to_str().is_some_and(|k| k.starts_with("HERDR_")) {
             c.env_remove(&k);

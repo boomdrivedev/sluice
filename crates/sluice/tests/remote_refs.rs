@@ -102,7 +102,7 @@ fn host_as_named(repo: &Repo) -> RemoteRefs {
 /// 0019 as amended 2026-11-18; rule core.43).
 #[test]
 fn a_records_commit_names_whoever_pushes_it() {
-    let (a, bare, b) = two_hosts("rr-author");
+    let (bare, a, b) = two_hosts("rr-author");
     let state = |name: &str| {
         let out = support::git_command()
             .arg("--git-dir")
@@ -159,18 +159,18 @@ fn put(files: &[(&str, &str)]) -> Changes {
     }
 }
 
-fn two_hosts(name: &str) -> (Repo, Scratch, Repo) {
+fn two_hosts(name: &str) -> (Scratch, Repo, Repo) {
     let a = Repo::new(name);
     let bare = a.bare_origin();
     let b = Repo::clone_of(bare.path(), &format!("{name}-b"));
-    (a, bare, b)
+    (bare, a, b)
 }
 
 /// 62, 63, 80: the state is one ref on the remote, read from any host,
 /// and of two writes from one version exactly one is written.
 #[test]
 fn two_hosts_write_one_version_and_one_is_refused() {
-    let (a, _bare, b) = two_hosts("rr-write");
+    let (_bare, a, b) = two_hosts("rr-write");
     let (ha, hb) = (host(&a, None), host(&b, None));
     let empty = ha.read("main").unwrap();
     assert_eq!((empty.version, empty.files.len()), (0, 0));
@@ -208,7 +208,7 @@ fn two_hosts_write_one_version_and_one_is_refused() {
 /// ones, never read with them (130).
 #[test]
 fn appends_and_finished_records_keep_their_places() {
-    let (a, _bare, _b) = two_hosts("rr-append");
+    let (_bare, a, _b) = two_hosts("rr-append");
     let h = host(&a, None);
     let mut c = put(&[(".finished/7.json", "{\"id\":7}\n")]);
     c.append.insert("log.jsonl".into(), b"one\n".to_vec());
@@ -230,7 +230,7 @@ fn appends_and_finished_records_keep_their_places() {
 /// and the live index is left as it was.
 #[test]
 fn a_finished_record_put_again_replaces_it_and_leaves_the_index() {
-    let (a, _bare, b) = two_hosts("rr-finished-again");
+    let (_bare, a, b) = two_hosts("rr-finished-again");
     let (ha, hb) = (host(&a, None), host(&b, None));
     let index = "{\"id\":5,\"state\":\"landed\",\"worktree\":\"unit/a\"}\n";
     let mut c = put(&[(".finished/5.json", "{\"id\":5}\n")]);
@@ -262,7 +262,7 @@ fn a_finished_record_put_again_replaces_it_and_leaves_the_index() {
 /// reaches the remote is current again.
 #[test]
 fn a_refused_state_fetch_is_stale_with_why() {
-    let (a, bare, _b) = two_hosts("rr-refused");
+    let (bare, a, _b) = two_hosts("rr-refused");
     let h = host(&a, None);
     {
         let _g = h.lock("main").unwrap().unwrap();
@@ -300,7 +300,7 @@ fn a_refused_state_fetch_is_stale_with_why() {
 /// a branch's records.
 #[test]
 fn each_profile_keeps_a_refusal_beside_the_records() {
-    let (a, _bare, _b) = two_hosts("rr-kept");
+    let (_bare, a, _b) = two_hosts("rr-kept");
     let h = host(&a, None);
     let local = LocalFiles::new(&a.dir().join(".git"));
     {
@@ -341,7 +341,7 @@ fn each_profile_keeps_a_refusal_beside_the_records() {
 /// Submission ids are numbered once across every host.
 #[test]
 fn ids_are_numbered_once_across_hosts() {
-    let (a, _bare, b) = two_hosts("rr-ids");
+    let (_bare, a, b) = two_hosts("rr-ids");
     let (ha, hb) = (host(&a, None), host(&b, None));
     assert_eq!(ha.allocate_id("main").unwrap(), 1);
     assert_eq!(hb.allocate_id("bolt/x").unwrap(), 2);
@@ -385,7 +385,7 @@ fn lines(ls: &[ResultLine]) -> Vec<u8> {
 /// signed counts as nothing.
 #[test]
 fn signed_runs_are_read_verified_on_another_host() {
-    let (a, _bare, b) = two_hosts("rr-signed");
+    let (_bare, a, b) = two_hosts("rr-signed");
     let (box_key, stranger) = (key(), key());
     let ha = host(&a, Some(("box", box_key.clone())));
     let mut replay = ran("c:test", Outcome::Pass);
@@ -441,7 +441,7 @@ fn signed_runs_are_read_verified_on_another_host() {
 /// the grant it was run under.
 #[test]
 fn a_signed_runs_grant_is_read_from_its_statement() {
-    let (a, bare, b) = two_hosts("rr-grant");
+    let (bare, a, b) = two_hosts("rr-grant");
     let box_key = key();
     let under = |task: &str, grant: &str| {
         let mut l = ran(task, Outcome::Pass);
@@ -497,7 +497,7 @@ fn a_signed_runs_grant_is_read_from_its_statement() {
 /// signer is asked, in the same profile, and is again when the first is.
 #[test]
 fn a_statement_verified_with_one_key_is_unverified_with_another() {
-    let (a, _bare, b) = two_hosts("rr-two-keys");
+    let (_bare, a, b) = two_hosts("rr-two-keys");
     let (key_a, key_b) = (key(), key());
     host(&a, Some(("box", key_a.clone())))
         .record_results(&lines(&[ran("a:test", Outcome::Pass)]))
@@ -524,7 +524,7 @@ fn a_statement_verified_with_one_key_is_unverified_with_another() {
 /// read set aside on every host, and two set-asides at once both stay.
 #[test]
 fn a_set_aside_is_read_on_another_host() {
-    let (a, _bare, b) = two_hosts("rr-aside");
+    let (_bare, a, b) = two_hosts("rr-aside");
     let ha = host(&a, None);
     let hb = host(&b, None);
     ha.set_aside(b"{\"task\":\"a:test\"}").unwrap();
@@ -540,7 +540,7 @@ fn a_set_aside_is_read_on_another_host() {
 /// the other's.
 #[test]
 fn two_hosts_of_one_signer_keep_both_adds() {
-    let (a, _bare, b) = two_hosts("rr-adds");
+    let (_bare, a, b) = two_hosts("rr-adds");
     let (ka, kb) = (key(), key());
     host(&a, Some(("sessions", ka.clone())))
         .record_results(&lines(&[ran("a:test", Outcome::Pass)]))
@@ -569,7 +569,7 @@ fn two_hosts_of_one_signer_keep_both_adds() {
 /// why.
 #[test]
 fn a_host_with_no_signing_key_records_nothing_and_says_so() {
-    let (a, _bare, _b) = two_hosts("rr-unsigned");
+    let (_bare, a, _b) = two_hosts("rr-unsigned");
     let err = host(&a, None)
         .record_results(&lines(&[ran("a:test", Outcome::Pass)]))
         .unwrap_err();
@@ -580,7 +580,7 @@ fn a_host_with_no_signing_key_records_nothing_and_says_so() {
 /// last `KEPT_LOGS` candidates of the branch.
 #[test]
 fn logs_are_kept_on_the_remote_for_the_last_candidates() {
-    let (a, bare, _b) = two_hosts("rr-logs");
+    let (bare, a, _b) = two_hosts("rr-logs");
     let h = host(&a, None);
     for n in 1..=(KEPT_LOGS + 2) {
         let kept = h
@@ -656,7 +656,7 @@ fn a_sign_of_life_cut_after_it_was_sent_stands() {
 #[test]
 fn a_state_write_refused_at_the_lease_is_one_push() {
     use std::os::unix::fs::PermissionsExt;
-    let (a, _bare, b) = two_hosts("rr-lease-once");
+    let (_bare, a, b) = two_hosts("rr-lease-once");
     let (ha, hb) = (host(&a, None), host(&b, None));
     let at_a = ha.read("main").unwrap().version;
     let at_b = hb.read("main").unwrap().version;
@@ -728,7 +728,7 @@ fn ref_at(repo: &Repo, name: &str) -> Option<String> {
 /// combinations formed on the branch, with the records.
 #[test]
 fn a_ticks_ask_brings_the_branch_and_the_work_in_one_fetch() {
-    let (a, _bare, b) = two_hosts("rr-with-branch");
+    let (_bare, a, b) = two_hosts("rr-with-branch");
     let (ha, hb) = (host(&a, None), host(&b, None));
     {
         let _g = hb.lock("main").unwrap().unwrap();
@@ -765,7 +765,7 @@ fn a_ticks_ask_brings_the_branch_and_the_work_in_one_fetch() {
 /// remote no longer holds fetches nothing.
 #[test]
 fn a_combination_only_the_remote_holds_is_fetched_and_a_place_made_at_it() {
-    let (a, _bare, b) = two_hosts("rr-one-candidate");
+    let (_bare, a, b) = two_hosts("rr-one-candidate");
     let (ha, hb) = (host(&a, None), host(&b, None));
     let combination = b.branch("combined", "main", &[("both", Some("1 and 2\n"))]);
     hb.publish_candidate("main", "c7", &Rev::new(combination.clone()))
@@ -813,7 +813,7 @@ fn a_combination_only_the_remote_holds_is_fetched_and_a_place_made_at_it() {
 /// to name as the remote's (124).
 #[test]
 fn a_branch_the_remote_lacks_still_gives_the_records() {
-    let (a, bare, _b) = two_hosts("rr-no-branch");
+    let (bare, a, _b) = two_hosts("rr-no-branch");
     let h = host(&a, None);
     {
         let _g = h.lock("main").unwrap().unwrap();
@@ -841,7 +841,7 @@ fn a_branch_the_remote_lacks_still_gives_the_records() {
 /// no revision from.
 #[test]
 fn a_remote_out_of_reach_gives_the_records_last_fetched() {
-    let (a, bare, _b) = two_hosts("rr-with-branch-stale");
+    let (bare, a, _b) = two_hosts("rr-with-branch-stale");
     let h = host(&a, None);
     {
         let _g = h.lock("main").unwrap().unwrap();
@@ -1627,7 +1627,7 @@ fn owed(id: u64, outcome: &str) -> String {
 }
 
 /// A host whose `main` names signers and origin, with origin.
-fn signed_main(name: &str) -> (Repo, Scratch) {
+fn signed_main(name: &str) -> (Scratch, Repo) {
     let a = Repo::new(name);
     a.write(
         ".config/sluice.toml",
@@ -1636,7 +1636,7 @@ fn signed_main(name: &str) -> (Repo, Scratch) {
     a.git(&["add", "-A"]);
     a.git(&["commit", "-q", "-m", "signers"]);
     let bare = a.bare_origin();
-    (a, bare)
+    (bare, a)
 }
 
 /// This host's own queue of `main`: `subs` as `(id, state)`, `deliveries`
@@ -1685,7 +1685,7 @@ fn carry_main(r: &sluice::profiles::records::Records) -> sluice_seams::Carried {
 fn a_hosts_queue_moves_to_its_remote_with_its_numbers() {
     use sluice_core::line::Line;
     use sluice_core::records::{Event, HomeState, HERE};
-    let (a, _bare) = signed_main("rr-carry");
+    let (_bare, a) = signed_main("rr-carry");
     own_queue_moving(&a, &[(52, "queued"), (53, "failed")], &owed(53, "failed"));
     let r = records(&a).as_host("host-a");
     assert!(
@@ -1751,7 +1751,7 @@ fn a_hosts_queue_moves_to_its_remote_with_its_numbers() {
 fn a_number_the_remote_holds_is_carried_under_the_next() {
     use sluice_core::line::Line;
     use sluice_core::records::{to_document, HomeDoc, HERE, HOME_FILE};
-    let (a, _bare) = signed_main("rr-carry-next");
+    let (_bare, a) = signed_main("rr-carry-next");
     let theirs = host(&a, None);
     let other = carried_doc(52, "queued")
         .replace("host-a", "host-b")
@@ -1819,7 +1819,7 @@ fn a_number_the_remote_holds_is_carried_under_the_next() {
 #[test]
 fn a_carry_stopped_after_the_remote_was_written_is_closed_by_the_next() {
     use sluice_core::line::Line;
-    let (a, _bare) = signed_main("rr-carry-stopped");
+    let (_bare, a) = signed_main("rr-carry-stopped");
     own_queue_moving(&a, &[(52, "queued"), (53, "failed")], &owed(53, "failed"));
     let r = records(&a).as_host("host-a");
     carry_main(&r);
@@ -1876,7 +1876,7 @@ fn submit_from(r: &sluice::profiles::records::Records, id: u64, host: &str) {
 fn a_branch_comes_home_each_host_taking_its_own_submissions() {
     use sluice_core::line::Line;
     use sluice_core::records::{HomeState, Moving, HERE};
-    let (a, bare) = signed_main("rr-home-coming");
+    let (bare, a) = signed_main("rr-home-coming");
     let b = Repo::clone_of(bare.path(), "rr-home-coming-b");
     let ra = records(&a).as_host("host-a");
     let rb = records(&b).as_host("host-b");
@@ -2033,7 +2033,7 @@ fn kms_record(key: &p256::ecdsa::SigningKey, claim: &str) -> Vec<u8> {
 #[test]
 fn a_kms_record_verifies_by_the_listed_half_alone() {
     use sluice_seams::State as _;
-    let (a, _bare, b) = two_hosts("rr-kms");
+    let (_bare, a, b) = two_hosts("rr-kms");
     let kms_key = p256::ecdsa::SigningKey::random(&mut rand_core::OsRng);
     host(&a, None)
         .add_signed(
@@ -2070,7 +2070,7 @@ fn a_kms_record_verifies_by_the_listed_half_alone() {
 fn a_kms_record_by_another_key_counts_for_nothing() {
     use sluice::host_process::results::SignerRef as _;
     use sluice_seams::State as _;
-    let (a, _bare, b) = two_hosts("rr-kms-other");
+    let (_bare, a, b) = two_hosts("rr-kms-other");
     let (listed, other) = (
         p256::ecdsa::SigningKey::random(&mut rand_core::OsRng),
         p256::ecdsa::SigningKey::random(&mut rand_core::OsRng),

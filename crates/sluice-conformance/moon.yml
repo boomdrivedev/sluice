@@ -4,7 +4,7 @@ dependsOn: [seams, core, fakes]
 
 tasks:
   test:
-    command: 'cargo test -p sluice-conformance'
-    inputs: ['/crates/sluice-conformance/**/*', '/crates/sluice-seams/**/*', '/crates/sluice-core/**/*', '/crates/sluice-fakes/**/*', '/docs/examples/state/**/*', '/Cargo.toml', '/Cargo.lock', '/devenv.nix', '/devenv.lock']
+    command: 'cargo nextest run -p sluice-conformance'
+    inputs: ['/crates/sluice-conformance/**/*', '/crates/sluice-seams/**/*', '/crates/sluice-core/**/*', '/crates/sluice-fakes/**/*', '/docs/examples/state/**/*', '/Cargo.toml', '/Cargo.lock', '/.config/nextest.toml', '/devenv.nix', '/devenv.lock']
     tags: [cargo-test, check-fast]
     options: {runFromWorkspaceRoot: true}

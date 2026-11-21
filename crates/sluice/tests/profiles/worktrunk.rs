@@ -44,6 +44,14 @@ struct Scratch {
     herdr: FakeHerdr,
 }
 
+/// Its tests end while a run may go: its host process is stopped as it
+/// ends, which ends the runs (`a-leaked-child-fails-its-test@9a82a5147ba6`).
+impl Drop for Scratch {
+    fn drop(&mut self) {
+        support::guard::stop_host_processes(&self.state);
+    }
+}
+
 /// A herdr of the test's own: it keeps each call's arguments, the socket
 /// it was handed and the pane it ran in, and answers as the test sets.
 struct FakeHerdr {

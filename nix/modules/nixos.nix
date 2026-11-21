@@ -8,10 +8,12 @@
 # sets `services.sluice.daemon.enable` (137; record 0093 as amended
 # 2026-11-18; design D10, D11 of `sluice-runs-as-a-daemon`): a systemd
 # user unit of services.sluice.user, who lingers, so it runs from boot
-# with no one logged in, as Boomdrive's runner's unit is kept. NixOS
-# restarts no changed user unit, so the user's activation, after the
-# link, starts the unit where it is not running and restarts it where the
-# running daemon's command line is not the unit's.
+# with no one logged in, as Boomdrive's runner's unit is kept. The unit
+# runs the system profile's sluice, so a new package changes no unit. The
+# user's activation, after the link, starts the unit where it is not
+# running, and otherwise has the running daemon start afresh as the
+# profile's sluice where it runs another, which keeps its runs (D5 of
+# `sluice-host-owns-its-workers`).
 { packages }:
 {
   config,
@@ -32,10 +34,12 @@ let
     };
   home = account.home or "/home/${user}";
 
-  # The daemon's command line, which the activation compares the running
-  # daemon's with: the package's sluice, or, where the package is null,
-  # the PATH's through the runtime shell, since systemd looks a bare name
-  # up in its own folders and not the unit's PATH (design D11).
+  # The sluice the daemon runs: the system profile's, where the module
+  # installs its package, or the PATH's where the package is null.
+  program = if cfg.package == null then "sluice" else "/run/current-system/sw/bin/sluice";
+  # The daemon's command line: the program, through the runtime shell where
+  # it is the PATH's, since systemd looks a bare name up in its own folders
+  # and not the unit's PATH (design D11).
   command =
     if cfg.package == null then
       [
@@ -45,18 +49,9 @@ let
       ]
     else
       [
-        "${cfg.package}/bin/sluice"
+        program
         "daemon"
       ];
-  # What ps shows of the daemon that command line runs.
-  running =
-    if cfg.package == null then
-      [
-        "sluice"
-        "daemon"
-      ]
-    else
-      command;
 
   # The profiles: never a package's own folder, so the daemon and a
   # person's shell run one copy of each tool.
@@ -70,12 +65,12 @@ let
   ];
 
   # What `keep` runs, which the user's activation does not have.
-  keepPath = lib.makeBinPath [
-    pkgs.procps
-    config.systemd.package
-  ];
-  keeping = lib.optionalString cfg.daemon.enable "; PATH=${keepPath}:$PATH ${pkgs.runtimeShell} ${./activate.sh} keep ${
-    lib.escapeShellArgs ([ user ] ++ running)
+  keepPath = lib.makeBinPath [ config.systemd.package ];
+  keeping = lib.optionalString cfg.daemon.enable "; PATH=${keepPath}:${lib.concatStringsSep ":" path}:$PATH ${pkgs.runtimeShell} ${./activate.sh} keep ${
+    lib.escapeShellArgs [
+      user
+      program
+    ]
   }";
 in
 {
@@ -115,7 +110,8 @@ in
       # XDG_RUNTIME_DIR.
       enableDefaultPath = false;
       environment.PATH = lib.concatStringsSep ":" path;
-      # Restarted by the user's activation, which compares command lines.
+      # Its command line names no package; the user's activation has the
+      # daemon start afresh as a new sluice.
       restartIfChanged = false;
       serviceConfig = {
         ExecStart = utils.escapeSystemdExecArgs command;
@@ -123,8 +119,10 @@ in
         # minute, and never given up on.
         Restart = "always";
         RestartSec = "30s";
-        # A stop ends the daemon alone: the runs it started go on (135).
-        KillMode = "process";
+        # A stop ends every process of the unit: the daemon ends its runs as
+        # it stops, and systemd ends what is left
+        # (`sluices-runs-end-with-its-host-process@e814b716f3b1`).
+        KillMode = "control-group";
         # The time its tasks are given to finish their rounds, and a
         # margin (design D7).
         TimeoutStopSec = "75s";

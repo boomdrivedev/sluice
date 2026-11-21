@@ -129,28 +129,34 @@ run keep "$file"
 expect "$named" "keep exits $status, not 2" [ "$status" -eq 2 ]
 expect "$named" "a refused call made $home/.config" missing "$home/.config"
 
-# keep's cases (design D10 of `sluice-runs-as-a-daemon`): systemctl and ps
-# stood in for on its PATH, systemctl naming `$main` as the unit's main
-# process and writing each call to `calls`, and ps answering `$running`.
+# keep's cases (design D10 of `sluice-runs-as-a-daemon`; D5 of
+# `sluice-host-owns-its-workers`): systemctl and the program stood in for,
+# systemctl naming `$main` as the unit's main process, and each writing
+# each call to `calls`. The program's hand-over says that the daemon
+# started afresh where the daemon ran `$running`, another program.
 me=$(id -un)
 program=$dir/store/sluice
 stand() {
   mkdir -p "$dir/bin"
+  program=$dir/store/sluice
   cat >"$dir/bin/systemctl" <<'STUB'
 #!/bin/sh
 echo "$*" >>"$CALLS"
 case $* in *show*) echo "$MAIN" ;; esac
 STUB
-  cat >"$dir/bin/ps" <<'STUB'
+  cat >"$program" <<'STUB'
 #!/bin/sh
-echo "$RUNNING"
+echo "sluice $*" >>"$CALLS"
+if [ "$RUNNING" != "$0" ]; then
+  echo "sluice: the host process $MAIN, which ran $RUNNING, started afresh as $0"
+fi
 STUB
-  chmod +x "$dir/bin/systemctl" "$dir/bin/ps"
+  chmod +x "$dir/bin/systemctl" "$program"
   calls=$dir/calls
   : >"$calls"
 }
 # keep with `$@` in the case's folder, the unit's main process `$1` and
-# its command line `$2`.
+# the program it runs `$2`.
 kept() {
   main=$1
   running=$2
@@ -165,40 +171,45 @@ kept() {
 called() {
   grep -Fxq -- "$1" "$calls"
 }
+not() {
+  ! "$@"
+}
 
 named="keep: not running"
 fresh
 stand
-kept 0 "" "$me" "$program" daemon
+kept 0 "" "$me" "$program"
 expect "$named" "keep exits $status: $said" [ "$status" -eq 0 ]
 expect "$named" "keep did not start sluice.service without waiting: $(cat "$calls")" \
   called "--user --no-block start sluice.service"
+expect "$named" "keep asked a hand-over: $(cat "$calls")" not called "sluice hand-over"
 expect "$named" "keep says \"$said\", not that it started sluice.service" \
   [ "$out" = "sluice: started sluice.service" ]
 
-named="keep: another command line"
+named="keep: another program"
 fresh
 stand
-kept 42 "/nix/store/older-sluice/bin/sluice daemon" "$me" "$program" daemon
+kept 42 "/nix/store/older-sluice/bin/sluice" "$me" "$program"
 expect "$named" "keep exits $status: $said" [ "$status" -eq 0 ]
-expect "$named" "keep did not restart sluice.service without waiting: $(cat "$calls")" \
-  called "--user --no-block restart sluice.service"
-expect "$named" "keep says \"$said\", not the command line that ran" \
-  [ "$out" = "sluice: restarted sluice.service, which ran /nix/store/older-sluice/bin/sluice daemon" ]
+expect "$named" "keep asked no hand-over: $(cat "$calls")" called "sluice hand-over"
+expect "$named" "keep restarted the unit: $(cat "$calls")" not called "--user --no-block restart sluice.service"
+expect "$named" "keep says \"$said\", not the program that ran" \
+  [ "$out" = "sluice: the host process 42, which ran /nix/store/older-sluice/bin/sluice, started afresh as $program" ]
 
-named="keep: the unit's command line"
+named="keep: the unit's program"
 fresh
 stand
-kept 42 "$program daemon" "$me" "$program" daemon
+kept 42 "$program" "$me" "$program"
 expect "$named" "keep exits $status: $said" [ "$status" -eq 0 ]
 expect "$named" "keep started or restarted the unit: $(cat "$calls")" \
-  [ "$(cat "$calls")" = "--user show --property=MainPID --value sluice.service" ]
+  [ "$(cat "$calls")" = "--user show --property=MainPID --value sluice.service
+sluice hand-over" ]
 expect "$named" "keep says \"$said\"" [ -z "$out$err" ]
 
 named="keep: another user"
 fresh
 stand
-kept 0 "" "not-$me" "$program" daemon
+kept 0 "" "not-$me" "$program"
 expect "$named" "keep exits $status: $said" [ "$status" -eq 0 ]
 expect "$named" "keep asked the service manager $(cat "$calls")" [ ! -s "$calls" ]
 expect "$named" "keep says \"$said\"" [ -z "$out$err" ]

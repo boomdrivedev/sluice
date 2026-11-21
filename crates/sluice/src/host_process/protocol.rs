@@ -38,6 +38,12 @@ pub struct Named {
     /// `sluice-runs-as-a-daemon`). An older process says nothing of it.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub daemon: bool,
+    /// The executable it runs, resolved through every link: what a service
+    /// manager's activation compares with the program it installs (the
+    /// change `sluice-host-owns-its-workers`, design D5). An older process
+    /// says nothing of it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub program: Option<PathBuf>,
 }
 
 /// What follows the host process's passes of a repository (D7, D11).
@@ -107,13 +113,19 @@ pub enum Request {
     /// The bound, what counts against it, the runs waiting and whose turn
     /// is next.
     Room,
-    /// End, for a newer sluice (D8). `program` is the asker's executable,
-    /// resolved through every link, which a daemon starts afresh in place
-    /// as; an older command sends none, and a host process that is no
-    /// daemon ends on it as before (design D3 of `sluice-runs-as-a-daemon`).
+    /// Hand over, for a newer sluice (D8). `program` is the asker's
+    /// executable, resolved through every link, which the host process
+    /// starts afresh in place as; an older command sends none, and the host
+    /// process starts afresh as its own (design D3 of
+    /// `sluice-runs-as-a-daemon` and of `sluice-host-owns-its-workers`).
+    /// `ends` says that the asker takes the host's place itself, as a
+    /// daemon does: the host process ends, and its runs end with it. A host
+    /// process of an older sluice ends on any `hand-over`.
     HandOver {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         program: Option<PathBuf>,
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        ends: bool,
     },
 }
 
@@ -223,18 +235,42 @@ mod tests {
     fn a_hand_over_naming_a_program_reads_as_a_hand_over() {
         let named = Request::HandOver {
             program: Some(PathBuf::from("/x/sluice")),
+            ends: false,
         };
         let line = serde_json::to_string(&named).unwrap();
         assert_eq!(line, r#"{"ask":"hand-over","program":"/x/sluice"}"#);
         assert_eq!(serde_json::from_str::<Request>(&line).unwrap(), named);
         assert_eq!(
             serde_json::from_str::<Request>(r#"{"ask":"hand-over"}"#).unwrap(),
-            Request::HandOver { program: None }
+            Request::HandOver {
+                program: None,
+                ends: false
+            }
         );
         assert_eq!(
-            serde_json::to_string(&Request::HandOver { program: None }).unwrap(),
+            serde_json::to_string(&Request::HandOver {
+                program: None,
+                ends: false
+            })
+            .unwrap(),
             r#"{"ask":"hand-over"}"#
         );
+        assert_eq!(
+            serde_json::from_str::<Older>(&line).unwrap(),
+            Older::HandOver
+        );
+        // A daemon's ask to end reads as one to an older host process,
+        // which ends on it.
+        let ending = Request::HandOver {
+            program: Some(PathBuf::from("/x/sluice")),
+            ends: true,
+        };
+        let line = serde_json::to_string(&ending).unwrap();
+        assert_eq!(
+            line,
+            r#"{"ask":"hand-over","program":"/x/sluice","ends":true}"#
+        );
+        assert_eq!(serde_json::from_str::<Request>(&line).unwrap(), ending);
         assert_eq!(
             serde_json::from_str::<Older>(&line).unwrap(),
             Older::HandOver

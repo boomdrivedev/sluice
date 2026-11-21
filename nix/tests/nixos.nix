@@ -21,6 +21,15 @@ let
   off = t.nixosSystem { services.sluice.enable = lib.mkForce false; };
   noUser = t.nixosSystem { services.sluice.user = lib.mkForce "carol"; };
   daemon = t.nixosSystem { services.sluice.daemon.enable = true; };
+  daemonOwn = t.nixosSystem (
+    { pkgs, ... }:
+    {
+      services.sluice = {
+        package = pkgs.writeTextDir "bin/sluice" "";
+        daemon.enable = true;
+      };
+    }
+  );
   # Imported again under another module, as another flake's module that
   # imports it does.
   twice = t.nixosSystem { imports = [ { imports = [ t.outputs.nixosModules.sluice ]; } ]; };
@@ -82,8 +91,8 @@ in
   "The daemon on NixOS" =
     let
       unit = daemon.config.systemd.user.services.sluice;
-      program = "${flakes}/bin/sluice";
-      keeps = "activate.sh keep alice ${program} daemon";
+      program = "/run/current-system/sw/bin/sluice";
+      keeps = "activate.sh keep alice ${program}";
     in
     t.expect (t.failures daemon == [ ]) "the system fails: ${toString (t.failures daemon)}"
     ++ t.expect (
@@ -93,7 +102,7 @@ in
       unit.serviceConfig.Restart == "always"
     ) "the unit restarts ${unit.serviceConfig.Restart}"
     ++ t.expect (
-      unit.serviceConfig.KillMode == "process"
+      unit.serviceConfig.KillMode == "control-group"
     ) "the unit's stop kills ${unit.serviceConfig.KillMode}"
     ++ t.expect (
       unit.unitConfig.ConditionUser == "alice"
@@ -107,6 +116,19 @@ in
     ++ t.expect daemon.config.users.users.alice.linger "alice does not linger"
     ++ t.expect (lib.hasInfix (plain keeps) (activationOf daemon)) "alice's activation runs no `${plain keeps}`: ${activationOf daemon}"
     ++ links daemon (lib.removeSuffix "; fi" (linkOf daemon (builtins.readFile ./files/empty.toml)));
+
+  # daemon-service, "A new package" (D5 of `sluice-host-owns-its-workers`):
+  # the unit names no package, so a new package changes no unit; the
+  # activation has the daemon start afresh.
+  "A new package changes no unit" =
+    t.expect (t.failures daemonOwn == [ ]) "the system fails: ${toString (t.failures daemonOwn)}"
+    ++ t.expect (
+      daemonOwn.config.systemd.user.services.sluice.serviceConfig
+      == daemon.config.systemd.user.services.sluice.serviceConfig
+    ) "the unit changes with the package"
+    ++ t.expect (
+      activationOf daemonOwn == activationOf daemon
+    ) "NixOS's user activation sluice changes with the package: ${activationOf daemonOwn}";
 
   "On NixOS" =
     t.expect (t.failures every == [ ]) "every key fails: ${toString (t.failures every)}"

@@ -7,11 +7,12 @@
 //! seconds for it to answer, and otherwise fails naming the log. Ten
 //! commands at once take the start lock in turn: the first starts the
 //! process, and the others find it answering. A command newer than the
-//! process that answers has it hand over once, waits for its socket to go,
-//! and starts its own; an older one uses the process as it is. A newer
-//! command has an older `sluice daemon` start afresh in place as the
-//! command's own executable instead, and uses the image started afresh
-//! (design D3, D4 of `sluice-runs-as-a-daemon`).
+//! process that answers has it hand over once; an older one uses the
+//! process as it is. The process that hands over starts afresh in place as
+//! the command's own executable, and the command uses the image started
+//! afresh. A host process of an older sluice can end instead, and the
+//! command then starts its own (design D3, D4 of `sluice-runs-as-a-daemon`;
+//! D3 of `sluice-host-owns-its-workers`).
 
 use std::ffi::OsString;
 use std::fs::{File, OpenOptions};
@@ -146,19 +147,16 @@ impl Client {
     }
 
     /// The host process, started where none answers, and an older one
-    /// handed over once for this newer command's own (D8): an older daemon
-    /// started afresh in place as this command's executable, whose image
-    /// started afresh is this command's own start (design D4 of
-    /// `sluice-runs-as-a-daemon`).
+    /// handed over once for this newer command's own (D8): started afresh
+    /// in place as this command's executable, whose image started afresh is
+    /// this command's own start (design D4 of `sluice-runs-as-a-daemon`; D3
+    /// of `sluice-host-owns-its-workers`).
     pub fn reach(&self) -> Result<Connection> {
         if let Some(c) = self.answering()? {
             if !older(&c.named.version, &self.version) {
                 return Ok(c);
             }
-            if c.named.daemon {
-                return self.afresh(c);
-            }
-            self.hand_over(c)?;
+            return self.afresh(c);
         }
         self.start()
     }
@@ -169,19 +167,23 @@ impl Client {
         std::fs::canonicalize(&self.program).ok()
     }
 
-    /// D4 of `sluice-runs-as-a-daemon`: have the older daemon `c` start
+    /// D4 of `sluice-runs-as-a-daemon` and D3 of
+    /// `sluice-host-owns-its-workers`: have the older host process `c` start
     /// afresh in place as this command's executable, and wait, as long as
     /// a hand-over is waited for ([`HAND_OVER_WAIT`]), for a host process
     /// that is not the image it asked, another pid or the same pid with
     /// another `since`, which it uses as a start of its own, whatever its
-    /// version. Where the image it asked still answers then, it fails
-    /// naming the log; where none answers, it starts its own.
+    /// version. A host process of an older sluice that ends instead lets
+    /// its pid go, and the command then starts its own. Where the image it
+    /// asked still answers, or its pid still runs, at the end of the wait,
+    /// it fails naming the log.
     fn afresh(&self, mut c: Connection) -> Result<Connection> {
         let asked = c.named.clone();
         send(
             &mut c.writer,
             &Request::HandOver {
                 program: self.program(),
+                ends: false,
             },
         )?;
         let _ = receive::<Answer>(&mut c.reader);
@@ -195,7 +197,7 @@ impl Client {
                 }
                 if Instant::now() >= until {
                     bail!(
-                        "sluice daemon {} (pid {}) was asked to start afresh as {} and still answers as it was after {} seconds; see {}",
+                        "sluice's host process {} (pid {}) was asked to start afresh as {} and still answers as it was after {} seconds; see {}",
                         asked.version,
                         asked.pid,
                         self.program.display(),
@@ -203,39 +205,72 @@ impl Client {
                         self.paths.log().display()
                     );
                 }
-            } else if Instant::now() >= until {
+            } else if !alive(asked.pid) {
                 return self.start();
-            }
-            std::thread::sleep(Duration::from_millis(20));
-        }
-    }
-
-    /// Have the older process `c` hand over, and wait for it to end, which
-    /// lets its lock go for the process this command starts: as long as it
-    /// gives its tasks to finish their rounds, and a start's wait after
-    /// ([`HAND_OVER_WAIT`]).
-    fn hand_over(&self, mut c: Connection) -> Result<()> {
-        send(
-            &mut c.writer,
-            &Request::HandOver {
-                program: self.program(),
-            },
-        )?;
-        let _ = receive::<Answer>(&mut c.reader);
-        let until = Instant::now() + HAND_OVER_WAIT;
-        while alive(c.named.pid) {
-            if Instant::now() >= until {
+            } else if Instant::now() >= until {
                 bail!(
-                    "sluice's host process {} (pid {}) was asked to hand over and has not ended within {} seconds; see {}",
-                    c.named.version,
-                    c.named.pid,
+                    "sluice's host process {} (pid {}) was asked to hand over and has not ended or started afresh within {} seconds; see {}",
+                    asked.version,
+                    asked.pid,
                     HAND_OVER_WAIT.as_secs(),
                     self.paths.log().display()
                 );
             }
             std::thread::sleep(Duration::from_millis(20));
         }
-        Ok(())
+    }
+
+    /// `sluice hand-over` (the change `sluice-host-owns-its-workers`,
+    /// design D5): have the host process that answers, where it runs
+    /// another executable than this command's, start afresh in place as
+    /// this command's, keeping its runs, and wait for the image started
+    /// afresh. It starts no host process. The process asked and the one
+    /// that answers after; `None` where none answers, or where it runs this
+    /// command's executable already.
+    pub fn hand_over_here(&self) -> Result<Option<(Named, Named)>> {
+        let Some(mut c) = self.answering()? else {
+            return Ok(None);
+        };
+        let program = self.program();
+        if program.is_some() && c.named.program == program {
+            return Ok(None);
+        }
+        let asked = c.named.clone();
+        send(
+            &mut c.writer,
+            &Request::HandOver {
+                program,
+                ends: false,
+            },
+        )?;
+        let _ = receive::<Answer>(&mut c.reader);
+        drop(c);
+        let until = Instant::now() + HAND_OVER_WAIT;
+        loop {
+            if let Some(n) = self.answering()? {
+                if n.named.pid != asked.pid || n.named.since != asked.since {
+                    return Ok(Some((asked, n.named)));
+                }
+            } else if !alive(asked.pid) {
+                bail!(
+                    "sluice's host process {} (pid {}) ended when asked to hand over; see {}",
+                    asked.version,
+                    asked.pid,
+                    self.paths.log().display()
+                );
+            }
+            if Instant::now() >= until {
+                bail!(
+                    "sluice's host process {} (pid {}) was asked to start afresh as {} and did not within {} seconds; see {}",
+                    asked.version,
+                    asked.pid,
+                    self.program.display(),
+                    HAND_OVER_WAIT.as_secs(),
+                    self.paths.log().display()
+                );
+            }
+            std::thread::sleep(Duration::from_millis(20));
+        }
     }
 
     /// Start the host process under the start lock, unless one answers

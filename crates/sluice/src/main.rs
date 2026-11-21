@@ -67,6 +67,11 @@ fn main() {
     }
     // The host process needs no repository: it holds every repository its
     // index names (135; design D1).
+    if let Some(Command::Host | Command::Daemon) = &cli.command {
+        // A host process keeps no descriptor that its starter's caller
+        // left open (`nothing-detached@f807c7f5fcea`).
+        sluice::host_process::close_inherited();
+    }
     if let Some(Command::Host) = &cli.command {
         match sluice::host_process::run(cli.choices(), carried) {
             Ok(code) => std::process::exit(code),
@@ -88,6 +93,33 @@ fn main() {
         }
     }
     drop(carried);
+    // `sluice hand-over` needs no repository: it asks the host process
+    // (the change `sluice-host-owns-its-workers`, design D5).
+    if let Some(Command::HandOver) = &cli.command {
+        let asked = sluice::host_process::client::Client::host().and_then(|c| c.hand_over_here());
+        match asked {
+            Ok(Some((before, after))) => {
+                let ran = before.program.map_or_else(
+                    || format!("sluice {}", before.version),
+                    |p| p.display().to_string(),
+                );
+                let now = after.program.map_or_else(
+                    || format!("sluice {}", after.version),
+                    |p| p.display().to_string(),
+                );
+                println!(
+                    "sluice: the host process {}, which ran {ran}, started afresh as {now}",
+                    after.pid
+                );
+            }
+            Ok(None) => {}
+            Err(e) => {
+                eprintln!("sluice hand-over: {e:#}");
+                std::process::exit(3);
+            }
+        }
+        return;
+    }
     // git's credential helper needs no repository: what it gives is in
     // its environment.
     if let Some(Command::Credential { operation }) = &cli.command {

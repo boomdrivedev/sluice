@@ -11,6 +11,14 @@
 //! command exits or its time runs out, and writes `result.json` last.
 //! [`Runs::state`] reads what it wrote.
 //!
+//! In `sluice host`, the supervisor is a worker of the host process
+//! (`crate::workers`; `workers-end-with-their-owner@292e869158d6`): its
+//! child, in a process group of its own, and the command's group is
+//! recorded as the host's worker too. When the host process stops, the
+//! supervisor ends the command's group and writes no result, so the run
+//! has no outcome and is tested again
+//! (`sluices-runs-end-with-its-host-process@e814b716f3b1`).
+//!
 //! ```text
 //! <common>/sluice/.runs/<place, flat>/
 //!   request.json   what to run; written before the supervisor starts
@@ -285,8 +293,12 @@ impl Runs {
     }
 
     /// Start `request` in a new run directory for the place `name`, under
-    /// a supervisor in a session of its own, so a terminal's Ctrl-C or
-    /// hang-up never reaches the run. Returns without waiting for it.
+    /// a supervisor. In `sluice host`, the supervisor is a worker: a child
+    /// of the host process in a process group of its own, which ends with
+    /// its owner (`workers-end-with-their-owner@292e869158d6`). In another
+    /// process, the supervisor starts in a session of its own, so a
+    /// terminal's Ctrl-C or hang-up never reaches the run. Returns without
+    /// waiting for it.
     pub fn start(&self, name: &str, request: &Request) -> Result<()> {
         let dir = self.dir(name);
         if session_run(name).is_none() && dir.join("request.json").exists() {
@@ -300,12 +312,19 @@ impl Runs {
             .stdin(Stdio::null())
             .stdout(Stdio::null())
             .stderr(Stdio::null());
-        // SAFETY: setsid is async-signal-safe and touches no memory.
-        unsafe {
-            cmd.pre_exec(|| {
-                nix::unistd::setsid().map_err(std::io::Error::from)?;
-                Ok(())
-            });
+        let owner = crate::workers::owner();
+        match owner {
+            Some(owner) => {
+                cmd.env(crate::workers::VAR, crate::workers::var(owner));
+                crate::workers::take(&mut cmd, "run");
+            }
+            // SAFETY: setsid is async-signal-safe and touches no memory.
+            None => unsafe {
+                cmd.pre_exec(|| {
+                    nix::unistd::setsid().map_err(std::io::Error::from)?;
+                    Ok(())
+                });
+            },
         }
         let mut child = cmd
             .spawn()
@@ -335,12 +354,18 @@ impl Runs {
             }
             std::thread::sleep(Duration::from_millis(10));
         }
-        // Reaped by this thread while the process lasts; after it ends,
-        // by whatever adopts it: the supervisor outlives the host process
-        // that started it, a successor's among them (design D20).
-        std::thread::spawn(move || {
-            let _ = child.wait();
-        });
+        // A worker is waited on by its owner, which a hand-over in place
+        // keeps. A supervisor in a session of its own is reaped by this
+        // thread while the process lasts, and after it ends by whatever
+        // adopts it.
+        match owner {
+            Some(_) => crate::workers::wait(child),
+            None => {
+                std::thread::spawn(move || {
+                    let _ = child.wait();
+                });
+            }
+        }
         Ok(())
     }
 
@@ -585,7 +610,8 @@ impl Runs {
         };
         let log = dir.join("release.log");
         let out = File::create(&log)?;
-        let mut child = Command::new(program)
+        let mut command = Command::new(program);
+        command
             .args(args)
             .current_dir(cwd)
             .env_clear()
@@ -593,7 +619,9 @@ impl Runs {
             .stdin(Stdio::null())
             .stdout(out.try_clone()?)
             .stderr(out)
-            .process_group(0)
+            .process_group(0);
+        crate::workers::take(&mut command, "release");
+        let mut child = command
             .spawn()
             .with_context(|| format!("starting the release command {program}"))?;
         let pgid = child.id() as i32;
@@ -616,6 +644,7 @@ impl Runs {
             Some(s) => s,
             None => child.wait()?,
         };
+        crate::workers::forget(pgid);
         if !status.success() {
             let tail = log_end(&log);
             bail!(
@@ -667,8 +696,44 @@ pub fn supervised(dir: &Path) -> Result<bool> {
     }
 }
 
+/// Set when a supervisor that is a worker of `sluice host` is asked to
+/// stop: its owner stops.
+static STOPPED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+extern "C" fn stop_asked(_: libc::c_int) {
+    STOPPED.store(true, std::sync::atomic::Ordering::SeqCst);
+}
+
+fn stop_was_asked() -> bool {
+    STOPPED.load(std::sync::atomic::Ordering::SeqCst)
+}
+
+/// A supervisor that is a worker of `sluice host` takes `SIGTERM` and
+/// `SIGINT` as its owner's stop: it ends the run's checks and writes no
+/// result, so the run has no outcome
+/// (`sluices-runs-end-with-its-host-process@e814b716f3b1`).
+fn catch_stop() {
+    use nix::sys::signal::{sigaction, SaFlags, SigAction, SigHandler, SigSet, Signal};
+    let action = SigAction::new(
+        SigHandler::Handler(stop_asked),
+        SaFlags::empty(),
+        SigSet::empty(),
+    );
+    // SAFETY: the handler only stores to an atomic, which is
+    // async-signal-safe.
+    unsafe {
+        let _ = sigaction(Signal::SIGTERM, &action);
+        let _ = sigaction(Signal::SIGINT, &action);
+    }
+}
+
 /// `sluice supervise <dir>`: run the request in `dir` to its end.
 pub fn supervise(dir: &Path) -> Result<()> {
+    // A worker of `sluice host` records its checks and its watch as the
+    // host's workers, and stops with its owner.
+    if crate::workers::own_from_env().is_some() {
+        catch_stop();
+    }
     // Record 0122 (design D3): the run's own start, written before the
     // supervisor holds the run, so whoever finds the run held, its start
     // returned among them, finds when it began.
@@ -710,7 +775,8 @@ pub fn supervise(dir: &Path) -> Result<()> {
         _ => None,
     };
     let out = File::create(dir.join("out.log"))?;
-    let mut child = match Command::new(program)
+    let mut command = Command::new(program);
+    command
         .args(args)
         .current_dir(&request.cwd)
         .env_clear()
@@ -718,9 +784,9 @@ pub fn supervise(dir: &Path) -> Result<()> {
         .stdin(Stdio::null())
         .stdout(out.try_clone()?)
         .stderr(out)
-        .process_group(0)
-        .spawn()
-    {
+        .process_group(0);
+    crate::workers::take(&mut command, "checks");
+    let mut child = match command.spawn() {
         Ok(c) => c,
         Err(e) => {
             if let Some(w) = watch.as_mut() {
@@ -754,6 +820,9 @@ pub fn supervise(dir: &Path) -> Result<()> {
             timed_out = true;
             break;
         }
+        if stop_was_asked() {
+            break;
+        }
         times.note(false);
         // A watch ended from outside is reaped at once, so its group is
         // gone for whoever ended it (rule core.10).
@@ -774,6 +843,15 @@ pub fn supervise(dir: &Path) -> Result<()> {
         Some(s) => Some(s),
         None => Some(child.wait()?),
     };
+    crate::workers::forget(pgid);
+    // A run that ended with its owner has no outcome: its supervisor
+    // writes no result (`sluices-runs-end-with-its-host-process@e814b716f3b1`).
+    if stop_was_asked() {
+        if let Some(w) = watch.as_mut() {
+            w.end(Duration::from_secs(request.grace));
+        }
+        return Ok(());
+    }
     // Design D5: a second for reports still on their way, then the watch
     // is ended.
     if let Some(w) = watch.as_mut() {
@@ -816,6 +894,7 @@ impl Watch {
         let pgid = self.pgid;
         end_group(pgid, grace, &mut || self.reap());
         let _ = self.child.wait();
+        crate::workers::forget(pgid);
     }
 }
 
@@ -842,7 +921,8 @@ fn start_watch(dir: &Path, request: &Request, argv: &[String]) -> Result<Option<
         };
         write_atomic(&dir.join("watch-error"), line.as_bytes())
     };
-    let child = match Command::new(program)
+    let mut command = Command::new(program);
+    command
         .args(args)
         .current_dir(&request.cwd)
         .env_clear()
@@ -850,9 +930,9 @@ fn start_watch(dir: &Path, request: &Request, argv: &[String]) -> Result<Option<
         .stdin(Stdio::null())
         .stdout(out)
         .stderr(err)
-        .process_group(0)
-        .spawn()
-    {
+        .process_group(0);
+    crate::workers::take(&mut command, "watch");
+    let child = match command.spawn() {
         Ok(c) => c,
         Err(e) => {
             said(format!("could not start: {e}"))?;

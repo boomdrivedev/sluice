@@ -636,12 +636,12 @@ fn protect_names_a_worktree_holding_a_protected_branch() {
 /// `bolt/x`, its copy, stands apart from origin's, which is fetched here.
 /// Returns the repository, the worktree on `bolt/x`, the copy's revision,
 /// origin's, and the bare repository.
-fn copy_apart(name: &str) -> (Repo, PathBuf, String, String, Scratch) {
+fn copy_apart(name: &str) -> (Scratch, Repo, PathBuf, String, String) {
     copy_apart_with(name, "")
 }
 
 /// [`copy_apart`], `bolt/*`'s table given `extra` as well.
-fn copy_apart_with(name: &str, extra: &str) -> (Repo, PathBuf, String, String, Scratch) {
+fn copy_apart_with(name: &str, extra: &str) -> (Scratch, Repo, PathBuf, String, String) {
     let repo = Repo::new(name);
     repo.write(
         ".config/sluice.toml",
@@ -667,7 +667,7 @@ fn copy_apart_with(name: &str, extra: &str) -> (Repo, PathBuf, String, String, S
     repo.git(&["worktree", "add", "-q", held.to_str().unwrap(), "bolt/x"]);
     let copy = repo.rev("bolt/x");
     assert_ne!(copy, remote);
-    (repo, held, copy, remote, bare)
+    (bare, repo, held, copy, remote)
 }
 
 /// 124: on a branch kept on a remote, the protection judges a write by
@@ -676,7 +676,7 @@ fn copy_apart_with(name: &str, extra: &str) -> (Repo, PathBuf, String, String, S
 /// from the copy's value.
 #[test]
 fn a_copy_apart_from_its_remote_is_judged_by_its_own_value() {
-    let (repo, held, copy, remote, _bare) = copy_apart("protect-copy");
+    let (_bare, repo, held, copy, remote) = copy_apart("protect-copy");
     let out = git_in(&repo, &held, &["reset", "-q", "--hard"]);
     assert!(out.status.success(), "{}", text(&out));
     let out = repo.git_raw(&["pack-refs", "--all", "--prune"]);
@@ -706,7 +706,7 @@ fn a_copy_apart_from_its_remote_is_judged_by_its_own_value() {
 /// A protected repository whose `bolt/x` and its records are kept on
 /// `origin`, its policy naming a signer, so a read of the records fetches
 /// them (C.6); and the bare origin.
-fn kept_on_origin(name: &str) -> (Repo, Scratch) {
+fn kept_on_origin(name: &str) -> (Scratch, Repo) {
     let key = PrivateKey::random(&mut rand_core::OsRng, Algorithm::Ed25519).unwrap();
     let repo = Repo::new(name);
     repo.write(
@@ -724,7 +724,7 @@ fn kept_on_origin(name: &str) -> (Repo, Scratch) {
     let bare = repo.bare_origin();
     let out = sl(&repo, &["protect"]);
     assert!(out.status.success(), "{}", text(&out));
-    (repo, bare)
+    (bare, repo)
 }
 
 /// [`sl_with_state`], ended and failed when it has not ended within a
@@ -765,7 +765,11 @@ fn sl_ended(repo: &Repo, args: &[&str]) -> Output {
 /// minutes).
 #[test]
 fn a_fetch_whose_packing_runs_the_hook_ends() {
-    let (repo, _bare) = kept_on_origin("protect-fetch-packs");
+    let (_bare, repo) = kept_on_origin("protect-fetch-packs");
+    // The tests' git configuration turns git's maintenance off; this test
+    // is of a fetch whose maintenance packs, so the repository turns it on.
+    repo.git(&["config", "maintenance.auto", "true"]);
+    repo.git(&["config", "gc.auto", "6700"]);
     let tip = repo.rev("bolt/x");
     for i in 0..20 {
         repo.git(&["branch", &format!("loose/{i}"), "main"]);
@@ -790,7 +794,7 @@ fn a_fetch_whose_packing_runs_the_hook_ends() {
 /// round.
 #[test]
 fn a_hook_under_sluices_own_fetch_fetches_nothing() {
-    let (repo, _bare) = kept_on_origin("protect-fetch-hook");
+    let (_bare, repo) = kept_on_origin("protect-fetch-hook");
     repo.git(&["branch", "bolt/y", "main"]);
     repo.git(&["push", "-q", "origin", "bolt/y"]);
     let tip = repo.rev("bolt/y");
@@ -839,7 +843,7 @@ fn a_hook_under_sluices_own_fetch_fetches_nothing() {
 /// levels this host's copy itself, and how to bring the worktree level.
 #[test]
 fn a_refusal_names_the_command_and_both_revisions() {
-    let (repo, held, copy, remote, _bare) = copy_apart("protect-words");
+    let (_bare, repo, held, copy, remote) = copy_apart("protect-words");
     let said = |out: &Output, command: &str, to: &str| {
         let t = text(out);
         assert_eq!(out.status.code(), Some(128), "{t}");
@@ -1138,7 +1142,7 @@ fn a_policy_field_the_hook_does_not_know_changes_nothing_it_guards() {
 /// holding a field no sluice yet reads, is still judged as sluice's copy.
 #[test]
 fn a_copy_is_judged_under_fields_the_hook_does_not_know() {
-    let (repo, _held, copy, remote, _bare) =
+    let (_bare, repo, _held, copy, remote) =
         copy_apart_with("protect-later-copy", "later = true\n");
     host_settings(&repo, "[later]\nx = 1\n");
     let out = repo.git_raw(&["update-ref", "refs/heads/bolt/x", &remote]);

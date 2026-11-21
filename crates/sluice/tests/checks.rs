@@ -1423,6 +1423,19 @@ fn a_toolchain_that_fails_could_not_start_the_tests() {
         );
         (out.status.code(), said)
     };
+    // A status's document is its standard output alone: a warning goes to
+    // its standard error.
+    let status = || {
+        let out = sluice_in(&worktree, &state, &["status", "1", "--json"]);
+        let said = format!(
+            "{}{}",
+            String::from_utf8_lossy(&out.stdout),
+            String::from_utf8_lossy(&out.stderr)
+        );
+        let v: serde_json::Value =
+            serde_json::from_slice(&out.stdout).unwrap_or_else(|e| panic!("{e}: {said}"));
+        (v, said)
+    };
     let (code, said) = run(&["submit", "bolt/x", "--no-wait", "--json"]);
     assert_eq!(code, Some(0), "{said}");
 
@@ -1439,12 +1452,8 @@ fn a_toolchain_that_fails_could_not_start_the_tests() {
     assert_eq!(lost(&log()), 1, "{}", log());
     let results = || std::fs::read_to_string(records.join("results.jsonl")).unwrap_or_default();
     assert_eq!(results(), "", "nothing under any key");
-    let (_, said) = run(&["status", "1", "--json"]);
-    assert_ne!(
-        serde_json::from_str::<serde_json::Value>(&said).unwrap()["state"],
-        "failed",
-        "{said}"
-    );
+    let (v, said) = status();
+    assert_ne!(v["state"], "failed", "{said}");
 
     for _ in 0..2 {
         let (code, said) = run(&["step", "bolt/x"]);
@@ -1454,8 +1463,7 @@ fn a_toolchain_that_fails_could_not_start_the_tests() {
     assert_eq!(code, Some(0), "{said}");
     assert_eq!(lost(&log()), 2, "the third ends it: {}", log());
     assert_eq!(results(), "");
-    let (_, said) = run(&["status", "1", "--json"]);
-    let v: serde_json::Value = serde_json::from_str(&said).unwrap();
+    let (v, said) = status();
     assert_eq!(v["state"], "failed", "{said}");
     assert_eq!(
         v["failed"],

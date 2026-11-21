@@ -30,15 +30,24 @@
 //! stay synchronous: the host process calls them on tokio's pool for
 //! blocking work. It waits on events and timers, on tokio's clock, and no
 //! wait of it sleeps and looks again. `SIGTERM` and `SIGINT` stop each host
-//! process as a hand-over does.
+//! process.
+//!
+//! Each worker of the host process, a run's supervisor, a git command, a
+//! credential command, an equip step or a release command, is its child in
+//! a process group of its own, recorded in `host/workers/`
+//! (`crate::workers`; the change `sluice-host-owns-its-workers`). A stop
+//! ends the workers, and a run that ends so has no outcome. A hand-over
+//! starts the newer image afresh in place, with the same pid, so the
+//! workers stay its children. A host process that starts ends the groups
+//! that a killed host process left.
 //!
 //! `sluice daemon` is the same process with its idle end off, on a machine
 //! that chooses to keep it running (137; record 0093 as amended 2026-11-08
 //! and 2026-11-18). It takes the host's place from a host process that ends
-//! when idle, waits behind another daemon, and hands over by starting
-//! afresh in its own process, keeping its pid and its socket, so whatever
-//! keeps it running keeps the new image (design D1 to D7 of
-//! `sluice-runs-as-a-daemon`).
+//! when idle, which ends for it, and waits behind another daemon. Every
+//! host process hands over by starting afresh in its own process, keeping
+//! its pid and its socket, so whatever keeps it running keeps the new image
+//! (design D1 to D7 of `sluice-runs-as-a-daemon`).
 
 pub mod ask;
 pub mod client;
@@ -269,14 +278,17 @@ pub(crate) struct Hosting {
 
 /// What a connection asks of the host process itself.
 pub(crate) enum Control {
-    /// A newer command asked it to hand over: a daemon starts afresh in
-    /// place as the executable the asker named, or as its own where it
-    /// named none; a host process that is no daemon ends (design D3 of
-    /// `sluice-runs-as-a-daemon`).
+    /// A newer command asked it to hand over: it starts afresh in place as
+    /// the executable the asker named, or as its own where it named none
+    /// (design D3 of `sluice-runs-as-a-daemon` and of
+    /// `sluice-host-owns-its-workers`). Where the asker takes the host's
+    /// place itself, as a daemon does, it ends.
     HandOver {
         program: Option<PathBuf>,
         /// The asker's version, as its `hello` said it.
         by: String,
+        /// The asker takes the host's place itself.
+        ends: bool,
     },
     /// A command named a repository: the edge watches it, where it does
     /// not yet.
@@ -320,14 +332,11 @@ impl Successor {
     }
 }
 
-/// How the host process's loop ended.
+/// How the host process's loop ended: no work in play, a signal or its
+/// state folder gone. A hand-over does not end it: the process starts
+/// afresh in place.
 enum Ending {
-    /// It ends: no work in play, a newer sluice's ask or its state folder
-    /// gone.
     Ended,
-    /// It handed its repositories to a successor, whose socket is now the
-    /// host's (design D20).
-    HandedOver,
 }
 
 /// What an earlier image of this process, or the process that started it,
@@ -376,6 +385,34 @@ pub fn take_carried() -> Carried {
     }
 }
 
+/// Close each descriptor that this process inherited and keeps for no use
+/// of its own: each at 3 or above that is not set to close on exec. sluice
+/// sets each descriptor that it opens to close on exec, and
+/// [`take_carried`] sets so each that it takes. A host process runs long,
+/// and a descriptor that its starter's caller left open, such as the write
+/// end of a test runner's pipe, would stay open as long as it runs, and in
+/// each worker that it starts (`nothing-detached@f807c7f5fcea`). Called in
+/// `main` after [`take_carried`], before any thread starts. The
+/// descriptors that it closed.
+pub fn close_inherited() -> Vec<RawFd> {
+    let open: Vec<RawFd> = match std::fs::read_dir("/dev/fd") {
+        Ok(entries) => entries
+            .filter_map(|e| e.ok()?.file_name().to_str()?.parse().ok())
+            .collect(),
+        Err(_) => return Vec::new(),
+    };
+    let mut closed = Vec::new();
+    for fd in open.into_iter().filter(|fd| *fd > 2) {
+        // SAFETY: fcntl and close read only their integer arguments; a
+        // descriptor of the listing that is closed already answers EBADF.
+        let flags = unsafe { libc::fcntl(fd, libc::F_GETFD) };
+        if flags >= 0 && flags & libc::FD_CLOEXEC == 0 && unsafe { libc::close(fd) } == 0 {
+            closed.push(fd);
+        }
+    }
+    closed
+}
+
 /// The host process's runtime: many threads, and a bounded pool for
 /// blocking work (design D1 of `sluice-host-runs-on-a-tokio-edge`).
 fn runtime() -> Result<tokio::runtime::Runtime> {
@@ -391,9 +428,13 @@ fn runtime() -> Result<tokio::runtime::Runtime> {
 /// or, where another holds its lock, end at once and move nothing (135;
 /// design D1). `choices` are the telemetry its own command line and
 /// sluice's variables choose (151; rule core.53). Its exit.
-pub fn run(choices: crate::telemetry::Choices, carried: Carried) -> Result<i32> {
+pub fn run(choices: crate::telemetry::Choices, mut carried: Carried) -> Result<i32> {
     let successor = Successor::now();
     let paths = Paths::host()?;
+    // An image started afresh in place holds the start lock that its last
+    // image handed it, until its socket answers.
+    let start = carried.start.take();
+    let afresh = start.is_some();
     let folder =
         Folder::open(&paths.dir).with_context(|| format!("opening {}", paths.dir.display()))?;
     let Some(lock) = folder.try_lock(LOCK)? else {
@@ -410,8 +451,8 @@ pub fn run(choices: crate::telemetry::Choices, carried: Carried) -> Result<i32> 
             choices,
             successor,
             daemon: false,
-            start: None,
-            afresh: false,
+            start,
+            afresh,
             carried,
         },
     )
@@ -640,7 +681,10 @@ fn handed_over(
                 }
                 if asked.insert(c.named.pid) {
                     let program = successor.program.as_ref().ok().cloned();
-                    let _ = c.ask(&Request::HandOver { program });
+                    let _ = c.ask(&Request::HandOver {
+                        program,
+                        ends: true,
+                    });
                 }
                 last = Some(c.named);
             }
@@ -696,6 +740,7 @@ fn run_holding(runtime: &tokio::runtime::Runtime, holder: Holder) -> Result<i32>
         since: chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true),
         asked_only: asked_only(),
         daemon,
+        program: successor.program.as_ref().ok().cloned(),
     };
     folder.write(VERSION, &serde_json::to_vec(&named)?)?;
     // D6 of `sluice-host-runs-on-a-tokio-edge`: a daemon started afresh in
@@ -747,6 +792,14 @@ fn run_holding(runtime: &tokio::runtime::Runtime, holder: Holder) -> Result<i32>
     // Record 0108 as amended 2026-11-19: one token for each repository,
     // held for the process's life and shared by its workers and its looks.
     let tokens = crate::profiles::Tokens::default();
+    // Each worker that it starts is its child, in a process group of its
+    // own, recorded in `host/workers/` (`workers-end-with-their-owner@292e869158d6`).
+    // A worker's end is an event at its edge.
+    let (worker_ended, workers_ended) = mpsc::unbounded_channel();
+    let owner = crate::workers::own(&paths.dir, move || {
+        let _ = worker_ended.send(());
+    })
+    .context("taking the host's workers")?;
     let ending = runtime.block_on(async {
         let looked_with = settings.clone();
         let looked_holding = tokens.clone();
@@ -805,6 +858,25 @@ fn run_holding(runtime: &tokio::runtime::Runtime, holder: Holder) -> Result<i32>
                 ""
             }
         ));
+        // Before it claims a run or starts a worker: the groups that a
+        // killed host process left are ended, and the workers that an
+        // earlier image of this process started are its own again
+        // (`nothing-detached@f807c7f5fcea`).
+        let swept = tokio::task::block_in_place(|| crate::workers::sweep(&owner));
+        for r in &swept.ended {
+            log(&format!(
+                "sluice host: ended the process group {} of {}, which a stopped host process \
+                 left",
+                r.pid,
+                r.held.as_ref().map_or("a worker", |h| h.what.as_str())
+            ));
+        }
+        if !swept.kept.is_empty() {
+            log(&format!(
+                "sluice host: it keeps the workers {:?} of its last image",
+                swept.kept
+            ));
+        }
         // 135 (design D4): the repositories it holds, found again; a gone
         // one, or one with no sluice, leaves the index.
         let index = hosting.index();
@@ -829,12 +901,20 @@ fn run_holding(runtime: &tokio::runtime::Runtime, holder: Holder) -> Result<i32>
             &successor,
             telemetry.as_ref(),
             controls,
+            workers_ended,
+            &owner,
         )
         .await;
-        // A successor's socket is the host's now: only this process's own
-        // is removed.
-        if !matches!(ending, Ok(Ending::HandedOver)) {
-            let _ = std::fs::remove_file(&hosting.paths.socket);
+        let _ = std::fs::remove_file(&hosting.paths.socket);
+        // A stop ends its workers: a run that ended so has no outcome
+        // (`sluices-runs-end-with-its-host-process@e814b716f3b1`).
+        let ended = tokio::task::block_in_place(|| crate::workers::stop(&owner));
+        for r in &ended {
+            log(&format!(
+                "sluice host: ended the process group {} of {} as it stops",
+                r.pid,
+                r.held.as_ref().map_or("a worker", |h| h.what.as_str())
+            ));
         }
         hosting.connected.close();
         let _ = tokio::time::timeout(Duration::from_secs(1), hosting.connected.wait()).await;
@@ -1050,10 +1130,6 @@ fn binds(
     Ok(())
 }
 
-/// How long it waits for its successor to answer: a start's (design D2,
-/// D20).
-const SUCCESSOR_WAIT: Duration = Duration::from_secs(10);
-
 /// The start lock, once whatever holds it lets go, waited for on tokio's
 /// pool for blocking work.
 async fn start_lock(folder: &Arc<Folder>) -> Result<File> {
@@ -1070,170 +1146,17 @@ fn flush(telemetry: Option<&crate::telemetry::Telemetry>) {
     }
 }
 
-/// D20: hand the repositories to a successor it starts itself, for a
-/// change of `tables` no binding takes up in place: every scheduler
-/// finishes its reading and lets its worker go, its telemetry sends what
-/// it holds, and under the start lock, held until a host process of
-/// another pid answers, it lets its lock and its socket go and starts
-/// `<the executable it started as> host` with the environment it started
-/// with, detached. The successor says on a pipe that its socket answers.
-/// Nothing passes to the successor but what the records and the host's
-/// state hold: it reads the settings file itself. Where none answers, it
-/// takes its lock and socket back and goes on as it was, said once.
-/// Whether it handed over.
-#[allow(clippy::too_many_arguments)]
-async fn hand_over(
-    hosting: &Arc<Hosting>,
-    listener: &mut UnixListener,
-    lock: &mut Option<File>,
-    successor: &Successor,
-    telemetry: Option<&crate::telemetry::Telemetry>,
-    take_up: &TakeUp,
-    tables: &[&'static str],
-) -> bool {
-    let program = match &successor.program {
-        Ok(p) => p.clone(),
-        Err(why) => {
-            take_up.not_handed(tables, "its successor could not start", why);
-            return false;
-        }
-    };
-    let start = match start_lock(&hosting.folder).await {
-        Ok(f) => f,
-        Err(e) => {
-            take_up.not_handed(tables, "its successor could not start", &format!("{e:#}"));
-            return false;
-        }
-    };
-    log(&format!(
-        "sluice: {} changed {}, which the host process takes up by handing its repositories to \
-         a fresh one",
-        take_up.file(),
-        tables.join(", ")
-    ));
-    hosting.tasks.stop_all().await;
-    flush(telemetry);
-    drop(lock.take());
-    let _ = std::fs::remove_file(&hosting.paths.socket);
-    let log_path = hosting.paths.log();
-    let spawned = (|| -> Result<(std::process::Child, OwnedFd)> {
-        let (read, write) = nix::unistd::pipe()?;
-        for end in [&read, &write] {
-            nix::fcntl::fcntl(
-                end,
-                nix::fcntl::FcntlArg::F_SETFD(nix::fcntl::FdFlag::FD_CLOEXEC),
-            )?;
-        }
-        let out = hosting.folder.file(LOG, How::Append)?;
-        let mut command = std::process::Command::new(&program);
-        command
-            .arg("host")
-            .current_dir("/")
-            .stdin(std::process::Stdio::null())
-            .stdout(out.try_clone()?)
-            .stderr(out)
-            .env_clear()
-            .envs(successor.env.iter().cloned())
-            .env(READY_FD_VAR, write.as_raw_fd().to_string());
-        let handed = write.as_raw_fd();
-        // SAFETY: setsid and fcntl are async-signal-safe; nothing else runs
-        // here.
-        unsafe {
-            use std::os::unix::process::CommandExt;
-            command.pre_exec(move || {
-                nix::unistd::setsid().map_err(std::io::Error::from)?;
-                let fd = std::os::fd::BorrowedFd::borrow_raw(handed);
-                nix::fcntl::fcntl(
-                    fd,
-                    nix::fcntl::FcntlArg::F_SETFD(nix::fcntl::FdFlag::empty()),
-                )
-                .map_err(std::io::Error::from)?;
-                Ok(())
-            });
-        }
-        let child = command.spawn()?;
-        drop(write);
-        Ok((child, read))
-    })();
-    let own = std::process::id();
-    let answered = match spawned {
-        Ok((child, read)) => {
-            std::thread::spawn(move || {
-                let mut child = child;
-                child.wait()
-            });
-            // The successor's word that its socket answers, or the pipe's
-            // end where it ended first, then its answer read once.
-            if let Ok(ready) = tokio::net::unix::pipe::Receiver::from_owned_fd(read) {
-                let _ = tokio::time::timeout(SUCCESSOR_WAIT, async {
-                    let mut buf = [0u8; 16];
-                    loop {
-                        if ready.readable().await.is_err() {
-                            return;
-                        }
-                        match ready.try_read(&mut buf) {
-                            Ok(_) => return,
-                            Err(e) if e.kind() == ErrorKind::WouldBlock => {}
-                            Err(_) => return,
-                        }
-                    }
-                })
-                .await;
-            }
-            let env = successor.env.clone();
-            tokio::task::spawn_blocking(move || {
-                client::Client::new(&program, env)
-                    .ok()
-                    .and_then(|c| c.answering().ok().flatten())
-                    .map(|c| c.named.pid)
-            })
-            .await
-            .ok()
-            .flatten()
-            .is_some_and(|p| p != own)
-        }
-        Err(_) => false,
-    };
-    if answered {
-        drop(start);
-        return true;
-    }
-    // A successor that took the lock late holds the host now.
-    match hosting.folder.try_lock(LOCK) {
-        Ok(Some(f)) => *lock = Some(f),
-        _ => {
-            drop(start);
-            return true;
-        }
-    }
-    match bind(&hosting.paths.socket).and_then(|l| {
-        l.set_nonblocking(true)?;
-        Ok(UnixListener::from_std(l)?)
-    }) {
-        Ok(l) => *listener = l,
-        Err(e) => log(&format!("sluice host: binding again: {e:#}")),
-    }
-    hosting.tasks.resume();
-    // Its repositories with work in play are held again at once, as its
-    // start finds them (design D4).
-    scan(hosting);
-    drop(start);
-    take_up.not_handed(
-        tables,
-        "its successor did not start",
-        &format!("see {}", log_path.display()),
-    );
-    false
-}
-
-/// D3, D5 and D6 of `sluice-runs-as-a-daemon`: a daemon starts afresh in
-/// its own process as `program`, running `daemon` with the environment it
-/// started with, keeping its pid, so whatever keeps it running keeps the
-/// image started afresh: every scheduler finishes its reading and lets its
-/// worker go, its telemetry sends what it holds, and under the start lock
-/// and with its socket, each handed to the image started afresh by its
-/// descriptor, it lets its lock go and replaces its image. A command that
-/// connects meanwhile waits in the socket's queue for the new image (D6 of
+/// D3, D5 and D6 of `sluice-runs-as-a-daemon`, and D3 of
+/// `sluice-host-owns-its-workers`: a host process starts afresh in its own
+/// process as `program`, running `daemon` or `host` as it does, with the
+/// environment it started with. It keeps its pid, so its workers stay its
+/// children, and whatever keeps it running keeps the image started afresh
+/// (`sluices-runs-end-with-its-host-process@e814b716f3b1`). Every scheduler
+/// finishes its reading and lets its worker go, and its telemetry sends
+/// what it holds. Then, under the start lock and with its socket, each
+/// handed to the image started afresh by its descriptor, it lets its lock
+/// go and replaces its image. A command that connects meanwhile waits in
+/// the socket's queue for the new image (D6 of
 /// `sluice-host-runs-on-a-tokio-edge`). It returns only where the start
 /// failed: its lock taken back, its schedulers going on, and why.
 async fn start_afresh(
@@ -1248,7 +1171,14 @@ async fn start_afresh(
         Ok(f) => f,
         Err(e) => return format!("{e:#}"),
     };
-    log("sluice daemon: it starts afresh in its own process, keeping its pid");
+    let role = if hosting.named.daemon {
+        "daemon"
+    } else {
+        "host"
+    };
+    log(&format!(
+        "sluice {role}: it starts afresh in its own process, keeping its pid"
+    ));
     hosting.tasks.stop_all().await;
     flush(telemetry);
     let socket = listener.as_raw_fd();
@@ -1263,7 +1193,7 @@ async fn start_afresh(
         inherit(socket, nix::fcntl::FdFlag::empty())?;
         let mut command = std::process::Command::new(program);
         command
-            .arg("daemon")
+            .arg(role)
             .env_clear()
             .envs(
                 successor
@@ -1289,9 +1219,9 @@ async fn start_afresh(
     if lock.is_none() {
         match hosting.folder.try_lock(LOCK) {
             Ok(Some(f)) => *lock = Some(f),
-            Ok(None) => log("sluice daemon: another holds the host's lock now"),
+            Ok(None) => log(&format!("sluice {role}: another holds the host's lock now")),
             Err(e) => log(&format!(
-                "sluice daemon: taking the host's lock again: {e:#}"
+                "sluice {role}: taking the host's lock again: {e:#}"
             )),
         }
     }
@@ -1325,6 +1255,8 @@ async fn serve(
     successor: &Successor,
     telemetry: Option<&crate::telemetry::Telemetry>,
     mut controls: mpsc::UnboundedReceiver<Control>,
+    mut workers_ended: mpsc::UnboundedReceiver<()>,
+    owner: &crate::workers::Owner,
 ) -> Result<Ending> {
     let (mut watch, mut seen) = match watch::Watch::new() {
         Ok((w, bursts)) => (Some(w), Some(bursts)),
@@ -1405,7 +1337,16 @@ async fn serve(
             control = controls.recv() => {
                 count(&EDGE.events);
                 let (program, by) = match control {
-                    Some(Control::HandOver { program, by }) => (program, by),
+                    Some(Control::HandOver { by, ends: true, .. }) => {
+                        // A daemon takes the host's place: this process
+                        // ends, and its runs end with it.
+                        log(&format!(
+                            "sluice {}: sluice {by} takes the host's place; it ends",
+                            if hosting.named.daemon { "daemon" } else { "host" }
+                        ));
+                        return end(hosting).await;
+                    }
+                    Some(Control::HandOver { program, by, .. }) => (program, by),
                     Some(Control::Noted(repository)) => {
                         // A repository the watch takes in now is read once
                         // more, for a change made before its watch began.
@@ -1416,18 +1357,14 @@ async fn serve(
                     }
                     None => continue,
                 };
-                if !hosting.named.daemon {
-                    log(&format!(
-                        "sluice host: sluice {by} asked this one to hand over; it ends"
-                    ));
-                    return end(hosting).await;
-                }
-                // D3 of `sluice-runs-as-a-daemon`: a daemon a newer command
-                // asked to hand over starts afresh as the executable the
-                // asker named, or as its own; where it cannot, it goes on as
-                // it was, said once.
+                // D3 of `sluice-runs-as-a-daemon` and of
+                // `sluice-host-owns-its-workers`: a host process that a newer
+                // command asked to hand over starts afresh as the executable
+                // the asker named, or as its own, and keeps its workers;
+                // where it cannot, it goes on as it was, said once.
+                let role = if hosting.named.daemon { "daemon" } else { "host" };
                 log(&format!(
-                    "sluice daemon: sluice {by} asked this one to hand over; it starts afresh in \
+                    "sluice {role}: sluice {by} asked this one to hand over; it starts afresh in \
                      place"
                 ));
                 let program = match (program, &successor.program) {
@@ -1443,7 +1380,7 @@ async fn serve(
                     Err(why) => ("its own executable".to_string(), why.clone()),
                 };
                 log(&format!(
-                    "sluice daemon: warning: sluice {by} asked it to hand over, and it could not \
+                    "sluice {role}: warning: sluice {by} asked it to hand over, and it could not \
                      start afresh as {shown}, so it goes on as it was: {why}"
                 ));
             }
@@ -1473,6 +1410,12 @@ async fn serve(
                 take_up.look(hosting);
             }
             () = hosting.nudge.notified() => count(&EDGE.events),
+            // A worker ended: a run's part of the bound is free whatever
+            // way its run ended.
+            Some(()) = workers_ended.recv() => {
+                count(&EDGE.events);
+                runs_changed(hosting, &registry, watch.as_mut());
+            }
             _ = activity.changed() => count(&EDGE.events),
             _ = room.changed() => {
                 count(&EDGE.events);
@@ -1493,6 +1436,8 @@ async fn serve(
                 take_up.look(hosting);
                 scan_with(hosting, watch.as_mut());
                 runs_changed(hosting, &registry, watch.as_mut());
+                let dir = owner.dir.clone();
+                let _ = tokio::task::spawn_blocking(move || crate::workers::prune(&dir)).await;
                 send_room(hosting, telemetry, &mut sent, &mut names);
             }
         }
@@ -1510,9 +1455,11 @@ fn count(n: &std::sync::atomic::AtomicU64) {
 }
 
 /// Whether nothing keeps a host process that is no daemon: no scheduler
-/// busy, no connection open, and no part held or run waiting (D6).
+/// busy, no connection open, no part held or run waiting (D6), and no
+/// worker of its own running, which would end with it.
 fn idle(hosting: &Hosting) -> bool {
-    !hosting.tasks.any()
+    crate::workers::children() == 0
+        && !hosting.tasks.any()
         && hosting.connections.load(Ordering::SeqCst) == 0
         && !hosting.room.lock().busy(Instant::now())
 }
@@ -1590,25 +1537,19 @@ async fn taken(
     let Taken::HandOver(tables) = take_up.landed(hosting, bound) else {
         return None;
     };
-    // D5 of `sluice-runs-as-a-daemon`: a daemon starts afresh in place as
-    // the executable it started as.
-    if hosting.named.daemon {
-        let why = match &successor.program {
-            Ok(program) => {
-                start_afresh(hosting, listener, lock, successor, telemetry, program).await
-            }
-            Err(why) => why.clone(),
-        };
-        take_up.not_handed(&tables, "it could not start afresh", &why);
-        return None;
-    }
-    if hand_over(
-        hosting, listener, lock, successor, telemetry, take_up, &tables,
-    )
-    .await
-    {
-        return Some(Ending::HandedOver);
-    }
+    // D5 of `sluice-runs-as-a-daemon` and D3 of
+    // `sluice-host-owns-its-workers`: a host process starts afresh in place
+    // as the executable it started as, and keeps its workers.
+    log(&format!(
+        "sluice: {} changed {}, which the host process takes up by starting afresh in place",
+        take_up.file(),
+        tables.join(", ")
+    ));
+    let why = match &successor.program {
+        Ok(program) => start_afresh(hosting, listener, lock, successor, telemetry, program).await,
+        Err(why) => why.clone(),
+    };
+    take_up.not_handed(&tables, "it could not start afresh", &why);
     None
 }
 
@@ -1966,12 +1907,14 @@ async fn answer(hosting: &Arc<Hosting>, stream: UnixStream) -> Result<()> {
                 .context("reading the room")??;
             send(&mut writer, &Answer::Room(view)).await
         }
-        // D3 of `sluice-runs-as-a-daemon`: a daemon starts afresh in place;
-        // a host process that is no daemon ends, whatever the asker named.
-        Request::HandOver { program } => {
+        // D3 of `sluice-runs-as-a-daemon` and of
+        // `sluice-host-owns-its-workers`: the host process starts afresh in
+        // place, or ends where the asker takes its place.
+        Request::HandOver { program, ends } => {
             let _ = hosting.control.send(Control::HandOver {
                 program,
                 by: hello.hello.clone(),
+                ends,
             });
             send(&mut writer, &Answer::Ok).await
         }

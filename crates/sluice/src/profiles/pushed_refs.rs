@@ -961,7 +961,7 @@ pub(crate) fn refusal(out: &Output) -> String {
 }
 
 pub(crate) fn command(git_dir: &Path, args: &[&str]) -> Command {
-    let mut c = Command::new("git");
+    let mut c = crate::workers::command("git", "git");
     c.arg("--git-dir")
         .arg(git_dir)
         .args(args)

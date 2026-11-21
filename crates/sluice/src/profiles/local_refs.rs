@@ -14,7 +14,7 @@
 use std::cell::RefCell;
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
-use std::process::{Command, Output, Stdio};
+use std::process::{Output, Stdio};
 
 use anyhow::{anyhow, bail, Context, Result};
 use gix::refs::file::transaction::prepare::ReferenceOutOfDate;
@@ -561,7 +561,7 @@ impl LocalRefs {
     /// session points it elsewhere, and it reads nothing from stdin.
     fn git(&self, args: &[&str]) -> Result<Output> {
         let sluice = Author::sluice();
-        Command::new("git")
+        crate::workers::command("git", "git")
             .arg("--git-dir")
             .arg(&self.git_dir)
             .args(args)

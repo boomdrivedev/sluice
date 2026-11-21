@@ -52,6 +52,14 @@ struct OnGitHub {
     b_signing: String,
 }
 
+/// Its tests end while a run may go: its host process is stopped as it
+/// ends, which ends the runs (`a-leaked-child-fails-its-test@9a82a5147ba6`).
+impl Drop for OnGitHub {
+    fn drop(&mut self) {
+        support::guard::stop_host_processes(self.state.path());
+    }
+}
+
 /// `policy` naming signers `a` and `b` by `keys`, and each branch's own
 /// table trusting both, so every branch with a remote keeps its records
 /// there (C.6; 78; design D28). A policy that names signers already is
@@ -5786,6 +5794,14 @@ struct Other<'a> {
     repo: Repo,
     config: Scratch,
     state: Scratch,
+}
+
+/// Another host's tests end while its run may go: its host process is
+/// stopped as it ends, which ends the runs.
+impl Drop for Other<'_> {
+    fn drop(&mut self) {
+        support::guard::stop_host_processes(self.state.path());
+    }
 }
 
 impl OnGitHub {

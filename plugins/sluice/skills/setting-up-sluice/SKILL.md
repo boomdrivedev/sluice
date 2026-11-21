@@ -35,6 +35,11 @@ curl -fsSL https://github.com/agentplot/sluice/releases/latest/download/sluice-a
 Each way installs `sluice` and `wt-submit` (worktrunk runs it as `wt submit`).
 Check `~/.local/bin` is on `PATH`, then `sluice --version` again.
 
+After an upgrade, run `sluice hand-over`. Where sluice's host process
+runs an older sluice, it starts afresh as the new one and keeps the tests
+it runs. Where none runs, the command does nothing. Never stop the host
+process to upgrade it: a stop ends the tests it runs.
+
 ## 2. A working copy per branch
 
 sluice is set up in a repository whose git directory stands apart from its

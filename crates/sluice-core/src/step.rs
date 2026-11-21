@@ -5235,6 +5235,10 @@ fn read_runs(runs: &[SystemRun]) -> RunsRead {
         let mut last: BTreeMap<&String, &CheckOutcome> = BTreeMap::new();
         let mut done = true;
         for &n in &chain {
+            // A run given every check decides [`EVERY_CHECK`] again.
+            if runs[n].checks.is_empty() {
+                last.retain(|c, _| c.as_str() != EVERY_CHECK);
+            }
             match &runs[n].ended {
                 Some(e) if runs[n].state.done() => {
                     // 66: a run its time limit ended reads as timed out,
@@ -5260,7 +5264,12 @@ fn read_runs(runs: &[SystemRun]) -> RunsRead {
         if !undecided.is_empty() {
             read.waiting = true;
             let unproven = undecided.iter().any(|(_, o)| **o == CheckOutcome::Unproven);
-            let checks = undecided.into_iter().map(|(c, _)| c.clone()).collect();
+            // A follow-up of [`EVERY_CHECK`] is given every check.
+            let checks = undecided
+                .into_iter()
+                .map(|(c, _)| c.clone())
+                .filter(|c| c != EVERY_CHECK)
+                .collect();
             read.follow.push((cur, checks, unproven));
         }
     }
@@ -5318,8 +5327,17 @@ fn end_run(l: &mut Line, cand: &str, i: usize, ended: Ended, now: &str) {
 }
 
 /// 60, record 0122 (design D7): each of `checks` with no outcome, the
-/// run's executor having stopped before it reported.
+/// run's executor having stopped before it reported. A run that was given
+/// no check by name, on a branch that names no required check, has
+/// [`EVERY_CHECK`] with no outcome, so its follow-up runs every check
+/// again and a lost run is never read as passed
+/// (`sluices-runs-end-with-its-host-process@e814b716f3b1`).
 fn lost(checks: &[String]) -> Vec<NotRun> {
+    let every = [EVERY_CHECK.to_string()];
+    let checks = match checks.is_empty() {
+        true => &every[..],
+        false => checks,
+    };
     checks
         .iter()
         .map(|task| NotRun {
@@ -5329,6 +5347,11 @@ fn lost(checks: &[String]) -> Vec<NotRun> {
         })
         .collect()
 }
+
+/// What a run that was given no check by name has with no outcome where
+/// it decided nothing: every check that it runs. A run given every check
+/// decides it again.
+const EVERY_CHECK: &str = "every check of the run";
 
 /// 115 (as amended 2026-11-18; record 0031 as amended 2026-11-18): the end
 /// of run `i` of `c` whose claim lapsed on `host`, each of its checks in
@@ -5804,6 +5827,48 @@ mod tests {
 
     use super::*;
     use crate::{Clock, Requester, Seams, SubmitHead, SubmitRequest};
+
+    /// A run given `checks`, ended with `ended`, following `follows`.
+    fn run_ended(checks: &[&str], ended: Ended, follows: Option<usize>) -> SystemRun {
+        SystemRun {
+            system: None,
+            checks: checks.iter().map(|c| c.to_string()).collect(),
+            state: RunState::Closed,
+            place: None,
+            run: None,
+            no_replay: false,
+            declined: BTreeMap::new(),
+            lost: None,
+            opened: None,
+            claim: None,
+            running: None,
+            ended: Some(ended),
+            closed: None,
+            follows,
+            no_executor: false,
+        }
+    }
+
+    /// `sluices-runs-end-with-its-host-process@e814b716f3b1`: a lost run
+    /// that was given no check by name is never read as passed; its
+    /// follow-up is given every check, and its pass decides the run.
+    #[test]
+    fn a_lost_run_with_no_named_check_is_tested_again() {
+        let lost_run = run_ended(&[], with_none(&lost(&[]), "t"), None);
+        let read = read_runs(std::slice::from_ref(&lost_run));
+        assert!(read.waiting && !read.failed);
+        assert_eq!(read.follow, vec![(0, Vec::<String>::new(), false)]);
+
+        let passed = Ended {
+            at: "t".into(),
+            outcomes: [("command".to_string(), CheckOutcome::Passed)].into(),
+            timed_out: false,
+            why: None,
+            untaken: false,
+        };
+        let read = read_runs(&[lost_run, run_ended(&[], passed, Some(0))]);
+        assert!(!read.waiting && !read.failed && read.follow.is_empty());
+    }
 
     const POLICY: &str = "[branches.main]\nrequired = [\"#gate\"]\nparallel = 4\n";
 
