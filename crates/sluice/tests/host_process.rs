@@ -2727,7 +2727,7 @@ async fn three_idle_repositories_are_read_once_a_minute() {
 /// host-events, "Five serves during a reading" (`one-read-in-flight@e99acda774d0`):
 /// five commands' `serve` while a pass is in flight make one more pass
 /// after it, and no third.
-#[tokio::test(flavor = "multi_thread")]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn five_serves_during_a_reading_make_one_more() {
     let seen = edge::Seen::default();
     let tasks = edge::tasks(&seen, Duration::from_millis(300));
@@ -2752,7 +2752,7 @@ async fn five_serves_during_a_reading_make_one_more() {
 
 /// host-events, "A burst of ref changes": twenty refs of a repository
 /// moved within a moment are one burst of the watch, and one reading.
-#[tokio::test(flavor = "multi_thread")]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_burst_of_ref_moves_makes_one_reading() {
     let repo = support::Repo::new("host-burst");
     let common = std::fs::canonicalize(repo.dir().join(".git")).unwrap();

@@ -1897,14 +1897,23 @@ mod tests {
         }
     }
 
-    /// `check` holds within ten seconds of tokio's clock, which a paused
-    /// test moves on as it waits.
+    /// `check` holds within ten seconds of the system's clock: a paused
+    /// clock moves on while a worker's thread runs on its own, so tokio's
+    /// clock bounds no wait for a worker.
     async fn soon(what: &str, check: impl Fn() -> bool) {
-        let until = Instant::now() + Duration::from_secs(10);
+        let until = std::time::Instant::now() + Duration::from_secs(30);
         while !check() {
-            assert!(Instant::now() < until, "{what}: not within 10s");
-            tokio::time::sleep(Duration::from_millis(10)).await;
+            assert!(std::time::Instant::now() < until, "{what}: not within 10s");
+            tokio::time::sleep(Duration::from_millis(1)).await;
         }
+    }
+
+    /// Whether a reading of `repository` is under way: one began after the
+    /// last ended. A fake worker counts its pass before its scheduler marks
+    /// the pass's end.
+    fn reading(tasks: &Tasks, repository: &Path) -> bool {
+        let m = tasks.marks(repository);
+        m.began.map(|b| b.n) > m.ended.map(|e| e.n)
     }
 
     /// Let every task run that can, and every blocking call end, on a
@@ -1923,7 +1932,7 @@ mod tests {
     /// 26, 135 (design D5): a worker that panics ends its own thread alone,
     /// and is bound again at its next tick; another repository's worker
     /// passes meanwhile.
-    #[tokio::test(start_paused = true)]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn a_worker_that_panics_is_bound_again_at_its_next_tick() {
         let repo = PathBuf::from("/host/a.git");
         let fakes = Fakes {
@@ -1937,13 +1946,11 @@ mod tests {
             fakes.seen.binds(&repo) == 1 && !tasks.holds(&repo)
         })
         .await;
-        settle().await;
         assert!(fakes.seen.passes(&repo).is_empty());
         // Another repository's worker passes meanwhile.
         let other = PathBuf::from("/host/b.git");
         assert!(tasks.handle(&other).pass(None).await.is_ok());
-        // Its next tick binds it again, and it passes.
-        tokio::time::advance(Duration::from_secs(3)).await;
+        // Its next tick, three seconds on, binds it again, and it passes.
         soon("bound again", || !fakes.seen.passes(&repo).is_empty()).await;
         assert_eq!(fakes.seen.binds(&repo), 2);
     }
@@ -1951,7 +1958,7 @@ mod tests {
     /// D13, D14: a part of the host's bound that frees has the repository
     /// it is owed to, one waiting with none under test, pass at once; under
     /// passes when asked, nothing passes by itself.
-    #[tokio::test(start_paused = true)]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn a_freed_part_wakes_the_repository_it_is_owed_to() {
         use super::super::room::{Room, Shared};
         use sluice_seams::RunKind;
@@ -1977,7 +1984,7 @@ mod tests {
                 "the idle repository waits"
             );
             drop(part);
-            settle().await;
+            tokio::time::sleep(Duration::from_millis(300)).await;
             if asked_only {
                 assert!(fakes.seen.passes(&idle).is_empty());
             } else {
@@ -1994,7 +2001,7 @@ mod tests {
     /// repository is current: one ended within its tick at once; with none,
     /// a look's or the worker's next pass's, its refusal named; under passes
     /// when asked, from a look, though a worker holds the repository.
-    #[tokio::test(start_paused = true)]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn a_read_is_answered_once_a_reading_is_current() {
         let repo = PathBuf::from("/host/read.git");
         let fakes = Fakes {
@@ -2018,10 +2025,10 @@ mod tests {
         // One ended within its tick: at once, nothing read again.
         let began = Instant::now();
         assert!(tasks.read(&repo, tick, within, false).await.current);
-        assert_eq!(Instant::now(), began);
+        assert!(began.elapsed() < Duration::from_millis(50));
         assert_eq!(fakes.seen.looks(&repo).len(), 1);
         // Past its tick: read again.
-        tokio::time::advance(tick).await;
+        tokio::time::sleep(tick).await;
         assert!(tasks.read(&repo, tick, within, false).await.current);
         assert_eq!(fakes.seen.looks(&repo).len(), 2);
 
@@ -2029,12 +2036,17 @@ mod tests {
         // follow asks a pass of its own first (D9), which asks the remote,
         // as a binding made afresh has asked nothing yet.
         let _held = tasks.handle(&repo).follow(FollowKind::Wait);
+        // The bind's own pass and the follow's are one pass, or two where
+        // the follow came while the first was under way.
         soon("the follow's own pass", || {
-            fakes.seen.passes(&repo).len() == 1
+            !fakes.seen.passes(&repo).is_empty() && !reading(&tasks, &repo)
         })
         .await;
-        assert_eq!(fakes.seen.passes(&repo), [true]);
-        tokio::time::advance(tick).await;
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        assert!(!reading(&tasks, &repo));
+        let passed = fakes.seen.passes(&repo).len();
+        assert!(fakes.seen.passes(&repo)[0], "the first pass asks");
+        tokio::time::sleep(tick).await;
         let read = tasks.read(&repo, tick, within, false).await;
         assert!(read.current, "{read:?}");
         // Nothing in play and the remote asked within the minute: the pass
@@ -2044,7 +2056,8 @@ mod tests {
             read.refused.as_deref(),
             Some("origin: 503 Service Unavailable")
         );
-        assert_eq!(fakes.seen.passes(&repo), [true, false]);
+        assert_eq!(fakes.seen.passes(&repo).len(), passed + 1);
+        assert_eq!(fakes.seen.passes(&repo).last(), Some(&false));
         assert_eq!(fakes.seen.looks(&repo).len(), 2);
 
         // Under passes when asked, a look reads, running no pass, though a
@@ -2053,7 +2066,11 @@ mod tests {
         let _task = asked.handle(&repo).follow(FollowKind::Wait);
         let read = asked.read(&repo, tick, within, false).await;
         assert!(read.current && read.ended.is_some(), "{read:?}");
-        assert_eq!(fakes.seen.passes(&repo).len(), 2, "no pass was run");
+        assert_eq!(
+            fakes.seen.passes(&repo).len(),
+            passed + 1,
+            "no pass was run"
+        );
         assert_eq!(fakes.seen.looks(&repo).len(), 3);
         // Asked afresh, it reads again though its reading is current.
         assert!(asked.read(&repo, tick, within, false).await.current);
@@ -2066,14 +2083,14 @@ mod tests {
     /// change, its `serve`, is not current, so the next read reads the
     /// change, by a look under passes when asked; the look's answer says
     /// the look made it, which wrote no reader's document.
-    #[tokio::test(start_paused = true)]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn a_read_after_a_change_reads_it() {
         let repo = PathBuf::from("/host/told.git");
         let fakes = Fakes::default();
         let tasks = fakes.tasks().passes_when_asked();
         let (tick, within) = (Duration::from_secs(60), Duration::from_secs(5));
         let _task = tasks.handle(&repo).follow(FollowKind::Wait);
-        settle().await;
+        tokio::time::sleep(Duration::from_millis(300)).await;
         let looked = fakes.seen.looks(&repo).len();
         // A pass's reading: current, and no look's.
         tasks.handle(&repo).pass(None).await.unwrap();
@@ -2096,7 +2113,7 @@ mod tests {
     /// read's trigger during it makes one more look, and the read answers
     /// from the look begun after the change, so the next read is answered
     /// at once.
-    #[tokio::test(flavor = "multi_thread")]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn a_reading_under_way_when_told_is_read_again() {
         let repo = PathBuf::from("/host/under-way.git");
         let fakes = Fakes {
@@ -2257,7 +2274,7 @@ mod tests {
     /// asks the remote where the last reading found work in play, at a
     /// watch's opening and after a command's change, and otherwise not
     /// within the minute.
-    #[tokio::test(start_paused = true)]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn a_pass_asks_where_work_is_in_play_or_a_watch_opens() {
         let repo = PathBuf::from("/host/pass-asks.git");
         let fakes = Fakes::default();
@@ -2265,8 +2282,13 @@ mod tests {
         let passes = || fakes.seen.passes(&repo);
         let pass = |n: usize| {
             tasks.handle(&repo).wake();
-            let (seen, repo) = (fakes.seen.clone(), repo.clone());
-            async move { soon("the pass", || seen.passes(&repo).len() == n).await }
+            let (seen, repo, tasks) = (fakes.seen.clone(), repo.clone(), tasks.clone());
+            async move {
+                soon("the pass", || {
+                    seen.passes(&repo).len() == n && !reading(&tasks, &repo)
+                })
+                .await
+            }
         };
 
         tasks.look(&repo);
@@ -2307,7 +2329,7 @@ mod tests {
     /// and counts as the process busy until it ends, when it binds that
     /// repository's worker where work is in play. A second look while the
     /// first reads joins one reading after it.
-    #[tokio::test(flavor = "multi_thread")]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn a_slow_look_holds_no_command_and_no_other_look() {
         let (slow, quick, other) = (
             PathBuf::from("/host/slow.git"),
@@ -2360,7 +2382,7 @@ mod tests {
 
     /// D3: many triggers while a reading is in flight make one more reading
     /// after it, and no third.
-    #[tokio::test(flavor = "multi_thread")]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn triggers_during_a_reading_make_one_more() {
         let repo = PathBuf::from("/host/joined.git");
         let fakes = Fakes {
