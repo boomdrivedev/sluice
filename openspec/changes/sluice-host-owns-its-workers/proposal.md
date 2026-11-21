@@ -22,10 +22,10 @@ Claims that it keeps holding:
 
 - Each worker is a child of `sluice host` in a process group of its own, recorded in the host's state.
 - A stop of `sluice host` ends its workers' groups. A run that ended with its owner has no outcome.
-- Each hand-over and each settings take-up starts the next host process in place, with the same pid, so the runs stay its children.
+- Each hand-over and each settings take-up starts the next host process in place, with the same pid, so the runs stay its children. An older command still uses a newer host process.
 - A host process that starts ends the groups that a killed host process left.
-- The daemon's services end the job's process group.
-- `[runs] max` counts checks, session runs and previews. git and credential workers run outside it.
+- The daemon's services end the job's process group. A new package is a hand-over, not a restart of the service.
+- `[runs] max` stays the one limit of sluice's checks, session runs and previews, by the user's answer of 2026-11-21. git and credential workers run outside it.
 - A guard in the test support fails each test that leaves a process, and ends that process.
 - The test tasks of each Rust crate run under cargo-nextest, which fails a test that leaves a process that holds its output.
 - The shell test tasks of the plugins and the check-e2e tier run under one script that fails where a process of the test is left.
@@ -40,6 +40,7 @@ Out of scope:
 
 ### New Capabilities
 
+- `resident-workers`: each worker as a child of `sluice host` in its own process group, its end with its owner, a hand-over in place, and the sweep at start.
 - `test-children`: a test fails when it leaves a process that continues to run, in each crate and in each shell test task.
 
 ### Modified Capabilities
@@ -47,11 +48,11 @@ Out of scope:
 - `host-process`: a run ends with its host process, and a hand-over starts the next host process in place.
 - `host-daemon`: a stopped daemon ends its runs.
 - `settings-take-up`: a take-up that cannot be done while the process runs starts afresh in place.
-- `daemon-service`: the services end the job's process group.
+- `daemon-service`: the services end the job's process group, and a new package is a hand-over.
 
 ## Impact
 
-- The runs and the host process of the `sluice` crate: workers in process groups, a record of each group, a sweep at start, a hand-over in place.
+- The runs and the host process of the `sluice` crate: workers in process groups, and a record of each group. Also a sweep at start, and a hand-over in place.
 - The test support of the `sluice` crate: a guard, which the tests that start sluice use.
 - The project files of the five crates: `cargo nextest run` in place of `cargo test`. A nextest configuration at the root.
 - The devenv shell: cargo-nextest at a pinned version.
