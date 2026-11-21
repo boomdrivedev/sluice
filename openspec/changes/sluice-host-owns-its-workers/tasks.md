@@ -11,18 +11,18 @@
 
 - [x] 2.1 Add the guard to the test support. It stops the test's host processes, fails the test where a process of its folders is left, and ends each such process. Check: `cargo test -p sluice --test host_process a_test_that_leaves_a_run_fails`, `a_clean_test_passes` and `the_guard_ends_a_process_that_ignores_sigterm`.
 - [x] 2.2 Find a detached process by the state folder and the scratch folders, and pass over another test's processes. Check: `cargo test -p sluice --test host_process the_guard_finds_a_detached_host_process` and `the_guard_passes_over_another_tests_process`.
-- [ ] 2.3 Hold the guard in `OnDisk` and in each `Scratch`. Check: `sluice exec main -- moon run cli:test`.
+- [x] 2.3 Hold the guard in `OnDisk` and in each `Scratch`. Check: `sluice exec main -- moon run cli:test`.
 
 ## 3. The Rust test tasks
 
 - [x] 3.1 Pin cargo-nextest in the devenv shell, and add the root's nextest profile with `leak-timeout` set to fail. Check: `sluice exec main -- moon run root:toolchain`.
 - [x] 3.2 Run the `test`, `tools` and `sandbox` tasks of the five crates with `cargo nextest run`. Check: a fixture test that leaks `sleep 60` fails `cargo nextest run`, and the suite passes without it.
-- [ ] 3.3 Change each test that the guard or nextest fails so that it ends its processes before it ends. Check: `sluice exec main -- moon run cli:tools`, then `cli:sandbox`, one at a time.
+- [x] 3.3 Change each test that the guard or nextest fails so that it ends its processes before it ends. Check: `sluice exec main -- moon run cli:tools`, then `moon run cli:sandbox` outside the gate's sandbox, as the pre-merge hook runs it, one at a time.
 
 ## 4. The shell test tasks
 
 - [x] 4.1 Add `tests/leaks.sh`, which runs a test command in a process group of its own with its own folders, and fails where a process of the test is left. Check: `sluice exec main -- moon run root:leaks-cases`, a task of the root that runs the script on a test that leaves a watcher and on one that leaves nothing.
-- [ ] 4.2 Run the plugins' shell test tasks and the check-e2e tier through `tests/leaks.sh`. Check: `sluice exec main -- moon run plugin-herdr:test-sh`, then `plugin-herdr:test-dash`, `plugin-sluice:hooks` and `plugin-sluice:lay-out`, one at a time.
+- [x] 4.2 Run the plugins' shell test tasks and the check-e2e tier through `tests/leaks.sh`. Check: `sluice exec main -- moon run plugin-herdr:test-sh`, then `plugin-herdr:test-dash`, `plugin-sluice:hooks` and `plugin-sluice:lay-out`, one at a time.
 
 ## 5. The services
 
