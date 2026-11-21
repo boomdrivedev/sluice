@@ -1648,7 +1648,15 @@ fn the_overview_names_a_hand_pushed_revision() {
     assert_eq!(before["revision"], s.remote_main().as_str(), "{before}");
     let other = Repo::clone_of(s.origin.path(), "overview-hand-pushed-b");
     let pushed = other.push_change("by-hand.txt", "pushed by hand\n");
-    let after = overview_of(&s, "main");
+    // A one-shot read within a tick of the host process's last reading is
+    // answered from that reading (129): the push is named once a reading
+    // after it ends.
+    let until = Instant::now() + Duration::from_secs(10);
+    let mut after = overview_of(&s, "main");
+    while after["revision"] != pushed.as_str() && Instant::now() < until {
+        std::thread::sleep(Duration::from_millis(500));
+        after = overview_of(&s, "main");
+    }
     assert_eq!(after["revision"], pushed.as_str(), "{after}");
     assert_eq!(after["at"], before["at"], "{after}");
     assert_eq!(after["depth"], 0, "{after}");
