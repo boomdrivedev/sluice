@@ -2948,6 +2948,54 @@ fn the_guard_ends_a_process_that_ignores_sigterm() {
     assert!(guard.find().is_empty(), "{:?}", guard.find());
 }
 
+/// `nothing-detached@f807c7f5fcea`: a host process that a command starts
+/// keeps no descriptor that the command's caller left open. The caller's
+/// pipe reads its end once the command ends, while the host process runs.
+#[test]
+fn a_host_process_keeps_no_descriptor_its_callers_caller_left_open() {
+    use std::os::fd::AsRawFd;
+    use std::os::unix::process::CommandExt;
+    let d = OnDisk::new("host-inherited-fd", POLICY);
+    let dir = d.session("a");
+    assert_eq!(answering(&d), None);
+    let (read, write) = nix::unistd::pipe().unwrap();
+    let raw = write.as_raw_fd();
+    let mut c = d.command(&dir);
+    c.args(["submit", "main", "--no-wait", "--json"]);
+    // SAFETY: dup2 is async-signal-safe; the copy at 9 is not set to close
+    // on exec, as a caller's stray descriptor is not.
+    unsafe {
+        c.pre_exec(move || {
+            if libc::dup2(raw, 9) < 0 {
+                return Err(std::io::Error::last_os_error());
+            }
+            Ok(())
+        });
+    }
+    let out = c.output().unwrap();
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    drop(write);
+    let host = answering(&d).expect("a host process runs");
+    nix::fcntl::fcntl(
+        &read,
+        nix::fcntl::FcntlArg::F_SETFL(nix::fcntl::OFlag::O_NONBLOCK),
+    )
+    .unwrap();
+    let mut buf = [0u8; 8];
+    assert!(
+        matches!(nix::unistd::read(&read, &mut buf), Ok(0)),
+        "the pipe reads its end"
+    );
+    assert!(
+        alive(host),
+        "the host process runs as the pipe reads its end"
+    );
+}
+
 /// `a-leaked-child-fails-its-test@9a82a5147ba6`: a process of the test
 /// that ends by itself just after the test ends does not continue to run,
 /// and the guard passes it over. The far side of a git fetch that just

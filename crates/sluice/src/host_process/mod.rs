@@ -385,6 +385,34 @@ pub fn take_carried() -> Carried {
     }
 }
 
+/// Close each descriptor that this process inherited and keeps for no use
+/// of its own: each at 3 or above that is not set to close on exec. sluice
+/// sets each descriptor that it opens to close on exec, and
+/// [`take_carried`] sets so each that it takes. A host process runs long,
+/// and a descriptor that its starter's caller left open, such as the write
+/// end of a test runner's pipe, would stay open as long as it runs, and in
+/// each worker that it starts (`nothing-detached@f807c7f5fcea`). Called in
+/// `main` after [`take_carried`], before any thread starts. The
+/// descriptors that it closed.
+pub fn close_inherited() -> Vec<RawFd> {
+    let open: Vec<RawFd> = match std::fs::read_dir("/dev/fd") {
+        Ok(entries) => entries
+            .filter_map(|e| e.ok()?.file_name().to_str()?.parse().ok())
+            .collect(),
+        Err(_) => return Vec::new(),
+    };
+    let mut closed = Vec::new();
+    for fd in open.into_iter().filter(|fd| *fd > 2) {
+        // SAFETY: fcntl and close read only their integer arguments; a
+        // descriptor of the listing that is closed already answers EBADF.
+        let flags = unsafe { libc::fcntl(fd, libc::F_GETFD) };
+        if flags >= 0 && flags & libc::FD_CLOEXEC == 0 && unsafe { libc::close(fd) } == 0 {
+            closed.push(fd);
+        }
+    }
+    closed
+}
+
 /// The host process's runtime: many threads, and a bounded pool for
 /// blocking work (design D1 of `sluice-host-runs-on-a-tokio-edge`).
 fn runtime() -> Result<tokio::runtime::Runtime> {

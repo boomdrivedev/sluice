@@ -67,6 +67,11 @@ fn main() {
     }
     // The host process needs no repository: it holds every repository its
     // index names (135; design D1).
+    if let Some(Command::Host | Command::Daemon) = &cli.command {
+        // A host process keeps no descriptor that its starter's caller
+        // left open (`nothing-detached@f807c7f5fcea`).
+        sluice::host_process::close_inherited();
+    }
     if let Some(Command::Host) = &cli.command {
         match sluice::host_process::run(cli.choices(), carried) {
             Ok(code) => std::process::exit(code),
