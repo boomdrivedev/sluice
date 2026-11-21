@@ -211,6 +211,19 @@ impl HostCount {
         Ok(out)
     }
 
+    /// The run directory of each entry that counts now: the host process
+    /// watches each, so the end of its run frees its part of the bound (the
+    /// change `sluice-host-runs-on-a-tokio-edge`).
+    pub fn run_dirs(&self) -> Result<std::collections::BTreeSet<PathBuf>> {
+        let mut out = std::collections::BTreeSet::new();
+        for (name, e) in self.recorded()? {
+            if self.live(&name, &e)? {
+                out.insert(e.run_dir);
+            }
+        }
+        Ok(out)
+    }
+
     /// The host's lock, once whatever holds it lets go.
     fn lock(&self) -> Result<File> {
         lock(&self.dir)
@@ -453,7 +466,7 @@ mod tests {
         let s = Scratch::new("older");
         let older = s.run_dir("older");
         let repository = s.0.join("repo");
-        let now = std::time::Instant::now();
+        let now = tokio::time::Instant::now();
         let mut room = Room::over(s.count(), 1, 0);
         let admitted = s
             .count()
@@ -499,7 +512,7 @@ mod tests {
         let dir = s.run_dir("outlived");
         let repository = s.0.join("repo");
         let asker = Asker::Queue(repository.clone());
-        let now = std::time::Instant::now();
+        let now = tokio::time::Instant::now();
         let supervisor = {
             let mut room = Room::over(s.count(), 1, 0);
             let Asked::Held(id) = room.ask(&asker, &repository, None, now).unwrap() else {

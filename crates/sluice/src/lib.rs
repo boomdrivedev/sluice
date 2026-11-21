@@ -1522,11 +1522,6 @@ extern "C" fn interrupted(_: nix::libc::c_int) {
     INTERRUPTED.store(true, Ordering::SeqCst);
 }
 
-/// Whether Ctrl-C, or a stop where [`stop_on_terminate`] is in force, came.
-pub(crate) fn stopped() -> bool {
-    INTERRUPTED.load(Ordering::SeqCst)
-}
-
 /// Ctrl-C ends a wait and nothing else: the submission stays queued (5)
 /// and its run, in a session of its own, goes on.
 pub fn stop_on_interrupt() -> Result<()> {
@@ -2871,8 +2866,8 @@ fn dispatch(
             runs::supervise(&dir)?;
             Ok(0)
         }
-        Command::Host => host_process::run(telemetry::Choices::default()),
-        Command::Daemon => host_process::daemon(telemetry::Choices::default(), None),
+        Command::Host => host_process::run(telemetry::Choices::default(), Default::default()),
+        Command::Daemon => host_process::daemon(telemetry::Choices::default(), Default::default()),
         Command::Protect { remove, json } => {
             let dir = std::env::current_dir()?;
             if remove {

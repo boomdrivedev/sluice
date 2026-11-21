@@ -51,6 +51,9 @@ aws-sdk-sts.workspace = true
 aws-runtime.workspace = true
 aws-smithy-http-client.workspace = true
 tokio.workspace = true
+tokio-util.workspace = true
+tokio-stream.workspace = true
+notify-debouncer-full.workspace = true
 zip.workspace = true
 sigstore-verify.workspace = true
 sigstore-trust-root.workspace = true
@@ -94,6 +97,8 @@ path = "tests/profiles/conformance.rs"
 tools = []
 
 [dev-dependencies]
+# A test of sluice host's edge pauses tokio's clock and moves it.
+tokio = { workspace = true, features = ["test-util"] }
 ssh-key.workspace = true
 rand_core.workspace = true
 sluice-fakes = { path = "../sluice-fakes" }
