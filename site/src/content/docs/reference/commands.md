@@ -16,6 +16,7 @@ sidebar:
 | `sluice overview` | Every branch's queue at a glance: the combinations under test, the submissions still queued, the latest landings, blames and conflicts, and the worktrees and previews held. `--json` for tools: it also gives each branch's `revision`, as the read found it, and `after_landed`, the landed submissions a queued one's `--after` names, and each combination's `on`, the branch's revision it was formed on. `--json --watch` prints it again each time it changes. A read of the queue it couldn't make is printed as one line, the error document with what it was refused. The watch reads again a second later. It ends only when it's stopped, when its repository is gone, or where the repository has no sluice: no state, and no branch here or a remote's as last fetched holding `.config/sluice.toml`. Its last line is then the overview with `"set_up": false`, and it exits `0`; nothing is fetched to tell. sluice's host process reads the queue for every watch and wait, which follow what it read. `sluice overview` alone asks it for a reading and prints from the host process's last reading, fetching nothing itself ([below](#one-shot-reads)). |
 | `sluice step <branch>` | One round of a branch's work, then exit: for cron, CI or a hook. sluice's host process runs it between its passes, as it runs every round, and the step prints what it did ([below](#who-runs-the-rounds)). Says `elsewhere` when another host runs the branch's queue, and `held` when the revision it reads lacks the branch's last landing ([below](#sluice-branch)). Each thing its intake couldn't ask GitHub is said on stderr, every step: `sluice: warning: taking in <branch>'s pull requests: <asked>: <what GitHub said>`, where `asked` is the branch's pull requests or `pull/<n>`. `--json` for scripts. |
 | `sluice daemon` | Keep sluice's host process running, on a machine that chooses to; nothing needs it. It runs in the foreground and never ends for being idle, for a machine that runs queues for other hosts and no sluice command itself ([below](#sluice-daemon)). |
+| `sluice hand-over` | Have sluice's host process start afresh as this sluice, keeping the tests it runs, where it runs another sluice; it starts none ([below](#sluice-hand-over)). |
 | `sluice amend <id>` | Reorder a queued submission (`--after`, `--priority`) until it is under test. `--branch <branch>` names the branch its number is on, where more than one branch holds it ([below](#sluice-wait)). `--json` for scripts. |
 | `sluice withdraw <id>` | Take a submission out of the queue. One already withdrawn is said so, and exits `0`; one landed is refused. `--branch <branch>` names the branch its number is on, where more than one branch holds it ([below](#sluice-wait)). `--json` for scripts. |
 | `sluice protect` | Install the branch-protection hook; `--remove` takes it out. Warns of a worktree that has checked out a protected branch. `--json` for scripts. |
@@ -1721,20 +1722,45 @@ has sluice, it adds that repository to the index, as every command
 does.
 
 - Started while a host process that ends when idle runs, it has that
-  process hand over and takes its place. Where that process hasn't
-  ended within the time a hand-over is given, seventy seconds, it exits
-  `3` naming the host process's log.
+  process end and takes its place. The tests that process ran end with
+  it, and the daemon runs them again. Where that process hasn't ended
+  within the time a hand-over is given, seventy seconds, it exits `3`
+  naming the host process's log.
 - Started while another `sluice daemon` runs, it says once on stderr
   which one it waits for, and takes its place once that one ends.
 - A newer sluice's command has it start afresh in its own process as
   that command's sluice, keeping its process ID, so whatever keeps it
   running keeps the new one.
-- `SIGTERM` or `SIGINT` stops it: each repository's round finishes, and
-  it exits `0`. The tests it started go on, and the next host process
-  reads them.
+- `SIGTERM` or `SIGINT` stops it: each repository's round finishes, the
+  tests it started end, and it exits `0`. A test it ended has no
+  outcome, and the next host process runs it again.
+- Its service manager stops it with its whole process group. A new
+  sluice is no reason to restart it: `sluice hand-over` has it start
+  afresh as the new sluice and keep its tests.
 
 Once it holds the host, what it says goes to `host/log` in
 [sluice's state](/sluice/reference/state/), as the host process's does.
+
+## `sluice hand-over`
+
+Every test that sluice's host process runs is its child, and ends when
+the host process ends. A host process asked to hand over starts afresh
+in its own process instead, keeping its process ID, so its tests go on.
+`sluice hand-over` asks it, where the host process that answers runs
+another sluice than this one: it has that process start afresh as this
+sluice, waits for it to answer, and says so on one line:
+
+```console
+$ sluice hand-over
+sluice: the host process 4127, which ran /nix/store/…-sluice-0.98.0/bin/sluice, started afresh as /nix/store/…-sluice-0.99.0/bin/sluice
+```
+
+It says nothing where the host process runs this sluice already, or
+where none answers, and it starts none. A service manager's activation
+runs it after it installs a new sluice, in place of a restart, which
+would end the tests. A newer sluice's command does the same by itself.
+It exits `3` naming the host process's log where the host process does
+not start afresh within seventy seconds.
 
 ## Exit codes
 

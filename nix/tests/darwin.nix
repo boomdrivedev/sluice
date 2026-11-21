@@ -21,6 +21,15 @@ let
   off = t.darwinSystem { services.sluice.enable = lib.mkForce false; };
   noHome = t.darwinSystem { users.users.alice.home = lib.mkForce null; };
   daemon = t.darwinSystem { services.sluice.daemon.enable = true; };
+  daemonOwn = t.darwinSystem (
+    { pkgs, ... }:
+    {
+      services.sluice = {
+        package = pkgs.writeTextDir "bin/sluice" "";
+        daemon.enable = true;
+      };
+    }
+  );
   daemonNone = t.darwinSystem {
     services.sluice = {
       package = null;
@@ -84,8 +93,9 @@ in
   "The daemon on nix-darwin" =
     let
       agent = agentOf daemon;
-      line = "/bin/wait4path /nix/store && exec ${flakes}/bin/sluice daemon";
+      line = "/bin/wait4path /nix/store && exec /run/current-system/sw/bin/sluice daemon";
       path = agent.EnvironmentVariables.PATH or "";
+      handOver = "/run/current-system/sw/bin/sluice hand-over || true";
     in
     t.expect (t.failures daemon == [ ]) "the system fails: ${toString (t.failures daemon)}"
     ++ t.expect (
@@ -97,7 +107,11 @@ in
     ) "the agent runs ${toString (map plain agent.ProgramArguments)}, not /bin/sh -c ${plain line}"
     ++ t.expect (agent.RunAtLoad == true) "the agent does not run at load"
     ++ t.expect (agent.KeepAlive == true) "the agent is not kept alive"
-    ++ t.expect (agent.AbandonProcessGroup == true) "a stop ends the agent's process group"
+    ++ t.expect (agent.AbandonProcessGroup == false) "a stop does not end the agent's process group"
+    ++ t.expect (lib.hasInfix handOver (activationOf daemon)) "the activation runs no `${handOver}`: ${activationOf daemon}"
+    ++ t.expect (
+      !lib.hasInfix "hand-over" (activationOf base)
+    ) "the activation asks a hand-over with the daemon off: ${activationOf base}"
     ++ t.expect (
       agent.ThrottleInterval == 30
     ) "the agent's throttle is ${toString agent.ThrottleInterval}, not 30"
@@ -111,6 +125,16 @@ in
     ++ t.expect (
       agent.StandardErrorPath == "/Users/alice/Library/Logs/sluice-daemon.log"
     ) "the agent's errors go to ${toString agent.StandardErrorPath}";
+
+  # daemon-service, "A new package" (D5 of `sluice-host-owns-its-workers`):
+  # the agent names no package, so a new package changes no agent and
+  # nix-darwin reloads none; the activation has the daemon start afresh.
+  "A new package changes no agent" =
+    t.expect (t.failures daemonOwn == [ ]) "the system fails: ${toString (t.failures daemonOwn)}"
+    ++ t.expect (agentOf daemonOwn == agentOf daemon) "the agent changes with the package"
+    ++ t.expect (
+      activationOf daemonOwn == activationOf daemon
+    ) "nix-darwin's activation changes with the package: ${activationOf daemonOwn}";
 
   # daemon-service, "No package" (design D11 of `sluice-runs-as-a-daemon`).
   "The daemon with no package" =

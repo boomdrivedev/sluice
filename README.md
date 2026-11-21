@@ -271,7 +271,8 @@ sets it up.
 | `sluice` | Where this worktree stands: its submission, each branch's queue, its place and what to run next. `--json` for a status line. |
 | `sluice overview` | Every branch's queue at a glance, with the latest landings and blames. `--json` for tools; `--json --watch` prints it again on each change. |
 | `sluice step <branch>` | One round of a branch's work, run by sluice's host process, then exit: for cron, CI or a hook. `--json` for scripts. |
-| `sluice daemon` | Keep sluice's host process running, on a machine that chooses to; nothing needs it. It never ends for being idle; `SIGTERM` stops it. |
+| `sluice daemon` | Keep sluice's host process running, on a machine that chooses to; nothing needs it. It never ends for being idle; `SIGTERM` stops it, and the tests it runs end with it. |
+| `sluice hand-over` | Have sluice's host process start afresh as this sluice, keeping the tests it runs, where it runs another sluice; it starts none. For a service manager's activation after it installs a new sluice. |
 | `sluice amend <id>` | Reorder a queued submission (`--after`, `--priority`) until it is under test. `--json` for scripts. |
 | `sluice withdraw <id>` | Take a submission out of the queue; one already withdrawn exits `0` and says so. `--json` for scripts. |
 | `sluice protect` | Install the branch-protection hook; `--remove` takes it out. Warns of a worktree that has checked out a protected branch. `--json` for scripts. |

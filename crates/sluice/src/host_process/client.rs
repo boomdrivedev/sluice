@@ -220,6 +220,59 @@ impl Client {
         }
     }
 
+    /// `sluice hand-over` (the change `sluice-host-owns-its-workers`,
+    /// design D5): have the host process that answers, where it runs
+    /// another executable than this command's, start afresh in place as
+    /// this command's, keeping its runs, and wait for the image started
+    /// afresh. It starts no host process. The process asked and the one
+    /// that answers after; `None` where none answers, or where it runs this
+    /// command's executable already.
+    pub fn hand_over_here(&self) -> Result<Option<(Named, Named)>> {
+        let Some(mut c) = self.answering()? else {
+            return Ok(None);
+        };
+        let program = self.program();
+        if program.is_some() && c.named.program == program {
+            return Ok(None);
+        }
+        let asked = c.named.clone();
+        send(
+            &mut c.writer,
+            &Request::HandOver {
+                program,
+                ends: false,
+            },
+        )?;
+        let _ = receive::<Answer>(&mut c.reader);
+        drop(c);
+        let until = Instant::now() + HAND_OVER_WAIT;
+        loop {
+            if let Some(n) = self.answering()? {
+                if n.named.pid != asked.pid || n.named.since != asked.since {
+                    return Ok(Some((asked, n.named)));
+                }
+            } else if !alive(asked.pid) {
+                bail!(
+                    "sluice's host process {} (pid {}) ended when asked to hand over; see {}",
+                    asked.version,
+                    asked.pid,
+                    self.paths.log().display()
+                );
+            }
+            if Instant::now() >= until {
+                bail!(
+                    "sluice's host process {} (pid {}) was asked to start afresh as {} and did not within {} seconds; see {}",
+                    asked.version,
+                    asked.pid,
+                    self.program.display(),
+                    HAND_OVER_WAIT.as_secs(),
+                    self.paths.log().display()
+                );
+            }
+            std::thread::sleep(Duration::from_millis(20));
+        }
+    }
+
     /// Start the host process under the start lock, unless one answers
     /// once the lock is this command's, and wait for it to answer.
     fn start(&self) -> Result<Connection> {

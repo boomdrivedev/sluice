@@ -626,9 +626,16 @@ pub enum Command {
     /// that runs queues for others, and runs no sluice command itself, may
     /// keep it running under its service manager: it is the host process,
     /// in the foreground, and never ends for being idle (135, 137). It
-    /// stops on SIGTERM or SIGINT, its runs going on.
+    /// stops on SIGTERM or SIGINT, and its runs end with it.
     #[command(after_help = "Example:\n  $ sluice daemon")]
     Daemon,
+    /// Have this user's sluice host process start afresh as this sluice,
+    /// keeping its runs, where it runs another sluice; it starts none.
+    ///
+    /// A service manager's activation runs it after it installs a new
+    /// sluice, in place of a restart, which would end the runs.
+    #[command(after_help = "Example:\n  $ sluice hand-over")]
+    HandOver,
     /// Install the hook that refuses updates to protected branches by
     /// anything but sluice; `submit`, `step` and `run` install it too.
     #[command(after_help = "Examples:\n  $ sluice protect\n  $ sluice protect --remove")]
@@ -1680,6 +1687,7 @@ impl Cli {
                 Command::Supervise { .. } => "supervise",
                 Command::Host => "host",
                 Command::Daemon => "daemon",
+                Command::HandOver => "hand-over",
                 Command::Protect { .. } => "protect",
                 Command::Hook { .. } => "hook",
                 Command::Branch { command } => match command {
@@ -2876,6 +2884,8 @@ fn dispatch(
         }
         Command::Host => host_process::run(telemetry::Choices::default(), Default::default()),
         Command::Daemon => host_process::daemon(telemetry::Choices::default(), Default::default()),
+        // main answers it before any repository is read.
+        Command::HandOver => Ok(0),
         Command::Protect { remove, json } => {
             let dir = std::env::current_dir()?;
             if remove {

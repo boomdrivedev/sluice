@@ -898,6 +898,7 @@ impl sluice::host_process::HostProcess for FakeProcess {
             since: "2026-11-07T00:00:00Z".into(),
             asked_only: true,
             daemon: false,
+            program: None,
         };
         Ok(Some((named, view)))
     }

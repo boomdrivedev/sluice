@@ -2144,8 +2144,8 @@ fn the_overview_names_a_daemon() {
 }
 
 /// A policy whose check marks that it began in `marks`, then waits for
-/// `go` there, or for the marks to go: its run outlives whatever host
-/// process started it.
+/// `go` there, or for the marks to go: its run goes on until the host
+/// process that owns it stops.
 fn held_policy(marks: &support::Scratch) -> String {
     format!(
         "[tests]\nrunner = \"command\"\n\
@@ -2765,6 +2765,62 @@ fn an_upgrade_keeps_its_runs_as_children() {
         logs.contains("it starts afresh in its own process, keeping its pid"),
         "{logs}"
     );
+}
+
+/// daemon-service, "A new package" (D5 of `sluice-host-owns-its-workers`):
+/// `sluice hand-over` from another sluice has the host process that runs a
+/// combination's checks start afresh as that sluice, with the same pid, and
+/// its checks go on; run again, it asks nothing and says nothing; with no
+/// host process, it starts none.
+#[test]
+fn a_hand_over_starts_the_host_process_afresh_as_this_sluice() {
+    let marks = support::Scratch::new("host-hand-over-cmd-marks");
+    let d = OnDisk::new("host-hand-over-cmd", &held_policy(&marks));
+    let bin = support::Scratch::new("host-hand-over-cmd-bin");
+    let copy = bin.path().join("sluice");
+    std::fs::copy(env!("CARGO_BIN_EXE_sluice"), &copy).unwrap();
+    let copy = std::fs::canonicalize(&copy).unwrap();
+    let hand_over = || {
+        let mut c = std::process::Command::new(&copy);
+        c.current_dir(d.repo.dir())
+            .env_clear()
+            .envs(support::env_of(&d.command(d.repo.dir())))
+            .arg("hand-over")
+            .output()
+            .unwrap()
+    };
+
+    let none = hand_over();
+    assert!(none.status.success(), "{}", text(&none));
+    assert_eq!(text(&none), "");
+    assert_eq!(answering(&d), None, "it started a host process");
+
+    let dir = d.session("a");
+    let id = queued_live(&d, &dir);
+    within(60, "the combination's check runs", || {
+        check_of(&marks).is_some()
+    });
+    let first = named(&d).expect("the host process answers");
+    let check = check_of(&marks).unwrap();
+    let out = hand_over();
+    assert!(out.status.success(), "{}", text(&out));
+    assert!(
+        text(&out).contains(&format!("started afresh as {}", copy.display())),
+        "{}",
+        text(&out)
+    );
+    let now = named(&d).expect("it answers");
+    assert_eq!(now.pid, first.pid);
+    assert_ne!(now.since, first.since);
+    assert_eq!(now.program.as_deref(), Some(copy.as_path()));
+    assert!(alive(check), "the check goes on");
+
+    let again = hand_over();
+    assert!(again.status.success(), "{}", text(&again));
+    assert_eq!(text(&again), "", "it asked again");
+    assert_eq!(named(&d).unwrap().since, now.since);
+    std::fs::write(marks.path().join("go"), "").unwrap();
+    lands(&d, id);
 }
 
 /// resident-workers, "A stop after a hand-over": a host process that took

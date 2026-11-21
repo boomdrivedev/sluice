@@ -38,6 +38,12 @@ pub struct Named {
     /// `sluice-runs-as-a-daemon`). An older process says nothing of it.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub daemon: bool,
+    /// The executable it runs, resolved through every link: what a service
+    /// manager's activation compares with the program it installs (the
+    /// change `sluice-host-owns-its-workers`, design D5). An older process
+    /// says nothing of it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub program: Option<PathBuf>,
 }
 
 /// What follows the host process's passes of a repository (D7, D11).

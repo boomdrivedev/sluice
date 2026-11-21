@@ -11,6 +11,14 @@
 //! command exits or its time runs out, and writes `result.json` last.
 //! [`Runs::state`] reads what it wrote.
 //!
+//! In `sluice host`, the supervisor is a worker of the host process
+//! (`crate::workers`; `workers-end-with-their-owner@292e869158d6`): its
+//! child, in a process group of its own, and the command's group is
+//! recorded as the host's worker too. When the host process stops, the
+//! supervisor ends the command's group and writes no result, so the run
+//! has no outcome and is tested again
+//! (`sluices-runs-end-with-its-host-process@e814b716f3b1`).
+//!
 //! ```text
 //! <common>/sluice/.runs/<place, flat>/
 //!   request.json   what to run; written before the supervisor starts

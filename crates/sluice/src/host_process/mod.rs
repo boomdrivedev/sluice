@@ -30,15 +30,24 @@
 //! stay synchronous: the host process calls them on tokio's pool for
 //! blocking work. It waits on events and timers, on tokio's clock, and no
 //! wait of it sleeps and looks again. `SIGTERM` and `SIGINT` stop each host
-//! process as a hand-over does.
+//! process.
+//!
+//! Each worker of the host process, a run's supervisor, a git command, a
+//! credential command, an equip step or a release command, is its child in
+//! a process group of its own, recorded in `host/workers/`
+//! (`crate::workers`; the change `sluice-host-owns-its-workers`). A stop
+//! ends the workers, and a run that ends so has no outcome. A hand-over
+//! starts the newer image afresh in place, with the same pid, so the
+//! workers stay its children. A host process that starts ends the groups
+//! that a killed host process left.
 //!
 //! `sluice daemon` is the same process with its idle end off, on a machine
 //! that chooses to keep it running (137; record 0093 as amended 2026-11-08
 //! and 2026-11-18). It takes the host's place from a host process that ends
-//! when idle, waits behind another daemon, and hands over by starting
-//! afresh in its own process, keeping its pid and its socket, so whatever
-//! keeps it running keeps the new image (design D1 to D7 of
-//! `sluice-runs-as-a-daemon`).
+//! when idle, which ends for it, and waits behind another daemon. Every
+//! host process hands over by starting afresh in its own process, keeping
+//! its pid and its socket, so whatever keeps it running keeps the new image
+//! (design D1 to D7 of `sluice-runs-as-a-daemon`).
 
 pub mod ask;
 pub mod client;
@@ -703,6 +712,7 @@ fn run_holding(runtime: &tokio::runtime::Runtime, holder: Holder) -> Result<i32>
         since: chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true),
         asked_only: asked_only(),
         daemon,
+        program: successor.program.as_ref().ok().cloned(),
     };
     folder.write(VERSION, &serde_json::to_vec(&named)?)?;
     // D6 of `sluice-host-runs-on-a-tokio-edge`: a daemon started afresh in
