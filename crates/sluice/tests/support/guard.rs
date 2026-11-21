@@ -35,11 +35,22 @@ pub struct Found {
     pub command: String,
     /// Whether it is a `sluice host` or `sluice daemon` of the test.
     pub host: bool,
+    /// Its parent's pid, its process group and the seconds it has run, as
+    /// the guard found it: a failure names what started the process.
+    pub parent: Option<u32>,
+    pub group: Option<i32>,
+    pub ran: u64,
 }
 
 impl std::fmt::Display for Found {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "pid {}: {}", self.pid, self.command)
+        let parent = self.parent.map_or("none".to_string(), |p| p.to_string());
+        let group = self.group.map_or("none".to_string(), |g| g.to_string());
+        write!(
+            f,
+            "pid {} (parent {parent}, group {group}, {} s): {}",
+            self.pid, self.ran, self.command
+        )
     }
 }
 
@@ -86,18 +97,19 @@ impl Guard {
         while hosts.iter().any(|h| runs(h.pid)) && Instant::now() < until {
             std::thread::sleep(Duration::from_millis(50));
         }
-        // A process that ends by itself within [`SETTLE`] does not continue
-        // to run: the far side of a fetch that just ended, for example.
-        let until = Instant::now() + SETTLE;
-        while left.iter().any(|p| runs(p.pid)) && Instant::now() < until {
-            std::thread::sleep(Duration::from_millis(20));
-        }
-        left.retain(|p| runs(p.pid));
         for p in self.find() {
             if !left.iter().any(|l| l.pid == p.pid) && !host_worker(p.pid) {
                 left.push(p);
             }
         }
+        // A process that ends by itself within [`SETTLE`] does not continue
+        // to run: the far side of a fetch that just ended, for example, or
+        // of one that a host process of another test's folder made.
+        let until = Instant::now() + SETTLE;
+        while left.iter().any(|p| runs(p.pid)) && Instant::now() < until {
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        left.retain(|p| runs(p.pid));
         end(&left);
         left
     }
@@ -184,6 +196,11 @@ pub fn find(folders: &[PathBuf]) -> Vec<Found> {
             pid: pid.as_u32(),
             command: words.join(" "),
             host,
+            parent: p.parent().map(|q| q.as_u32()),
+            group: nix::unistd::getpgid(Some(nix::unistd::Pid::from_raw(pid.as_u32() as i32)))
+                .ok()
+                .map(|g| g.as_raw()),
+            ran: p.run_time(),
         });
     }
     out.sort_by_key(|f| f.pid);
