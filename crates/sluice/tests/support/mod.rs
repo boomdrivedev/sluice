@@ -859,7 +859,7 @@ impl sluice::host_process::HostProcess for FakeProcess {
         let roomed = self.roomed(here)?;
         let running = sluice_seams::Tests::running(&roomed)?;
         let mut room = roomed.room.lock();
-        let now = std::time::Instant::now();
+        let now = tokio::time::Instant::now();
         let view = sluice::host_process::protocol::RoomView {
             bound: room.bound(),
             reserve: room.reserved(),

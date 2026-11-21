@@ -1009,8 +1009,21 @@ fn a_bolt_is_made_and_deleted_with_no_remote() {
 
     let out = s.submit_to("a", "bolt/x", "bolt/x");
     assert!(out.status.success(), "{}", text(&out));
-    let out = s.sluice(&["run", "--rounds", "8"]);
-    assert!(out.status.success(), "{}", text(&out));
+    // Rounds until its check has run and it lands: a round passes in
+    // milliseconds, and the check's run takes its own time.
+    let rounds_until = |landed: &dyn Fn() -> bool| {
+        let until = Instant::now() + Duration::from_secs(60);
+        while !landed() {
+            assert!(
+                Instant::now() < until,
+                "{}",
+                text(&s.sluice(&["status", "--all"]))
+            );
+            let out = s.sluice(&["run", "--rounds", "8"]);
+            assert!(out.status.success(), "{}", text(&out));
+        }
+    };
+    rounds_until(&|| s.repo.rev("bolt/x") != main);
     let bolt = s.repo.rev("bolt/x");
     assert_ne!(bolt, main);
     let out = s.sluice(&["branch", "delete", "bolt/x"]);
@@ -1023,8 +1036,7 @@ fn a_bolt_is_made_and_deleted_with_no_remote() {
 
     let out = s.submit_to("land", "bolt/x", "main");
     assert!(out.status.success(), "{}", text(&out));
-    let out = s.sluice(&["run", "--rounds", "8"]);
-    assert!(out.status.success(), "{}", text(&out));
+    rounds_until(&|| s.repo.rev("main") != main);
     let out = s.sluice(&["branch", "delete", "bolt/x"]);
     assert!(out.status.success(), "{}", text(&out));
     let out = s
@@ -1636,7 +1648,15 @@ fn the_overview_names_a_hand_pushed_revision() {
     assert_eq!(before["revision"], s.remote_main().as_str(), "{before}");
     let other = Repo::clone_of(s.origin.path(), "overview-hand-pushed-b");
     let pushed = other.push_change("by-hand.txt", "pushed by hand\n");
-    let after = overview_of(&s, "main");
+    // A one-shot read within a tick of the host process's last reading is
+    // answered from that reading (129): the push is named once a reading
+    // after it ends.
+    let until = Instant::now() + Duration::from_secs(10);
+    let mut after = overview_of(&s, "main");
+    while after["revision"] != pushed.as_str() && Instant::now() < until {
+        std::thread::sleep(Duration::from_millis(500));
+        after = overview_of(&s, "main");
+    }
     assert_eq!(after["revision"], pushed.as_str(), "{after}");
     assert_eq!(after["at"], before["at"], "{after}");
     assert_eq!(after["depth"], 0, "{after}");

@@ -44,7 +44,8 @@ pub struct Named {
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum FollowKind {
-    /// `sluice overview --watch`: its repository is read every second.
+    /// `sluice overview --watch`: its repository is read each second while
+    /// work is in play, and on a file event otherwise.
     Watch,
     /// `sluice wait`, a waiting submit or `wt submit`.
     Wait,

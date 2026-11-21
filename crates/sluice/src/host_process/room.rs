@@ -33,7 +33,12 @@
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, MutexGuard};
-use std::time::{Duration, Instant};
+use std::time::Duration;
+
+// The host process's clock (design D5 of the change
+// `sluice-host-runs-on-a-tokio-edge`): tokio's, which a test can pause.
+// Outside a runtime it reads the system's clock.
+use tokio::time::Instant;
 
 use anyhow::Result;
 use serde::{Deserialize, Serialize};
@@ -671,6 +676,16 @@ impl Room {
         !self.held.is_empty() || !self.queue_waits.is_empty() || !self.session_waits.is_empty()
     }
 
+    /// When the next combination's wait lapses, where one waits: the room
+    /// may be idle from then on, so the host process looks again then.
+    pub fn next_lapse(&self) -> Option<Instant> {
+        self.queue_waits
+            .values()
+            .chain(self.waited_since.values())
+            .map(|w| w.last + QUEUE_WAIT)
+            .min()
+    }
+
     /// Combinations' waits whose rounds stopped asking go.
     fn lapse(&mut self, now: Instant) {
         self.queue_waits
@@ -696,6 +711,11 @@ pub type Owed = Arc<dyn Fn(&Path) + Send + Sync>;
 pub struct Shared {
     room: Arc<Mutex<Room>>,
     owed: Arc<Mutex<Option<Owed>>>,
+    /// Moved each time a part is given back or taken by its run, a run
+    /// ends, a wait goes or the bounds change: a session's or a preview's
+    /// wait asks again then, and the host process looks at whether it is
+    /// idle (the change `sluice-host-runs-on-a-tokio-edge`).
+    changed: Arc<tokio::sync::watch::Sender<u64>>,
 }
 
 impl Shared {
@@ -703,7 +723,18 @@ impl Shared {
         Shared {
             room: Arc::new(Mutex::new(room)),
             owed: Arc::default(),
+            changed: Arc::new(tokio::sync::watch::Sender::new(0)),
         }
+    }
+
+    /// Say that the room changed.
+    pub fn changed(&self) {
+        self.changed.send_modify(|n| *n = n.wrapping_add(1));
+    }
+
+    /// A receiver that changes each time the room changes.
+    pub fn subscribe(&self) -> tokio::sync::watch::Receiver<u64> {
+        self.changed.subscribe()
     }
 
     /// The room, for one step; a holder that panicked leaves it as it was.
@@ -757,6 +788,15 @@ impl Shared {
         })
     }
 
+    /// The room's part `id`, which gives it back when dropped unstarted.
+    pub fn holding(&self, id: u64) -> Holding {
+        Holding {
+            room: self.clone(),
+            id,
+            done: false,
+        }
+    }
+
     /// The seam's part for the room's part `id`, which gives it back when
     /// dropped unstarted.
     pub fn part(&self, kind: RunKind, id: u64) -> Part {
@@ -789,6 +829,7 @@ impl Holding {
     pub fn started(mut self) {
         self.room.lock().started(self.id);
         self.done = true;
+        self.room.changed();
     }
 }
 
@@ -796,6 +837,7 @@ impl Drop for Holding {
     fn drop(&mut self) {
         if !self.done {
             let owed = self.room.lock().give_back(self.id);
+            self.room.changed();
             if let Some(repository) = owed {
                 self.room.tell(&repository);
             }
