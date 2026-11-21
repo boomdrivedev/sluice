@@ -443,7 +443,7 @@ fn the_host_processs_look_at_an_idle_repository_starts_nothing() {
 /// apart, ask nothing more within the minute.
 #[test]
 fn an_idle_repositorys_remote_is_asked_once_a_minute() {
-    let (d, _origin) = on_origin("host-idle-asks");
+    let (_origin, d) = on_origin("host-idle-asks");
     let repository = d.repository(d.repo.dir());
     within(15, "the host process ends once idle", || {
         answering(&d).is_none()
@@ -1316,15 +1316,15 @@ fn the_overview_names_the_host_process() {
 
 /// `main`'s records on a bare origin, its runs signed by `a`, whose key
 /// `d`'s host holds: the host, and the remote.
-fn on_origin(name: &str) -> (OnDisk, support::Scratch) {
-    let (d, mut remotes) = on_remotes(name, &["origin"]);
-    (d, remotes.remove(0))
+fn on_origin(name: &str) -> (support::Scratch, OnDisk) {
+    let (mut remotes, d) = on_remotes(name, &["origin"]);
+    (remotes.remove(0), d)
 }
 
 /// `main`'s records on a bare `remotes[0]`, and a branch of each other
 /// remote's name on that remote, their runs signed by `a`, whose key
 /// `d`'s host holds: the host, and the remotes in order.
-fn on_remotes(name: &str, remotes: &[&str]) -> (OnDisk, Vec<support::Scratch>) {
+fn on_remotes(name: &str, remotes: &[&str]) -> (Vec<support::Scratch>, OnDisk) {
     use ssh_key::{Algorithm, PrivateKey};
     let k = PrivateKey::random(&mut rand_core::OsRng, Algorithm::Ed25519).unwrap();
     let mut policy = format!(
@@ -1356,7 +1356,7 @@ fn on_remotes(name: &str, remotes: &[&str]) -> (OnDisk, Vec<support::Scratch>) {
         d.repo.git(&["remote", "rename", "origin", remotes[0]]);
     }
     signing(&d, &k);
-    (d, bare)
+    (bare, d)
 }
 
 /// `d`'s host signs as `a` with `k`.
@@ -1391,7 +1391,7 @@ fn asks_a_remote(start: &str) -> bool {
 /// origin nothing.
 #[test]
 fn a_status_with_no_host_process_starts_it_and_reads_its_first_reading() {
-    let (d, origin) = on_origin("host-first-reading");
+    let (origin, d) = on_origin("host-first-reading");
     let other = OnDisk {
         repo: support::Repo::clone_of(origin.path(), "host-first-reading-other"),
         git: support::CountingGit::new(),
@@ -1552,7 +1552,7 @@ fn timed_status(d: &OnDisk) -> (std::process::Output, Duration, bool) {
 /// when the host process last read the repository.
 #[test]
 fn a_status_beside_a_slow_look_reads_as_held_and_says_so() {
-    let (d, _remotes) = on_remotes("host-slow-look", &["origin", "mirror"]);
+    let (_remotes, d) = on_remotes("host-slow-look", &["origin", "mirror"]);
     queued(&d, "mine");
     let host = Slowed::start(&d, "host-slow-look");
     let (out, _, asked) = timed_status(&d);
@@ -1584,7 +1584,7 @@ fn a_status_beside_a_slow_look_reads_as_held_and_says_so() {
 /// nothing fetched and nothing said.
 #[test]
 fn a_status_during_a_long_round_answers_at_once() {
-    let (d, _origin) = on_origin("host-long-round");
+    let (_origin, d) = on_origin("host-long-round");
     queued(&d, "mine");
     let host = Slowed::start(&d, "host-long-round");
     let (out, _, _) = timed_status(&d);
@@ -2428,9 +2428,13 @@ fn a_newer_client_has_an_older_daemon_start_afresh() {
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null());
     let socket = paths.socket.clone();
+    let version = paths.version();
     // The older daemon: asked to hand over, it lets its lock and socket go
     // and starts `<the executable named> daemon`, standing for its start
-    // afresh in place.
+    // afresh in place. Its own process ends once the new one has taken the
+    // host's place, as a released sluice's does: a client whose asked
+    // process ends with none answering starts its own (design D3 of
+    // `sluice-host-owns-its-workers`).
     let handed = std::thread::spawn(move || {
         let (stream, _) = listener.accept().unwrap();
         let mut reader = BufReader::new(stream.try_clone().unwrap());
@@ -2444,8 +2448,6 @@ fn a_newer_client_has_an_older_daemon_start_afresh() {
         drop(listener);
         let _ = std::fs::remove_file(&socket);
         drop(lock);
-        let _ = sleeper.kill();
-        let _ = sleeper.wait();
         let asked: serde_json::Value = serde_json::from_str(request.trim()).unwrap();
         let program = asked["program"].as_str().expect("a program").to_string();
         let started = std::process::Command::new(&program)
@@ -2457,6 +2459,17 @@ fn a_newer_client_has_an_older_daemon_start_afresh() {
             .stderr(std::process::Stdio::null())
             .spawn()
             .unwrap();
+        let until = Instant::now() + Duration::from_secs(30);
+        while Instant::now() < until
+            && !std::fs::read(&version)
+                .ok()
+                .and_then(|b| serde_json::from_slice::<serde_json::Value>(&b).ok())
+                .is_some_and(|v| v["pid"] == started.id())
+        {
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        let _ = sleeper.kill();
+        let _ = sleeper.wait();
         (asked, Kept(started))
     });
     let reached = d

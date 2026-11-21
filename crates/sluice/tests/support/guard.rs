@@ -7,11 +7,11 @@
 //! one of the test's folders. A detached process is found so too.
 //!
 //! When the test ends, the guard first notes each process of the test that
-//! is no `sluice host` and no git or credential worker of one. Then it
-//! stops each `sluice host` of the test, and waits for it to exit. It gives
-//! the processes that it noted one second to end by themselves. Then it
-//! lists the test's processes again. It ends each process that it found
-//! still running, and the test fails where it found any.
+//! is no `sluice host` and no git or credential worker of one, and gives
+//! them one second to end by themselves. Then it stops each `sluice host`
+//! of the test, and waits for it to exit. Then it lists the test's
+//! processes again. It ends each process that it found, and the test fails
+//! where it found any.
 
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
@@ -89,6 +89,15 @@ impl Guard {
             .filter(|p| !p.host && !host_worker(p.pid))
             .cloned()
             .collect();
+        // A process that ends by itself within [`SETTLE`] does not continue
+        // to run: the far side of a fetch that just ended, for example. A
+        // process that the host stop ends is left all the same: a run, a
+        // supervisor or a check.
+        let until = Instant::now() + SETTLE;
+        while left.iter().any(|p| runs(p.pid)) && Instant::now() < until {
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        left.retain(|p| runs(p.pid));
         let hosts: Vec<&Found> = before.iter().filter(|p| p.host).collect();
         for h in &hosts {
             signal(h.pid, libc::SIGTERM);
@@ -97,13 +106,6 @@ impl Guard {
         while hosts.iter().any(|h| runs(h.pid)) && Instant::now() < until {
             std::thread::sleep(Duration::from_millis(50));
         }
-        // A process that ends by itself within [`SETTLE`] does not continue
-        // to run: the far side of a fetch that just ended, for example.
-        let until = Instant::now() + SETTLE;
-        while left.iter().any(|p| runs(p.pid)) && Instant::now() < until {
-            std::thread::sleep(Duration::from_millis(20));
-        }
-        left.retain(|p| runs(p.pid));
         for p in self.find() {
             if !left.iter().any(|l| l.pid == p.pid) && !host_worker(p.pid) {
                 left.push(p);
