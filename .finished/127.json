@@ -1,0 +1,43 @@
+{
+  "schema": "sluice/submission@1",
+  "id": 127,
+  "branch": "main",
+  "head": "e064596d02a1cb164c81044decdb7311b17ce5df",
+  "from": {
+    "agent": "bolt/sluice-checks-and-waits-on-an-agents-own-work",
+    "worktree": "pull/304",
+    "head": "bolt/sluice-checks-and-waits-on-an-agents-own-work"
+  },
+  "submitted": "2026-11-19T21:11:40Z",
+  "after": [],
+  "priority": 0,
+  "attempt": 1,
+  "state": "withdrawn",
+  "tested": {
+    "combination": "99e82c22cd79996fac56313df8fad2132e51c4e5",
+    "on": "efb53f678232500ad1157af61bbcaf962e01a588",
+    "submissions": [
+      127
+    ]
+  },
+  "result": "failed",
+  "failed": [
+    {
+      "task": "#check-e2e",
+      "not_run": "its executor stopped before it reported"
+    },
+    {
+      "task": "#check-fast",
+      "not_run": "its executor stopped before it reported"
+    },
+    {
+      "task": "#check-tools",
+      "not_run": "its executor stopped before it reported"
+    }
+  ],
+  "withdrawn": {
+    "by": "resubmission",
+    "at": "2026-11-20T23:26:57Z"
+  },
+  "subject": "bolt/sluice-checks-and-waits-on-an-agents-own-work"
+}

@@ -1,0 +1,26 @@
+{
+  "schema": "sluice/submission@1",
+  "id": 118,
+  "branch": "main",
+  "head": "cf3cb41a4b12814233229e4b57c23c6797e52bd8",
+  "from": {
+    "agent": "bolt/sluice-reports-its-work-plainly",
+    "worktree": "pull/300",
+    "head": "bolt/sluice-reports-its-work-plainly"
+  },
+  "submitted": "2026-11-19T14:06:20Z",
+  "after": [],
+  "priority": 0,
+  "attempt": 1,
+  "state": "landed",
+  "tested": {
+    "combination": "dde4cc539511fdf7e6fc9cf486172a1206b98535",
+    "on": "bcb3dc6e8eebdafd458e60c27e26bd413fea5e46",
+    "submissions": [
+      118
+    ]
+  },
+  "result": "passed",
+  "landed_as": "75fd576007b40d2a14a841cb450a499f7c2553cd",
+  "subject": "bolt/sluice-reports-its-work-plainly"
+}

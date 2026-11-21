@@ -1,0 +1,27 @@
+{
+  "schema": "sluice/submission@1",
+  "id": 137,
+  "branch": "main",
+  "head": "a467df047c8376ce3ef85dda36daea713c227eef",
+  "from": {
+    "agent": "bolt/sluices-pools-run-a-repositorys-own-steps",
+    "worktree": "pull/308",
+    "head": "bolt/sluices-pools-run-a-repositorys-own-steps"
+  },
+  "submitted": "2026-11-20T22:58:26Z",
+  "after": [],
+  "priority": 0,
+  "attempt": 1,
+  "state": "landed",
+  "tested": {
+    "combination": "548a26ccae41506203ce4009f46255332d25b01a",
+    "on": "ed3a91e84602eb7825fc4cc5286801082370d5f0",
+    "submissions": [
+      137
+    ]
+  },
+  "result": "passed",
+  "landed_as": "4956bad34ec67044024143d896515665368a77de",
+  "subject": "sluice's pools run a repository's own steps",
+  "under_test_ms": 1173000
+}

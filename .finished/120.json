@@ -1,0 +1,26 @@
+{
+  "schema": "sluice/submission@1",
+  "id": 120,
+  "branch": "main",
+  "head": "c492ae60e155a41804e05d673b053adc91bf99dc",
+  "from": {
+    "agent": "bolt/sluice-keeps-a-gates-queues-moving",
+    "worktree": "pull/301",
+    "head": "bolt/sluice-keeps-a-gates-queues-moving"
+  },
+  "submitted": "2026-11-19T17:02:37Z",
+  "after": [],
+  "priority": 0,
+  "attempt": 1,
+  "state": "landed",
+  "tested": {
+    "combination": "9acc065779a363eceea04587c309c939baca77b1",
+    "on": "75fd576007b40d2a14a841cb450a499f7c2553cd",
+    "submissions": [
+      120
+    ]
+  },
+  "result": "passed",
+  "landed_as": "a76ffeb39c6f03966717acb822534fce10c7f04d",
+  "subject": "bolt/sluice-keeps-a-gates-queues-moving"
+}

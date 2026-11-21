@@ -1,0 +1,27 @@
+{
+  "schema": "sluice/submission@1",
+  "id": 140,
+  "branch": "main",
+  "head": "01c6e73ae8a057f9dba9d1a3fc72c4a0e08af9c1",
+  "from": {
+    "agent": "change/sluice-host-runs-on-a-tokio-edge",
+    "worktree": "pull/309",
+    "head": "change/sluice-host-runs-on-a-tokio-edge"
+  },
+  "submitted": "2026-11-21T09:58:24Z",
+  "after": [],
+  "priority": 0,
+  "attempt": 1,
+  "state": "landed",
+  "tested": {
+    "combination": "b9ca0f9ca18985dd073158758f1bbe4036b74a75",
+    "on": "11d7d86b77470979bf7e6c91879932c5688f4586",
+    "submissions": [
+      140
+    ]
+  },
+  "result": "passed",
+  "landed_as": "80edc37ffb5f537015af62e067eb33d0b27a1a0e",
+  "subject": "change/sluice-host-runs-on-a-tokio-edge",
+  "under_test_ms": 2345000
+}

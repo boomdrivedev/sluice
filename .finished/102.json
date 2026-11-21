@@ -1,0 +1,29 @@
+{
+  "schema": "sluice/submission@1",
+  "id": 102,
+  "branch": "main",
+  "head": "16ce6275132d6e6d2ea42cf2bab2dcf25fb5b21b",
+  "from": {
+    "agent": "boomdrive-design",
+    "worktree": "pull/293",
+    "head": "design/the-daemon-is-sluices-own-service"
+  },
+  "submitted": "2026-11-18T20:24:27Z",
+  "after": [],
+  "priority": 0,
+  "attempt": 1,
+  "state": "landed",
+  "tested": {
+    "combination": "3532bf578d5006c8dab3f445922d28a69fa23ad4",
+    "on": "5d7d1c3d0866db732382828379110e8ee89fe1d1",
+    "submissions": [
+      101,
+      102,
+      103,
+      104
+    ]
+  },
+  "result": "passed",
+  "landed_as": "5a702e307ec7040db81f3b53d0071a051ca71c15",
+  "subject": "design/the-daemon-is-sluices-own-service"
+}

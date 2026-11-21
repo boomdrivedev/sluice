@@ -1,0 +1,21 @@
+{
+  "schema": "sluice/submission@1",
+  "id": 100,
+  "branch": "main",
+  "head": "1ee68db701860ffb8e5caec4364a12e6a4348737",
+  "from": {
+    "agent": "boomdrive-design",
+    "worktree": "pull/291",
+    "head": "design/what-a-metric-carries"
+  },
+  "submitted": "2026-11-18T19:13:35Z",
+  "after": [],
+  "priority": 0,
+  "attempt": 1,
+  "state": "withdrawn",
+  "withdrawn": {
+    "by": "boomdrive-design",
+    "at": "2026-11-18T20:48:41Z"
+  },
+  "subject": "design/what-a-metric-carries"
+}

@@ -1,0 +1,26 @@
+{
+  "schema": "sluice/submission@1",
+  "id": 122,
+  "branch": "main",
+  "head": "ca50fadd2344a6e4f78075032dcf421e582cc88a",
+  "from": {
+    "agent": "boomdrive-design",
+    "worktree": "pull/302",
+    "head": "design/a-release-takes-over-what-an-earlier-one-left"
+  },
+  "submitted": "2026-11-19T17:56:52Z",
+  "after": [],
+  "priority": 0,
+  "attempt": 1,
+  "state": "landed",
+  "tested": {
+    "combination": "f3b0ffda16a30ec05e4de41478415fc4e43e61e3",
+    "on": "a76ffeb39c6f03966717acb822534fce10c7f04d",
+    "submissions": [
+      122
+    ]
+  },
+  "result": "passed",
+  "landed_as": "b88fcef9150ba01b377d8e9d1d539294bcec7574",
+  "subject": "design/a-release-takes-over-what-an-earlier-one-left"
+}

@@ -1,0 +1,26 @@
+{
+  "schema": "sluice/submission@1",
+  "id": 115,
+  "branch": "main",
+  "head": "03097ef46f22b1a2a65190ea2c61684a188a0611",
+  "from": {
+    "agent": "boomdrive-ops",
+    "worktree": "pull/298",
+    "head": "fix/main--the-sign-job-pushes-its-record-as-the-app"
+  },
+  "submitted": "2026-11-19T12:19:38Z",
+  "after": [],
+  "priority": 0,
+  "attempt": 1,
+  "state": "landed",
+  "tested": {
+    "combination": "29c506d65f0d3ecfbc9eeca49cb6937c9c8294aa",
+    "on": "13bfe44744c535f76e828f3b82e288a1adfe5fec",
+    "submissions": [
+      115
+    ]
+  },
+  "result": "passed",
+  "landed_as": "b359d606da01860918273c2483d456f5ac11a3a8",
+  "subject": "fix/main--the-sign-job-pushes-its-record-as-the-app"
+}

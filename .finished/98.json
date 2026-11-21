@@ -1,0 +1,27 @@
+{
+  "schema": "sluice/submission@1",
+  "id": 98,
+  "branch": "main",
+  "head": "14f8465cfd1880fe16eeb1c4834071f989cdffe7",
+  "from": {
+    "agent": "boomdrive-design",
+    "worktree": "pull/289",
+    "head": "design/a-lapsed-claim-counts-toward-the-runs-in-a-row"
+  },
+  "submitted": "2026-11-18T18:57:54Z",
+  "after": [],
+  "priority": 0,
+  "attempt": 1,
+  "state": "landed",
+  "tested": {
+    "combination": "3fac3bcb0184a50adee622661fbf9d9e48ce6ff8",
+    "on": "15b5cf173674e8ff2a508a94ac00d3462a2300a5",
+    "submissions": [
+      98,
+      99
+    ]
+  },
+  "result": "passed",
+  "landed_as": "62ebbb1efebf479ef358f5d2511762638d0e3fbe",
+  "subject": "design/a-lapsed-claim-counts-toward-the-runs-in-a-row"
+}

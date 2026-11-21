@@ -1,0 +1,29 @@
+{"format": "weir-known/1", "reader": "pull/288", "known_at": "2026-11-18T00:54:25Z"}
+{"format": "weir-known/1", "reader": "pull/289", "known_at": "2026-11-18T19:32:26Z"}
+{"format": "weir-known/1", "reader": "pull/290", "known_at": "2026-11-18T19:32:50Z"}
+{"format": "weir-delivery/1", "key": "101:landed", "readers": ["pull/292"], "message": "[sluice] #101 landed on main as 96e24df.", "recorded_at": "2026-11-18T21:10:08Z", "expires_at": "2026-11-25T21:10:08Z"}
+{"format": "weir-delivery/1", "key": "102:landed", "readers": ["pull/293"], "message": "[sluice] #102 landed on main as 5a702e3.", "recorded_at": "2026-11-18T21:10:08Z", "expires_at": "2026-11-25T21:10:08Z"}
+{"format": "weir-delivery/1", "key": "103:landed", "readers": ["pull/291"], "message": "[sluice] #103 landed on main as 844c129.", "recorded_at": "2026-11-18T21:10:08Z", "expires_at": "2026-11-25T21:10:08Z"}
+{"format": "weir-known/1", "reader": "pull/294", "known_at": "2026-11-18T21:11:22Z"}
+{"format": "weir-handover/1", "key": "102:landed", "reader": "pull/293", "by": "wait", "at": "2026-11-18T21:11:12Z"}
+{"format": "weir-delivery/1", "key": "106:landed", "readers": ["pull/295"], "message": "[sluice] #106 landed on main as 94f87f7.", "recorded_at": "2026-11-18T23:10:07Z", "expires_at": "2026-11-25T23:10:07Z"}
+{"format": "weir-known/1", "reader": "pull/296", "known_at": "2026-11-19T00:07:44Z"}
+{"format": "weir-known/1", "reader": "pull/297", "known_at": "2026-11-19T12:56:31Z"}
+{"format": "weir-known/1", "reader": "pull/298", "known_at": "2026-11-19T13:24:14Z"}
+{"format": "weir-known/1", "reader": "pull/299", "known_at": "2026-11-19T13:57:23Z"}
+{"format": "weir-known/1", "reader": "pull/300", "known_at": "2026-11-19T15:04:39Z"}
+{"format": "weir-known/1", "reader": "pull/301", "known_at": "2026-11-19T18:17:21Z"}
+{"format": "weir-known/1", "reader": "pull/302", "known_at": "2026-11-19T18:20:09Z"}
+{"format": "weir-known/1", "reader": "pull/303", "known_at": "2026-11-19T20:05:30Z"}
+{"format": "weir-delivery/1", "key": "128:landed", "readers": ["pull/305"], "message": "[sluice] #128 landed on main as 035547e.", "recorded_at": "2026-11-19T23:55:44Z", "expires_at": "2026-11-26T23:55:44Z"}
+{"format": "weir-handover/1", "key": "128:landed", "reader": "pull/305", "by": "wait", "at": "2026-11-19T23:55:51Z"}
+{"format": "weir-known/1", "reader": "pull/306", "known_at": "2026-11-20T21:00:45Z"}
+{"format": "weir-known/1", "reader": "pull/307", "known_at": "2026-11-20T22:24:32Z"}
+{"format": "weir-known/1", "reader": "pull/308", "known_at": "2026-11-20T23:18:35Z"}
+{"format": "weir-known/1", "reader": "pull/304", "known_at": "2026-11-20T23:26:57Z"}
+{"format": "weir-known/1", "reader": "pull/309", "known_at": "2026-11-21T10:38:23Z"}
+{"format": "weir-delivery/1", "key": "141:landed", "readers": ["pull/310"], "message": "[sluice] #141 landed on main as 6c9caac.", "recorded_at": "2026-11-21T17:54:02Z", "expires_at": "2026-11-28T17:54:02Z"}
+{"format": "weir-handover/1", "key": "141:landed", "reader": "pull/310", "by": "wait", "at": "2026-11-21T17:54:09Z"}
+{"format": "weir-handover/1", "key": "141:landed", "reader": "pull/310", "by": "inbox", "at": "2026-11-21T17:54:21Z"}
+{"format": "weir-confirmation/1", "key": "141:landed", "reader": "pull/310", "at": "2026-11-21T17:54:45Z"}
+{"format": "weir-known/1", "reader": "pull/310", "known_at": "2026-11-21T17:54:45Z"}
