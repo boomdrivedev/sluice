@@ -766,6 +766,10 @@ fn sl_ended(repo: &Repo, args: &[&str]) -> Output {
 #[test]
 fn a_fetch_whose_packing_runs_the_hook_ends() {
     let (repo, _bare) = kept_on_origin("protect-fetch-packs");
+    // The tests' git configuration turns git's maintenance off; this test
+    // is of a fetch whose maintenance packs, so the repository turns it on.
+    repo.git(&["config", "maintenance.auto", "true"]);
+    repo.git(&["config", "gc.auto", "6700"]);
     let tip = repo.rev("bolt/x");
     for i in 0..20 {
         repo.git(&["branch", &format!("loose/{i}"), "main"]);

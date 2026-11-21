@@ -58,12 +58,31 @@ pub fn isolated(c: &mut Command) -> &mut Command {
             sluice::profiles::places::USER_SCRATCH_VAR,
             test_user_scratch(),
         )
-        .env("GIT_CONFIG_GLOBAL", "/dev/null")
+        .env("GIT_CONFIG_GLOBAL", test_git_config())
         .env("GIT_CONFIG_NOSYSTEM", "1")
         .env("GIT_TERMINAL_PROMPT", "0")
         .env("GCM_INTERACTIVE", "never")
         .env_remove("GIT_ASKPASS")
         .env_remove("SSH_ASKPASS")
+}
+
+/// The global git configuration of every git a test runs, sluice's own
+/// among them: nothing but git's maintenance turned off. A push into a
+/// test's bare repository otherwise starts `git maintenance run --auto
+/// --detach`, which outlives the test, and the guard fails it. The file
+/// holds no credential helper, as `/dev/null` held none. A push to a local
+/// repository keeps this variable for the receiving side, where it clears
+/// `GIT_CONFIG_COUNT`.
+pub fn test_git_config() -> PathBuf {
+    let path =
+        std::env::temp_dir().join(format!("sluice-test-{}.gitconfig", nix::unistd::geteuid()));
+    let text = "[maintenance]\n\tauto = false\n[gc]\n\tauto = 0\n[receive]\n\tautogc = false\n";
+    if std::fs::read_to_string(&path).ok().as_deref() != Some(text) {
+        let tmp = path.with_extension(format!("{}.tmp", std::process::id()));
+        std::fs::write(&tmp, text).expect("the tests' git configuration");
+        std::fs::rename(&tmp, &path).expect("the tests' git configuration");
+    }
+    path
 }
 
 /// git, [`isolated`], with every credential helper cleared before any a

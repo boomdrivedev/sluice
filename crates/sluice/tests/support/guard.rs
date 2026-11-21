@@ -68,10 +68,9 @@ impl Guard {
         if before.is_empty() {
             return Vec::new();
         }
-        let workers: Vec<u32> = self.folders.iter().flat_map(|f| host_workers(f)).collect();
         let mut left: Vec<Found> = before
             .iter()
-            .filter(|p| !p.host && !workers.contains(&p.pid))
+            .filter(|p| !p.host && !host_worker(p.pid))
             .cloned()
             .collect();
         let hosts: Vec<&Found> = before.iter().filter(|p| p.host).collect();
@@ -83,7 +82,7 @@ impl Guard {
             std::thread::sleep(Duration::from_millis(50));
         }
         for p in self.find() {
-            if !left.iter().any(|l| l.pid == p.pid) {
+            if !left.iter().any(|l| l.pid == p.pid) && !host_worker(p.pid) {
                 left.push(p);
             }
         }
@@ -158,7 +157,7 @@ pub fn find(folders: &[PathBuf]) -> Vec<Found> {
                 .and_then(|e| e.strip_prefix("XDG_STATE_HOME="))
                 .map(|s| real(Path::new(s)))
         });
-        let by_state = state.as_ref().is_some_and(|s| folders.contains(s));
+        let by_state = state.as_ref().is_some_and(|s| inside(s, folders));
         let by_cwd = p.cwd().is_some_and(|c| inside(c, folders));
         if !by_state && !by_cwd {
             continue;
@@ -183,19 +182,67 @@ fn inside(dir: &Path, folders: &[PathBuf]) -> bool {
     folders.iter().any(|f| dir.starts_with(f))
 }
 
-/// The git and credential workers that the host process of the state
-/// folder `state` recorded: its stop ends them.
-fn host_workers(state: &Path) -> Vec<u32> {
-    let dir = state.join("sluice").join("host").join(sluice::workers::DIR);
-    sluice::workers::records(&dir)
-        .into_iter()
-        .filter(|r| {
-            r.held
-                .as_ref()
-                .is_some_and(|h| h.what == "git" || h.what == "credential")
-        })
-        .map(|r| r.pid as u32)
-        .collect()
+/// Stop each host process that the state folder `state` names, with
+/// `SIGTERM`, and wait for it to exit: it ends its runs as it stops. A
+/// test harness whose tests end while a run goes calls it as it ends.
+pub fn stop_host_processes(state: &Path) {
+    let version = state.join("sluice").join("host").join("version");
+    let Some(pid) = std::fs::read(version)
+        .ok()
+        .and_then(|b| serde_json::from_slice::<serde_json::Value>(&b).ok())
+        .and_then(|v| v["pid"].as_u64())
+    else {
+        return;
+    };
+    let pid = pid as u32;
+    if !runs(pid) {
+        return;
+    }
+    signal(pid, libc::SIGTERM);
+    let until = Instant::now() + Duration::from_secs(90);
+    while runs(pid) && Instant::now() < until {
+        std::thread::sleep(Duration::from_millis(50));
+    }
+}
+
+/// Whether `pid` is in the group of a git or credential worker of a host
+/// process: a group whose leader runs git, or `sluice credential`, as a
+/// child of `sluice host` or `sluice daemon`. Such a worker is the host's,
+/// which its stop waits for; git's own children, the other side of a local
+/// fetch among them, are in its group.
+fn host_worker(pid: u32) -> bool {
+    let Ok(group) = nix::unistd::getpgid(Some(nix::unistd::Pid::from_raw(pid as i32))) else {
+        return false;
+    };
+    let leader = group.as_raw();
+    let Some(parent) = sluice::workers::parent(leader) else {
+        return false;
+    };
+    let words = |pid: i32| -> Vec<String> {
+        let mut system = System::new();
+        system.refresh_processes_specifics(
+            ProcessesToUpdate::Some(&[Pid::from_u32(pid as u32)]),
+            false,
+            ProcessRefreshKind::nothing().with_cmd(UpdateKind::Always),
+        );
+        system
+            .process(Pid::from_u32(pid as u32))
+            .map(|p| {
+                p.cmd()
+                    .iter()
+                    .map(|c| c.to_string_lossy().into_owned())
+                    .collect()
+            })
+            .unwrap_or_default()
+    };
+    let named = |w: &[String], n: &str| {
+        w.first()
+            .is_some_and(|c| Path::new(c).file_name().is_some_and(|f| f == n))
+    };
+    let leads = words(leader);
+    let git = named(&leads, "git") || leads.get(1).is_some_and(|w| w == "credential");
+    let host = words(parent);
+    git && named(&host, "sluice") && host.get(1).is_some_and(|w| w == "host" || w == "daemon")
 }
 
 fn runs(pid: u32) -> bool {

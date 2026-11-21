@@ -1662,6 +1662,9 @@ fn the_overview_counts_another_repositorys_combination_in_its_room() {
     for branch in doc["branches"].as_array().unwrap() {
         assert_eq!(branch["candidates"], serde_json::json!([]), "{doc}");
     }
+    // The run goes on after the test's reads: its host process is
+    // stopped, which ends it.
+    support::guard::stop_host_processes(a.state.path());
 }
 
 /// 84, record 0074 (design D6); the host-requirements spec's "The tests

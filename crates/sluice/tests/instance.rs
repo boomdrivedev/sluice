@@ -582,13 +582,14 @@ mod bound {
 
     /// The settings-take-up spec's "The host process sends to the collector
     /// it is changed to" (135; 151; record 0107 as amended 2026-11-13;
-    /// rules core.53, core.54; design D20): `[telemetry]` changed to
-    /// another collector while the first combination's run goes is handed
-    /// by sluice's host process to a fresh one it starts, which reads the
-    /// file itself: the first collector is sent what the first process
-    /// held, traces and metrics, and the second the traces of its
-    /// successor; each run starts once with every core, both land, and a
-    /// host process of another pid answers.
+    /// rules core.53, core.54; design D20; D3 of
+    /// `sluice-host-owns-its-workers`): `[telemetry]` changed to another
+    /// collector while the first combination's run goes is taken up by
+    /// sluice's host process starting afresh in place, whose new image
+    /// reads the file itself: the first collector is sent what the first
+    /// image held, traces and metrics, and the second the traces of the
+    /// image started afresh; each run starts once with every core, both
+    /// land, and the image started afresh has the same pid.
     #[test]
     fn the_host_process_hands_a_changed_telemetry_table_to_a_fresh_one() {
         use std::collections::BTreeSet;
@@ -644,16 +645,24 @@ mod bound {
         );
         assert_eq!(states(&s, "bolt/a"), ["landed", "landed"], "{said}{log}");
         let handed = format!(
-            "sluice: {} changed [telemetry], which the host process takes up by handing its \
-             repositories to a fresh one",
+            "sluice: {} changed [telemetry], which the host process takes up by starting afresh \
+             in place",
             file.display()
         );
         assert_eq!(log.matches(&handed).count(), 1, "{log}");
+        let first_pid = started(&log);
+        let afresh: Vec<&str> = log
+            .lines()
+            .filter(|l| l.contains(" started afresh in place as "))
+            .collect();
+        assert_eq!(afresh.len(), 1, "{log}");
         assert!(
-            started(&log).len() >= 2,
-            "a host process of another pid: {log}"
+            first_pid
+                .iter()
+                .any(|pid| afresh[0].contains(&format!(", pid {pid}"))),
+            "the image started afresh has the same pid: {log}"
         );
-        assert!(!log.contains("did not start"), "{log}");
+        assert!(!log.contains("could not start afresh"), "{log}");
     }
 
     /// host-daemon, "A changed collector" (135; 151; record 0107 as
