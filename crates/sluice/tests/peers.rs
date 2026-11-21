@@ -35,6 +35,15 @@ struct Host {
     git: support::CountingGit,
 }
 
+/// A host stops its host process as it ends, before its folders and the
+/// remote's are judged: the host process fetches from the remote until it
+/// stops.
+impl Drop for Host {
+    fn drop(&mut self) {
+        support::guard::stop_host_processes(self.state.path());
+    }
+}
+
 impl Host {
     fn new(repo: Repo, name: &str, signer: &str, key: &PrivateKey) -> Host {
         let config = Scratch::new(&format!("{name}-config"));
@@ -163,7 +172,7 @@ fn line(principal: &str, k: &PrivateKey) -> String {
 /// Two hosts over one bare remote, under a policy naming each one's
 /// signer and trusting those in `trust`; the first host's and the
 /// second's, and the remote.
-fn two_hosts(name: &str, trust: &str) -> (Host, Host, Scratch) {
+fn two_hosts(name: &str, trust: &str) -> (Scratch, Host, Host) {
     hosts_under(name, |a, b| {
         format!(
             "[tests]\nrunner = \"command\"\ncommand = \"true\"\n\n\
@@ -176,7 +185,7 @@ fn two_hosts(name: &str, trust: &str) -> (Host, Host, Scratch) {
 /// Two hosts over one bare remote, under the policy `policy` makes of
 /// signer `a`'s key line and signer `b`'s; the first host's and the
 /// second's, and the remote.
-fn hosts_under(name: &str, policy: impl Fn(&str, &str) -> String) -> (Host, Host, Scratch) {
+fn hosts_under(name: &str, policy: impl Fn(&str, &str) -> String) -> (Scratch, Host, Host) {
     let (ka, kb) = (
         PrivateKey::random(&mut rand_core::OsRng, Algorithm::Ed25519).unwrap(),
         PrivateKey::random(&mut rand_core::OsRng, Algorithm::Ed25519).unwrap(),
@@ -191,9 +200,9 @@ fn hosts_under(name: &str, policy: impl Fn(&str, &str) -> String) -> (Host, Host
     let origin = a.bare_origin();
     let b = Repo::clone_of(origin.path(), &format!("{name}-b"));
     (
+        origin,
         Host::new(a, &format!("{name}-a"), "a", &ka),
         Host::new(b, &format!("{name}-b"), "b", &kb),
-        origin,
     )
 }
 
@@ -216,7 +225,7 @@ fn refs_under(origin: &Scratch, prefix: &str) -> String {
 fn a_run_is_claimed_and_run_by_the_other_host() {
     let (os, arch) = sluice::instance::this_system();
     let elsewhere = if os == "windows" { "linux" } else { "windows" };
-    let (host_a, host_b, origin) = hosts_under("claims", |a, b| {
+    let (origin, host_a, host_b) = hosts_under("claims", |a, b| {
         format!(
             "[tests]\nrunner = \"command\"\ncommand = \"true\"\n\n\
              [systems.here]\nos = \"{os}\"\narch = \"{arch}\"\n\n\
@@ -273,7 +282,7 @@ fn a_run_is_claimed_and_run_by_the_other_host() {
 /// host reads it landed from the remote when it is back.
 #[test]
 fn a_submission_lands_by_another_host() {
-    let (host_a, host_b, origin) = two_hosts("peers", "[\"a\", \"b\"]");
+    let (origin, host_a, host_b) = two_hosts("peers", "[\"a\", \"b\"]");
 
     let id = host_a.submit("x");
     let deadline = Instant::now() + Duration::from_secs(60);
@@ -324,7 +333,7 @@ fn a_submission_lands_by_another_host() {
 /// over by `inbox` there (record 0102, D3).
 #[test]
 fn an_outcome_on_the_remote_is_collected_on_another_host() {
-    let (host_a, host_b, _origin) = two_hosts("peers-inbox", "[\"a\", \"b\"]");
+    let (_origin, host_a, host_b) = two_hosts("peers-inbox", "[\"a\", \"b\"]");
     let id = host_a.submit("x");
     let deadline = Instant::now() + Duration::from_secs(60);
     while host_a.state_of(id) != "landed" {
@@ -443,7 +452,7 @@ fn a_host_whose_own_main_is_refused_counts_the_remotes_signers() {
 /// Two hosts over one bare remote, both signing as `box`: `main`'s policy
 /// lists the first host's key for `box`, `release`'s the second's. The
 /// first host's and the second's, and the remote.
-fn own_keys(name: &str) -> (Host, Host, Scratch) {
+fn own_keys(name: &str) -> (Scratch, Host, Host) {
     let (ka, kb) = (
         PrivateKey::random(&mut rand_core::OsRng, Algorithm::Ed25519).unwrap(),
         PrivateKey::random(&mut rand_core::OsRng, Algorithm::Ed25519).unwrap(),
@@ -469,9 +478,9 @@ fn own_keys(name: &str) -> (Host, Host, Scratch) {
     let origin = a.bare_origin();
     let b = Repo::clone_of(origin.path(), &format!("{name}-b"));
     (
+        origin,
         Host::new(a, &format!("{name}-a"), "box", &ka),
         Host::new(b, &format!("{name}-b"), "box", &kb),
-        origin,
     )
 }
 
@@ -526,7 +535,7 @@ fn missing(host: &Host, origin: &Scratch, id: u64, branch: &str) {
 /// check missing, until host a's steps run it.
 #[test]
 fn a_host_runs_a_branch_only_where_its_policy_lists_the_hosts_key() {
-    let (host_a, host_b, origin) = own_keys("own-key");
+    let (origin, host_a, host_b) = own_keys("own-key");
     let x = host_a.submit_to("x", "main");
     let y = host_a.submit_to("y", "release");
     land(&[&host_b], y);
@@ -539,7 +548,7 @@ fn a_host_runs_a_branch_only_where_its_policy_lists_the_hosts_key() {
 /// missing, until host b's steps run it.
 #[test]
 fn the_other_host_runs_the_other_branch() {
-    let (host_a, host_b, origin) = own_keys("other-key");
+    let (origin, host_a, host_b) = own_keys("other-key");
     let x = host_a.submit_to("x", "main");
     let y = host_a.submit_to("y", "release");
     land(&[&host_a], x);
@@ -549,7 +558,7 @@ fn the_other_host_runs_the_other_branch() {
 
 /// One host whose `main` and `release` keep their records on origin, each
 /// with one submission landed, and the remote.
-fn two_branches_landed(name: &str) -> (Host, Scratch) {
+fn two_branches_landed(name: &str) -> (Scratch, Host) {
     let k = PrivateKey::random(&mut rand_core::OsRng, Algorithm::Ed25519).unwrap();
     let repo = Repo::new(name);
     repo.write(
@@ -577,7 +586,7 @@ fn two_branches_landed(name: &str) -> (Host, Scratch) {
             std::thread::sleep(Duration::from_millis(200));
         }
     }
-    (host, origin)
+    (origin, host)
 }
 
 /// The starts of git among `starts` that are the tick's one ask of
@@ -598,7 +607,7 @@ fn asks(starts: &[String]) -> usize {
 /// its start and differ by their passes alone (135).
 #[test]
 fn each_pass_asks_origin_once_for_both_branches() {
-    let (host, _origin) = two_branches_landed("ticks-two");
+    let (_origin, host) = two_branches_landed("ticks-two");
     let run = |rounds: &str| -> Vec<String> {
         host.host_process_ended();
         let before = host.git.count();
@@ -662,7 +671,7 @@ impl Drop for Watching {
 /// fetch from origin (129).
 #[test]
 fn each_watch_tick_asks_origin_once_for_both_branches() {
-    let (host, _origin) = two_branches_landed("ticks-watch");
+    let (_origin, host) = two_branches_landed("ticks-watch");
     let watch = Watching::start(&host);
     let first = watch.next(Duration::from_secs(10)).expect("a first line");
     let branches: Vec<&str> = first["branches"]
@@ -684,7 +693,7 @@ fn each_watch_tick_asks_origin_once_for_both_branches() {
 /// in the remote's words, and the next tick asks again (80, 129, 133).
 #[test]
 fn a_refused_ask_shows_both_branches_as_last_fetched() {
-    let (host, origin) = two_branches_landed("ticks-refused");
+    let (origin, host) = two_branches_landed("ticks-refused");
     let watch = Watching::start(&host);
     let first = watch.next(Duration::from_secs(10)).expect("a first line");
     let at: Vec<serde_json::Value> = first["branches"]
@@ -734,7 +743,7 @@ fn remote_calls(starts: &[String]) -> Vec<String> {
 /// them.
 #[test]
 fn a_one_shot_overview_beside_a_current_reading_asks_origin_nothing() {
-    let (host, _origin) = two_branches_landed("overview-current");
+    let (_origin, host) = two_branches_landed("overview-current");
     host.submit("queued");
     // The host process reads the repository for a one-shot read.
     let out = host.sluice(&["status", "main"]);
@@ -760,7 +769,7 @@ fn a_one_shot_overview_beside_a_current_reading_asks_origin_nothing() {
 /// asks origin nothing, and says the queue as the host holds it.
 #[test]
 fn a_status_beside_a_current_reading_asks_origin_nothing() {
-    let (host, _origin) = two_branches_landed("status-current");
+    let (_origin, host) = two_branches_landed("status-current");
     host.submit("queued");
     let out = host.sluice(&["overview", "--json"]);
     assert!(out.status.success(), "{}", text(&out));
@@ -781,7 +790,7 @@ fn a_status_beside_a_current_reading_asks_origin_nothing() {
 /// itself.
 #[test]
 fn a_signed_record_is_verified_once() {
-    let (host, origin) = two_branches_landed("verified-once");
+    let (origin, host) = two_branches_landed("verified-once");
     let mut landed = Vec::new();
     for n in ["m2", "m3"] {
         let id = host.submit_to(n, "main");
@@ -924,7 +933,7 @@ impl Drop for Kept {
 /// amended 2026-11-19).
 #[test]
 fn a_daemon_lands_what_another_host_submits() {
-    let (host_a, host_b, origin) = two_hosts("peers-daemon", "[\"a\", \"b\"]");
+    let (origin, host_a, host_b) = two_hosts("peers-daemon", "[\"a\", \"b\"]");
     let id = host_a.submit("x");
     let mut daemon = Kept(
         host_b

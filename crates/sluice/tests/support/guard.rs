@@ -97,19 +97,18 @@ impl Guard {
         while hosts.iter().any(|h| runs(h.pid)) && Instant::now() < until {
             std::thread::sleep(Duration::from_millis(50));
         }
-        for p in self.find() {
-            if !left.iter().any(|l| l.pid == p.pid) && !host_worker(p.pid) {
-                left.push(p);
-            }
-        }
         // A process that ends by itself within [`SETTLE`] does not continue
-        // to run: the far side of a fetch that just ended, for example, or
-        // of one that a host process of another test's folder made.
+        // to run: the far side of a fetch that just ended, for example.
         let until = Instant::now() + SETTLE;
         while left.iter().any(|p| runs(p.pid)) && Instant::now() < until {
             std::thread::sleep(Duration::from_millis(20));
         }
         left.retain(|p| runs(p.pid));
+        for p in self.find() {
+            if !left.iter().any(|l| l.pid == p.pid) && !host_worker(p.pid) {
+                left.push(p);
+            }
+        }
         end(&left);
         left
     }
