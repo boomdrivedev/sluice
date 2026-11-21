@@ -36,7 +36,7 @@
 use std::cell::RefCell;
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
+use std::process::Stdio;
 use std::rc::Rc;
 use std::time::Duration;
 
@@ -574,7 +574,7 @@ impl Pulls {
 
     /// The commit messages of `tip..head`, oldest first.
     fn messages(&self, tip: &Rev, head: &Rev) -> Result<Vec<String>> {
-        let out = Command::new("git")
+        let out = crate::workers::command("git", "git")
             .arg("--git-dir")
             .arg(&self.dir)
             .args([

@@ -120,7 +120,7 @@ impl Context<'_> {
             return Ok(self.env.clone());
         }
         let argv = self.argv(&["env", "-0"]);
-        let out = std::process::Command::new(&argv[0])
+        let out = crate::workers::command(&argv[0], "equip")
             .args(&argv[1..])
             .current_dir(&self.request.place.path)
             .env_clear()
@@ -811,7 +811,7 @@ fn toolchain(
     let (program, args) = argv
         .split_first()
         .ok_or_else(|| anyhow!("[tests] toolchain names no command"))?;
-    let out = match std::process::Command::new(program)
+    let out = match crate::workers::command(program, "equip")
         .args(args)
         .current_dir(place)
         .env_clear()

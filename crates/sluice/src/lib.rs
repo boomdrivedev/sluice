@@ -33,6 +33,7 @@ pub mod signing;
 pub mod telemetry;
 pub mod told;
 pub mod words;
+pub mod workers;
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::io::Write;

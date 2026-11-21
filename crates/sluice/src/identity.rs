@@ -18,7 +18,7 @@
 
 use std::io::{BufRead, Write};
 use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
+use std::process::Stdio;
 use std::time::Duration;
 
 use anyhow::{anyhow, Result};
@@ -356,7 +356,7 @@ impl CredentialCommand {
                 .map_err(failed)?;
             drop(asking);
             let ran = output_kept(
-                Command::new(&self.program)
+                crate::workers::command(&self.program, "credential")
                     .args(&self.args)
                     .arg(operation)
                     .stdin(Stdio::from(asked)),

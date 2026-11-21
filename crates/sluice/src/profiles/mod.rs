@@ -514,7 +514,7 @@ fn gone(dir: &Path) -> bool {
 /// The top of the git worktree holding `dir`, as git prints it; `None`
 /// where git finds no worktree, as in a bare repository's git directory.
 pub fn worktree_top(dir: &Path) -> Result<Option<String>> {
-    let out = Command::new("git")
+    let out = crate::workers::command("git", "git")
         .args(["rev-parse", "--show-toplevel"])
         .current_dir(dir)
         .env_remove("GIT_DIR")
@@ -632,7 +632,7 @@ impl crate::exec::Host for Bound {
     }
 
     fn revision(&self, rev: &str) -> Result<Option<String>> {
-        let out = Command::new("git")
+        let out = crate::workers::command("git", "git")
             .args(["rev-parse", "--verify", "--quiet", "--end-of-options"])
             .arg(format!("{rev}^{{commit}}"))
             .env_remove("GIT_DIR")

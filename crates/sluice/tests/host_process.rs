@@ -40,6 +40,24 @@ fn alive(pid: u32) -> bool {
     nix::sys::signal::kill(nix::unistd::Pid::from_raw(pid as i32), None).is_ok()
 }
 
+/// Stop the process `pid` with `SIGTERM`, as a service manager does, and
+/// wait for it to exit: a host process ends its runs as it stops.
+fn stop(pid: u32) {
+    let _ = nix::sys::signal::kill(
+        nix::unistd::Pid::from_raw(pid as i32),
+        nix::sys::signal::Signal::SIGTERM,
+    );
+    within(90, "the process stops", || !alive(pid));
+}
+
+/// Stop the host process that answers for `d`, where one does: the runs
+/// that it holds end with it, so the test leaves none.
+fn stop_host(d: &OnDisk) {
+    if let Some(pid) = answering(d) {
+        stop(pid);
+    }
+}
+
 /// Kill the process `pid` at once.
 fn kill(pid: u32) {
     let _ = nix::sys::signal::kill(
@@ -571,8 +589,9 @@ fn a_reach_while_it_ends_starts_another() {
     assert!(pids.len() > 1, "it ended and was started again: {pids:?}");
 }
 
-/// 135 (design D8): a command of a newer sluice has an older host
-/// process hand over, and starts its own.
+/// 135 (design D8; D3 of `sluice-host-owns-its-workers`): a command of a
+/// newer sluice has an older host process hand over, which starts afresh
+/// in place: the same pid with a later `since`.
 #[test]
 fn a_newer_client_has_an_older_host_process_hand_over() {
     let d = OnDisk::new("host-newer", POLICY);
@@ -581,11 +600,11 @@ fn a_newer_client_has_an_older_host_process_hand_over() {
     let mut follow = client
         .follow(Path::new(&repository), FollowKind::Wait)
         .unwrap();
-    let older = follow.named.pid;
+    let older = follow.named.clone();
     let newer = client.clone().with_version("0.72.0");
     let reached = newer.reach().expect("the newer command's own");
-    assert_ne!(reached.named.pid, older);
-    within(10, "the older process ends", || !alive(older));
+    assert_eq!(reached.named.pid, older.pid);
+    assert_ne!(reached.named.since, older.since);
     // What followed the older one is closed, and reaches the new one.
     assert!(follow.next(Some(Duration::from_secs(5))).is_err());
 }
@@ -650,11 +669,12 @@ fn a_hand_over_longer_than_a_start_is_waited_out() {
     assert!(request.contains("hand-over"), "{request}");
 }
 
-/// 135 (design D8): a command of an older sluice uses a newer host
-/// process as it is, and a request the process does not know is answered
-/// with an error naming both versions.
+/// 135 (design D8; `never-break-an-existing-client@ed293965fc5c`): a
+/// command of an older sluice uses a newer host process as it is, and a
+/// request the process does not know is answered with an error naming
+/// both versions.
 #[test]
-fn an_older_client_uses_a_newer_host_process() {
+fn an_older_command_uses_a_newer_host_process() {
     let d = OnDisk::new("host-older-client", POLICY);
     let client = d.client(d.repo.dir());
     // A newer process, standing at the socket: it answers `hello` as sluice
@@ -862,6 +882,7 @@ fn a_run_holds_nothing_of_the_command_that_started_the_host_process() {
         .unwrap();
     let cwd = String::from_utf8_lossy(&cwd.stdout);
     assert!(cwd.lines().any(|l| l == "n/"), "{cwd}");
+    stop_host(&d);
 }
 
 /// What a round of a combination's runs git for: its checkout, its
@@ -923,6 +944,7 @@ fn a_waits_first_pass_beside_a_live_host_process_is_the_one_it_asked_for() {
     let doc: serde_json::Value =
         serde_json::from_slice(&out.stdout).unwrap_or_else(|_| panic!("{}", text(&out)));
     assert_eq!(doc["state"], "testing", "{doc}");
+    stop_host(&d);
 }
 
 /// overview-reader, "The host process is killed under a wait": the wait
@@ -1035,6 +1057,7 @@ fn a_step_is_the_host_processs_round() {
         !starts.iter().any(|(p, a)| *p == step && a_rounds(a)),
         "the step ran none of it: {starts:?}"
     );
+    stop_host(&d);
 }
 
 /// This setup's host bound: `[runs] max` in its config.
@@ -1151,6 +1174,7 @@ fn s75_a_combination_starts_before_a_third_agents_check() {
         let out = agent.wait_with_output().unwrap();
         assert!(out.status.success(), "{}", text(&out));
     }
+    stop_host(&d);
 }
 
 /// run-bound, "An agent's check stopped while it waits" (150; rule
@@ -1202,6 +1226,14 @@ fn an_agents_check_stopped_while_it_waits_is_counted_nowhere() {
 
 /// `sluice status main` through the binary, the host process it may start
 /// passing at its own tick.
+/// Whether a run of `d`'s repository wrote its result.
+fn run_ended(d: &OnDisk) -> bool {
+    let runs = d.repo.dir().join(".git/sluice/.runs");
+    std::fs::read_dir(runs)
+        .map(|e| e.flatten().any(|e| e.path().join("result.json").exists()))
+        .unwrap_or(false)
+}
+
 fn status_live(d: &OnDisk) {
     let out = d
         .command(d.repo.dir())
@@ -1211,9 +1243,10 @@ fn status_live(d: &OnDisk) {
     assert!(out.status.success(), "{}", text(&out));
 }
 
-/// host-process, "Killed while a combination is under test" (135, S10): a
-/// run outlives the host process killed under it; the one a status starts
-/// reads its result from the run, runs no check again, and lands it.
+/// host-process, "A result read before the kill" (135, S10): a run whose
+/// checks end with a result after its host process was killed, before the
+/// next host process starts, is landed by the one a status starts, which
+/// reads its result from the run and runs no check again.
 #[test]
 fn a_killed_host_process_loses_nothing() {
     let marks = support::Scratch::new("host-killed-marks");
@@ -1233,6 +1266,7 @@ fn a_killed_host_process_loses_nothing() {
     std::thread::sleep(Duration::from_secs(1));
     kill(answering(&d).expect("the host process runs"));
     within(30, "the checks end, outliving it", || done.exists());
+    within(10, "its result is written", || run_ended(&d));
     within(10, "it is gone", || answering(&d).is_none());
     status_live(&d);
     within(60, "the submission lands", || {
@@ -1425,6 +1459,14 @@ struct Slowed {
     _bin: support::Scratch,
 }
 
+/// Dropped, the git that waits goes on at once, so the host process can
+/// stop.
+impl Drop for Slowed {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_file(&self.flag);
+    }
+}
+
 impl Slowed {
     fn start(d: &OnDisk, name: &str) -> Slowed {
         let repository = std::path::PathBuf::from(d.repository(d.repo.dir()));
@@ -1439,7 +1481,7 @@ impl Slowed {
         std::fs::write(
             &script,
             format!(
-                "#!/bin/sh\nif [ -f '{flag}' ] && [ \"$PPID\" = \"$(cat '{flag}')\" ]; then sleep 60; fi\nexec '{real}' \"$@\"\n",
+                "#!/bin/sh\nif [ -f '{flag}' ] && [ \"$PPID\" = \"$(cat '{flag}')\" ]; then i=0; while [ -f '{flag}' ] && [ $i -lt 600 ]; do sleep 0.1; i=$((i+1)); done; fi\nexec '{real}' \"$@\"\n",
                 flag = flag.display(),
                 real = real.display()
             ),
@@ -1474,7 +1516,8 @@ impl Slowed {
         }
     }
 
-    /// From now on, every git the host process starts waits a minute.
+    /// From now on, every git the host process starts waits a minute, or
+    /// until the slowing is dropped.
     fn slow(&self) {
         std::fs::write(&self.flag, self.pid.to_string()).unwrap();
     }
@@ -1726,51 +1769,50 @@ fn settings(d: &OnDisk, text: &str) -> std::path::PathBuf {
     file
 }
 
-/// 135, record 0107 as amended 2026-11-13 (design D20): a submit made as
-/// the host process hands over for a changed `[telemetry]` reaches the
-/// successor, exactly one host process runs once the hand-over ends, and
-/// the submission lands with no other command moving it.
+/// 135, record 0107 as amended 2026-11-13 (design D20; D3 of
+/// `sluice-host-owns-its-workers`): a submit made as the host process
+/// starts afresh in place for a changed `[telemetry]` reaches the image
+/// started afresh, exactly one host process runs, and the submission lands
+/// with no other command moving it.
 #[test]
 fn a_submit_during_a_hand_over_reaches_the_successor() {
-    let d = OnDisk::new("host-hand-over-submit", POLICY);
+    let marks = support::Scratch::new("host-hand-over-submit-marks");
+    let d = OnDisk::new("host-hand-over-submit", &held_policy(&marks));
     settings(&d, "[telemetry]\nservice = \"one\"\n");
-    let dir = d.session("a");
-    let repository = d.repository(d.repo.dir());
+    let held = d.session("a");
+    let dir = d.session("b");
     live_from_here(&d);
-    // A host process that passes at its own tick, kept by a follow until
-    // it hands over.
-    let client = d.client(d.repo.dir());
-    let kept = client
-        .follow(Path::new(&repository), FollowKind::Wait)
-        .expect("a host process");
-    let first = kept.named.pid;
-    let log = client.paths().log();
+    // A host process that passes at its own tick, its first submission's
+    // check held, so it has work in play across the hand-over.
+    let first_id = queued_live(&d, &held);
+    within(60, "the first submission's check runs", || {
+        check_of(&marks).is_some()
+    });
+    let first = named(&d).expect("a host process");
 
     settings(&d, "[telemetry]\nservice = \"two\"\n");
     within(30, "the host process hands over", || {
-        std::fs::read_to_string(&log)
-            .unwrap_or_default()
-            .contains("takes up by handing its repositories to a fresh one")
-            || std::fs::read_to_string(client.paths().previous_log())
-                .unwrap_or_default()
-                .contains("takes up by handing its repositories to a fresh one")
+        host_logs(&d).contains("takes up by starting afresh in place")
     });
     let id = queued_live(&d, &dir);
 
-    within(15, "the first host process ends", || !alive(first));
-    let successor = answering(&d).expect("a host process answers");
-    assert_ne!(successor, first, "the successor answers");
-    within(60, "the submission lands", || {
-        state(&d, d.repo.dir(), id) == "landed"
+    within(15, "the image started afresh answers", || {
+        named(&d).is_some_and(|n| n.since != first.since)
     });
+    let successor = answering(&d).expect("a host process answers");
+    assert_eq!(successor, first.pid, "the same pid answers");
+    std::fs::write(marks.path().join("go"), "").unwrap();
+    lands(&d, first_id);
+    lands(&d, id);
     the_one_host_process(&d, successor, "one host process throughout");
 }
 
-/// 135, record 0107 as amended 2026-11-13 (design D20): where the
-/// successor the host process starts for a changed `[telemetry]` exits at
-/// once, it takes its lock back, its socket answers with its own pid, its
-/// repository's work goes on, and its log says once that its successor did
-/// not start, naming the log.
+/// settings-take-up, "A successor that does not answer" (135, record 0107
+/// as amended 2026-11-13; D3 of `sluice-host-owns-its-workers`): where the
+/// executable the host process starts afresh as for a changed
+/// `[telemetry]` is gone, it takes its lock back, its socket answers with
+/// its own pid and `since`, its run goes on, and its log says once that it
+/// could not start afresh.
 #[test]
 fn a_successor_that_does_not_start_leaves_the_host_process_as_it_was() {
     let marks = support::Scratch::new("host-no-successor-marks");
@@ -1793,8 +1835,8 @@ fn a_successor_that_does_not_start_leaves_the_host_process_as_it_was() {
     let dir = d.session("a");
     let repository = d.repository(d.repo.dir());
     live_from_here(&d);
-    // The host process started from a copy of sluice, which a successor
-    // started from the same path finds replaced by one that exits at once.
+    // The host process started from a copy of sluice, which is gone when
+    // it starts afresh.
     let bin = support::Scratch::new("host-no-successor-bin");
     let copy = bin.path().join("sluice");
     std::fs::copy(env!("CARGO_BIN_EXE_sluice"), &copy).unwrap();
@@ -1804,46 +1846,43 @@ fn a_successor_that_does_not_start_leaves_the_host_process_as_it_was() {
     let kept = client
         .follow(Path::new(&repository), FollowKind::Wait)
         .expect("a host process");
-    let first = kept.named.pid;
+    let first = kept.named.clone();
     let id = queued_live(&d, &dir);
     within(60, "#1 is under test", || {
         state(&d, d.repo.dir(), id) == "testing"
     });
     // The round marks #1 testing before it makes the run's place and
     // starts its supervisor from the host process's own executable, so the
-    // copy is replaced only once the run's check has begun: replaced
-    // sooner, under load, the supervisor started from it exits at once and
-    // #1 fails.
+    // copy goes only once the run's check has begun: gone sooner, the
+    // supervisor cannot start and #1 fails.
     within(60, "#1's check begins", || began.exists());
     std::fs::remove_file(&copy).unwrap();
-    std::fs::write(&copy, "#!/bin/sh\nexit 0\n").unwrap();
-    use std::os::unix::fs::PermissionsExt;
-    std::fs::set_permissions(&copy, std::fs::Permissions::from_mode(0o755)).unwrap();
 
     settings(&d, "[telemetry]\nservice = \"two\"\n");
     let log = client.paths().log();
     let said = || std::fs::read_to_string(&log).unwrap_or_default();
     within(
         40,
-        "the host process says its successor did not start",
-        || said().contains("its successor did not start"),
+        "the host process says it could not start afresh",
+        || said().contains("it could not start afresh"),
     );
-    assert!(alive(first), "{}", said());
-    assert_eq!(answering(&d), Some(first), "{}", said());
+    assert!(alive(first.pid), "{}", said());
+    let now = named(&d).expect("it answers");
+    assert_eq!(
+        (now.pid, &now.since),
+        (first.pid, &first.since),
+        "{}",
+        said()
+    );
     let warned: Vec<String> = said()
         .lines()
-        .filter(|l| l.contains("its successor did not start"))
+        .filter(|l| l.contains("it could not start afresh"))
         .map(str::to_string)
         .collect();
     assert_eq!(warned.len(), 1, "{}", said());
     assert!(
         warned[0]
             .contains("changed [telemetry], which the host process takes up only by handing over"),
-        "{}",
-        warned[0]
-    );
-    assert!(
-        warned[0].contains(&log.display().to_string()),
         "{}",
         warned[0]
     );
@@ -1867,7 +1906,8 @@ fn a_successor_that_does_not_start_leaves_the_host_process_as_it_was() {
         );
         std::thread::sleep(Duration::from_millis(100));
     }
-    the_one_host_process(&d, first, "the host process as it was");
+    the_one_host_process(&d, first.pid, "the host process as it was");
+    drop(kept);
 }
 
 /// `sluice daemon`, as a machine that keeps it running starts it, in a
@@ -1931,8 +1971,20 @@ impl Daemon {
     }
 }
 
+/// A daemon dropped is stopped as a service manager stops it, so it ends
+/// its workers, and killed where it has not exited within thirty seconds.
 impl Drop for Daemon {
     fn drop(&mut self) {
+        if self.runs() {
+            let _ = nix::sys::signal::kill(
+                nix::unistd::Pid::from_raw(self.pid() as i32),
+                nix::sys::signal::Signal::SIGTERM,
+            );
+            let until = Instant::now() + Duration::from_secs(30);
+            while self.runs() && Instant::now() < until {
+                std::thread::sleep(Duration::from_millis(50));
+            }
+        }
         let _ = self.child.kill();
         let _ = self.child.wait();
     }
@@ -2284,6 +2336,7 @@ fn ask_hand_over(d: &OnDisk, program: &Path) {
     let answer = c
         .ask(&sluice::host_process::protocol::Request::HandOver {
             program: Some(program.to_path_buf()),
+            ends: false,
         })
         .unwrap();
     assert_eq!(answer, sluice::host_process::protocol::Answer::Ok);
@@ -2487,32 +2540,28 @@ fn a_submit_during_a_daemons_start_afresh_reaches_it() {
 }
 
 /// host-daemon, "Stopped while a run goes on" (135; design D7 of
-/// `sluice-runs-as-a-daemon`): `sluice daemon` running a combination's
-/// checks, sent `SIGTERM`, exits 0 and its socket goes; its run goes on,
-/// and once `sluice wait` runs, the submission lands with no check run
-/// again.
+/// `sluice-runs-as-a-daemon`; `sluices-runs-end-with-its-host-process@e814b716f3b1`):
+/// `sluice daemon` running a combination's checks, sent `SIGTERM`, exits 0,
+/// its socket goes and no process of the checks runs; once `sluice wait`
+/// runs, the combination is tested again and the submission lands.
 #[test]
-fn a_stopped_daemon_leaves_its_runs_going() {
+fn a_stopped_daemon_ends_its_runs() {
     let marks = support::Scratch::new("daemon-stopped-marks");
-    let ran = marks.path().join("ran");
-    let done = marks.path().join("done");
-    let policy = format!(
-        "[tests]\nrunner = \"command\"\ncommand = \"echo run >> '{}'; sleep 3; touch '{}'\"\n\n[branches.main]\ntimeout = \"1m\"\n",
-        ran.display(),
-        done.display()
-    );
-    let d = OnDisk::new("daemon-stopped", &policy);
+    let d = OnDisk::new("daemon-stopped", &held_policy(&marks));
     let dir = d.session("a");
     let mut daemon = Daemon::start(&d, d.repo.dir());
     answers(&d, &daemon);
     let id = queued_live(&d, &dir);
-    within(30, "the combination's checks run", || ran.exists());
+    within(60, "the combination's checks run", || {
+        check_of(&marks).is_some()
+    });
     // Once its round has recorded the run started (S10).
     std::thread::sleep(Duration::from_secs(1));
     let status = daemon.stop(nix::sys::signal::Signal::SIGTERM);
     assert!(status.success(), "{status:?}: {}", host_logs(&d));
     assert!(!d.client(d.repo.dir()).paths().socket.exists());
-    within(30, "the checks end, outliving it", || done.exists());
+    assert_eq!(check_of(&marks), None, "{}", host_logs(&d));
+    std::fs::write(marks.path().join("go"), "").unwrap();
     let out = d
         .command(d.repo.dir())
         .args(["wait", &id.to_string()])
@@ -2520,8 +2569,327 @@ fn a_stopped_daemon_leaves_its_runs_going() {
         .unwrap();
     assert!(out.status.success(), "{}", text(&out));
     assert_eq!(state(&d, d.repo.dir(), id), "landed");
-    let runs = std::fs::read_to_string(&ran).unwrap();
-    assert_eq!(runs.lines().count(), 1, "no check ran again: {runs}");
+    let runs = std::fs::read_to_string(marks.path().join("began")).unwrap();
+    assert_eq!(runs.lines().count(), 2, "tested again: {runs}");
+}
+
+/// The pid of the run's check that `marks` holds: the shell whose command
+/// names its marks, where one runs.
+fn check_of(marks: &support::Scratch) -> Option<u32> {
+    use sysinfo::{ProcessRefreshKind, ProcessStatus, ProcessesToUpdate, System, UpdateKind};
+    let began = marks.path().join("began").display().to_string();
+    let mut system = System::new();
+    system.refresh_processes_specifics(
+        ProcessesToUpdate::All,
+        true,
+        ProcessRefreshKind::nothing().with_cmd(UpdateKind::Always),
+    );
+    system
+        .processes()
+        .iter()
+        .filter(|(_, p)| !matches!(p.status(), ProcessStatus::Zombie))
+        .find(|(_, p)| {
+            let words: Vec<String> = p
+                .cmd()
+                .iter()
+                .map(|c| c.to_string_lossy().into_owned())
+                .collect();
+            let line = words.join(" ");
+            line.contains(&began) && line.contains("while")
+        })
+        .map(|(pid, _)| pid.as_u32())
+}
+
+/// The process groups that `d`'s host state names as workers.
+fn recorded_groups(d: &OnDisk) -> Vec<i32> {
+    let dir = d
+        .state
+        .path()
+        .join("sluice/host")
+        .join(sluice::workers::DIR);
+    sluice::workers::records(&dir)
+        .into_iter()
+        .map(|r| r.pid)
+        .collect()
+}
+
+/// The process group of `pid`.
+fn group_of(pid: u32) -> i32 {
+    nix::unistd::getpgid(Some(nix::unistd::Pid::from_raw(pid as i32)))
+        .unwrap()
+        .as_raw()
+}
+
+/// The submission `id` lands within ninety seconds, under whatever host
+/// process a status starts.
+fn lands(d: &OnDisk, id: u64) {
+    let until = Instant::now() + Duration::from_secs(90);
+    while state(d, d.repo.dir(), id) != "landed" {
+        assert!(
+            Instant::now() < until,
+            "the submission lands: {}",
+            host_logs(d)
+        );
+        std::thread::sleep(Duration::from_millis(200));
+    }
+}
+
+/// resident-workers, "A combination's checks"
+/// (`workers-end-with-their-owner@292e869158d6`): the checks' parent chain
+/// reaches `sluice host`, their process group is not its group, and the
+/// host's state names that group.
+#[test]
+fn a_runs_checks_are_a_child_group_of_sluice_host() {
+    let marks = support::Scratch::new("host-child-group-marks");
+    let d = OnDisk::new("host-child-group", &held_policy(&marks));
+    let dir = d.session("a");
+    let id = queued_live(&d, &dir);
+    within(60, "the combination's check runs", || {
+        check_of(&marks).is_some()
+    });
+    let host = answering(&d).expect("the host process runs");
+    let check = check_of(&marks).expect("the check runs");
+    let supervisor = sluice::workers::parent(check as i32).expect("its parent");
+    assert_eq!(
+        sluice::workers::parent(supervisor),
+        Some(host as i32),
+        "the check's parent chain reaches sluice host"
+    );
+    assert_ne!(group_of(check), group_of(host));
+    assert_ne!(group_of(supervisor as u32), group_of(host));
+    let groups = recorded_groups(&d);
+    assert!(groups.contains(&group_of(check)), "{groups:?}");
+    assert!(groups.contains(&supervisor), "{groups:?}");
+    std::fs::write(marks.path().join("go"), "").unwrap();
+    lands(&d, id);
+}
+
+/// resident-workers, "Stopped while a combination is under test", and "The
+/// run after a stop" (`sluices-runs-end-with-its-host-process@e814b716f3b1`):
+/// a host process that a command started, sent `SIGTERM` while a
+/// combination's checks run, has ended them when it exits; the run has no
+/// outcome, and the next host process tests the combination again.
+#[test]
+fn a_stopped_host_process_ends_its_runs() {
+    let marks = support::Scratch::new("host-stop-ends-marks");
+    let d = OnDisk::new("host-stop-ends", &held_policy(&marks));
+    let dir = d.session("a");
+    let id = queued_live(&d, &dir);
+    within(60, "the combination's check runs", || {
+        check_of(&marks).is_some()
+    });
+    // Once its round has recorded the run started (S10).
+    std::thread::sleep(Duration::from_secs(1));
+    let host = answering(&d).expect("the host process runs");
+    nix::sys::signal::kill(
+        nix::unistd::Pid::from_raw(host as i32),
+        nix::sys::signal::Signal::SIGTERM,
+    )
+    .unwrap();
+    within(60, "the host process exits", || !alive(host));
+    assert_eq!(check_of(&marks), None, "{}", host_logs(&d));
+    assert!(recorded_groups(&d).is_empty(), "{:?}", recorded_groups(&d));
+    std::fs::write(marks.path().join("go"), "").unwrap();
+    status_live(&d);
+    lands(&d, id);
+    let ran = std::fs::read_to_string(marks.path().join("began")).unwrap();
+    assert_eq!(ran.lines().count(), 2, "tested again: {ran}");
+}
+
+/// resident-workers, "Killed with SIGKILL", and host-process, "Killed while
+/// a combination is under test" (`nothing-detached@f807c7f5fcea`): a host
+/// process killed with `SIGKILL` leaves its checks running; the next host
+/// process ends their group before it starts a worker, the run has no
+/// outcome, and the combination is tested again.
+#[test]
+fn a_killed_host_processs_runs_end_at_the_next_start() {
+    let marks = support::Scratch::new("host-killed-ends-marks");
+    let d = OnDisk::new("host-killed-ends", &held_policy(&marks));
+    let dir = d.session("a");
+    let id = queued_live(&d, &dir);
+    within(60, "the combination's check runs", || {
+        check_of(&marks).is_some()
+    });
+    std::thread::sleep(Duration::from_secs(1));
+    let host = answering(&d).expect("the host process runs");
+    kill(host);
+    within(10, "it is gone", || !alive(host));
+    let check = check_of(&marks).expect("the check outlives a killed host process");
+    status_live(&d);
+    within(30, "the next host process ends the check", || !alive(check));
+    let logs = host_logs(&d);
+    assert!(logs.contains("which a stopped host process left"), "{logs}");
+    std::fs::write(marks.path().join("go"), "").unwrap();
+    lands(&d, id);
+    let ran = std::fs::read_to_string(marks.path().join("began")).unwrap();
+    assert_eq!(ran.lines().count(), 2, "tested again: {ran}");
+}
+
+/// resident-workers, "An upgrade while a combination is under test", and
+/// host-process, "The host's sluice is upgraded"
+/// (`sluices-runs-end-with-its-host-process@e814b716f3b1`): a host process
+/// that a command started, running a combination's checks, asked to hand
+/// over by a newer command, starts afresh in place: the newer command
+/// reaches a host process with the same pid and a later `since`, the
+/// checks go on as its children, and their result lands the combination
+/// with no check run again.
+#[test]
+fn an_upgrade_keeps_its_runs_as_children() {
+    let marks = support::Scratch::new("host-upgrade-marks");
+    let d = OnDisk::new("host-upgrade", &held_policy(&marks));
+    let dir = d.session("a");
+    let id = queued_live(&d, &dir);
+    within(60, "the combination's check runs", || {
+        check_of(&marks).is_some()
+    });
+    let first = named(&d).expect("the host process answers");
+    let check = check_of(&marks).unwrap();
+    let reached = d
+        .client(d.repo.dir())
+        .with_version("99.0.0")
+        .reach()
+        .expect("the newer command's own");
+    assert_eq!(reached.named.pid, first.pid, "{}", host_logs(&d));
+    assert_ne!(reached.named.since, first.since);
+    drop(reached);
+    assert!(alive(check), "the check goes on");
+    let supervisor = sluice::workers::parent(check as i32).unwrap();
+    assert_eq!(sluice::workers::parent(supervisor), Some(first.pid as i32));
+    std::fs::write(marks.path().join("go"), "").unwrap();
+    lands(&d, id);
+    let ran = std::fs::read_to_string(marks.path().join("began")).unwrap();
+    assert_eq!(ran.lines().count(), 1, "no check ran again: {ran}");
+    // A stop of the image started afresh ends what it took over.
+    let logs = host_logs(&d);
+    assert!(
+        logs.contains("it starts afresh in its own process, keeping its pid"),
+        "{logs}"
+    );
+}
+
+/// resident-workers, "A stop after a hand-over": a host process that took
+/// a run in a hand-over, sent `SIGTERM`, has ended the run's group when it
+/// exits.
+#[test]
+fn a_stop_after_a_hand_over_ends_the_run() {
+    let marks = support::Scratch::new("host-stop-after-marks");
+    let d = OnDisk::new("host-stop-after", &held_policy(&marks));
+    let dir = d.session("a");
+    let _id = queued_live(&d, &dir);
+    within(60, "the combination's check runs", || {
+        check_of(&marks).is_some()
+    });
+    let first = named(&d).expect("the host process answers");
+    let reached = d
+        .client(d.repo.dir())
+        .with_version("99.0.0")
+        .reach()
+        .expect("the newer command's own");
+    assert_eq!(reached.named.pid, first.pid);
+    drop(reached);
+    let check = check_of(&marks).expect("the check goes on");
+    nix::sys::signal::kill(
+        nix::unistd::Pid::from_raw(first.pid as i32),
+        nix::sys::signal::Signal::SIGTERM,
+    )
+    .unwrap();
+    within(60, "the host process exits", || !alive(first.pid));
+    assert!(!alive(check), "{}", host_logs(&d));
+    assert_eq!(check_of(&marks), None);
+}
+
+/// test-children, "A test that leaves a run"
+/// (`a-leaked-child-fails-its-test@9a82a5147ba6`): a test that ends while a
+/// combination's checks run fails; the guard stops its `sluice host`, and
+/// its words name the pid and the command of the checks.
+#[test]
+fn a_test_that_leaves_a_run_fails() {
+    let marks = support::Scratch::new("guard-run-marks");
+    let d = OnDisk::new("guard-run", &held_policy(&marks));
+    let dir = d.session("a");
+    let _id = queued_live(&d, &dir);
+    within(60, "the combination's check runs", || {
+        check_of(&marks).is_some()
+    });
+    let check = check_of(&marks).unwrap();
+    let host = answering(&d).unwrap();
+    let guard = d.guard();
+    let failed = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| guard.judge()))
+        .expect_err("the test fails");
+    let words = failed.downcast_ref::<String>().cloned().unwrap_or_default();
+    assert!(words.contains(&format!("pid {check}")), "{words}");
+    assert!(words.contains("while"), "{words}");
+    assert!(!alive(host), "the guard stopped the host process");
+    assert!(!alive(check));
+    assert!(d.guard().find().is_empty());
+}
+
+/// test-children, "A clean test": a test that lands its submission, its
+/// checks and git commands ended, passes; the guard stops its `sluice host`
+/// and finds no other process.
+#[test]
+fn a_clean_test_passes() {
+    let d = OnDisk::new("guard-clean", POLICY);
+    let dir = d.session("a");
+    let id = queued_live(&d, &dir);
+    lands(&d, id);
+    let host = answering(&d);
+    assert_eq!(d.guard().check(), Vec::new());
+    if let Some(host) = host {
+        assert!(!alive(host), "the guard stopped the host process");
+    }
+}
+
+/// test-children, "A detached host process": the guard finds a `sluice
+/// host` that a command started in a session of its own by the test's
+/// state folder, and stops it, which is no leak.
+#[test]
+fn the_guard_finds_a_detached_host_process() {
+    let d = OnDisk::new("guard-detached", POLICY);
+    let reached = d.client(d.repo.dir()).reach().expect("started");
+    let pid = reached.named.pid;
+    drop(reached);
+    let found = d.guard().find();
+    assert!(found.iter().any(|f| f.pid == pid && f.host), "{found:?}");
+    assert_eq!(d.guard().check(), Vec::new());
+    assert!(!alive(pid), "the guard stopped it");
+}
+
+/// test-children, "Another test's process": the guard of one test neither
+/// names nor ends the `sluice host` of another test that runs at the same
+/// time.
+#[test]
+fn the_guard_passes_over_another_tests_process() {
+    let first = OnDisk::new("guard-first", POLICY);
+    let second = OnDisk::new("guard-second", POLICY);
+    let reached = second.client(second.repo.dir()).reach().expect("started");
+    let pid = reached.named.pid;
+    assert!(first.guard().find().iter().all(|f| f.pid != pid));
+    assert_eq!(first.guard().check(), Vec::new());
+    assert!(alive(pid), "the other test's host process runs on");
+    drop(reached);
+}
+
+/// test-children, "A check that ignores SIGTERM": the guard ends a process
+/// of the test that ignores `SIGTERM`; none of it runs three seconds after
+/// the guard is done.
+#[test]
+fn the_guard_ends_a_process_that_ignores_sigterm() {
+    let scratch = support::Scratch::new("guard-stubborn");
+    let mut child = std::process::Command::new("/bin/sh")
+        .args(["-c", "trap '' TERM; while true; do sleep 1; done"])
+        .current_dir(scratch.path())
+        .stdin(std::process::Stdio::null())
+        .spawn()
+        .unwrap();
+    let guard = support::guard::Guard::new(&[scratch.path()]);
+    let began = Instant::now();
+    let left = guard.check();
+    assert!(left.iter().any(|f| f.pid == child.id()), "{left:?}");
+    let _ = child.wait();
+    assert!(began.elapsed() < Duration::from_secs(10));
+    std::thread::sleep(Duration::from_secs(3));
+    assert!(guard.find().is_empty(), "{:?}", guard.find());
 }
 
 /// The edge of the host process on tokio (the change
@@ -2974,7 +3342,7 @@ fn a_records_write_reaches_a_watch_by_its_file_event() {
     let state = other.path().join("sluice").join("host").join("version");
     if let Ok(bytes) = std::fs::read(state) {
         if let Ok(n) = serde_json::from_slice::<sluice::host_process::protocol::Named>(&bytes) {
-            kill(n.pid);
+            stop(n.pid);
         }
     }
 }

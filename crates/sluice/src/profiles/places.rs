@@ -120,7 +120,7 @@ use std::ffi::OsString;
 use std::fs::File;
 use std::net::{Ipv4Addr, SocketAddr, TcpListener, TcpStream};
 use std::path::{Path, PathBuf};
-use std::process::{Command, Output, Stdio};
+use std::process::{Output, Stdio};
 use std::time::Duration;
 
 use anyhow::{anyhow, bail, Context as _, Result};
@@ -1420,7 +1420,7 @@ impl Places {
     /// `git` in the common dir, with nothing of a caller's repository or
     /// hooks: a hook's `GIT_DIR` would point it elsewhere.
     fn git(&self, args: &[&str]) -> Result<Output> {
-        Command::new("git")
+        crate::workers::command("git", "git")
             .arg("-C")
             .arg(&self.common)
             .args(args)
@@ -1533,7 +1533,7 @@ impl Places {
     /// git's hash of `text`: names stay the same across sluice's builds.
     fn hash(&self, text: &str) -> Result<String> {
         use std::io::Write as _;
-        let mut child = Command::new("git")
+        let mut child = crate::workers::command("git", "git")
             .args(["hash-object", "--stdin"])
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())

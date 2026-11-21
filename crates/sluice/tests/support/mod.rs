@@ -4,6 +4,7 @@
 #![allow(dead_code)]
 
 pub mod aws;
+pub mod guard;
 pub mod http;
 
 use std::cell::{Cell, RefCell};
@@ -156,8 +157,11 @@ impl Scratch {
     }
 }
 
+/// A scratch folder that a process still uses when the test ends fails
+/// the test, and the process is ended (`a-leaked-child-fails-its-test@9a82a5147ba6`).
 impl Drop for Scratch {
     fn drop(&mut self) {
+        guard::Guard::new(&[&self.0]).judge();
         let _ = std::fs::remove_dir_all(&self.0);
     }
 }
@@ -246,7 +250,26 @@ pub struct OnDisk {
     pub sessions: Scratch,
 }
 
+/// As the test ends, the guard stops its host processes and judges all its
+/// folders at once, before any of them goes (design D7, D8 of
+/// `sluice-host-owns-its-workers`).
+impl Drop for OnDisk {
+    fn drop(&mut self) {
+        self.guard().judge();
+    }
+}
+
 impl OnDisk {
+    /// The guard of the test's folders.
+    pub fn guard(&self) -> guard::Guard {
+        guard::Guard::new(&[
+            self.repo.dir(),
+            self.config.path(),
+            self.state.path(),
+            self.sessions.path(),
+        ])
+    }
+
     /// `policy` committed on `main`, the branch checked out.
     pub fn new(name: &str, policy: &str) -> OnDisk {
         let repo = Repo::new(name);

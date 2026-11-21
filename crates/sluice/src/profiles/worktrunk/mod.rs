@@ -40,7 +40,7 @@ impl Worktrunk {
     }
 
     fn git(&self, worktree: &Path, args: &[&str]) -> Result<std::process::Output> {
-        Command::new("git")
+        crate::workers::command("git", "git")
             .arg("-C")
             .arg(worktree)
             .args(args)
