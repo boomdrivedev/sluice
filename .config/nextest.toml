@@ -2,7 +2,6 @@
 # `sluice-host-owns-its-workers`, design D9;
 # `a-leaked-child-fails-its-test@9a82a5147ba6`). Each test runs in a
 # process of its own. A test that leaves a process that holds its output
-# fails five seconds after the test ends. Under the gate's load, a process
-# that ends by itself can hold the output for more than half a second.
+# fails half a second after the test ends.
 [profile.default]
-leak-timeout = { period = "5s", result = "fail" }
+leak-timeout = { period = "500ms", result = "fail" }

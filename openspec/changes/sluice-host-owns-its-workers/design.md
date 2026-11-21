@@ -86,7 +86,7 @@ Not taken: a test that must stop its own host process. Each test would then repe
 
 ### D9. cargo-nextest for the Rust crates
 
-The `test`, `tools` and `sandbox` tasks of the five crates run `cargo nextest run` with the same filters. A nextest profile at the root sets `leak-timeout` to `{ period = "5s", result = "fail" }`. nextest runs each test in a process of its own, so a test that leaves a process that holds its output fails. Under the gate's load, a process that ends by itself held a test's output for more than half a second, so the period is five seconds. The devenv shell pins cargo-nextest, as it pins the tree's other tools.
+The `test`, `tools` and `sandbox` tasks of the five crates run `cargo nextest run` with the same filters. A nextest profile at the root sets `leak-timeout` to `{ period = "500ms", result = "fail" }`. nextest runs each test in a process of its own, so a test that leaves a process that holds its output fails. The devenv shell pins cargo-nextest, as it pins the tree's other tools.
 
 Not taken: the guard alone. It does not see a process that a test starts outside its folders, such as a plain `sleep`.
 
