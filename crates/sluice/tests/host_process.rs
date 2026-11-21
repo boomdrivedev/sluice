@@ -1691,11 +1691,18 @@ fn the_host_process_keeps_its_repositories_across_a_new_binding() {
 
     std::fs::write(&config, "[runs]\nmax = 3\n").unwrap();
     let log = d.client(d.repo.dir()).paths().log();
-    within(30, "the host process takes the change up", || {
-        std::fs::read_to_string(&log)
-            .unwrap_or_default()
-            .contains("took up the host's settings in")
-    });
+    let until = Instant::now() + Duration::from_secs(30);
+    while !std::fs::read_to_string(&log)
+        .unwrap_or_default()
+        .contains("took up the host's settings in")
+    {
+        assert!(
+            Instant::now() < until,
+            "the host process takes the change up: {}",
+            host_logs(&d)
+        );
+        std::thread::sleep(Duration::from_millis(100));
+    }
     let before = lines.load(std::sync::atomic::Ordering::SeqCst);
     std::fs::write(&go, "").unwrap();
     within(60, "#1 lands", || state(&d, d.repo.dir(), id) == "landed");

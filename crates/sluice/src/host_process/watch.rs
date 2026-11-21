@@ -41,22 +41,25 @@ pub const JOIN: Duration = Duration::from_millis(120);
 /// than [`JOIN`] apart.
 pub struct Bursts {
     flushes: mpsc::UnboundedReceiver<DebounceEventResult>,
-    /// What it joined so far. It is kept across a cancelled call, so a
-    /// `select!` that drops [`Bursts::next`] loses no event.
-    joined: Option<DebounceEventResult>,
+    /// What it joined so far, and when it gives it unless a further flush
+    /// comes first. Both are kept across a cancelled call, so a `select!`
+    /// that drops [`Bursts::next`] loses no event and waits no longer.
+    joined: Option<(DebounceEventResult, tokio::time::Instant)>,
 }
 
 impl Bursts {
     /// The next burst; `None` once the watch is gone.
     pub async fn next(&mut self) -> Option<DebounceEventResult> {
         if self.joined.is_none() {
-            self.joined = Some(self.flushes.recv().await?);
+            let first = self.flushes.recv().await?;
+            self.joined = Some((first, tokio::time::Instant::now() + JOIN));
         }
         loop {
-            match tokio::time::timeout(JOIN, self.flushes.recv()).await {
+            let until = self.joined.as_ref().expect("a flush").1;
+            match tokio::time::timeout_at(until, self.flushes.recv()).await {
                 Ok(Some(more)) => {
-                    let joined = self.joined.take().expect("a flush");
-                    self.joined = Some(match (joined, more) {
+                    let (joined, _) = self.joined.take().expect("a flush");
+                    let joined = match (joined, more) {
                         (Ok(mut a), Ok(b)) => {
                             a.extend(b);
                             Ok(a)
@@ -66,9 +69,10 @@ impl Bursts {
                             Err(a)
                         }
                         (Err(a), Ok(_)) | (Ok(_), Err(a)) => Err(a),
-                    });
+                    };
+                    self.joined = Some((joined, tokio::time::Instant::now() + JOIN));
                 }
-                _ => return self.joined.take(),
+                _ => return self.joined.take().map(|(joined, _)| joined),
             }
         }
     }

@@ -885,6 +885,9 @@ fn take_log(folder: &Folder) -> Result<()> {
 /// minute's backstop.
 struct TakeUp {
     settings: HostSettings,
+    /// When it looks once more after a file event: a look that met the
+    /// file mid-write finds nothing, and no further event may come.
+    again: Option<Instant>,
     /// A change being bound: its settings, the tables it moves, and the
     /// binding's answer.
     binding: Option<(
@@ -907,6 +910,7 @@ impl TakeUp {
     fn new(settings: HostSettings) -> TakeUp {
         TakeUp {
             settings,
+            again: None,
             binding: None,
         }
     }
@@ -1359,6 +1363,7 @@ async fn serve(
             }
         }
         let lapse = hosting.room.lock().next_lapse();
+        let again = take_up.again;
         tokio::select! {
             accepted = listener.accept() => {
                 count(&EDGE.events);
@@ -1428,6 +1433,11 @@ async fn serve(
                 ).await {
                     return Ok(ending);
                 }
+            }
+            () = tokio::time::sleep_until(again.unwrap_or(far)), if again.is_some() => {
+                count(&EDGE.timers);
+                take_up.again = None;
+                take_up.look(hosting);
             }
             () = hosting.nudge.notified() => count(&EDGE.events),
             _ = activity.changed() => count(&EDGE.events),
@@ -1520,6 +1530,7 @@ async fn take_events(
     if seen.settings {
         w.settings(take_up.settings.path());
         take_up.look(hosting);
+        take_up.again = Some(Instant::now() + Duration::from_secs(1));
     }
     if seen.runs {
         runs_changed(hosting, registry, Some(w));
