@@ -1009,8 +1009,21 @@ fn a_bolt_is_made_and_deleted_with_no_remote() {
 
     let out = s.submit_to("a", "bolt/x", "bolt/x");
     assert!(out.status.success(), "{}", text(&out));
-    let out = s.sluice(&["run", "--rounds", "8"]);
-    assert!(out.status.success(), "{}", text(&out));
+    // Rounds until its check has run and it lands: a round passes in
+    // milliseconds, and the check's run takes its own time.
+    let rounds_until = |landed: &dyn Fn() -> bool| {
+        let until = Instant::now() + Duration::from_secs(60);
+        while !landed() {
+            assert!(
+                Instant::now() < until,
+                "{}",
+                text(&s.sluice(&["status", "--all"]))
+            );
+            let out = s.sluice(&["run", "--rounds", "8"]);
+            assert!(out.status.success(), "{}", text(&out));
+        }
+    };
+    rounds_until(&|| s.repo.rev("bolt/x") != main);
     let bolt = s.repo.rev("bolt/x");
     assert_ne!(bolt, main);
     let out = s.sluice(&["branch", "delete", "bolt/x"]);
@@ -1023,8 +1036,7 @@ fn a_bolt_is_made_and_deleted_with_no_remote() {
 
     let out = s.submit_to("land", "bolt/x", "main");
     assert!(out.status.success(), "{}", text(&out));
-    let out = s.sluice(&["run", "--rounds", "8"]);
-    assert!(out.status.success(), "{}", text(&out));
+    rounds_until(&|| s.repo.rev("main") != main);
     let out = s.sluice(&["branch", "delete", "bolt/x"]);
     assert!(out.status.success(), "{}", text(&out));
     let out = s
