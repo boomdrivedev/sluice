@@ -3228,17 +3228,15 @@ fn forecast(
     json: bool,
     out: &mut dyn Write,
 ) -> Result<i32> {
-    let (s, host) = (here.s, here.host);
+    let s = here.s;
+    // 64, 129 (the change `sluice-host-answers-every-read`, design D3):
+    // `sluice host` forms it on the branch and its records as it holds
+    // them after its current reading, fetching nothing.
     let formed = || -> Result<Result<Forecasted, SubmitRefusal>> {
-        Ok(
-            match forecast_read(s, host, worktree, from, branch, after)? {
-                Some(got) => got,
-                None => match from {
-                    Some(from) => s.forecast_branch(from, branch, after)?,
-                    None => s.forecast(worktree, branch, after)?,
-                },
-            },
-        )
+        Ok(match from {
+            Some(from) => s.forecast_branch(from, branch, after)?,
+            None => s.forecast(worktree, branch, after)?,
+        })
     };
     let got = match formed() {
         Err(e) if e.downcast_ref::<sluice_core::Unheld>().is_some() => {
@@ -3284,52 +3282,6 @@ fn forecast(
         Forecast::Clear => LANDED,
         Forecast::Conflict { .. } => CONFLICT,
     })
-}
-
-/// 64, 129: the forecast formed on the read of `branch` in the document of
-/// the host's reader, while that reader keeps its tick (rule core.25):
-/// `--head`'s branch taken from the same read where it holds it, and read
-/// as today, once, where not. `None` where there is no such reader, its
-/// read does not hold the branch, or holds too little to form on.
-fn forecast_read(
-    s: &Sluice<'_>,
-    host: &dyn exec::Host,
-    worktree: &str,
-    from: Option<&str>,
-    branch: &str,
-    after: &[u64],
-) -> Result<Option<Result<Forecasted, SubmitRefusal>>> {
-    let now = std::time::SystemTime::now();
-    // A reader this cannot look for is none: the forecast reads as a round.
-    let found = host
-        .readers()
-        .and_then(|dir| reader::current(&dir, &host.repository()?, now));
-    let Ok(Some(doc)) = found else {
-        return Ok(None);
-    };
-    let Some(view) = branch_in(&doc, branch) else {
-        return Ok(None);
-    };
-    let Some(from) = from else {
-        let session = s.seams().driver.session(worktree)?;
-        if session.detached {
-            return Ok(None);
-        }
-        return s.forecast_read(&view, &session.head, &session.from.worktree, after);
-    };
-    if let Some(head) = branch_in(&doc, from).and_then(|v| v.revision) {
-        return s.forecast_read(&view, &head, from, after);
-    }
-    let Some(head) = s.branch_read(from)? else {
-        if s.is_held() {
-            return Err(sluice_core::Unheld::Branch(from.into()).into());
-        }
-        return Ok(Some(Err(SubmitRefusal::NoHead(from.into()))));
-    };
-    Ok(Some(match s.forecast_read(&view, &head, from, after)? {
-        Some(got) => got,
-        None => s.forecast_head(&head, from, branch, after)?,
-    }))
 }
 
 /// A forecast as `submit --check --json` and `exec --json` print it: its

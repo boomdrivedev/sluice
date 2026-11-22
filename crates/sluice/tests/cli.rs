@@ -787,111 +787,6 @@ fn reader_of_four(f: &Fakes, tick: u64) -> (sluice::reader::Lead, serde_json::Va
     (lead, doc, r.as_str().to_string(), one)
 }
 
-/// Set the reader's marks: its last read ended `ended` seconds before
-/// now, and its next began `began` seconds before now.
-fn mark_reader(ended: u64, began: u64) {
-    let now = std::time::SystemTime::now();
-    for (ext, ago) in [("json", ended), ("lock", began)] {
-        std::fs::File::options()
-            .write(true)
-            .open(readers_file(REPOSITORY, ext))
-            .unwrap()
-            .set_modified(now - std::time::Duration::from_secs(ago))
-            .unwrap();
-    }
-}
-
-/// `unit/forecast`'s head, conflicting with `#1`'s work, and `--check
-/// --json` of it, read.
-fn check_forecast(f: &Fakes) -> serde_json::Value {
-    work(
-        f,
-        "unit/forecast",
-        "crw-1-unit-3",
-        &[("plugin/lib/plan.py", Some("two"))],
-    );
-    let (code, out) = sluice(
-        f,
-        &[
-            "submit",
-            "--check",
-            BRANCH,
-            "--worktree",
-            "unit/forecast",
-            "--json",
-        ],
-    );
-    assert_eq!(code, CONFLICT, "{out}");
-    json(&out)
-}
-
-/// 64, 129: beside a live reader keeping its tick, a forecast forms on the
-/// branch and the queue as the reader last read them, not on the records.
-#[test]
-fn a_forecast_takes_the_branch_from_a_current_reader() {
-    let f = setup();
-    let (_reader, _, r, _) = reader_of_four(&f, 3);
-    let v = check_forecast(&f);
-    assert_eq!(v["onto"], r.as_str(), "{v}");
-    assert_eq!(v["ahead"], serde_json::json!([4]), "{v}");
-    assert_eq!(v["conflict"]["with"][0]["id"], 4, "{v}");
-    assert_eq!(
-        v["conflict"]["with"][0]["from"]["worktree"], "unit/touches",
-        "{v}"
-    );
-}
-
-/// 64, 129: `--check --head` takes the branch it forecasts from the same
-/// read where the reader read it, as it takes the branch it lands on.
-#[test]
-fn a_forecast_of_a_bolt_takes_both_from_the_reader() {
-    let f = setup();
-    let (_reader, mut doc, r, _) = reader_of_four(&f, 3);
-    let tip = f.world.tip(BRANCH);
-    let bolt = f.world.work(&tip, &[("plugin/lib/plan.py", Some("two"))]);
-    let mut y = doc["branches"][0].clone();
-    y["branch"] = "bolt/y".into();
-    y["revision"] = bolt.as_str().into();
-    y["submissions"] = serde_json::json!([]);
-    y["candidates"] = serde_json::json!([]);
-    y["depth"] = 0.into();
-    doc["branches"].as_array_mut().unwrap().push(y);
-    rewrite_readers_doc(&doc);
-    let (code, out) = sluice(
-        &f,
-        &["submit", BRANCH, "--check", "--head", "bolt/y", "--json"],
-    );
-    assert_eq!(code, CONFLICT, "{out}");
-    let v = json(&out);
-    assert_eq!(v["head"], bolt.as_str(), "{v}");
-    assert_eq!(v["onto"], r.as_str(), "{v}");
-    assert_eq!(v["ahead"], serde_json::json!([4]), "{v}");
-}
-
-/// 64, 129: a reader whose last read ended five ticks ago, with no read
-/// begun since, has stalled: the forecast reads the records as a round.
-#[test]
-fn a_stalled_reader_is_read_past() {
-    let f = setup();
-    let (_reader, _, _, _) = reader_of_four(&f, 1);
-    mark_reader(5, 6);
-    let v = check_forecast(&f);
-    assert_eq!(v["onto"], f.world.tip(BRANCH).as_str(), "{v}");
-    assert_eq!(v["ahead"], serde_json::json!([1]), "{v}");
-}
-
-/// 64, 129: a reader twenty seconds into a read it began a second after
-/// its last ended is current: the forecast takes its last read.
-#[test]
-fn a_reader_in_a_slow_read_is_current() {
-    let f = setup();
-    let (_reader, _, r, _) = reader_of_four(&f, 1);
-    mark_reader(21, 20);
-    let v = check_forecast(&f);
-    assert_eq!(v["onto"], r.as_str(), "{v}");
-    assert_eq!(v["ahead"], serde_json::json!([4]), "{v}");
-}
-
 /// 64, 129 (design D16): a read that names no revision of the branch, as
 /// a reader's that could not ask its remote, is no read to form on: beside
 /// that reader keeping its tick, the forecast forms on the branch and its
@@ -2953,48 +2848,6 @@ fn watch_of_another_repository_leads() {
     assert_eq!(lines[0]["branches"], serde_json::json!([]));
     assert_eq!(readers_doc().as_ref(), Some(&lines[0]));
     assert_eq!(readers_doc_of(other), Some(doc));
-}
-
-/// 129 (design D16): a one-shot overview beside a reader that keeps its
-/// tick prints that reader's document of its reading, its text rendered
-/// from it as the watch's is, though the host's records hold none of it;
-/// with no reader, the records as the host holds them. It never takes the
-/// reader's place or writes its document.
-#[test]
-fn a_one_shot_overview_beside_a_reader_prints_its_document() {
-    let f = setup();
-    let (_, out) = sluice(&f, &["overview", "--json"]);
-    assert_eq!(json(&out)["branches"], serde_json::json!([]));
-    assert!(!readers_file(REPOSITORY, "lock").exists());
-    let mut doc = seven_testing();
-    doc["tick"] = 3600.into();
-    let _reader = reader_of(REPOSITORY, &doc);
-    let (code, out) = sluice(&f, &["overview", "--json"]);
-    assert_eq!(code, 0, "{out}");
-    assert_eq!(json(&out), doc);
-    let (code, text) = sluice(&f, &["overview"]);
-    assert_eq!(code, 0, "{text}");
-    assert!(
-        text.starts_with(&format!("{BRANCH} at ")) && text.contains("#7"),
-        "{text}"
-    );
-    assert_eq!(readers_doc(), Some(doc));
-}
-
-/// 129 (design D16): the home view beside a reader that keeps its tick
-/// counts the branches from that reader's document, though the host's
-/// records hold none of it.
-#[test]
-fn the_home_view_beside_a_reader_counts_from_its_document() {
-    let f = setup();
-    assert_eq!(home(&f, "nowhere")["branches"], serde_json::json!([]));
-    let mut doc = seven_testing();
-    doc["tick"] = 3600.into();
-    let _reader = reader_of(REPOSITORY, &doc);
-    let v = home(&f, "nowhere");
-    assert_eq!(v["branches"][0]["branch"], BRANCH, "{v}");
-    assert_eq!(v["branches"][0]["testing"], 1, "{v}");
-    assert_eq!(readers_doc(), Some(doc));
 }
 
 /// The overview as a reader read it of queues no test's records hold:
@@ -12185,4 +12038,41 @@ fn job_record_of_a_head_adds_its_bundle_with_no_claim() {
         adds[0].1
     );
     assert_eq!(f.world.version("main"), version, "no state written");
+}
+
+/// overview-reader, "A one-shot overview beside a current reading" (the
+/// change `sluice-host-answers-every-read`, design D3): a one-shot
+/// overview prints the records as `sluice host` holds them after its
+/// reading, whatever a reader's file of an earlier release says beside
+/// them, and writes no reader's file.
+#[test]
+fn a_one_shot_overview_beside_a_reader_prints_its_document() {
+    let f = setup();
+    let (_, out) = sluice(&f, &["overview", "--json"]);
+    assert_eq!(json(&out)["branches"], serde_json::json!([]));
+    assert!(!readers_file(REPOSITORY, "lock").exists());
+    let mut doc = seven_testing();
+    doc["tick"] = 3600.into();
+    let _reader = reader_of(REPOSITORY, &doc);
+    let (code, out) = sluice(&f, &["overview", "--json"]);
+    assert_eq!(code, 0, "{out}");
+    assert_eq!(json(&out)["branches"], serde_json::json!([]), "{out}");
+    let (code, text) = sluice(&f, &["overview"]);
+    assert_eq!(code, 0, "{text}");
+    assert!(!text.contains("#7"), "{text}");
+    assert_eq!(readers_doc(), Some(doc), "the file is as it was written");
+}
+
+/// The home view counts the branches from the records as `sluice host`
+/// holds them, whatever a reader's file says beside them (design D3).
+#[test]
+fn the_home_view_beside_a_reader_counts_from_its_document() {
+    let f = setup();
+    assert_eq!(home(&f, "nowhere")["branches"], serde_json::json!([]));
+    let mut doc = seven_testing();
+    doc["tick"] = 3600.into();
+    let _reader = reader_of(REPOSITORY, &doc);
+    let v = home(&f, "nowhere");
+    assert_eq!(v["branches"], serde_json::json!([]), "{v}");
+    assert_eq!(readers_doc(), Some(doc));
 }
