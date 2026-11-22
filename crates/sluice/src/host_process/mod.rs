@@ -60,6 +60,7 @@ pub mod pass;
 pub mod protocol;
 pub mod results;
 pub mod room;
+pub mod subscription;
 pub mod tasks;
 pub mod watch;
 
