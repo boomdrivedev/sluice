@@ -147,12 +147,6 @@ pub enum Request {
     Serve { repository: PathBuf },
     /// One round of `branch`, answered with the step's document (D10).
     Step { repository: PathBuf, branch: String },
-    /// Keep the repository read while the connection is open, each pass's
-    /// report written down it.
-    Follow {
-        repository: PathBuf,
-        kind: FollowKind,
-    },
     /// A pass of the repository now, answered once it ends (D14). `at`,
     /// RFC 3339, is the asker's time: where passes are taken only when
     /// asked, the pass is at that time, so the host process's time is its
@@ -161,14 +155,6 @@ pub enum Request {
         repository: PathBuf,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         at: Option<String>,
-    },
-    /// Answered once a reading of the repository is current (D16); with
-    /// `afresh`, once a reading begun after the ask ends, as a forecast's
-    /// second ask has it.
-    Read {
-        repository: PathBuf,
-        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
-        afresh: bool,
     },
     /// The results `wants` names, as `branch`'s gate reads them, answered
     /// from the host process's index of the repository on the connection's
@@ -190,9 +176,6 @@ pub enum Request {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         branch: Option<String>,
     },
-    /// The bound, what counts against it, the runs waiting and whose turn
-    /// is next.
-    Room,
     /// Hand over, for a newer sluice (D8). `program` is the asker's
     /// executable, resolved through every link, which the host process
     /// starts afresh in place as; an older command sends none, and the host
@@ -209,7 +192,7 @@ pub enum Request {
     },
 }
 
-/// A repository's reading, as the host process answers a `read` (129;
+/// A repository's reading, as the host process holds it for a read (129;
 /// design D16): whether it was current, when it ended, and the words a
 /// remote refused it with, where one did.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -283,9 +266,6 @@ pub enum Answer {
     Waiting(Why),
     /// The room is the asker's.
     Held,
-    Room(RoomView),
-    /// A reading of the repository, as it stood when answered (D16).
-    Read(Reading),
     /// The results asked for, one JSON document per line (D17).
     Results(String),
     /// The request could not be answered, in these words.
@@ -319,7 +299,6 @@ mod tests {
     #[derive(Debug, PartialEq, Deserialize)]
     #[serde(tag = "ask", rename_all = "kebab-case")]
     enum Older {
-        Room,
         HandOver,
     }
 

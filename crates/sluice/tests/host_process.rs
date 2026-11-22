@@ -124,7 +124,10 @@ fn a_second_host_process_ends_at_once() {
     let client = d.client(d.repo.dir());
     let repository = d.repository(d.repo.dir());
     let follow = client
-        .follow(Path::new(&repository), FollowKind::Wait)
+        .subscribe(vec![sluice::host_process::protocol::Added {
+            folder: std::path::PathBuf::from(&repository),
+            kind: FollowKind::Wait,
+        }])
         .expect("the host process starts");
     let first = follow.named.pid;
     let out = d.command(d.repo.dir()).arg("host").output().unwrap();
@@ -147,7 +150,10 @@ fn a_socket_a_killed_host_process_left_is_replaced() {
     let client = d.client(d.repo.dir());
     let repository = d.repository(d.repo.dir());
     let follow = client
-        .follow(Path::new(&repository), FollowKind::Wait)
+        .subscribe(vec![sluice::host_process::protocol::Added {
+            folder: std::path::PathBuf::from(&repository),
+            kind: FollowKind::Wait,
+        }])
         .unwrap();
     let first = follow.named.pid;
     kill(first);
@@ -292,68 +298,6 @@ fn a_refused_policy_in_one_repository_holds_no_others_round() {
     );
 }
 
-/// 135 (design D7): a repository an older `sluice run` drives is left to
-/// it while it lives, every other moved, and taken at the first tick after
-/// it ends.
-#[test]
-fn a_repository_an_older_sluice_run_drives_is_left_to_it() {
-    let d = OnDisk::new("host-older-a", POLICY);
-    let b = d.another("host-older-b", POLICY);
-    let id_a = queued(&d, "a");
-    let id_b = queued_from(&d, b.dir());
-    let (a, b_repo) = (d.repository(d.repo.dir()), d.repository(b.dir()));
-    // An older `sluice run` holds a's driver's lock.
-    let readers = d.state.path().join("sluice/readers");
-    let older = sluice::reader::Driver::take(&readers, &a)
-        .unwrap()
-        .expect("the older run's lock");
-    let client = d.client(d.repo.dir());
-    live_from_here(&d);
-    client.serve(Path::new(&a)).unwrap();
-    client.serve(Path::new(&b_repo)).unwrap();
-    within(60, "b's submission lands", || {
-        state(&d, b.dir(), id_b) == "landed"
-    });
-    std::thread::sleep(Duration::from_secs(4));
-    assert_eq!(state(&d, d.repo.dir(), id_a), "queued", "a is left to it");
-    drop(older);
-    within(60, "a's submission lands once the older run ends", || {
-        state(&d, d.repo.dir(), id_a) == "landed"
-    });
-}
-
-/// `host-process`'s "An older sluice run keeps the repository it drives"
-/// (135; design D7, D10): `sluice step` of a repository an older `sluice
-/// run` drives runs no round of it, saying that the older run drives it,
-/// and its submission stays queued for that run.
-#[test]
-fn a_step_of_a_repository_an_older_sluice_run_drives_runs_no_round() {
-    let d = OnDisk::new("host-older-step", POLICY);
-    let id = queued(&d, "a");
-    let a = d.repository(d.repo.dir());
-    let readers = d.state.path().join("sluice/readers");
-    let older = sluice::reader::Driver::take(&readers, &a)
-        .unwrap()
-        .expect("the older run's lock");
-    live_from_here(&d);
-    let out = d
-        .command(d.repo.dir())
-        .args(["step", "main"])
-        .output()
-        .unwrap();
-    assert!(!out.status.success(), "{}", text(&out));
-    assert!(
-        text(&out).contains(&format!(
-            "an older sluice run drives {a}, so sluice's host process runs no round of it while \
-             that run lives"
-        )),
-        "{}",
-        text(&out)
-    );
-    assert_eq!(state(&d, d.repo.dir(), id), "queued", "a is left to it");
-    drop(older);
-}
-
 /// 135 (design D6): the host process ends once its queues are empty and
 /// nothing follows it.
 #[test]
@@ -495,7 +439,10 @@ fn an_idle_repositorys_remote_is_asked_once_a_minute() {
     );
 
     let watch = client
-        .follow(Path::new(&repository), FollowKind::Watch)
+        .subscribe(vec![sluice::host_process::protocol::Added {
+            folder: std::path::PathBuf::from(&repository),
+            kind: FollowKind::Watch,
+        }])
         .expect("the watch follows");
     let until = Instant::now() + Duration::from_secs(10);
     while asks() != 2 {
@@ -525,7 +472,10 @@ fn the_host_process_ends_with_its_state_folder() {
     let client = d.client(d.repo.dir());
     let repository = d.repository(d.repo.dir());
     let follow = client
-        .follow(Path::new(&repository), FollowKind::Wait)
+        .subscribe(vec![sluice::host_process::protocol::Added {
+            folder: std::path::PathBuf::from(&repository),
+            kind: FollowKind::Wait,
+        }])
         .unwrap();
     let pid = follow.named.pid;
     // The process may write into the folder as it goes: removed again
@@ -550,7 +500,10 @@ fn a_state_folder_made_again_ends_the_host_process() {
     let client = d.client(d.repo.dir());
     let repository = d.repository(d.repo.dir());
     let follow = client
-        .follow(Path::new(&repository), FollowKind::Wait)
+        .subscribe(vec![sluice::host_process::protocol::Added {
+            folder: std::path::PathBuf::from(&repository),
+            kind: FollowKind::Wait,
+        }])
         .unwrap();
     let pid = follow.named.pid;
     let dir = client.paths().dir.clone();
@@ -598,7 +551,10 @@ fn a_newer_client_has_an_older_host_process_hand_over() {
     let client = d.client(d.repo.dir());
     let repository = d.repository(d.repo.dir());
     let mut follow = client
-        .follow(Path::new(&repository), FollowKind::Wait)
+        .subscribe(vec![sluice::host_process::protocol::Added {
+            folder: std::path::PathBuf::from(&repository),
+            kind: FollowKind::Wait,
+        }])
         .unwrap();
     let older = follow.named.clone();
     let newer = client.clone().with_version("0.72.0");
@@ -868,7 +824,10 @@ fn a_run_holds_nothing_of_the_command_that_started_the_host_process() {
     // Followed, it lives on once the submission lands.
     let _follow = d
         .client(d.repo.dir())
-        .follow(Path::new(&d.repository(d.repo.dir())), FollowKind::Wait)
+        .subscribe(vec![sluice::host_process::protocol::Added {
+            folder: d.repo.dir().to_path_buf(),
+            kind: FollowKind::Wait,
+        }])
         .unwrap();
     within(60, "the checks ran", || file.exists());
     let env = std::fs::read_to_string(&file).unwrap();
@@ -1129,8 +1088,8 @@ fn a_profile_beside_the_host_process_holds_through_its_socket() {
     within(10, "the run given back is the second repository's", || {
         second.hold(RunKind::Queue, "main").unwrap().is_some()
     });
-    let (_, room) = client.room().unwrap().expect("it answers");
-    assert_eq!(room.waiting.sessions, 0, "no session waits: {room:?}");
+    let room = room_of(&d);
+    assert_eq!(room["waiting"]["sessions"], 0, "no session waits: {room}");
 }
 
 /// run-bound, "Turns on a bound of two" (150, S75; rule core.49; record
@@ -1153,7 +1112,10 @@ fn s75_a_combination_starts_before_a_third_agents_check() {
     live_from_here(&d);
     let _follow = d
         .client(d.repo.dir())
-        .follow(Path::new(&repository), FollowKind::Wait)
+        .subscribe(vec![sluice::host_process::protocol::Added {
+            folder: std::path::PathBuf::from(&repository),
+            kind: FollowKind::Wait,
+        }])
         .unwrap();
     let a = agent(&d, "a", &format!("touch '{}'; sleep 3", m("a").display()));
     let b = agent(&d, "b", &format!("touch '{}'; sleep 9", m("b").display()));
@@ -1190,7 +1152,10 @@ fn an_agents_check_stopped_while_it_waits_is_counted_nowhere() {
     let repository = d.repository(d.repo.dir());
     let _follow = d
         .client(d.repo.dir())
-        .follow(Path::new(&repository), FollowKind::Wait)
+        .subscribe(vec![sluice::host_process::protocol::Added {
+            folder: std::path::PathBuf::from(&repository),
+            kind: FollowKind::Wait,
+        }])
         .unwrap();
     let a = agent(&d, "a", &format!("touch '{}'; sleep 5", m("a").display()));
     within(30, "the first agent's check holds the run", || {
@@ -1298,7 +1263,10 @@ fn the_overview_names_the_host_process() {
     let repository = d.repository(d.repo.dir());
     let follow = d
         .client(d.repo.dir())
-        .follow(Path::new(&repository), FollowKind::Wait)
+        .subscribe(vec![sluice::host_process::protocol::Added {
+            folder: std::path::PathBuf::from(&repository),
+            kind: FollowKind::Wait,
+        }])
         .unwrap();
     let doc = overview(&d);
     assert_eq!(doc["host_process"]["pid"], follow.named.pid, "{doc}");
@@ -1519,7 +1487,10 @@ impl Slowed {
             sluice::host_process::client::Client::new(Path::new(env!("CARGO_BIN_EXE_sluice")), env)
                 .expect("its paths");
         let follow = client
-            .follow(&repository, FollowKind::Wait)
+            .subscribe(vec![sluice::host_process::protocol::Added {
+                folder: d.repo.dir().to_path_buf(),
+                kind: FollowKind::Wait,
+            }])
             .expect("the host process starts");
         let pid = follow.named.pid;
         Slowed {
@@ -1651,10 +1622,8 @@ fn a_status_reads_only_the_results_it_asks_for() {
     });
     // One host process answers every status after, its index kept.
     let repository = d.repository(d.repo.dir());
-    let _kept = d
-        .client(d.repo.dir())
-        .follow(Path::new(&repository), FollowKind::Wait)
-        .expect("the host process");
+    let _ = repository;
+    let _kept = held(&d);
     let status = || {
         let out = d
             .command(d.repo.dir())
@@ -1876,7 +1845,10 @@ fn a_successor_that_does_not_start_leaves_the_host_process_as_it_was() {
         sluice::host_process::client::Client::new(&copy, support::env_of(&d.command(d.repo.dir())))
             .unwrap();
     let kept = client
-        .follow(Path::new(&repository), FollowKind::Wait)
+        .subscribe(vec![sluice::host_process::protocol::Added {
+            folder: std::path::PathBuf::from(&repository),
+            kind: FollowKind::Wait,
+        }])
         .expect("a host process");
     let first = kept.named.clone();
     let id = queued_live(&d, &dir);
@@ -2168,7 +2140,10 @@ fn the_overview_names_a_daemon() {
     let repository = d.repository(d.repo.dir());
     let follow = d
         .client(d.repo.dir())
-        .follow(Path::new(&repository), FollowKind::Wait)
+        .subscribe(vec![sluice::host_process::protocol::Added {
+            folder: std::path::PathBuf::from(&repository),
+            kind: FollowKind::Wait,
+        }])
         .unwrap();
     let doc = overview(&d);
     assert_eq!(doc["host_process"]["daemon"], false, "{doc}");
@@ -3458,10 +3433,10 @@ fn a_daemon_started_afresh_answers_on_its_socket() {
 }
 
 /// host-events, "Another process writes the records": with a watch
-/// following a host process and nothing in play, the repository is not
-/// read each second; a submission another process writes to `main`'s
+/// following a host process and nothing in play, no document comes while
+/// nothing changes; a submission another process writes to `main`'s
 /// records, with no command telling this host process, is read once the
-/// file events stop, and the watch is told.
+/// file events stop, and the watch gets the document that holds it.
 #[test]
 fn a_records_write_reaches_a_watch_by_its_file_event() {
     let d = OnDisk::new("host-records-event", POLICY);
@@ -3473,16 +3448,23 @@ fn a_records_write_reaches_a_watch_by_its_file_event() {
     });
     let client = d.client(d.repo.dir());
     let mut watch = client
-        .follow(Path::new(&repository), FollowKind::Watch)
+        .subscribe(vec![sluice::host_process::protocol::Added {
+            folder: std::path::PathBuf::from(&repository),
+            kind: FollowKind::Watch,
+        }])
         .expect("the watch follows");
-    let first = watch.next(Some(Duration::from_secs(30))).unwrap();
+    use sluice::host_process::protocol::SubscriptionLine;
+    let first = watch.line(Some(Duration::from_secs(30))).unwrap();
     assert!(
-        matches!(first, Some(sluice::host_process::protocol::Answer::Pass(_))),
+        matches!(first, Some(SubscriptionLine::Document(_))),
         "{first:?}"
     );
-    // Idle: no pass in three seconds.
-    let quiet = watch.next(Some(Duration::from_secs(3))).unwrap();
-    assert!(quiet.is_none(), "a pass of an idle repository: {quiet:?}");
+    // Idle: no new document in three seconds.
+    let quiet = watch.line(Some(Duration::from_secs(3))).unwrap();
+    assert!(
+        quiet.is_none(),
+        "a document of an idle repository: {quiet:?}"
+    );
     // Another host's state folder: its submit tells another host process,
     // which passes only when asked, and writes `main`'s records here.
     let other = support::Scratch::new("host-records-event-other");
@@ -3495,11 +3477,14 @@ fn a_records_write_reaches_a_watch_by_its_file_event() {
         .unwrap();
     assert!(out.status.success(), "{}", text(&out));
     let written = Instant::now();
-    let told = watch.next(Some(Duration::from_secs(5))).unwrap();
-    assert!(
-        matches!(told, Some(sluice::host_process::protocol::Answer::Pass(_))),
-        "no pass after the write: {told:?}\n{}",
-        host_logs(&d)
+    let told = watch.line(Some(Duration::from_secs(5))).unwrap();
+    let Some(SubscriptionLine::Document(told)) = told else {
+        panic!("no document after the write: {told:?}\n{}", host_logs(&d));
+    };
+    assert_eq!(
+        told.overview["branches"][0]["depth"], 1,
+        "{}",
+        told.overview
     );
     assert!(
         written.elapsed() < sluice::host_process::watch::DEBOUNCE + Duration::from_secs(2),
@@ -3513,6 +3498,15 @@ fn a_records_write_reaches_a_watch_by_its_file_event() {
             stop(n.pid);
         }
     }
+}
+
+/// The host's room, as `sluice host` renders it with a one-shot overview
+/// (the change `sluice-host-answers-every-read`, design D9).
+fn room_of(d: &OnDisk) -> serde_json::Value {
+    let out = d.sluice(&["overview", "--json"]);
+    let doc: serde_json::Value =
+        serde_json::from_slice(&out.stdout).unwrap_or_else(|_| panic!("{}", text(&out)));
+    doc["room"].clone()
 }
 
 /// The host process of `d`, held while the subscription lives: a
@@ -3778,14 +3772,9 @@ fn a_read_takes_no_slot_of_runs_max() {
             go.display()
         ),
     );
-    let room = |d: &OnDisk| {
-        d.client(d.repo.dir())
-            .room()
-            .ok()
-            .flatten()
-            .is_some_and(|(_, r)| r.sessions == 1)
-    };
-    within(60, "the agent's check holds the one run", || room(&d));
+    within(60, "the agent's check holds the one run", || {
+        room_of(&d)["sessions"] == 1
+    });
     let began = Instant::now();
     let out = d.sluice(&["status", "main", "--json"]);
     assert!(out.status.success(), "{}", text(&out));
@@ -4365,4 +4354,83 @@ fn sluice_run_prints_the_passes_of_its_subscription() {
     let err = String::from_utf8_lossy(&out.stderr);
     assert!(!err.contains("could not be reached"), "{err}");
     let _ = id;
+}
+
+/// A client of sluice 0.97.0 says `hello` on `d`'s socket and asks
+/// `line`: the answer.
+fn older_asks(d: &OnDisk, line: &str) -> serde_json::Value {
+    let socket = d.client(d.repo.dir()).paths().socket.clone();
+    let stream = UnixStream::connect(&socket).unwrap();
+    let mut reader = BufReader::new(stream.try_clone().unwrap());
+    let mut writer = stream;
+    writeln!(writer, "{{\"hello\":\"0.97.0\"}}").unwrap();
+    let mut named = String::new();
+    reader.read_line(&mut named).unwrap();
+    writeln!(writer, "{line}").unwrap();
+    let mut answer = String::new();
+    reader.read_line(&mut answer).unwrap();
+    serde_json::from_str(&answer).unwrap_or_else(|_| panic!("{answer}"))
+}
+
+/// The error a client of 0.97.0 is answered, naming both versions and the
+/// sluice to run.
+fn assert_names_versions(answer: &serde_json::Value) {
+    let words = answer["error"]
+        .as_str()
+        .unwrap_or_else(|| panic!("{answer}"));
+    assert!(
+        words.starts_with("sluice 0.97.0 asked what this host process, sluice "),
+        "{words}"
+    );
+    assert!(
+        words.ends_with(&format!(". Run sluice {}.", sluice::VERSION)),
+        "{words}"
+    );
+}
+
+/// resident-reads, "An older one-shot read" (the change
+/// `sluice-host-answers-every-read`, design D9): a client that says
+/// `hello` as sluice 0.97.0 and asks `read` gets an error that names 0.97.0
+/// and the version of `sluice host`, and says to run that sluice; `sluice
+/// host` reads nothing for it.
+#[test]
+fn an_older_read_gets_the_host_processs_version() {
+    let d = OnDisk::new("host-older-read", POLICY);
+    let mut sub = held(&d);
+    settled(&mut sub);
+    let repository = d.repository(d.repo.dir());
+    let before = reads_logged(&d, "status") + reads_logged(&d, "overview");
+    let answer = older_asks(
+        &d,
+        &serde_json::json!({"ask": "read", "repository": repository}).to_string(),
+    );
+    assert_names_versions(&answer);
+    assert_eq!(
+        reads_logged(&d, "status") + reads_logged(&d, "overview"),
+        before,
+        "{}",
+        host_logs(&d)
+    );
+}
+
+/// resident-reads, "An older watch" (design D9): a client of 0.97.0 that
+/// asks `follow` as a watch gets the same error, and `sluice host` writes
+/// no file under `readers/`.
+#[test]
+fn an_older_follow_gets_the_host_processs_version() {
+    let d = OnDisk::new("host-older-follow", POLICY);
+    let mut sub = held(&d);
+    settled(&mut sub);
+    let repository = d.repository(d.repo.dir());
+    let answer = older_asks(
+        &d,
+        &serde_json::json!({"ask": "follow", "repository": repository, "kind": "watch"})
+            .to_string(),
+    );
+    assert_names_versions(&answer);
+    std::thread::sleep(Duration::from_secs(1));
+    assert!(
+        !d.state.path().join("sluice/readers").exists(),
+        "a file under readers/"
+    );
 }

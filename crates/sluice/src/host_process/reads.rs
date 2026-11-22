@@ -20,10 +20,10 @@ use std::sync::Arc;
 use anyhow::{anyhow, Result};
 use sluice_seams::RunKind;
 
-use super::ask::{Following, Here, Holding, HostProcess};
+use super::ask::{Here, Holding, HostProcess};
 use super::joined::Joined;
 use super::pass::Report;
-use super::protocol::{FollowKind, Named, Output, Reading, Request, RoomView};
+use super::protocol::{Named, Output, Reading, Request, RoomView};
 use super::room::Shared;
 use super::tasks::Tasks;
 use super::Hosting;
@@ -418,10 +418,6 @@ impl HostProcess for Answering {
         )))
     }
 
-    fn follow<'a>(&'a self, _: &Here<'a, '_>, _: FollowKind) -> Result<Box<dyn Following + 'a>> {
-        Err(anyhow!("a read follows nothing"))
-    }
-
     fn hold<'a>(
         &'a self,
         _: &Here<'a, '_>,
@@ -448,7 +444,7 @@ impl HostProcess for Answering {
         &self,
         _: Option<&Here<'_, '_>>,
         _: &Path,
-        _: Option<chrono::DateTime<chrono::Utc>>,
+        _: &dyn sluice_core::Clock,
     ) -> Result<Report> {
         Err(anyhow!("a read runs no pass"))
     }

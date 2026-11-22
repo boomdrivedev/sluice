@@ -28,10 +28,11 @@
 //! work is in play, and where nothing is, once a minute at most, a
 //! command's change, a watch's opening and a forecast's second ask having
 //! the next reading ask at once (129 as amended 2026-11-19). The worker is
-//! the repository's reader on the host, and holds its driver's lock, so an
-//! older sluice's waits and watches follow it; where an older `sluice run`
-//! holds that lock, it runs no round and follows that run's document. A
-//! panic ends only the worker's thread, and the worker starts again at its
+//! the repository's one reader on the host, and moves each repository that
+//! the host process holds. After each reading that a follower holds the
+//! repository for, the scheduler sends the repository's overview document
+//! on a `watch` channel (the change `sluice-host-answers-every-read`,
+//! design D6). A panic ends only the worker's thread, and the worker starts again at its
 //! next tick.
 
 use std::collections::{BTreeMap, VecDeque};
@@ -59,7 +60,6 @@ use crate::exec::Host;
 use crate::instance::Instance;
 use crate::profiles::checks::RoomHandle;
 use crate::profiles::{Bound, Tokens};
-use crate::reader::{Driver, Drives, Reader};
 use crate::{Pause, Skipped};
 
 /// How long a host process that ends gives its tasks to finish the round
@@ -1164,9 +1164,15 @@ impl Scheduler {
         let every = tick(self.watched());
         let after = Moment::now();
         let tracker = locked(&self.tasks.0.running).tracker.clone();
+        // A stop ends the read: no follower reads its document after it.
+        let token = self.token.clone();
         tracker.spawn_on(
             async move {
-                let Some(doc) = read(repository, after).await else {
+                let doc = tokio::select! {
+                    doc = read(repository, after) => doc,
+                    () = token.cancelled() => None,
+                };
+                let Some(doc) = doc else {
                     return;
                 };
                 send_document(&documents, crate::overview::ticked(doc, every));
@@ -1176,10 +1182,18 @@ impl Scheduler {
     }
 
     /// The repository is gone: its followers get the document that says
-    /// so, and it is held no longer (design D6).
+    /// so, in the words its last read failed with where it failed, and it
+    /// is held no longer (design D6).
     fn gone(&self) {
-        let words = format!("the repository at {} is gone", self.repository.display());
-        let mut doc = crate::told::document(crate::told::Kind::Internal, &words, &[]);
+        let failed = self
+            .documents
+            .borrow()
+            .clone()
+            .filter(|d| d.get("error").is_some());
+        let mut doc = failed.unwrap_or_else(|| {
+            let words = format!("the repository at {} is gone", self.repository.display());
+            crate::told::document(crate::told::Kind::Internal, &words, &[])
+        });
         doc["gone"] = true.into();
         send_document(&self.documents, doc);
     }
@@ -1493,9 +1507,9 @@ fn send_document(documents: &watch::Sender<Option<serde_json::Value>>, doc: serd
     if documents.receiver_count() == 0 {
         return;
     }
-    let now = crate::reader::untimed(&doc);
+    let now = crate::overview::untimed(&doc);
     documents.send_if_modified(|d| {
-        let changed = d.as_ref().map(crate::reader::untimed).as_ref() != Some(&now);
+        let changed = d.as_ref().map(crate::overview::untimed).as_ref() != Some(&now);
         if changed {
             *d = Some(doc);
         }
@@ -1668,16 +1682,7 @@ impl RepositoryWorker {
             taken,
             asked_only,
             task: Task {
-                driver: None,
-                reader: None,
                 kept: Kept::default(),
-                said_driven: false,
-                readers: bound.readers().map_err(|e| {
-                    format!(
-                        "sluice host: {}: could not be opened: {e:#}",
-                        common.display()
-                    )
-                })?,
                 repository: common.to_string_lossy().into_owned(),
                 in_play: true,
             },
@@ -1761,7 +1766,8 @@ impl Worker for RepositoryWorker {
             false => &self.clock,
         };
         let s = sluice_of(&self.bound, &self.policies, clock);
-        let report = self.task.pass(&s, &self.bound, clock, tick, asks);
+        let _ = tick;
+        let report = self.task.pass(&s, &self.bound, clock, asks);
         drop(s);
         let report = report.map(|r| crate::host_process::pass::Report {
             stale: self.bound.state.stale_all(),
@@ -1780,16 +1786,8 @@ impl Worker for RepositoryWorker {
             false => &self.clock,
         };
         let s = sluice_of(&self.bound, &self.policies, clock);
-        // D7: an older `sluice run` that drives the repository keeps its
-        // rounds while it lives, a step's among them.
-        let answer = match self.task.drives() {
-            true => pass::step(&s, &*self.bound.pulls, clock, branch).map_err(|e| format!("{e:#}")),
-            false => Err(format!(
-                "an older sluice run drives {}, so sluice's host process runs no round of it \
-                 while that run lives",
-                self.task.repository
-            )),
-        };
+        let answer =
+            pass::step(&s, &*self.bound.pulls, clock, branch).map_err(|e| format!("{e:#}"));
         let in_play = pass::in_play(&s);
         (answer, in_play)
     }
@@ -1849,90 +1847,22 @@ fn sluice_of<'a>(
 
 /// What a repository's worker holds between its passes.
 struct Task {
-    driver: Option<Driver>,
-    reader: Option<Reader>,
     kept: Kept,
     in_play: bool,
-    /// Whether it said that an older `sluice run` drives the repository.
-    said_driven: bool,
-    readers: PathBuf,
     repository: String,
 }
 
 impl Task {
-    /// Whether it drives the repository, its driver's lock taken where no
-    /// older `sluice run` holds it (D7).
-    fn drives(&mut self) -> bool {
-        if self.driver.is_none() {
-            self.driver = Driver::try_take(&self.readers, &self.repository).unwrap_or(None);
-        }
-        self.driver.is_some()
-    }
-
-    /// One pass, as the repository's driver and reader on the host; none
-    /// while an older `sluice run` drives it or an older reader reads it,
-    /// which it follows (D7).
+    /// One pass, as the repository's driver on the host.
     fn pass(
         &mut self,
         s: &Sluice<'_>,
         bound: &Bound,
         clock: &dyn Clock,
-        tick: Duration,
         asks: bool,
     ) -> Result<Report, String> {
-        if !self.drives() {
-            if !self.said_driven {
-                log(&format!(
-                    "sluice host: {}: an older sluice run drives it; this process follows it",
-                    self.repository
-                ));
-                self.said_driven = true;
-            }
-            self.in_play = pass::in_play(s);
-            return Ok(Report {
-                in_play: self.in_play,
-                ..Report::default()
-            });
-        }
-        self.said_driven = false;
-        // 129: it takes an older reader's lease as a newer watch does, and
-        // follows until that reader lets go.
-        match &mut self.reader {
-            Some(r) => {
-                let _ = r.step(true, Drives::Nobody);
-            }
-            None => match Reader::take_given(
-                &self.readers,
-                &self.repository,
-                bound.version(),
-                Drives::Nobody,
-            ) {
-                Ok(mut r) => {
-                    // An older reader's lease, taken at once.
-                    let _ = r.step(true, Drives::Nobody);
-                    self.reader = Some(r);
-                }
-                Err(e) => return Err(format!("{e:#}")),
-            },
-        }
-        let Some(Reader::Lead(lead)) = &mut self.reader else {
-            self.in_play = pass::in_play(s);
-            return Ok(Report {
-                in_play: self.in_play,
-                ..Report::default()
-            });
-        };
-        let report = pass::pass(
-            s,
-            bound,
-            &*bound.pulls,
-            clock,
-            Some(lead),
-            tick,
-            asks,
-            &mut self.kept,
-        )
-        .map_err(|e| format!("{e:#}"));
+        let report = pass::pass(s, bound, &*bound.pulls, clock, asks, &mut self.kept)
+            .map_err(|e| format!("{e:#}"));
         match &report {
             Ok(r) => {
                 for line in &r.lines {

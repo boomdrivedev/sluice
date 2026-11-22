@@ -220,23 +220,13 @@ fn a_watch_goes_on_where_the_policy_is_on_a_branch_other_than_heads() {
     assert_goes_on(repo.dir());
 }
 
-/// The reader's document a watch with `state` as its host's state writes:
-/// its path, once there is one.
-fn readers_doc(state: &Path) -> Option<std::path::PathBuf> {
-    let dir = state.join("sluice/readers");
-    std::fs::read_dir(dir)
-        .ok()?
-        .map(|e| e.unwrap().path())
-        .find(|p| p.extension().is_some_and(|x| x == "json"))
-}
-
-/// 129, and the change `sluice-host-runs-on-a-tokio-edge`: the host
-/// process, the reader over a repository where nothing moves, writes its
-/// document once and reads nothing more while nothing moves: after three
-/// seconds its bytes and its mark are as after the first read, and the
-/// watch prints nothing. A ref that moves is a file event: the host
-/// process reads the repository again and marks the read's end, its
-/// document's bytes standing.
+/// overview-reader, "A read that changes nothing" (129; the changes
+/// `sluice-host-runs-on-a-tokio-edge` and `sluice-host-answers-every-read`,
+/// design D6): over a repository where nothing moves, the watch prints
+/// the document once and nothing more for three seconds; a ref that moves
+/// is a file event, and `sluice host` reads the repository again, which
+/// changes nothing of the document but its time, so the watch prints
+/// nothing.
 #[test]
 fn a_readers_marks_move_while_its_document_stands() {
     let repo = Repo::new("marks");
@@ -245,29 +235,18 @@ fn a_readers_marks_move_while_its_document_stands() {
     let watch = Watch::start(repo.dir());
     let first = watch.first_line();
     assert_eq!(first["tick"], 1, "{first}");
-    // The watch's state is where its stderr is kept.
-    let state = watch.stderr.parent().unwrap();
-    let path = readers_doc(state).expect("the reader's document");
-    let bytes = std::fs::read(&path).unwrap();
-    let doc: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
-    assert_eq!(doc["tick"], 1, "{doc}");
-    let marked = || std::fs::metadata(&path).unwrap().modified().unwrap();
-    let first_mark = marked();
     std::thread::sleep(Duration::from_millis(3500));
-    assert_eq!(std::fs::read(&path).unwrap(), bytes, "rewritten");
-    assert_eq!(marked(), first_mark, "read again though nothing moved");
     assert!(
         watch.lines.try_recv().is_err(),
         "a line though nothing moved"
     );
     let head = repo.rev("HEAD");
     repo.git(&["update-ref", "refs/heads/moved", &head]);
-    let until = Instant::now() + Duration::from_secs(5);
-    while marked() == first_mark {
-        assert!(Instant::now() < until, "no read after the ref moved");
-        std::thread::sleep(Duration::from_millis(50));
-    }
-    assert_eq!(std::fs::read(&path).unwrap(), bytes, "rewritten");
+    let again = watch.lines_within(Duration::from_secs(3));
+    assert!(
+        again.is_empty(),
+        "a line for a read that changed nothing: {again:?}"
+    );
 }
 
 /// A policy a branch's records can be kept under.
@@ -364,9 +343,8 @@ fn a_watch_reads_the_policy_again_once_the_branch_moves() {
 }
 
 /// 129, 148: `main` written by a command that is not sluice's, the
-/// refusal counted in its state; a watch, the host's reader, and a second
-/// watch beside it, which follows the reader's document; the follower's
-/// document gives `main` the cause the reader's gives it.
+/// refusal counted in its state; a watch, and a second watch beside it,
+/// both following `sluice host`: each document gives `main` the cause.
 #[test]
 fn a_followers_overview_carries_refused_writes() {
     let d = OnDisk::new("watched-refused", MAIN);
@@ -393,10 +371,6 @@ fn a_followers_overview_carries_refused_writes() {
             .as_str()
             .is_some_and(|c| c.ends_with("update-ref refs/heads/main <revision> <revision>")),
         "{read}"
-    );
-    assert!(
-        readers_doc(d.state.path()).is_some(),
-        "no reader's document"
     );
 
     let follower = Watch::of(&d);

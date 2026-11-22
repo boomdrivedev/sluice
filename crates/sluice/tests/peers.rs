@@ -840,11 +840,12 @@ fn a_signed_record_is_verified_once() {
         support::env_of(&host.command(host.repo.dir())),
     )
     .unwrap();
+    let _ = repository;
     let _kept = client
-        .follow(
-            Path::new(&repository),
-            sluice::host_process::protocol::FollowKind::Wait,
-        )
+        .subscribe(vec![sluice::host_process::protocol::Added {
+            folder: host.repo.dir().to_path_buf(),
+            kind: sluice::host_process::protocol::FollowKind::Wait,
+        }])
         .unwrap();
 
     let out = host.sluice(&["run", "--rounds", "10"]);

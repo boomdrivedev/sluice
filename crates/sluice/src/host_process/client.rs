@@ -27,11 +27,9 @@ use anyhow::{anyhow, bail, Context, Result};
 use sluice_seams::RunKind;
 
 use super::pass::Report;
-use super::protocol::{
-    receive, send, Answer, FollowKind, Hello, Named, Output, Reading, Request, RoomView, Started,
-};
+use super::protocol::{receive, send, Answer, Hello, Named, Output, Request, Started};
+use super::version::older;
 use super::{environment, Paths};
-use crate::reader::older;
 
 /// How long a command waits for a process it started to answer (design
 /// D2).
@@ -404,27 +402,6 @@ impl Client {
         }
     }
 
-    /// A reading of `repository`, once one is current, or with `afresh`
-    /// once one begun after the ask ends, started where none answers
-    /// (D16): waited for the round's retry bound and a tick, then answered
-    /// as not current, the command reading as the host holds it.
-    pub fn read(&self, repository: &Path, afresh: bool) -> Result<Reading> {
-        let mut c = self.reach()?;
-        send(
-            &mut c.writer,
-            &Request::Read {
-                repository: repository.to_path_buf(),
-                afresh,
-            },
-        )?;
-        let wait = super::read_for() + super::READ_TICK;
-        match c.next(Some(wait))? {
-            Some(Answer::Read(r)) => Ok(r),
-            Some(other) => Err(unexpected(other)),
-            None => Ok(Reading::default()),
-        }
-    }
-
     /// The results `ask` names of `repository`, as `branch`'s gate reads
     /// them, from the host process's index, started where none answers
     /// (D17).
@@ -460,20 +437,6 @@ impl Client {
         }
     }
 
-    /// Follow `repository`'s passes while the connection is open (D7,
-    /// D11): each pass's report comes down it.
-    pub fn follow(&self, repository: &Path, kind: FollowKind) -> Result<Connection> {
-        let mut c = self.reach()?;
-        send(
-            &mut c.writer,
-            &Request::Follow {
-                repository: repository.to_path_buf(),
-                kind,
-            },
-        )?;
-        Ok(c)
-    }
-
     /// A subscription of `folders`, each followed as its kind says, the
     /// connection kept open for more `add` and `remove` lines and for the
     /// lines that the host process sends (the change
@@ -505,18 +468,6 @@ impl Client {
             },
         )?;
         Ok(c)
-    }
-
-    /// The room as the process that answers holds it; `None` where none
-    /// answers, and nothing is started.
-    pub fn room(&self) -> Result<Option<(Named, RoomView)>> {
-        let Some(mut c) = self.answering()? else {
-            return Ok(None);
-        };
-        match c.ask(&Request::Room)? {
-            Answer::Room(r) => Ok(Some((c.named, r))),
-            other => Err(unexpected(other)),
-        }
     }
 }
 

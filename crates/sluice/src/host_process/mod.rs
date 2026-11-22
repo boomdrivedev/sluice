@@ -63,6 +63,7 @@ pub mod results;
 pub mod room;
 pub mod subscription;
 pub mod tasks;
+pub mod version;
 pub mod watch;
 
 use std::ffi::OsString;
@@ -86,7 +87,7 @@ use crate::exec::Host;
 use crate::host_settings::{HostSettings, Look};
 use crate::instance::Instance;
 use crate::profiles::places::{repository_key, user_scratch, USER_SCRATCH_VAR};
-pub use ask::{Following, Here, Holding, Holds, HostProcess, Socketed, Subscription};
+pub use ask::{Here, Holding, Holds, HostProcess, Socketed, Subscription};
 use folder::{Folder, How};
 use protocol::{Answer, FollowKind, Hello, Named, Request, RoomView, Started};
 use room::{Asked, Asker, Room, Shared};
@@ -1820,11 +1821,15 @@ async fn answer(hosting: &Arc<Hosting>, stream: UnixStream) -> Result<()> {
     let request: Request = match serde_json::from_str(line.trim_end()) {
         Ok(r) => r,
         Err(_) => {
+            // The change `sluice-host-answers-every-read`, design D9: it
+            // answers only the requests of its own release, and names the
+            // sluice to run.
             let words = format!(
-                "sluice {} asked what this host process, sluice {}, does not know: {}",
+                "sluice {} asked what this host process, sluice {}, does not know: {}. Run sluice {}.",
                 hello.hello,
                 hosting.named.version,
-                line.trim_end()
+                line.trim_end(),
+                hosting.named.version
             );
             return send(&mut writer, &Answer::Error(words)).await;
         }
@@ -1876,27 +1881,6 @@ async fn answer(hosting: &Arc<Hosting>, stream: UnixStream) -> Result<()> {
             };
             send(&mut writer, &answer).await
         }
-        Request::Follow { repository, kind } => {
-            note(hosting, &repository);
-            let task = hosting.tasks.handle(&repository);
-            let mut follower = task.follow(kind);
-            let mut gone = Box::pin(closed(&mut lines));
-            loop {
-                tokio::select! {
-                    report = follower.next() => match report {
-                        Some(r) => {
-                            if send(&mut writer, &Answer::Pass(r)).await.is_err() {
-                                return Ok(());
-                            }
-                        }
-                        // The task ended under it: one is held again.
-                        None => return Ok(()),
-                    },
-                    () = &mut gone => return Ok(()),
-                    () = hosting.stop.cancelled() => return Ok(()),
-                }
-            }
-        }
         Request::Hold {
             kind,
             repository,
@@ -1912,14 +1896,6 @@ async fn answer(hosting: &Arc<Hosting>, stream: UnixStream) -> Result<()> {
                 &mut lines,
             )
             .await
-        }
-        Request::Read { repository, afresh } => {
-            note(hosting, &repository);
-            let reading = hosting
-                .tasks
-                .read(&repository, READ_TICK, read_for(), afresh)
-                .await;
-            send(&mut writer, &Answer::Read(reading)).await
         }
         Request::Results {
             repository,
@@ -1937,13 +1913,6 @@ async fn answer(hosting: &Arc<Hosting>, stream: UnixStream) -> Result<()> {
                 Err(e) => Answer::Error(format!("{e:#}")),
             };
             send(&mut writer, &answer).await
-        }
-        Request::Room => {
-            let held = hosting.clone();
-            let view = tokio::task::spawn_blocking(move || view(&held))
-                .await
-                .context("reading the room")??;
-            send(&mut writer, &Answer::Room(view)).await
         }
         // D3 of `sluice-runs-as-a-daemon` and of
         // `sluice-host-owns-its-workers`: the host process starts afresh in
@@ -2020,7 +1989,7 @@ impl subscription::Serves for Subscribed {
     }
 
     fn ends(&self, document: &serde_json::Value) -> bool {
-        crate::reader::no_sluice(document) || document["gone"] == true
+        crate::overview::no_sluice(document) || document["gone"] == true
     }
 }
 
@@ -2083,11 +2052,6 @@ pub(crate) fn note(hosting: &Hosting, repository: &Path) {
             repository.display()
         ));
     }
-}
-
-/// The room as a person reads it (150).
-fn view(hosting: &Hosting) -> Result<RoomView> {
-    view_of(&hosting.room)
 }
 
 /// `room` as a person reads it (150).

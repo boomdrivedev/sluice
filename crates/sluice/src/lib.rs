@@ -24,7 +24,6 @@ pub mod preview;
 pub mod profiles;
 pub mod progress;
 pub mod protect;
-pub mod reader;
 pub mod retry;
 pub mod runs;
 pub mod scrub;
@@ -2596,9 +2595,7 @@ fn dispatch(
             let folder = std::env::current_dir()?;
             subscriber::watch(host.host_process(), Some(&here), folder, clock, pause, out)
         }
-        Command::Overview { json, watch, .. } => {
-            overview::run(&s, host, clock, pulls, json, watch, pause, out)
-        }
+        Command::Overview { json, .. } => overview::run(&s, host, clock, pulls, json, out),
         Command::Amend {
             id,
             after,
@@ -4344,6 +4341,9 @@ fn wait_on(
         Some(&here),
         std::env::current_dir()?,
     );
+    // The document `sluice host` holds as the wait comes, where it holds
+    // one, is what the wait says first.
+    waiter.look();
     reading.read(s, waiter.document(), following.as_mut().unwrap_or(&mut own))?;
     loop {
         let sub = following.as_ref().unwrap_or(&own);

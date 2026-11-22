@@ -1864,10 +1864,11 @@ fn remote_calls(trace: &Path) -> Vec<String> {
         .collect()
 }
 
-/// 64, 129: beside a live reader keeping its tick, whose last read holds
-/// `main`, with `#1` queued on it, and `bolt/y`, both on a remote, a
-/// forecast of `bolt/y` onto `main` takes both from that read and asks
-/// the remote nothing: it forecasts as the read says with the remote gone.
+/// 64, 129 (the change `sluice-host-answers-every-read`, design D3): with
+/// `main`, `#1` queued on it, and `bolt/y` both on a remote, and the
+/// remote gone, a forecast of `bolt/y` onto `main` is formed by `sluice
+/// host` on both as it holds them, and the command asks the remote
+/// nothing.
 #[test]
 fn a_forecast_beside_a_current_reader_asks_the_remote_nothing() {
     let s = Setup::new("forecast-reader", "origin");
@@ -1894,8 +1895,7 @@ fn a_forecast_beside_a_current_reader_asks_the_remote_nothing() {
 
     let out = s.sluice(&["overview", "--json"]);
     assert!(out.status.success(), "{}", text(&out));
-    let mut doc: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
-    doc["tick"] = 3600.into();
+    let doc: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
     let part = |name: &str| {
         doc["branches"]
             .as_array()
@@ -1910,17 +1910,10 @@ fn a_forecast_beside_a_current_reader_asks_the_remote_nothing() {
         main["revision"].is_string() && bolt["revision"].is_string(),
         "{doc}"
     );
-    let repository = doc["repository"].as_str().unwrap().to_string();
-    // D7: the host process the steps reached drives the repository and
-    // keeps its reader's place; ended, the test's own reader takes it.
+    // The host process that the steps reached ends: the forecast starts
+    // one, whose first reading cannot ask origin, and forms on what the
+    // host holds.
     support::kill_host_process(&mut s.command(s.repo.dir()));
-    let readers = s.state.path().join("sluice/readers");
-    let mut reader =
-        match sluice::reader::Reader::take(&readers, &repository, sluice::VERSION).unwrap() {
-            sluice::reader::Reader::Lead(lead) => lead,
-            sluice::reader::Reader::Follow(_) => panic!("a reader of {repository} already"),
-        };
-    reader.write(&doc).unwrap();
     let aside = s.origin.path().with_extension("aside");
     std::fs::rename(s.origin.path(), &aside).unwrap();
 

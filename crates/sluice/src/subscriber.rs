@@ -20,7 +20,7 @@ use sluice_core::Clock;
 
 use crate::host_process::protocol::{Added, FollowKind, SubscriptionLine};
 use crate::host_process::{Here, HostProcess, Subscription};
-use crate::reader::{no_sluice, untimed};
+use crate::overview::{no_sluice, untimed};
 use crate::{telemetry, Pause, INTERRUPTED, STOPPED};
 
 /// How long a client waits for a line before it looks at its own state
@@ -99,10 +99,7 @@ impl<'a> Reached<'a> {
         let (true, Some(repository)) = (self.asked_only(), repository) else {
             return;
         };
-        if let Err(e) = self
-            .process
-            .pass_of(self.here, repository, Some(clock.now()))
-        {
+        if let Err(e) = self.process.pass_of(self.here, repository, clock) {
             telemetry::warn(&format!("sluice: warning: {e:#}"));
         }
     }
@@ -130,9 +127,10 @@ pub fn watch<'a>(
         }],
     );
     let mut last: Option<serde_json::Value> = None;
-    let mut repository: Option<PathBuf> = None;
+    // A pass is asked of the folder: `sluice host` resolves it.
+    let asked = sub.folders[0].folder.clone();
     loop {
-        sub.ask_pass(repository.as_deref(), clock);
+        sub.ask_pass(Some(&asked), clock);
         for line in sub.lines(LINE_WAIT) {
             let SubscriptionLine::Document(d) = line else {
                 continue;
@@ -143,9 +141,6 @@ pub fn watch<'a>(
             if doc["gone"] == true {
                 let words = doc["error"]["message"].as_str().unwrap_or("gone");
                 anyhow::bail!("{words}");
-            }
-            if let Some(r) = doc["repository"].as_str() {
-                repository = Some(PathBuf::from(r));
             }
             let now = untimed(&doc);
             if last.as_ref() != Some(&now) {
@@ -304,11 +299,11 @@ impl<'a> Runner<'a> {
         if self.reached.asked_only() {
             // The passes the subscription reports are those it asked.
             self.reached.lines(Duration::from_millis(1));
-            return match self.reached.process.pass_of(
-                self.reached.here,
-                &self.folder,
-                Some(clock.now()),
-            ) {
+            return match self
+                .reached
+                .process
+                .pass_of(self.reached.here, &self.folder, clock)
+            {
                 Ok(r) => Some(r),
                 Err(e) => {
                     telemetry::warn(&format!("sluice: warning: {e:#}"));
@@ -327,10 +322,10 @@ impl<'a> Runner<'a> {
         // own: a tick with no pass asks one, so each round is a pass. The
         // pass comes as each pass does, on the subscription.
         if self.waiting.is_empty() && self.idle && self.reached.open.is_some() {
-            if let Err(e) =
-                self.reached
-                    .process
-                    .pass_of(self.reached.here, &self.folder, Some(clock.now()))
+            if let Err(e) = self
+                .reached
+                .process
+                .pass_of(self.reached.here, &self.folder, clock)
             {
                 telemetry::warn(&format!("sluice: warning: {e:#}"));
             }
@@ -386,6 +381,14 @@ impl<'a> Waiter<'a> {
         self.document.as_ref()
     }
 
+    /// The document `sluice host` sends as the subscription opens, where it
+    /// holds one: no pass is asked.
+    pub fn look(&mut self) {
+        if self.reached.open().is_some() {
+            self.take_lines(Duration::from_millis(1));
+        }
+    }
+
     /// One tick: a pass asked first where passes are taken only when
     /// asked; the newest document, and the reports of the passes since the
     /// last tick.
@@ -424,7 +427,7 @@ impl<'a> Waiter<'a> {
             match self
                 .reached
                 .process
-                .pass_of(self.reached.here, &self.folder, Some(clock.now()))
+                .pass_of(self.reached.here, &self.folder, clock)
             {
                 Ok(r) => reports.push(r),
                 Err(e) => telemetry::warn(&format!("sluice: warning: {e:#}")),

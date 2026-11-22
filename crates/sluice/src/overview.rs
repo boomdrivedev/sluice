@@ -7,7 +7,6 @@
 
 use std::collections::BTreeSet;
 use std::io::Write;
-use std::sync::atomic::Ordering;
 use std::time::Duration;
 
 use anyhow::Result;
@@ -18,11 +17,7 @@ use sluice_core::{Clock, Sluice};
 
 use crate::exec::Host;
 use crate::preview::preview_json;
-use crate::reader::{no_sluice, untimed, Follow};
-use crate::{
-    hashes, held_line, progress, sessions_json, telemetry, Across, Names, Pause, PullRequests,
-    INTERRUPTED, STOPPED,
-};
+use crate::{hashes, held_line, progress, sessions_json, telemetry, Across, Names, PullRequests};
 
 /// 137, design D5: how the overview reads the pull requests into each
 /// branch this host follows and another host takes in.
@@ -223,98 +218,28 @@ fn followed(
     out
 }
 
-/// `tick` is how long `pause` pauses, which a watch that reads names in
-/// its documents (64, 129).
-#[allow(clippy::too_many_arguments)]
+/// A one-shot overview (129; the change `sluice-host-answers-every-read`,
+/// design D3, D6): the records as `sluice host` holds them after its
+/// current reading, asking no remote, and the pull requests it follows as
+/// it last kept them: the document that a subscription gets too, which
+/// says `"set_up": false` where the repository has no sluice. A watch is
+/// `crate::subscriber::watch`'s.
 pub fn run(
     s: &Sluice<'_>,
     host: &dyn Host,
     clock: &dyn Clock,
     pulls: &dyn PullRequests,
     json: bool,
-    watch: bool,
-    pause: &dyn Pause,
     out: &mut dyn Write,
 ) -> Result<i32> {
-    if !watch {
-        // 129 (the change `sluice-host-answers-every-read`, design D3, D6):
-        // the records as `sluice host` holds them after its current
-        // reading, asking no remote, and the pull requests it follows as
-        // it last kept them: the document that a subscription gets too,
-        // which says `"set_up": false` where the repository has no sluice.
-        let doc = read_held(s, host, clock, Follows::Kept(pulls), &mut None)?;
-        let branches = serde_json::from_value::<Vec<BranchView>>(doc["branches"].clone())?;
-        if json {
-            writeln!(out, "{}", serde_json::to_string_pretty(&doc)?)?;
-        } else {
-            write_overview(&branches, &doc, out)?;
-        }
-        return Ok(0);
+    let doc = read_held(s, host, clock, Follows::Kept(pulls), &mut None)?;
+    let branches = serde_json::from_value::<Vec<BranchView>>(doc["branches"].clone())?;
+    if json {
+        writeln!(out, "{}", serde_json::to_string_pretty(&doc)?)?;
+    } else {
+        write_overview(&branches, &doc, out)?;
     }
-    // 129, 135: sluice's host process is the repository's reader on the
-    // host; the watch follows it, starting it where none answers, and its
-    // document, reading nothing itself and taking no lock or lease (rule
-    // core.25). A host process that stopped is reached again at the next
-    // tick, and the last document stands until the next is written.
-    let (readers, repository) = (host.readers()?, host.repository()?);
-    let follow = Follow::of(&readers, &repository, host.version());
-    let here = crate::host_process::Here {
-        s,
-        host,
-        pulls,
-        clock,
-    };
-    let mut follower = crate::host_process::ask::Follower::new(
-        &here,
-        crate::host_process::protocol::FollowKind::Watch,
-    );
-    // Once at the start, then each time anything but the time it was read
-    // changes: what reads the lines finds what happened by comparing
-    // `recent`.
-    let mut last: Option<serde_json::Value> = None;
-    // D9: its first read is of the host process's pass its follow asked
-    // for, never a document an earlier reader left.
-    let mut first = true;
-    // 129: it ends only when stopped, when its output is closed, when its
-    // repository is gone, or where the repository has no sluice; anything
-    // else that fails is tried again at the next tick, which is its cadence
-    // and no retry (rule core.29).
-    loop {
-        match std::mem::replace(&mut first, false) {
-            true => follower.first(&here, crate::host_process::read_for()),
-            false => follower.tick(&here),
-        };
-        if INTERRUPTED.load(Ordering::SeqCst) {
-            return Ok(STOPPED);
-        }
-        // 129: a repository gone ends the watch as a failing overview
-        // ends, with the host process's read's words where it wrote them.
-        if host.repository_gone(&repository) {
-            let said = follow
-                .read()
-                .and_then(|d| d["error"]["message"].as_str().map(str::to_string));
-            match said {
-                Some(words) => anyhow::bail!("{words}"),
-                None => anyhow::bail!("the repository at {repository} is gone"),
-            }
-        }
-        if let Some(doc) = follow.read() {
-            let now = untimed(&doc);
-            if last.as_ref() != Some(&now) {
-                writeln!(out, "{}", serde_json::to_string(&doc)?)?;
-                out.flush()?;
-                last = Some(now);
-            }
-            // 129: the repository has no sluice, as the host process read
-            // it: the document saying so is the last line.
-            if no_sluice(&doc) {
-                return Ok(0);
-            }
-        }
-        if !pause.pause() {
-            return Ok(STOPPED);
-        }
-    }
+    Ok(0)
 }
 
 /// The overview document that `sluice host` sends a subscription of the
@@ -332,6 +257,23 @@ pub fn subscribed(
         crate::told::document(crate::told::Kind::Internal, &format!("{e:#}"), &[])
     });
     ticked(doc, tick)
+}
+
+/// Whether `doc`, an overview document, says its repository has no
+/// sluice: `"set_up": false` (129).
+pub fn no_sluice(doc: &serde_json::Value) -> bool {
+    doc.get("set_up") == Some(&serde_json::Value::Bool(false))
+}
+
+/// `doc` but for the time it was read: what `sluice host` sends again,
+/// and a watch prints again, only when it changes (the change
+/// `sluice-host-answers-every-read`, design D6).
+pub fn untimed(doc: &serde_json::Value) -> serde_json::Value {
+    let mut doc = doc.clone();
+    if let Some(o) = doc.as_object_mut() {
+        o.remove("at");
+    }
+    doc
 }
 
 /// `doc` as a reader writes it: naming its tick, the pause between its
