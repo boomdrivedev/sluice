@@ -13,7 +13,7 @@ use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
 
-use anyhow::{Context, Result};
+use anyhow::{anyhow, Context, Result};
 use sluice_core::home::{HomeStore, Owed};
 use sluice_core::policy::{Policy, POLICY_PATH};
 use sluice_core::records::{
@@ -1135,15 +1135,11 @@ impl State for Records {
             ResultsFrom::Asked => {
                 let asked = crate::host_process::client::Client::host()
                     .and_then(|c| c.results(&self.common, branch, ask));
-                match asked {
-                    Ok(bytes) => Ok(bytes),
-                    Err(e) => {
-                        crate::telemetry::warn(&format!(
-                            "sluice: warning: sluice's host process could not be asked for {branch}'s results, so this command reads them itself: {e:#}"
-                        ));
-                        self.results_here(branch, ask)
-                    }
-                }
+                // A command reads no line of the results log itself (the
+                // change `sluice-host-answers-every-read`, design D4).
+                asked.map_err(|e| {
+                    anyhow!("sluice's host process did not answer for {branch}'s results: {e:#}")
+                })
             }
         }
     }

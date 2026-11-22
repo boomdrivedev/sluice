@@ -4060,3 +4060,62 @@ fn a_newer_read_at_an_older_host_process_exits_3() {
         .collect();
     assert!(read.is_empty(), "the status ran git: {read:?}");
 }
+
+/// host-process, "A result recorded after the index was read" (the change
+/// `sluice-host-answers-every-read`, design D3): once `sluice host` read
+/// the results log for a status, a pass recorded under a new key of the
+/// submission's combination is shown by the next status; the lines before
+/// it, rewritten in place, are still read as the index first read them, so
+/// the host read the log from where it last read it.
+#[test]
+fn a_result_recorded_after_the_index_was_read_is_read() {
+    let d = OnDisk::new("host-result-after", POLICY);
+    let dir = d.session("a");
+    let id = queued_live(&d, &dir);
+    within(60, "the submission lands", || {
+        state(&d, d.repo.dir(), id) == "landed"
+    });
+    let mut sub = held(&d);
+    settled(&mut sub);
+    let checks = || -> (String, BTreeSet<String>) {
+        let out = d.sluice(&["status", &id.to_string(), "--json"]);
+        assert!(out.status.success(), "{}", text(&out));
+        let doc: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+        let tasks = doc["checks"]
+            .as_array()
+            .unwrap_or_else(|| panic!("checks in {doc}"))
+            .iter()
+            .map(|c| c["task"].as_str().unwrap().to_string())
+            .collect();
+        (
+            doc["tested"]["combination"].as_str().unwrap().to_string(),
+            tasks,
+        )
+    };
+    let (combination, before) = checks();
+    let log = d.repo.dir().join(".git/sluice/results.jsonl");
+    let first = std::fs::read_to_string(&log).unwrap();
+    let line = format!(
+        "{{\"at\":\"2026-11-13T00:00:00Z\",\"kind\":\"ran\",\"task\":\"late:check\",\
+         \"hash\":\"h-late\",\"outcome\":\"pass\",\"branch\":\"main\",\
+         \"combination\":\"{combination}\"}}\n"
+    );
+    // The lines the index read, rewritten in place, and one appended.
+    let rewritten = first.replace("\"pass\"", "\"fail\"");
+    assert_eq!(rewritten.len(), first.len());
+    std::fs::write(&log, format!("{rewritten}{line}")).unwrap();
+    let (_, after) = checks();
+    let mut expected = before.clone();
+    expected.insert("late:check".to_string());
+    assert_eq!(after, expected);
+    let out = d.sluice(&["status", &id.to_string(), "--json"]);
+    let doc: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert!(
+        doc["checks"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|c| !c["result"].to_string().contains("fail")),
+        "the lines before were read again: {doc}"
+    );
+}
