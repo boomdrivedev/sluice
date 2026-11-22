@@ -137,10 +137,16 @@ pub(crate) async fn answer(hosting: &Arc<Hosting>, request: Request) -> Output {
     let key = serde_json::to_string(&request).unwrap_or_default();
     let changed = hosting.tasks.told_at(&repository);
     let held = hosting.clone();
+    let said = key.clone();
     hosting
         .reads
         .of(&repository, &tracker)
         .ask(key, changed, None, move || async move {
+            // One line for each call, which the asks that join it share.
+            super::log(&format!(
+                "sluice host: {}: read {said}",
+                repository.display()
+            ));
             let runtime = tokio::runtime::Handle::current();
             tokio::task::spawn_blocking(move || {
                 render(&held, &repository, &folder, request, reading, runtime)

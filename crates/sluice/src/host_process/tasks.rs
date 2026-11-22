@@ -1338,18 +1338,18 @@ impl Scheduler {
         self.flight = Some(Flight::Pass { rx, asks, replies });
     }
 
-    /// Where passes are taken only when asked, a reading due is a look,
-    /// made beside work under way in the worker's lane that is no reading,
-    /// a step among it (D14).
+    /// A reading due during a step is a look made beside the step, so a
+    /// read during a long step is answered once the look ends (the change
+    /// `sluice-host-answers-every-read`, design D3); where passes are taken
+    /// only when asked, so is one due during any work of the worker's lane
+    /// that is no reading (D14).
     fn look_beside(&mut self) {
-        if self.reading_due
-            && self.asked_only()
-            && self.flight.is_some()
-            && !matches!(self.flight, Some(Flight::Pass { .. }))
-            && self.looking.is_none()
-            && !self.stopping
-            && !self.ended
-        {
+        let beside = match &self.flight {
+            Some(Flight::Step { .. }) => true,
+            Some(Flight::Pass { .. }) | None => false,
+            Some(_) => self.asked_only(),
+        };
+        if self.reading_due && beside && self.looking.is_none() && !self.stopping && !self.ended {
             self.reading_due = false;
             self.look();
         }
@@ -2385,6 +2385,54 @@ mod tests {
     }
 
     const IDLE_ASK_TEST: Duration = Duration::from_secs(61);
+
+    /// resident-reads, "A read past its bound is answered from the last
+    /// state" (the change `sluice-host-answers-every-read`, design D4): a
+    /// read whose reading does not end within `read_for()` is answered as
+    /// not current, with when the last reading ended, so `sluice host`
+    /// answers from the state it last kept. The look holds the paused clock
+    /// while it runs; the test moves the clock past the bound.
+    #[tokio::test(start_paused = true)]
+    async fn a_read_past_its_bound_answers_from_the_held_state() {
+        let repo = PathBuf::from("/host/slow-reading.git");
+        let held = Arc::new((Mutex::new(false), std::sync::Condvar::new()));
+        let gate = held.clone();
+        let look: InPlay = Arc::new(move |_: &Path, _: bool| {
+            let (blocked, ended) = &*gate;
+            let mut b = locked(blocked);
+            while *b {
+                b = ended.wait(b).unwrap_or_else(|e| e.into_inner());
+            }
+            Looked::default()
+        });
+        let tasks = Tasks::new(Fakes::default().bind(), look).passes_when_asked();
+        let tick = super::super::READ_TICK;
+        let first = tasks
+            .read(&repo, tick, super::super::read_for(), false)
+            .await;
+        assert!(first.current, "{first:?}");
+        assert!(first.ended.is_some(), "{first:?}");
+
+        tokio::time::advance(tick + Duration::from_secs(1)).await;
+        *locked(&held.0) = true;
+        let asked = {
+            let tasks = tasks.clone();
+            let repo = repo.clone();
+            tokio::spawn(async move {
+                tasks
+                    .read(&repo, tick, super::super::read_for(), false)
+                    .await
+            })
+        };
+        settle().await;
+        assert!(reading(&tasks, &repo), "a reading is in flight");
+        tokio::time::advance(super::super::read_for() + Duration::from_secs(1)).await;
+        let answered = asked.await.unwrap();
+        assert!(!answered.current, "{answered:?}");
+        assert_eq!(answered.ended, first.ended, "the state last kept");
+        *locked(&held.0) = false;
+        held.1.notify_all();
+    }
 
     /// reader-tick, "A remote's records are asked for once a minute where
     /// nothing is in play" (129 as amended 2026-11-19): the look at an

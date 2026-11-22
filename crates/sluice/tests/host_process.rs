@@ -1430,12 +1430,17 @@ fn a_status_with_no_host_process_starts_it_and_reads_its_first_reading() {
     assert!(doc["state"].is_string(), "{doc}");
 
     let starts = d.git.parented()[before..].to_vec();
+    // The status reads no record: the one git it runs is the branch
+    // protection's look at its hook (the change
+    // `sluice-host-answers-every-read`, design D2).
     let own: Vec<&String> = starts
         .iter()
-        .filter(|(pid, args)| *pid == status_pid && asks_a_remote(args))
+        .filter(|(pid, args)| {
+            *pid == status_pid && !args.contains(" rev-parse ") && !args.contains(" worktree list")
+        })
         .map(|(_, args)| args)
         .collect();
-    assert!(own.is_empty(), "the status asked origin: {own:?}");
+    assert!(own.is_empty(), "the status ran git: {own:?}");
     assert!(
         starts
             .iter()
@@ -1469,11 +1474,22 @@ impl Drop for Slowed {
 
 impl Slowed {
     fn start(d: &OnDisk, name: &str) -> Slowed {
+        Slowed::start_matching(d, name, "")
+    }
+
+    /// [`Slowed::start`], only a git whose arguments hold `matching` slowed.
+    fn start_matching(d: &OnDisk, name: &str, matching: &str) -> Slowed {
         let repository = std::path::PathBuf::from(d.repository(d.repo.dir()));
         live_from_here(d);
         let bin = support::Scratch::new(&format!("{name}-slow-git"));
         let flag = bin.path().join("flag");
-        let real = std::env::split_paths(&std::env::var_os("PATH").unwrap_or_default())
+        // The git the host's commands run, which counts its starts.
+        let path = support::env_of(&d.command(d.repo.dir()))
+            .into_iter()
+            .find(|(k, _)| k == "PATH")
+            .map(|(_, v)| v)
+            .unwrap_or_default();
+        let real = std::env::split_paths(&path)
             .map(|p| p.join("git"))
             .find(|p| p.is_file())
             .expect("git on the path");
@@ -1481,7 +1497,7 @@ impl Slowed {
         std::fs::write(
             &script,
             format!(
-                "#!/bin/sh\nif [ -f '{flag}' ] && [ \"$PPID\" = \"$(cat '{flag}')\" ]; then i=0; while [ -f '{flag}' ] && [ $i -lt 600 ]; do sleep 0.1; i=$((i+1)); done; fi\nexec '{real}' \"$@\"\n",
+                "#!/bin/sh\ncase \" $* \" in *'{matching}'*) slow=1;; *) slow=;; esac\nif [ -n \"$slow\" ] && [ -f '{flag}' ] && [ \"$PPID\" = \"$(cat '{flag}')\" ]; then i=0; while [ -f '{flag}' ] && [ $i -lt 600 ]; do sleep 0.1; i=$((i+1)); done; fi\nexec '{real}' \"$@\"\n",
                 flag = flag.display(),
                 real = real.display()
             ),
@@ -1526,10 +1542,22 @@ impl Slowed {
 /// `sluice status main --json` in `d`'s repository: its output, how long
 /// it took, and whether its own process asked a remote.
 fn timed_status(d: &OnDisk) -> (std::process::Output, Duration, bool) {
+    timed_status_with(d, None)
+}
+
+/// [`timed_status`], with no git on the status's path where `empty` is a
+/// folder with none.
+fn timed_status_with(
+    d: &OnDisk,
+    empty: Option<&support::Scratch>,
+) -> (std::process::Output, Duration, bool) {
     let before = d.git.count();
     let began = Instant::now();
-    let child = d
-        .command(d.repo.dir())
+    let mut c = d.command(d.repo.dir());
+    if let Some(empty) = empty {
+        c.env("PATH", empty.path());
+    }
+    let child = c
         .env("SLUICE_ROUND_SLEEP", "record")
         .args(["status", "main", "--json"])
         .stdout(std::process::Stdio::piped())
@@ -1545,11 +1573,12 @@ fn timed_status(d: &OnDisk) -> (std::process::Output, Duration, bool) {
     (out, took, asked)
 }
 
-/// 129 (design D16): a status whose reading does not come within the
-/// round's retry bound and a tick, the host process's look held by two
-/// remotes that answer nothing, each for a try's whole limit, reads the
-/// records as the host holds them, fetching nothing, and says on stderr
-/// when the host process last read the repository.
+/// 129 (design D16; the change `sluice-host-answers-every-read`, design
+/// D4): a status whose reading does not come within the round's retry
+/// bound and a tick, the host process's look held, is answered by `sluice
+/// host` from the records as it holds them, fetching nothing, and says on
+/// stderr when the host process last read the repository; the status runs
+/// no git.
 #[test]
 fn a_status_beside_a_slow_look_reads_as_held_and_says_so() {
     let (_remotes, d) = on_remotes("host-slow-look", &["origin", "mirror"]);
@@ -1563,7 +1592,10 @@ fn a_status_beside_a_slow_look_reads_as_held_and_says_so() {
 
     host.slow();
     std::thread::sleep(sluice::host_process::READ_TICK + Duration::from_millis(500));
-    let (out, took, asked) = timed_status(&d);
+    // The status runs no git: `sluice host` answers it from what it last
+    // kept (the change `sluice-host-answers-every-read`, design D4).
+    let empty = support::Scratch::new("host-slow-look-path");
+    let (out, took, asked) = timed_status_with(&d, Some(&empty));
     assert!(out.status.success(), "{}", text(&out));
     assert!(!asked, "the status asked origin");
     let bound = sluice::host_process::read_for();
@@ -3481,4 +3513,550 @@ fn a_records_write_reaches_a_watch_by_its_file_event() {
             stop(n.pid);
         }
     }
+}
+
+/// The host process of `d`, held while the subscription lives: a
+/// subscription of the repository's main folder as a wait (the change
+/// `sluice-host-answers-every-read`, design D6).
+fn held(d: &OnDisk) -> sluice::host_process::client::Connection {
+    d.client(d.repo.dir())
+        .subscribe(vec![sluice::host_process::protocol::Added {
+            folder: d.repo.dir().to_path_buf(),
+            kind: FollowKind::Wait,
+        }])
+        .expect("the host process")
+}
+
+/// The git starts of the host process `pid` after `before`.
+fn hosts_git(d: &OnDisk, pid: u32, before: usize) -> Vec<String> {
+    d.git.parented()[before..]
+        .iter()
+        .filter(|(p, _)| *p == pid)
+        .map(|(_, args)| args.clone())
+        .collect()
+}
+
+/// `c` with no git on its path: what a command runs then is no git.
+fn no_git<'a>(
+    c: &'a mut std::process::Command,
+    empty: &support::Scratch,
+) -> &'a mut std::process::Command {
+    c.env("PATH", empty.path())
+}
+
+/// The lines of the host process's log that say it made a read's call.
+fn reads_logged(d: &OnDisk, ask: &str) -> usize {
+    host_logs(d)
+        .lines()
+        .filter(|l| l.contains(": read {") && l.contains(&format!("\"ask\":\"{ask}\"")))
+        .count()
+}
+
+/// Wait until the host process of `d` has no reading in flight and its
+/// last reading ended: the subscription `sub` gets a document, and a
+/// tick passes.
+fn settled(sub: &mut sluice::host_process::client::Connection) {
+    let _ = sub.line(Some(Duration::from_secs(30)));
+    std::thread::sleep(sluice::host_process::READ_TICK + Duration::from_millis(500));
+}
+
+/// Whether a git that the host process `pid` started runs now, as its
+/// record under `host/workers/` says: a slowed one waits there.
+fn host_git_running(d: &OnDisk, pid: u32) -> bool {
+    let workers = d.state.path().join("sluice/host/workers");
+    std::fs::read_dir(&workers)
+        .map(|entries| {
+            entries.flatten().any(|e| {
+                let worker: u32 = e.file_name().to_string_lossy().parse().unwrap_or(0);
+                let body = std::fs::read_to_string(e.path()).unwrap_or_default();
+                worker != 0
+                    && alive(worker)
+                    && body.contains(&format!("\"owner\":{pid}"))
+                    && body.contains("\"what\":\"git\"")
+            })
+        })
+        .unwrap_or(false)
+}
+
+/// resident-reads, "A status in text and in JSON" (design D1): `sluice
+/// status main` and its `--json` show `main`'s queue with `#4` as
+/// `sluice host` answers it; the status process starts no git but the
+/// branch protection's look at its hook.
+#[test]
+fn a_status_is_answered_by_sluice_host() {
+    let (_origin, d) = on_origin("host-answers-status");
+    let id = queued(&d, "mine");
+    let mut sub = held(&d);
+    settled(&mut sub);
+    for json in [false, true] {
+        let before = d.git.count();
+        let mut c = d.command(d.repo.dir());
+        c.env("SLUICE_ROUND_SLEEP", "record")
+            .args(["status", "main"]);
+        if json {
+            c.arg("--json");
+        }
+        let child = c
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped())
+            .spawn()
+            .unwrap();
+        let pid = child.id();
+        let out = child.wait_with_output().unwrap();
+        assert!(out.status.success(), "{}", text(&out));
+        let shown = String::from_utf8_lossy(&out.stdout);
+        match json {
+            true => {
+                let doc: serde_json::Value = serde_json::from_str(&shown).unwrap();
+                assert_eq!(doc["branch"], "main", "{doc}");
+                assert!(
+                    doc["submissions"]
+                        .as_array()
+                        .is_some_and(|s| s.iter().any(|x| x["id"].as_u64() == Some(id))),
+                    "{doc}"
+                );
+            }
+            false => assert!(shown.contains(&format!("#{id}")), "{shown}"),
+        }
+        let own: Vec<String> = d.git.parented()[before..]
+            .iter()
+            .filter(|(p, args)| {
+                *p == pid && !args.contains(" rev-parse ") && !args.contains(" worktree list")
+            })
+            .map(|(_, a)| a.clone())
+            .collect();
+        assert!(own.is_empty(), "the status ran git: {own:?}");
+    }
+}
+
+/// resident-reads, "A status with no git" (design D2): with `sluice host`
+/// running, `sluice status main --json` with no git on its path shows the
+/// queue and exits 0.
+#[test]
+fn a_status_runs_with_no_git() {
+    let (_origin, d) = on_origin("host-status-no-git");
+    let id = queued(&d, "mine");
+    let mut sub = held(&d);
+    settled(&mut sub);
+    let empty = support::Scratch::new("host-status-no-git-path");
+    let mut c = d.command(d.repo.dir());
+    let out = no_git(&mut c, &empty)
+        .env("SLUICE_ROUND_SLEEP", "record")
+        .args(["status", "main", "--json"])
+        .output()
+        .unwrap();
+    assert!(out.status.success(), "{}", text(&out));
+    let doc: serde_json::Value =
+        serde_json::from_slice(&out.stdout).unwrap_or_else(|_| panic!("{}", text(&out)));
+    assert!(
+        doc["submissions"]
+            .as_array()
+            .is_some_and(|s| s.iter().any(|x| x["id"].as_u64() == Some(id))),
+        "{doc}"
+    );
+}
+
+/// resident-reads, "A folder in no repository" (design D2): a status in a
+/// folder that is in no repository prints what a status printed there
+/// before, `sluice: opening the repository at <folder>: ...`, and exits 3;
+/// with `--json`, the error document too.
+#[test]
+fn a_status_in_no_repository_says_as_before() {
+    let d = OnDisk::new("host-status-nowhere", POLICY);
+    let nowhere = support::Scratch::new("host-status-nowhere-folder");
+    let folder = std::fs::canonicalize(nowhere.path()).unwrap();
+    let out = d
+        .command(&folder)
+        .args(["status", "main"])
+        .output()
+        .unwrap();
+    assert_eq!(out.status.code(), Some(3), "{}", text(&out));
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        err.contains(&format!(
+            "sluice: opening the repository at {}",
+            folder.display()
+        )),
+        "{err}"
+    );
+    let out = d
+        .command(&folder)
+        .args(["status", "main", "--json"])
+        .output()
+        .unwrap();
+    assert_eq!(out.status.code(), Some(3), "{}", text(&out));
+    let doc: serde_json::Value =
+        serde_json::from_slice(&out.stdout).unwrap_or_else(|_| panic!("{}", text(&out)));
+    assert_eq!(doc["error"]["kind"], "internal", "{doc}");
+    stop_host(&d);
+}
+
+/// resident-reads, "The home view" (design D1, D2): `sluice` with no
+/// command in a worktree that submitted `#n` shows it, as `sluice host`
+/// answers it, with no git on its path.
+#[test]
+fn the_home_view_is_answered_by_sluice_host() {
+    let (_origin, d) = on_origin("host-answers-home");
+    let dir = d.session("mine");
+    let id = queued_from(&d, &dir);
+    let mut sub = held(&d);
+    settled(&mut sub);
+    let empty = support::Scratch::new("host-answers-home-path");
+    let mut c = d.command(&dir);
+    let out = no_git(&mut c, &empty)
+        .env("SLUICE_ROUND_SLEEP", "record")
+        .output()
+        .unwrap();
+    assert!(out.status.success(), "{}", text(&out));
+    let shown = String::from_utf8_lossy(&out.stdout);
+    assert!(shown.contains(&format!("#{id}")), "{shown}");
+}
+
+/// design D3: a status while a step of the repository is long under way
+/// answers once a look beside the step ends, with nothing waiting for the
+/// step: here the step's push waits a minute, and the status answers
+/// within ten seconds.
+#[test]
+fn a_status_during_a_long_step_answers_at_once() {
+    let (_origin, d) = on_origin("host-long-step");
+    queued(&d, "mine");
+    // Each records write of a step pushes to origin, and waits a minute.
+    let host = Slowed::start_matching(&d, "host-long-step", " push ");
+    host.slow();
+    let (client, repository) = (host.client.clone(), host.repository.clone());
+    let stepping = std::thread::spawn(move || {
+        let _ = client.step(&repository, "main");
+    });
+    std::thread::sleep(sluice::host_process::READ_TICK + Duration::from_secs(1));
+    let (out, took, asked) = timed_status(&d);
+    assert!(out.status.success(), "{}", text(&out));
+    assert!(!asked, "the status asked origin");
+    assert!(took < Duration::from_secs(10), "answered in {took:?}");
+    drop(host);
+    let _ = stepping.join();
+}
+
+/// design D3 (`workers-end-with-their-owner@292e869158d6`): the git that a
+/// read makes `sluice host` start, its reading's fetch, is a worker of
+/// `sluice host`, recorded under `host/workers/` while it runs.
+#[test]
+fn a_reads_git_is_a_worker_of_sluice_host() {
+    let (_origin, d) = on_origin("host-read-worker");
+    queued(&d, "mine");
+    let host = Slowed::start(&d, "host-read-worker");
+    std::thread::sleep(sluice::host_process::READ_TICK + Duration::from_millis(500));
+    host.slow();
+    let mut c = d.command(d.repo.dir());
+    let status = c
+        .env("SLUICE_ROUND_SLEEP", "record")
+        .args(["status", "main"])
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .unwrap();
+    within(20, "the read's git is recorded as a worker", || {
+        host_git_running(&d, host.pid)
+    });
+    drop(host);
+    let _ = status.wait_with_output();
+}
+
+/// design D3 (`runs-max-counts-checks-only@4276e56de833`): with `[runs]
+/// max` at one and an agent's check holding it, a status is answered at
+/// once: a read takes no slot.
+#[test]
+fn a_read_takes_no_slot_of_runs_max() {
+    let marks = support::Scratch::new("host-read-no-slot-marks");
+    let go = marks.path().join("go");
+    let d = OnDisk::new("host-read-no-slot", POLICY);
+    bound(&d, 1);
+    let mut held_run = agent(
+        &d,
+        "holds",
+        &format!(
+            "i=0; while [ ! -f '{}' ] && [ $i -lt 600 ]; do sleep 0.1; i=$((i+1)); done",
+            go.display()
+        ),
+    );
+    let room = |d: &OnDisk| {
+        d.client(d.repo.dir())
+            .room()
+            .ok()
+            .flatten()
+            .is_some_and(|(_, r)| r.sessions == 1)
+    };
+    within(60, "the agent's check holds the one run", || room(&d));
+    let began = Instant::now();
+    let out = d.sluice(&["status", "main", "--json"]);
+    assert!(out.status.success(), "{}", text(&out));
+    assert!(
+        began.elapsed() < Duration::from_secs(10),
+        "{:?}",
+        began.elapsed()
+    );
+    std::fs::write(&go, "").unwrap();
+    let _ = held_run.wait();
+}
+
+/// resident-subscriptions, "Ten statuses at one time" (design D5): with
+/// the host process's reading in flight, ten `sluice status main --json`
+/// at one time print the same queue, and `sluice host` makes one read's
+/// call for them, after one reading.
+#[test]
+fn ten_statuses_share_one_read() {
+    let (_origin, d) = on_origin("host-ten-statuses");
+    queued(&d, "mine");
+    let host = Slowed::start(&d, "host-ten-statuses");
+    std::thread::sleep(sluice::host_process::READ_TICK + Duration::from_millis(500));
+    let before = reads_logged(&d, "status");
+    let fetches_before = d.git.count();
+    host.slow();
+    let statuses: Vec<_> = (0..10)
+        .map(|_| {
+            d.command(d.repo.dir())
+                .env("SLUICE_ROUND_SLEEP", "record")
+                .args(["status", "main", "--json"])
+                .stdout(std::process::Stdio::piped())
+                .stderr(std::process::Stdio::piped())
+                .spawn()
+                .unwrap()
+        })
+        .collect();
+    // Each status waits for the one reading in flight.
+    std::thread::sleep(Duration::from_secs(3));
+    let _ = std::fs::remove_file(&host.flag);
+    let outs: Vec<_> = statuses
+        .into_iter()
+        .map(|c| c.wait_with_output().unwrap())
+        .collect();
+    let docs: BTreeSet<String> = outs
+        .iter()
+        .map(|o| {
+            assert!(o.status.success(), "{}", text(o));
+            let mut doc: serde_json::Value = serde_json::from_slice(&o.stdout).unwrap();
+            doc.as_object_mut().unwrap().remove("at");
+            doc.to_string()
+        })
+        .collect();
+    assert_eq!(docs.len(), 1, "{docs:?}");
+    assert_eq!(reads_logged(&d, "status") - before, 1, "{}", host_logs(&d));
+    let fetches = hosts_git(&d, host.pid, fetches_before)
+        .iter()
+        .filter(|a| a.contains(" fetch "))
+        .count();
+    assert_eq!(fetches, 1, "one reading");
+}
+
+/// resident-subscriptions, "Twenty statuses during a reading" (design D5):
+/// a reading in flight, a command told of a change, and twenty statuses
+/// within the reading's time: one more reading follows the first, and no
+/// third.
+#[test]
+fn twenty_statuses_during_a_reading_make_one_more() {
+    let (_origin, d) = on_origin("host-twenty-statuses");
+    queued(&d, "mine");
+    let host = Slowed::start(&d, "host-twenty-statuses");
+    std::thread::sleep(sluice::host_process::READ_TICK + Duration::from_millis(500));
+    let before = d.git.count();
+    host.slow();
+    let first = d
+        .command(d.repo.dir())
+        .env("SLUICE_ROUND_SLEEP", "record")
+        .args(["status", "main"])
+        .stdout(std::process::Stdio::null())
+        .spawn()
+        .unwrap();
+    within(10, "a reading is in flight", || {
+        host_git_running(&d, host.pid)
+    });
+    host.client.serve(&host.repository).expect("told");
+    let twenty: Vec<_> = (0..20)
+        .map(|_| {
+            d.command(d.repo.dir())
+                .env("SLUICE_ROUND_SLEEP", "record")
+                .args(["status", "main"])
+                .stdout(std::process::Stdio::null())
+                .spawn()
+                .unwrap()
+        })
+        .collect();
+    std::thread::sleep(Duration::from_secs(2));
+    let _ = std::fs::remove_file(&host.flag);
+    for mut c in twenty.into_iter().chain([first]) {
+        assert!(c.wait().unwrap().success());
+    }
+    let fetches = hosts_git(&d, host.pid, before)
+        .iter()
+        .filter(|a| a.contains(" fetch "))
+        .count();
+    assert_eq!(fetches, 2, "one reading, and one more");
+}
+
+/// resident-subscriptions, "A subscription and a status of one
+/// repository" (design D5, D6): a subscription of one worktree and a
+/// status in another worktree of the repository, asked while a reading is
+/// in flight, share that reading.
+#[test]
+fn a_subscription_and_a_status_share_a_reading() {
+    let (_origin, d) = on_origin("host-share-reading");
+    queued(&d, "mine");
+    let other = d.session("other");
+    let host = Slowed::start(&d, "host-share-reading");
+    std::thread::sleep(sluice::host_process::READ_TICK + Duration::from_millis(500));
+    let before = d.git.count();
+    host.slow();
+    let status = d
+        .command(&other)
+        .env("SLUICE_ROUND_SLEEP", "record")
+        .args(["status", "main"])
+        .stdout(std::process::Stdio::null())
+        .spawn()
+        .unwrap();
+    within(10, "a reading is in flight", || {
+        host_git_running(&d, host.pid)
+    });
+    let mut sub = held(&d);
+    std::thread::sleep(Duration::from_secs(1));
+    let _ = std::fs::remove_file(&host.flag);
+    let mut status = status;
+    assert!(status.wait().unwrap().success());
+    let line = sub.line(Some(Duration::from_secs(30))).unwrap();
+    assert!(
+        matches!(
+            line,
+            Some(sluice::host_process::protocol::SubscriptionLine::Document(
+                _
+            ))
+        ),
+        "{line:?}"
+    );
+    let fetches = hosts_git(&d, host.pid, before)
+        .iter()
+        .filter(|a| a.contains(" fetch "))
+        .count();
+    assert_eq!(fetches, 1, "one reading for both");
+}
+
+/// resident-reads, "A client of another tool" (design D1;
+/// `flume-has-a-resident@49876bc5c73c`): a client that speaks the
+/// protocol from the test, and starts no sluice command, says `hello` and
+/// asks `status` of `main` for a worktree's folder: it gets what `sluice
+/// status main` prints.
+#[test]
+fn a_client_of_another_tool_reads_a_status_on_the_socket() {
+    let (_origin, d) = on_origin("host-other-tool");
+    let id = queued(&d, "mine");
+    let mut sub = held(&d);
+    settled(&mut sub);
+    let socket = d.client(d.repo.dir()).paths().socket.clone();
+    let stream = UnixStream::connect(&socket).unwrap();
+    let mut reader = BufReader::new(stream.try_clone().unwrap());
+    let mut writer = stream;
+    writeln!(writer, "{{\"hello\":\"flume 0.1.0\"}}").unwrap();
+    let mut line = String::new();
+    reader.read_line(&mut line).unwrap();
+    assert!(line.contains("\"version\""), "{line}");
+    let folder = std::fs::canonicalize(d.repo.dir()).unwrap();
+    writeln!(
+        writer,
+        "{}",
+        serde_json::json!({"ask": "status", "folder": folder, "target": "main"})
+    )
+    .unwrap();
+    let mut answer = String::new();
+    reader.read_line(&mut answer).unwrap();
+    let answer: serde_json::Value = serde_json::from_str(&answer).unwrap();
+    let out = d.sluice(&["status", "main"]);
+    assert_eq!(answer["output"]["code"], 0, "{answer}");
+    let printed = answer["output"]["stdout"].as_str().unwrap();
+    assert!(printed.contains(&format!("#{id}")), "{printed}");
+    assert_eq!(printed, String::from_utf8_lossy(&out.stdout), "{answer}");
+}
+
+/// A fake host process on `d`'s socket, of `version`, that answers `hello`
+/// and then each request with `answer`, or closes the connection where it
+/// is `None`.
+fn fake_host(d: &OnDisk, version: &str, answer: Option<String>) -> std::thread::JoinHandle<()> {
+    let socket = d.client(d.repo.dir()).paths().socket.clone();
+    std::fs::create_dir_all(socket.parent().unwrap()).unwrap();
+    let _ = std::fs::remove_file(&socket);
+    let listener = std::os::unix::net::UnixListener::bind(&socket).unwrap();
+    let named = serde_json::json!({
+        "version": version,
+        "pid": std::process::id(),
+        "since": "2026-11-22T00:00:00.000Z",
+    })
+    .to_string();
+    std::thread::spawn(move || {
+        if let Ok((stream, _)) = listener.accept() {
+            let mut reader = BufReader::new(stream.try_clone().unwrap());
+            let mut writer = stream;
+            let mut line = String::new();
+            let _ = reader.read_line(&mut line);
+            let _ = writeln!(writer, "{named}");
+            line.clear();
+            let _ = reader.read_line(&mut line);
+            if let Some(a) = &answer {
+                let _ = writeln!(writer, "{a}");
+            }
+        }
+    })
+}
+
+/// resident-reads, "No host process answers" (design D4): a process that
+/// holds the socket, answers `hello`, and closes the connection at the
+/// status's ask: the status says that sluice's host process did not
+/// answer, reads no record, and exits 3.
+#[test]
+fn a_read_with_no_host_process_that_answers_exits_3() {
+    let d = OnDisk::new("host-read-unanswered", POLICY);
+    let fake = fake_host(&d, sluice::VERSION, None);
+    let before = d.git.count();
+    let out = d.sluice(&["status", "main", "--json"]);
+    let _ = fake.join();
+    assert_eq!(out.status.code(), Some(3), "{}", text(&out));
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        err.contains("sluice's host process did not answer"),
+        "{err}"
+    );
+    let doc: serde_json::Value =
+        serde_json::from_slice(&out.stdout).unwrap_or_else(|_| panic!("{}", text(&out)));
+    assert_eq!(doc["error"]["kind"], "internal", "{doc}");
+    let read: Vec<String> = d.git.starts()[before..]
+        .iter()
+        .filter(|a| !a.contains(" rev-parse ") && !a.contains(" worktree list"))
+        .cloned()
+        .collect();
+    assert!(read.is_empty(), "the status ran git: {read:?}");
+}
+
+/// resident-reads, "A newer command at an older host process" (design
+/// D9): an older `sluice host` that does not know `status` answers it with
+/// an error: the status names that host process's version, reads no
+/// record, and exits 3.
+#[test]
+fn a_newer_read_at_an_older_host_process_exits_3() {
+    let d = OnDisk::new("host-read-older", POLICY);
+    let words = format!(
+        "sluice {} asked what this host process, sluice 9.9.9, does not know: {{\"ask\":\"status\"}}",
+        sluice::VERSION
+    );
+    let fake = fake_host(
+        &d,
+        "9.9.9",
+        Some(serde_json::json!({ "error": words }).to_string()),
+    );
+    let before = d.git.count();
+    let out = d.sluice(&["status", "main"]);
+    let _ = fake.join();
+    assert_eq!(out.status.code(), Some(3), "{}", text(&out));
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert!(err.contains("sluice 9.9.9"), "{err}");
+    let read: Vec<String> = d.git.starts()[before..]
+        .iter()
+        .filter(|a| !a.contains(" rev-parse ") && !a.contains(" worktree list"))
+        .cloned()
+        .collect();
+    assert!(read.is_empty(), "the status ran git: {read:?}");
 }

@@ -474,6 +474,16 @@ impl Client {
         Ok(c)
     }
 
+    /// A subscription of `folders`, each followed as its kind says, the
+    /// connection kept open for more `add` and `remove` lines and for the
+    /// lines that the host process sends (the change
+    /// `sluice-host-answers-every-read`, design D6).
+    pub fn subscribe(&self, folders: Vec<super::protocol::Added>) -> Result<Connection> {
+        let mut c = self.reach()?;
+        send(&mut c.writer, &Request::Subscribe { folders })?;
+        Ok(c)
+    }
+
     /// Ask for a session's or a preview's room (D12), for the branch its
     /// run is held to where it names one (154), the connection kept while
     /// it waits and while it is held.
@@ -533,6 +543,33 @@ impl Connection {
                 }
             }
         }
+    }
+
+    /// The next line on a subscription, waiting up to `wait` where given:
+    /// `None` where none came within it (design D6).
+    pub fn line(
+        &mut self,
+        wait: Option<Duration>,
+    ) -> Result<Option<super::protocol::SubscriptionLine>> {
+        self.reader.get_ref().set_read_timeout(wait)?;
+        match receive(&mut self.reader) {
+            Ok(line) => Ok(Some(line)),
+            Err(e) => {
+                let timed_out = e.downcast_ref::<std::io::Error>().is_some_and(|io| {
+                    matches!(io.kind(), ErrorKind::WouldBlock | ErrorKind::TimedOut)
+                });
+                match timed_out {
+                    true => Ok(None),
+                    false => Err(e),
+                }
+            }
+        }
+    }
+
+    /// Send `ask` on a subscription: an `add` or a `remove` line (design
+    /// D6).
+    pub fn say(&mut self, ask: &super::protocol::SubscriptionAsk) -> Result<()> {
+        send(&mut self.writer, ask)
     }
 
     /// Say a held room's run began, in `place` with `run_dir` (D12).
