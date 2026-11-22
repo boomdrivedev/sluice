@@ -48,7 +48,8 @@ Out of scope:
 ## Impact
 
 - The protocol of `sluice host`: the new requests `status`, `overview`, `home`, `forecast`, `inbox` and `subscribe`, and the new answers `output`, `document` and, on a subscription, `pass`. The requests `read`, `follow` and `room` and the answers `read` and `room` go. `serve`, `step`, `pass`, `hold`, `results` and `hand-over` stay.
-- The `sluice` crate: the read commands are sent to `sluice host` before the command binds a repository. `sluice host` resolves a folder with a git worker, and answers each read on a thread that reads the repository as the host holds it, beside the repository's worker.
+- The `sluice` crate: the read commands are sent to `sluice host` before the command binds a repository. `sluice host` resolves a folder with a git worker, and answers each read with one call on tokio's pool for blocking work, which reads the repository as the host holds it, beside the repository's worker. Asks of one read join one call on a `watch` channel. A subscription is a `StreamMap` of `WatchStream`s, keyed by folder.
+- `Cargo.toml`: tokio-stream's feature `sync`, and futures-util as a direct dependency of the `sluice` crate. No new crate comes into the build.
 - `sluice overview`: a new flag, `--stdin`, which needs `--watch`.
 - `sluice wait`, a waiting `sluice submit`, `wt submit` and `sluice run`: they follow a subscription.
 - `reader.rs` and `host_process/tasks.rs`: the files under `readers/` go, with `reader::current`, `reader::Follow` and the host process's look for an older `sluice run`'s driver lock.
