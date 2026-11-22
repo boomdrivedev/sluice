@@ -55,6 +55,7 @@ pub mod clock;
 pub mod environment;
 pub mod folder;
 pub mod index;
+pub mod joined;
 pub mod pass;
 pub mod protocol;
 pub mod results;
