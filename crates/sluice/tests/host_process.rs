@@ -4302,7 +4302,11 @@ fn a_gone_repository_leaves_the_subscription() {
     // Its worker holds the repository while work is in play, and finds it
     // gone at its next pass.
     queued_live(&d, &theirs);
-    std::fs::remove_dir_all(b.dir().join(".git")).unwrap();
+    // The repository goes in one step: its round writes in `.git` while
+    // the round goes, so a removal that walks `.git` can meet a folder that
+    // the round wrote in after the walk emptied it.
+    let removed = support::Scratch::new("host-sub-gone-removed");
+    std::fs::rename(b.dir().join(".git"), removed.path().join("git")).unwrap();
     let said = documents_until(&mut sub, 60, |got| {
         got.iter().any(|(f, doc)| *f == gone && doc["gone"] == true)
     });
