@@ -163,6 +163,12 @@ fn main() {
     if let Some(code) = watch(&cli) {
         std::process::exit(code);
     }
+    // A wait follows sluice's host process, which takes each of its steps,
+    // and binds no repository; one that follows a pull request goes on
+    // below, as before (design D8).
+    if let Some(code) = wait(&cli) {
+        std::process::exit(code);
+    }
     let retry = Rc::new(retry(&cli));
     // The forge check reads the host's config itself, and says what in it
     // is wrong rather than failing on it.
@@ -509,6 +515,67 @@ fn watch(cli: &Cli) -> Option<i32> {
             3
         }
     })
+}
+
+/// `sluice wait` as a client of sluice's host process: its exit; `None` for
+/// any other command, and for a wait that follows a pull request (the
+/// change `sluice-host-answers-every-read`, design D8).
+fn wait(cli: &Cli) -> Option<i32> {
+    let Some(Command::Wait {
+        target,
+        timeout,
+        worktree,
+        json,
+        confirm,
+        confirm_landing,
+        branch,
+        pull_request,
+    }) = &cli.command
+    else {
+        return None;
+    };
+    // 124: a command still reads the host's settings in full.
+    if let Err(e) = Instance::read() {
+        eprintln!("sluice: {e:#}");
+        tell_json(*json, &e);
+        return Some(3);
+    }
+    let every = sluice::tick(cli.command.as_ref());
+    let skipped = Skipped::new(every);
+    let (clock, pause): (&dyn Clock, &dyn Pause) = match std::env::var(ROUND_SLEEP_VAR).as_deref() {
+        Ok("record") => (&skipped, &skipped),
+        _ => (&SystemClock, &Sleep(every)),
+    };
+    let deadline = timeout
+        .map(|t| clock.now() + chrono::Duration::from_std(t).unwrap_or(chrono::Duration::MAX));
+    let mut out = std::io::stdout();
+    let process = sluice::host_process::Socketed::default();
+    let followed = sluice::stop_on_interrupt()
+        .and_then(|()| Ok(std::env::current_dir()?))
+        .and_then(|folder| {
+            let ask = sluice::host_process::protocol::WaitAsk {
+                target: target.clone(),
+                branch: branch.clone(),
+                pull_request: *pull_request,
+                worktree: Some(from_folder(&folder, worktree).display().to_string()),
+                json: *json,
+                confirm: *confirm,
+                confirm_landing: *confirm_landing,
+                ..Default::default()
+            };
+            sluice::follow_wait(
+                &process, None, folder, ask, None, deadline, clock, pause, &mut out,
+            )
+        });
+    match followed {
+        Ok(Some(code)) => Some(code),
+        Ok(None) => None,
+        Err(e) => {
+            sluice::telemetry::error(&format!("sluice: {e:#}"));
+            tell_json(*json, &e);
+            Some(3)
+        }
+    }
 }
 
 /// Raise this process's soft limit on open files to its hard limit, as

@@ -912,6 +912,32 @@ impl sluice::host_process::HostProcess for FakeProcess {
         }))
     }
 
+    fn wait(
+        &self,
+        here: Option<&sluice::host_process::Here<'_, '_>>,
+        _: &std::path::Path,
+        ask: &sluice::host_process::protocol::WaitAsk,
+    ) -> anyhow::Result<sluice::host_process::protocol::WaitStep> {
+        use sluice::host_process::protocol::{Output, WaitStep};
+        let here = here.ok_or_else(|| anyhow::anyhow!("the fakes' host reads in a binding"))?;
+        let mut out = Vec::new();
+        Ok(
+            match sluice::wait_step(here.s, here.host, here.pulls, here.clock, ask, &mut out)? {
+                sluice::WaitStepped::Ended(code) => WaitStep::Ended(Output {
+                    stdout: String::from_utf8_lossy(&out).into_owned(),
+                    stderr: Vec::new(),
+                    code,
+                }),
+                sluice::WaitStepped::Follow(own, follows) => WaitStep::Follow {
+                    own,
+                    follows,
+                    said: String::from_utf8_lossy(&out).into_owned(),
+                },
+                sluice::WaitStepped::PullRequest => WaitStep::PullRequest,
+            },
+        )
+    }
+
     fn pass_of(
         &self,
         here: Option<&sluice::host_process::Here<'_, '_>>,

@@ -78,6 +78,66 @@ pub type SubscriptionAsk = super::subscription::Ask<FollowKind>;
 /// folder's `pass`, or an error (design D6).
 pub type SubscriptionLine = super::subscription::Sent<serde_json::Value, Report>;
 
+/// A submission a wait follows: its number and its branch.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Followed {
+    pub id: u64,
+    pub branch: String,
+}
+
+/// What a wait asks of `sluice host` (the change
+/// `sluice-host-answers-every-read`, design D8): its command's arguments,
+/// the submission it waits on and the one it follows, where it knows them.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WaitAsk {
+    /// `sluice wait`'s target: a submission's number or a branch.
+    pub target: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub branch: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pull_request: Option<u64>,
+    /// The waiting worktree, whose outcome the wait hands over; none for a
+    /// wait that hands over nothing, a submit by name's.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub worktree: Option<String>,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub json: bool,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub confirm: bool,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub confirm_landing: bool,
+    /// The submission it waits on, once it knows it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub own: Option<Followed>,
+    /// The submission it follows now, its own or what carries its work.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub following: Option<Followed>,
+    /// A waiting submit's copy, which its record's document carries.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub copy: Option<sluice_core::ops::CopyDiffers>,
+}
+
+/// How `sluice host` answers a wait's step (design D8).
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum WaitStep {
+    /// The wait ends: its report, the hand-over recorded, and its exit.
+    Ended(Output),
+    /// The wait follows `follows`, its own submission `own` or what carries
+    /// its work, as the records hold each now.
+    Follow {
+        own: sluice_core::records::Submission,
+        follows: sluice_core::records::Submission,
+        /// What the step said, as `sluice wait` said it, such as what
+        /// carries its work.
+        #[serde(default, skip_serializing_if = "String::is_empty")]
+        said: String,
+    },
+    /// The wait follows a pull request, which asks the forge: the command
+    /// follows it as before.
+    PullRequest,
+}
+
 /// A request, after `hello`.
 ///
 /// The reads (`status`, `overview`, `home`, `forecast` and `inbox`) each
@@ -156,6 +216,14 @@ pub enum Request {
         confirm: bool,
         #[serde(default, skip_serializing_if = "std::ops::Not::not")]
         new: bool,
+    },
+    /// A wait's step: where its submission stands, as `wait` (design D8).
+    Wait {
+        folder: PathBuf,
+        #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+        caller: BTreeMap<String, String>,
+        #[serde(flatten)]
+        wait: WaitAsk,
     },
     /// Serve `folders`, and the folders that the client adds after on the
     /// connection, each with its newest overview (design D6).
@@ -275,6 +343,8 @@ pub struct Output {
 pub enum Answer {
     /// A read's output (design D1).
     Output(Output),
+    /// A wait's step (design D8).
+    Waited(WaitStep),
     /// Done, for a serve or a hand-over.
     Ok,
     /// A step's document, as `sluice step --json` prints it.

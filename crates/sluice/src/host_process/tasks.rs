@@ -1416,7 +1416,7 @@ impl Scheduler {
                     self.reading_due = true;
                 }
             }
-            Landed::Bound(Err(_), _) if !self.repository.is_dir() => {
+            Landed::Bound(Err(_), _) if self.followed() && !self.repository.is_dir() => {
                 // The repository is gone: held no longer (design D6).
                 self.wants_worker = false;
                 self.ended = true;
@@ -1486,12 +1486,6 @@ impl Scheduler {
                     looked.in_play,
                     true,
                 );
-                // The repository is gone: held no longer (design D6).
-                if !self.repository.is_dir() {
-                    self.ended = true;
-                    self.gone();
-                    return;
-                }
                 self.document();
                 self.in_play = looked.in_play;
                 if looked.in_play && !self.refused() && !self.stopping {

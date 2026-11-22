@@ -329,33 +329,7 @@ fn render(
         return failed("the request is no read", json);
     };
     let (ran, mut stderr) = crate::telemetry::capturing(|| -> Result<(i32, Vec<u8>)> {
-        // A read reads the host's settings as its command read them as it
-        // started; a round takes a change up only between rounds (rule
-        // core.54).
-        let settings =
-            crate::instance::Instance::read().unwrap_or_else(|_| hosting.settings.instance());
-        let bound = crate::profiles::Bound::open_holding(
-            folder,
-            std::env::current_exe()?,
-            settings,
-            Rc::new(crate::retry::Policy::command().recording_where_set()),
-            &hosting.tokens,
-        )?;
-        let bound = crate::profiles::Bound {
-            state: bound
-                .state
-                .reading_results(crate::profiles::records::ResultsFrom::Indexed)
-                .seeded(reading.stale.clone()),
-            host_process: Box::new(Answering {
-                room: hosting.room.clone(),
-                named: hosting.named.clone(),
-                reading,
-                tasks: hosting.tasks.clone(),
-                repository: repository.to_path_buf(),
-                runtime,
-            }),
-            ..bound
-        };
+        let bound = bind_read(hosting, repository, folder, reading, runtime)?;
         let clock = super::clock::TokioClock::new();
         let mut out = Vec::new();
         let code = crate::caller::as_caller(caller, || {
@@ -383,6 +357,115 @@ fn render(
             stderr.append(&mut output.stderr);
             output.stderr = stderr;
             output
+        }
+    }
+}
+
+/// The binding a read's call reads `folder` with, as the host holds the
+/// repository (design D3): the host's settings as the file holds them
+/// now, the results from the host process's index, what the last ask read
+/// as last fetched, and the host process as the read takes it.
+fn bind_read(
+    hosting: &Hosting,
+    repository: &Path,
+    folder: &Path,
+    reading: Reading,
+    runtime: tokio::runtime::Handle,
+) -> Result<crate::profiles::Bound> {
+    // A read reads the host's settings as its command read them as it
+    // started; a round takes a change up only between rounds (rule
+    // core.54).
+    let settings =
+        crate::instance::Instance::read().unwrap_or_else(|_| hosting.settings.instance());
+    let bound = crate::profiles::Bound::open_holding(
+        folder,
+        std::env::current_exe()?,
+        settings,
+        Rc::new(crate::retry::Policy::command().recording_where_set()),
+        &hosting.tokens,
+    )?;
+    let bound = crate::profiles::Bound {
+        state: bound
+            .state
+            .reading_results(crate::profiles::records::ResultsFrom::Indexed)
+            .seeded(reading.stale.clone()),
+        host_process: Box::new(Answering {
+            room: hosting.room.clone(),
+            named: hosting.named.clone(),
+            reading,
+            tasks: hosting.tasks.clone(),
+            repository: repository.to_path_buf(),
+            runtime,
+        }),
+        ..bound
+    };
+    Ok(bound)
+}
+
+/// Answer a wait's step (design D8): the folder resolved and the
+/// repository read as a read's are, then one call on the pool for
+/// blocking work that binds the folder and takes the step.
+pub(crate) async fn wait(
+    hosting: &Arc<Hosting>,
+    folder: PathBuf,
+    caller: std::collections::BTreeMap<String, String>,
+    ask: super::protocol::WaitAsk,
+) -> super::protocol::Answer {
+    use super::protocol::{Answer, WaitStep};
+    let json = ask.json;
+    let repository = match resolved(hosting, &folder).await {
+        Ok(r) => r,
+        Err(words) => return Answer::Waited(WaitStep::Ended(failed(&words, json))),
+    };
+    super::note(hosting, &repository);
+    let reading = hosting
+        .tasks
+        .read(&repository, super::READ_TICK, super::read_for(), false)
+        .await;
+    let held = hosting.clone();
+    let runtime = tokio::runtime::Handle::current();
+    let stepped = tokio::task::spawn_blocking(move || {
+        let (ran, stderr) = crate::telemetry::capturing(|| {
+            crate::caller::as_caller(caller, || -> Result<(crate::WaitStepped, Vec<u8>)> {
+                let bound = bind_read(&held, &repository, &folder, reading, runtime)?;
+                let clock = super::clock::TokioClock::new();
+                let s = sluice_core::Sluice::new(bound.seams(), &clock)
+                    .as_peer(crate::exec::Host::peer(&bound))
+                    .holding();
+                let mut out = Vec::new();
+                let stepped = crate::wait_step(&s, &bound, &*bound.pulls, &clock, &ask, &mut out)?;
+                Ok((stepped, out))
+            })
+        });
+        (ran, stderr)
+    })
+    .await;
+    let (ran, mut stderr) = match stepped {
+        Ok(r) => r,
+        Err(e) => {
+            return Answer::Waited(WaitStep::Ended(failed(
+                &format!("the wait ended: {e}"),
+                json,
+            )))
+        }
+    };
+    match ran {
+        Ok((crate::WaitStepped::Ended(code), out)) => Answer::Waited(WaitStep::Ended(Output {
+            stdout: String::from_utf8_lossy(&out).into_owned(),
+            stderr,
+            code,
+        })),
+        Ok((crate::WaitStepped::Follow(own, follows), out)) => Answer::Waited(WaitStep::Follow {
+            own,
+            follows,
+            said: String::from_utf8_lossy(&out).into_owned(),
+        }),
+        Ok((crate::WaitStepped::PullRequest, _)) => Answer::Waited(WaitStep::PullRequest),
+        Err(e) => {
+            let mut output = failed(&format!("{e:#}"), json);
+            stderr.append(&mut output.stderr);
+            output.stderr = stderr;
+            Answer::Waited(WaitStep::Ended(output))
         }
     }
 }
@@ -468,5 +551,14 @@ impl HostProcess for Answering {
         _: &dyn sluice_core::Clock,
     ) -> Result<Report> {
         Err(anyhow!("a read runs no pass"))
+    }
+
+    fn wait(
+        &self,
+        _: Option<&Here<'_, '_>>,
+        _: &Path,
+        _: &super::protocol::WaitAsk,
+    ) -> Result<super::protocol::WaitStep> {
+        Err(anyhow!("a read asks no wait"))
     }
 }

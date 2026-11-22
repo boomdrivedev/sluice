@@ -111,6 +111,16 @@ pub trait HostProcess {
         folders: Vec<Added>,
     ) -> Result<Box<dyn Subscription + 'a>>;
 
+    /// A wait's step of `ask`, from the folder `folder` (the change
+    /// `sluice-host-answers-every-read`, design D8). `here` as for
+    /// [`HostProcess::subscribe`].
+    fn wait(
+        &self,
+        here: Option<&Here<'_, '_>>,
+        folder: &Path,
+        ask: &super::protocol::WaitAsk,
+    ) -> Result<super::protocol::WaitStep>;
+
     /// A pass of `repository` now, at the asker's time on `clock`, once it ends:
     /// a follower's ask at its tick where passes are taken only when asked
     /// (D14). `here` as for [`HostProcess::subscribe`].
@@ -221,6 +231,23 @@ impl HostProcess for Socketed {
         clock: &dyn sluice_core::Clock,
     ) -> Result<Report> {
         self.client()?.pass(repository, Some(clock.now()))
+    }
+
+    fn wait(
+        &self,
+        _: Option<&Here<'_, '_>>,
+        folder: &Path,
+        ask: &super::protocol::WaitAsk,
+    ) -> Result<super::protocol::WaitStep> {
+        // The worktree as `sluice host` finds it, from its own folder.
+        let ask = super::protocol::WaitAsk {
+            worktree: ask
+                .worktree
+                .as_ref()
+                .map(|w| folder.join(w).display().to_string()),
+            ..ask.clone()
+        };
+        self.client()?.wait(folder, &ask)
     }
 }
 
@@ -417,6 +444,17 @@ impl HostProcess for Inside {
     ) -> Result<Report> {
         Err(anyhow!(
             "a pass is asked of the host process, not from within it"
+        ))
+    }
+
+    fn wait(
+        &self,
+        _: Option<&Here<'_, '_>>,
+        _: &Path,
+        _: &super::protocol::WaitAsk,
+    ) -> Result<super::protocol::WaitStep> {
+        Err(anyhow!(
+            "a wait is asked of the host process, not from within it"
         ))
     }
 }

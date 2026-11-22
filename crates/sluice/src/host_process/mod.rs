@@ -1845,6 +1845,14 @@ async fn answer(hosting: &Arc<Hosting>, stream: UnixStream) -> Result<()> {
         | Request::Home { .. }
         | Request::Forecast { .. }
         | Request::Inbox { .. } => Ok(()),
+        Request::Wait {
+            folder,
+            caller,
+            wait,
+        } => {
+            let answer = reads::wait(hosting, folder, caller, wait).await;
+            send(&mut writer, &answer).await
+        }
         Request::Subscribe { folders } => subscribe(hosting, folders, lines, writer).await,
         Request::Serve { repository } => {
             note(hosting, &repository);

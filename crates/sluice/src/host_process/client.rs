@@ -379,6 +379,38 @@ impl Client {
         }
     }
 
+    /// A wait's step of `ask`, from `folder` (the change
+    /// `sluice-host-answers-every-read`, design D8), as `output` answers a
+    /// read.
+    pub fn wait(
+        &self,
+        folder: &Path,
+        ask: &super::protocol::WaitAsk,
+    ) -> Result<super::protocol::WaitStep> {
+        let mut c = self.reach()?;
+        let named = c.named.clone();
+        let request = Request::Wait {
+            folder: folder.to_path_buf(),
+            caller: crate::caller::here(),
+            wait: ask.clone(),
+        };
+        send(&mut c.writer, &request)?;
+        match receive::<Answer>(&mut c.reader) {
+            Ok(Answer::Waited(step)) => Ok(step),
+            Ok(Answer::Error(words)) => bail!(
+                "sluice's host process, sluice {} (pid {}), did not answer: {words}",
+                named.version,
+                named.pid
+            ),
+            Ok(other) => Err(unexpected(other)),
+            Err(e) => bail!(
+                "sluice's host process, sluice {} (pid {}), ended before it answered: {e:#}",
+                named.version,
+                named.pid
+            ),
+        }
+    }
+
     /// Tell the host process `repository` has work (D2): it holds it and
     /// passes it.
     pub fn serve(&self, repository: &Path) -> Result<()> {

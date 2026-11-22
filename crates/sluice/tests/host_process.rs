@@ -4430,3 +4430,68 @@ fn an_older_follow_gets_the_host_processs_version() {
         "a file under readers/"
     );
 }
+
+/// overview-reader, "Landed while followed" (the change
+/// `sluice-host-answers-every-read`, design D8): `sluice wait <n>` with no
+/// git on its path follows `sluice host`, prints `passed · landed as
+/// <rev>` once `sluice host` answers its record landed, and exits 0: it
+/// read no file of the records.
+#[test]
+fn a_wait_landed_while_followed_reads_no_record() {
+    let d = OnDisk::new("host-wait-landed", POLICY);
+    let dir = d.session("a");
+    let mut sub = subscribed(&d, &[d.repo.dir()], FollowKind::Watch);
+    documents_until(&mut sub, 30, |got| !got.is_empty());
+    let id = queued_live(&d, &dir);
+    let empty = support::Scratch::new("host-wait-landed-path");
+    let out = d
+        .command(&dir)
+        .env("PATH", empty.path())
+        .args(["wait", &id.to_string()])
+        .output()
+        .unwrap();
+    assert_eq!(out.status.code(), Some(0), "{}", text(&out));
+    let landed = d.repo.rev("main");
+    assert!(
+        String::from_utf8_lossy(&out.stdout)
+            .contains(&format!("passed · landed as {}", &landed[..7])),
+        "{}",
+        text(&out)
+    );
+}
+
+/// overview-reader, "Withdrawn while followed" (design D8): a wait with no
+/// git on its path follows `sluice host`; its submission is withdrawn, and
+/// the wait exits 4, as a wait that read the records did.
+#[test]
+fn a_wait_withdrawn_while_followed_reads_no_record() {
+    let marks = support::Scratch::new("host-wait-withdrawn-marks");
+    let go = marks.path().join("go");
+    let policy = format!(
+        "[tests]\nrunner = \"command\"\ncommand = \"i=0; while [ ! -f '{}' ] && [ $i -lt 600 ]; do sleep 0.1; i=$((i+1)); done\"\n\n[branches.main]\ntimeout = \"1m\"\n",
+        go.display()
+    );
+    let d = OnDisk::new("host-wait-withdrawn", &policy);
+    let dir = d.session("a");
+    let mut sub = subscribed(&d, &[d.repo.dir()], FollowKind::Watch);
+    documents_until(&mut sub, 30, |got| !got.is_empty());
+    let id = queued_live(&d, &dir);
+    let empty = support::Scratch::new("host-wait-withdrawn-path");
+    let wait = d
+        .command(&dir)
+        .env("PATH", empty.path())
+        .args(["wait", &id.to_string(), "--json"])
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .unwrap();
+    std::thread::sleep(Duration::from_secs(2));
+    let out = d.sluice(&["withdraw", &id.to_string()]);
+    assert!(out.status.success(), "{}", text(&out));
+    let out = wait.wait_with_output().unwrap();
+    std::fs::write(&go, "").unwrap();
+    assert_eq!(out.status.code(), Some(sluice::WITHDRAWN), "{}", text(&out));
+    let doc: serde_json::Value =
+        serde_json::from_slice(&out.stdout).unwrap_or_else(|_| panic!("{}", text(&out)));
+    assert_eq!(doc["state"], "withdrawn", "{doc}");
+}
