@@ -4119,3 +4119,224 @@ fn a_result_recorded_after_the_index_was_read_is_read() {
         "the lines before were read again: {doc}"
     );
 }
+
+/// A worktree of `repo` on `unit/<name>` off `main` under `d`'s sessions,
+/// with one commit of its own file: its directory.
+fn session_of(d: &OnDisk, repo: &support::Repo, name: &str) -> std::path::PathBuf {
+    let dir = d.sessions.path().join(name);
+    repo.git(&[
+        "worktree",
+        "add",
+        "-q",
+        "-b",
+        &format!("unit/{name}"),
+        dir.to_str().unwrap(),
+        "main",
+    ]);
+    std::fs::write(dir.join(format!("{name}.txt")), name).unwrap();
+    let at = dir.to_str().unwrap();
+    repo.git(&["-C", at, "add", "-A"]);
+    repo.git(&["-C", at, "commit", "-q", "-m", name]);
+    dir
+}
+
+/// The documents a subscription gets within `secs`, by folder, until
+/// `enough` says it has what it waits for.
+fn documents_until(
+    sub: &mut sluice::host_process::client::Connection,
+    secs: u64,
+    mut enough: impl FnMut(&[(std::path::PathBuf, serde_json::Value)]) -> bool,
+) -> Vec<(std::path::PathBuf, serde_json::Value)> {
+    use sluice::host_process::protocol::SubscriptionLine;
+    let until = Instant::now() + Duration::from_secs(secs);
+    let mut got = Vec::new();
+    while !enough(&got) && Instant::now() < until {
+        match sub.line(Some(Duration::from_millis(200))) {
+            Ok(Some(SubscriptionLine::Document(d))) => got.push((d.folder, d.overview)),
+            Ok(_) => {}
+            Err(e) => panic!("the subscription ended: {e:#}"),
+        }
+    }
+    got
+}
+
+/// The folder `dir` as a subscription names it.
+fn folder(dir: &Path) -> std::path::PathBuf {
+    std::fs::canonicalize(dir).unwrap()
+}
+
+/// A subscription of `folders`, each as `kind`, with a live host process.
+fn subscribed(
+    d: &OnDisk,
+    folders: &[&Path],
+    kind: FollowKind,
+) -> sluice::host_process::client::Connection {
+    live_from_here(d);
+    d.client(d.repo.dir())
+        .subscribe(
+            folders
+                .iter()
+                .map(|f| sluice::host_process::protocol::Added {
+                    folder: folder(f),
+                    kind,
+                })
+                .collect(),
+        )
+        .expect("the host process")
+}
+
+/// Whether `doc` holds submission `id` landed on `main`.
+fn landed_in(doc: &serde_json::Value, id: u64) -> bool {
+    doc["branches"].as_array().is_some_and(|b| {
+        b.iter().any(|b| {
+            b["recent"].as_array().is_some_and(|r| {
+                r.iter().any(|r| {
+                    r["event"] == "landed"
+                        && r["ids"]
+                            .as_array()
+                            .is_some_and(|ids| ids.iter().any(|i| i.as_u64() == Some(id)))
+                })
+            })
+        })
+    })
+}
+
+/// resident-subscriptions, "A watch's folder is read each second" (design
+/// D6): each overview that a subscription following a folder as a watch
+/// gets, while a submission of its repository is in play, holds `"tick":
+/// 1`.
+#[test]
+fn a_watchs_folder_is_read_each_second() {
+    let d = OnDisk::new("host-sub-watch", POLICY);
+    let dir = d.session("a");
+    let mut sub = subscribed(&d, &[d.repo.dir()], FollowKind::Watch);
+    queued_live(&d, &dir);
+    let docs = documents_until(&mut sub, 30, |got| got.len() >= 2);
+    assert!(docs.len() >= 2, "{docs:?}");
+    for (_, doc) in &docs {
+        assert_eq!(doc["tick"], 1, "{doc}");
+    }
+}
+
+/// resident-subscriptions, "Two folders on one connection" (design D6): a
+/// client subscribes to worktrees of two repositories; it gets each
+/// folder's overview at the start, and once a submission lands in the
+/// second repository, new overviews for the second folder only.
+#[test]
+fn a_subscription_serves_two_folders() {
+    let d = OnDisk::new("host-sub-two", POLICY);
+    let b = d.another("host-sub-two-b", POLICY);
+    let theirs = session_of(&d, &b, "theirs");
+    let mut sub = subscribed(&d, &[d.repo.dir(), b.dir()], FollowKind::Watch);
+    let first = documents_until(&mut sub, 30, |got| got.len() >= 2);
+    let folders: BTreeSet<_> = first.iter().map(|(f, _)| f.clone()).collect();
+    assert_eq!(
+        folders,
+        BTreeSet::from([folder(d.repo.dir()), folder(b.dir())]),
+        "{first:?}"
+    );
+    let id = queued_live(&d, &theirs);
+    let after = documents_until(&mut sub, 60, |got| {
+        got.iter().any(|(_, doc)| landed_in(doc, id))
+    });
+    assert!(after.iter().any(|(_, doc)| landed_in(doc, id)), "{after:?}");
+    assert!(
+        after.iter().all(|(f, _)| *f == folder(b.dir())),
+        "an overview for the first folder: {after:?}"
+    );
+}
+
+/// resident-subscriptions, "A folder added later" (design D6): a
+/// subscription serves one folder, the client adds a second on the same
+/// connection, and gets the second folder's overview.
+#[test]
+fn a_folder_added_later_shares_the_connection() {
+    let d = OnDisk::new("host-sub-later", POLICY);
+    let b = d.another("host-sub-later-b", POLICY);
+    let mut sub = subscribed(&d, &[d.repo.dir()], FollowKind::Watch);
+    let first = documents_until(&mut sub, 30, |got| !got.is_empty());
+    assert_eq!(first[0].0, folder(d.repo.dir()));
+    sub.say(&sluice::host_process::protocol::SubscriptionAsk::Add {
+        add: folder(b.dir()),
+        kind: None,
+    })
+    .unwrap();
+    let later = documents_until(&mut sub, 30, |got| {
+        got.iter().any(|(f, _)| *f == folder(b.dir()))
+    });
+    assert!(
+        later
+            .iter()
+            .any(|(f, doc)| *f == folder(b.dir()) && doc["schema"] == "sluice/overview@1"),
+        "{later:?}"
+    );
+}
+
+/// resident-subscriptions, "A folder removed" (design D6): a subscription
+/// serves two folders, the client removes the first, and a submission
+/// then lands in the first folder's repository: the client gets no
+/// overview for the first folder.
+#[test]
+fn a_removed_folder_gets_no_overview() {
+    let d = OnDisk::new("host-sub-removed", POLICY);
+    let b = d.another("host-sub-removed-b", POLICY);
+    let mine = d.session("mine");
+    let mut sub = subscribed(&d, &[d.repo.dir(), b.dir()], FollowKind::Watch);
+    documents_until(&mut sub, 30, |got| got.len() >= 2);
+    sub.say(&sluice::host_process::protocol::SubscriptionAsk::Remove {
+        remove: folder(d.repo.dir()),
+    })
+    .unwrap();
+    let id = queued_live(&d, &mine);
+    within(60, "the submission lands", || {
+        state(&d, d.repo.dir(), id) == "landed"
+    });
+    let after = documents_until(&mut sub, 3, |_| false);
+    assert!(
+        after.iter().all(|(f, _)| *f != folder(d.repo.dir())),
+        "{after:?}"
+    );
+}
+
+/// resident-subscriptions, "A repository removed" (design D6): a
+/// subscription serves two folders, and the first folder's repository is
+/// removed: the client gets an overview for the first folder that says it
+/// is gone, and later overviews for the second.
+#[test]
+fn a_gone_repository_leaves_the_subscription() {
+    let d = OnDisk::new("host-sub-gone", POLICY);
+    let b = d.another("host-sub-gone-a", POLICY);
+    let theirs = session_of(&d, &b, "theirs");
+    let gone = folder(b.dir());
+    let mut sub = subscribed(&d, &[b.dir(), d.repo.dir()], FollowKind::Watch);
+    documents_until(&mut sub, 30, |got| got.len() >= 2);
+    // Its worker holds the repository while work is in play, and finds it
+    // gone at its next pass.
+    queued_live(&d, &theirs);
+    std::fs::remove_dir_all(b.dir().join(".git")).unwrap();
+    let said = documents_until(&mut sub, 60, |got| {
+        got.iter().any(|(f, doc)| *f == gone && doc["gone"] == true)
+    });
+    let (_, doc) = said
+        .iter()
+        .find(|(f, doc)| *f == gone && doc["gone"] == true)
+        .unwrap_or_else(|| panic!("no gone document: {said:?}"));
+    assert!(
+        doc["error"]["message"]
+            .as_str()
+            .is_some_and(|m| m.contains("gone")),
+        "{doc}"
+    );
+    let mine = d.session("mine");
+    let id = queued_live(&d, &mine);
+    let later = documents_until(&mut sub, 60, |got| {
+        got.iter().any(|(_, doc)| landed_in(doc, id))
+    });
+    assert!(
+        later
+            .iter()
+            .any(|(f, doc)| *f == folder(d.repo.dir()) && landed_in(doc, id)),
+        "{later:?}"
+    );
+    assert!(later.iter().all(|(f, _)| *f != gone), "{later:?}");
+}

@@ -2386,6 +2386,88 @@ mod tests {
 
     const IDLE_ASK_TEST: Duration = Duration::from_secs(61);
 
+    /// Tasks that pass only when asked, each document read giving the
+    /// next of `docs` (the change `sluice-host-answers-every-read`, design
+    /// D6), and how many documents were read.
+    fn documented(docs: Vec<serde_json::Value>) -> (Tasks, Arc<AtomicUsize>) {
+        let tasks = Fakes::default().tasks().passes_when_asked();
+        let read = Arc::new(AtomicUsize::new(0));
+        let n = read.clone();
+        let docs = Arc::new(docs);
+        tasks.documenting(Arc::new(move |_, _| {
+            let i = n.fetch_add(1, Ordering::SeqCst);
+            let doc = docs.get(i).or(docs.last()).cloned();
+            Box::pin(async move { doc })
+        }));
+        (tasks, read)
+    }
+
+    /// design D6: a document that changed only in its time, `at`, is not
+    /// sent: a subscriber's receiver does not wake for it.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_document_that_changed_only_its_time_wakes_no_receiver() {
+        let repo = PathBuf::from("/host/documented.git");
+        let (tasks, read) = documented(vec![
+            serde_json::json!({"at": "1", "branches": ["main"]}),
+            serde_json::json!({"at": "2", "branches": ["main"]}),
+            serde_json::json!({"at": "3", "branches": ["main", "bolt/x"]}),
+        ]);
+        let mut documents = tasks.documents(&repo).expect("its channel");
+        let handle = tasks.handle(&repo);
+        let _follower = handle.following(FollowKind::Watch, false);
+        handle.pass(None).await.expect("a pass");
+        documents.changed().await.expect("the first document");
+        assert_eq!(documents.borrow_and_update().as_ref().unwrap()["at"], "1");
+        handle.pass(None).await.expect("a pass");
+        soon("the second document is read", || {
+            read.load(Ordering::SeqCst) == 2
+        })
+        .await;
+        settle().await;
+        assert!(
+            !documents.has_changed().unwrap(),
+            "woken for its time alone"
+        );
+        handle.pass(None).await.expect("a pass");
+        documents.changed().await.expect("the third document");
+        let doc = documents.borrow_and_update().clone().unwrap();
+        assert_eq!(doc["branches"], serde_json::json!(["main", "bolt/x"]));
+        assert_eq!(doc["tick"], 1, "a watch follows: its tick is a second");
+    }
+
+    /// resident-subscriptions, "A client that reads nothing for ten
+    /// seconds" (design D6): three passes each change the document while a
+    /// subscriber reads nothing; the next document it reads is the newest,
+    /// and the two older ones never reach it.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_slow_subscriber_gets_the_newest_overview() {
+        let repo = PathBuf::from("/host/slow-subscriber.git");
+        let (tasks, read) = documented(
+            (1..=3)
+                .map(|n| serde_json::json!({"at": n.to_string(), "n": n}))
+                .collect(),
+        );
+        let documents = tasks.documents(&repo).expect("its channel");
+        let handle = tasks.handle(&repo);
+        let _follower = handle.following(FollowKind::Wait, false);
+        for _ in 0..3 {
+            handle.pass(None).await.expect("a pass");
+        }
+        soon("three documents are read", || {
+            read.load(Ordering::SeqCst) == 3
+        })
+        .await;
+        soon("the newest is sent", || {
+            documents.borrow().as_ref().is_some_and(|d| d["n"] == 3)
+        })
+        .await;
+        let mut stream = tokio_stream::wrappers::WatchStream::new(documents.clone());
+        use tokio_stream::StreamExt;
+        let first = stream.next().await.flatten().expect("a document");
+        assert_eq!(first["n"], 3, "the newest, alone");
+        assert!(documents.has_changed().is_ok());
+    }
+
     /// resident-reads, "A read past its bound is answered from the last
     /// state" (the change `sluice-host-answers-every-read`, design D4): a
     /// read whose reading does not end within `read_for()` is answered as
