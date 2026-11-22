@@ -31,7 +31,14 @@ sluice uses tokio today only to run the AWS SDK, on a runtime with one thread. S
 
 ### D1. A tokio runtime in the host process alone
 
-`sluice host` and `sluice daemon` build a tokio runtime with many threads and a bounded pool for blocking work. No other command builds it. The edge holds the socket, the connections, the signals, the timers, the file events and the repository tasks. Each round, each reading and each look is a call of the synchronous core through `spawn_blocking`. The core keeps its seams. Its waits that sleep in a loop move to the edge, which decides when to call again. This follows `tokio-streams-before-rxrust@0b9fc11cda8b`: the residents use tokio only at their edge.
+`sluice host` and `sluice daemon` build a tokio runtime with many threads and a bounded pool for blocking work. No other command builds it. The edge holds the socket, the connections, the signals, the timers, the file events and the repository tasks. The core keeps its seams.
+
+The core runs in two places:
+
+- Each look is a call of the synchronous core through `spawn_blocking`, on the pool for blocking work.
+- Each repository with work in play has a worker: a `std::thread` of its own, which the repository's task starts (`tasks.rs:Scheduler::bind`). The thread enters the runtime (`Handle::enter`), so it reads tokio's clock. It holds the repository's binding while work is in play or a follower holds the repository, and it runs each pass and each step of the repository. The task lets the worker go when the repository has no work in play and no follower.
+
+The worker is a thread of its own for two reasons. The binding holds values that stay on one thread, so one thread must keep it from one pass to the next. And tokio moves a paused clock only while no task of the pool for blocking work runs. A round on a pool thread would stop a paused clock for the whole round, and a test could not move the clock past a timer while a round waits. A thread of its own does not stop the clock, so the clock moves while a round waits. Its waits that sleep in a loop move to the edge, which decides when to call again. This follows `tokio-streams-before-rxrust@0b9fc11cda8b`: the residents use tokio only at their edge.
 
 Not taken: async seams in the core. That changes each seam method, each fake and the conformance suite, and buys nothing for git and file work. Not taken: threads with less polling. The polls, the stop flags and the threads for each connection stay.
 
@@ -73,7 +80,7 @@ The listener is tokio's, bound at the path that `Paths` gives now. Each connecti
 
 - [FSEvents on macOS joins events and can report them late.] → The debounce takes the join. The minute's backstop catches a change that no event reports.
 - [inotify on Linux has a limit on watches for each user.] → The debouncer watches only refs, `packed-refs`, the worktrees' `HEAD` and the records folder, not the working copies. Where the limit refuses a watch, the host process says so once in its log and reads that repository at the minute's backstop.
-- [A long round holds a thread of the blocking pool.] → The pool is bounded at the number of repositories that can be in play plus the connections that read. A round on one repository never holds another's task.
+- [A long round holds its repository's worker thread.] → Each repository with work in play has its own thread, so a round on one repository never holds another repository's round, its task or a thread of the pool for blocking work. The pool, bounded at 256 threads, runs only the looks and the other short calls of the core. A repository with no work in play has no worker thread.
 - [`fork` and `execve` from a process with many threads.] → A hand-over in place cancels every task and waits for the tracker before `execve`, as the daemon does today.
 
 ## Migration Plan
