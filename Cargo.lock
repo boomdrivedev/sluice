@@ -4551,6 +4551,7 @@ dependencies = [
  "base64 0.22.1",
  "chrono",
  "clap",
+ "futures-util",
  "gix",
  "http 1.5.0",
  "jsonwebtoken",
@@ -4982,6 +4983,7 @@ dependencies = [
  "futures-core",
  "pin-project-lite",
  "tokio",
+ "tokio-util",
 ]
 
 [[package]]

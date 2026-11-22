@@ -204,7 +204,7 @@ The wait builds no tokio runtime. It reads the subscription's lines on one threa
 
 An older sluice program that sends `read`, `follow` or `room` gets that error, and acts on it as its own code acts on an error of `sluice host`. A newer command that reaches an older `sluice host` has it hand over first (`host_process/client.rs:Client::reach`), so a newer command asks a `sluice host` of its own release. An older `sluice host` that does not hand over answers a new request with an error. The newer command then exits 3 and names the version of that `sluice host`.
 
-Before: `sluice host` answered each request of each earlier release, and kept the files under `readers/` for the watches, waits and `sluice run`s of earlier releases. Now: it answers the requests that a command of its own release sends, and keeps no file under `readers/`. This rests on the amendment `never-break-an-existing-client@3e4073c64ec2`: before the first public release of sluice, a change may break a client.
+Before: `sluice host` answered each request of each earlier release, and kept the files under `readers/` for the watches, waits and `sluice run`s of earlier releases. Now: it answers the requests that a command of its own release sends, and keeps no file under `readers/`. This rests on the amendment `never-break-an-existing-client@b539ef8e2413`: before the first public release of sluice, a change may break a client.
 
 ### D10. The joined reads and the subscription are ready for the weir crate
 
@@ -245,7 +245,7 @@ Each claim that binds sluice, and what this design does with it.
 | `each-tracked-file-has-a-formatter@7bd720a7a6c1` | Does not touch it. The change adds no file type. | — |
 | `main-names-version-0-0-0@beed3874e15c` | Does not touch it. The versions in the examples are sample versions of an error. | — |
 | `names-use-the-domains-terms@343c9fac7fc5` | Keeps it. The new names are `subscribe`, `add`, `remove`, `document`, `pass`, `output` and `--stdin`. `boom terms check` runs on each commit. | D1, D6, D7 |
-| `never-break-an-existing-client@ed293965fc5c` | Changes it, by the amendment `never-break-an-existing-client@3e4073c64ec2`, which is proposed and waits for its acceptance. Before: a newer `sluice host` answered each request that an older sluice command sends. Now: before the first public release of sluice, `sluice host` answers only the requests of its own release, and names the release to run for any other. | D9 |
+| `never-break-an-existing-client@ed293965fc5c` | Changes it, by the amendment `never-break-an-existing-client@b539ef8e2413`, which is proposed and waits for its acceptance. Before: a newer `sluice host` answered each request that an older sluice command sends. Now: before the first public release of sluice, `sluice host` answers only the requests of its own release, and names the release to run for any other. | D9 |
 | `no-credential-in-the-repository@a349a974ad13` | Does not touch it. | — |
 | `no-task-reads-markdown@a25dda6425d7` | Keeps it. No task checks the site's page that the change edits. A person reads the diff. | Task 6.2 |
 | `nothing-commercial@80a056165cac` | Does not touch it. | — |
