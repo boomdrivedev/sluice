@@ -12,10 +12,6 @@ Claims that this change makes hold:
 - `one-read-in-flight@e99acda774d0`
 - `flume-has-a-resident@49876bc5c73c`, sluice's part: `flume host` gets each status and overview from the socket of `sluice host`.
 
-Claims that it keeps holding:
-
-- `never-break-an-existing-client@ed293965fc5c`
-
 ## What Changes
 
 - `sluice host` answers a status, an overview, the home view, a forecast, `sluice inbox` and a wait's record. The answer is the output that the command prints, and its exit code.
@@ -25,7 +21,10 @@ Claims that it keeps holding:
 - A new request, `subscribe`, serves many folders on one connection. The client adds and removes folders on the same connection. A slow client gets only the newest document of each folder.
 - `sluice overview --json --watch --stdin` is the client of `subscribe`. Each line of its input adds or removes a folder. Each line of its output is one folder's newest overview, with the folder named.
 - `sluice overview --json --watch` and `sluice wait` use `subscribe`. They read no file of `sluice host`.
-- The new requests go beside today's requests. `sluice host` keeps answering `read`, `results` and `follow`, and keeps writing the reader's document while an older command follows it. So an older command keeps working against the new `sluice host`.
+- `sluice run` follows a subscription, and prints each pass's report that the subscription sends.
+- `sluice host` no longer answers `read`, `follow` or `room`, since no command sends them after this change. It writes no file under `readers/`: no reader's document, no reader's version, lease or lock, and no driver's lock. No command reads such a file.
+- `sluice host` no longer leaves a repository to an older `sluice run` that holds the repository's driver lock.
+- `sluice host` answers a request that it does not know with an error. The error names the version of `sluice host` and says to run that sluice. A newer command still has an older `sluice host` hand over before it asks.
 
 Out of scope:
 
@@ -37,20 +36,22 @@ Out of scope:
 
 ### New Capabilities
 
-- `resident-reads`: `sluice host` answers each read from the state that it keeps, a client sends its folder and reads nothing, a read past its bound, and an older command at a newer `sluice host`.
-- `resident-subscriptions`: one subscription serves many folders, and many triggers of one read make one read in flight.
+- `resident-reads`: `sluice host` answers each read from the state that it keeps, a client sends its folder and reads nothing, a read past its bound, and a request that `sluice host` does not know.
+- `resident-subscriptions`: one subscription serves many folders as a watch, a wait or `sluice run`, and many triggers of one read make one read in flight.
 
 ### Modified Capabilities
 
-- `overview-reader`: a one-shot read is answered by `sluice host`. A read past its bound is answered from the last state, not by the command. A wait takes its submission and its record from `sluice host`.
+- `overview-reader`: a one-shot read is answered by `sluice host`. A read past its bound is answered from the last state, not by the command. A wait takes its submission and its record from `sluice host`. The reader's document is kept in `sluice host` and sent on subscriptions, with no file. No older reader's lease, lock or version is read or taken.
 - `forecast`: `sluice host` forms a forecast that has no current reading.
-- `host-process`: a command that needs results gets them only from `sluice host`.
+- `host-process`: a command that needs results gets them only from `sluice host`. An older command gets an error for a request that `sluice host` does not know. No older `sluice run` keeps a repository from `sluice host`.
 
 ## Impact
 
-- The protocol of `sluice host`: the requests `status`, `overview`, `home`, `forecast`, `inbox` and `subscribe`, and the answers `output` and `document`. Each new field is optional, and each old request stays.
+- The protocol of `sluice host`: the new requests `status`, `overview`, `home`, `forecast`, `inbox` and `subscribe`, and the new answers `output`, `document` and, on a subscription, `pass`. The requests `read`, `follow` and `room` and the answers `read` and `room` go. `serve`, `step`, `pass`, `hold`, `results` and `hand-over` stay.
 - The `sluice` crate: the read commands are sent to `sluice host` before the command binds a repository. `sluice host` resolves a folder with a git worker, and answers each read on a thread that reads the repository as the host holds it, beside the repository's worker.
 - `sluice overview`: a new flag, `--stdin`, which needs `--watch`.
-- `sluice wait`, a waiting `sluice submit` and `wt submit`: they follow a subscription in place of the reader's document file.
+- `sluice wait`, a waiting `sluice submit`, `wt submit` and `sluice run`: they follow a subscription.
+- `reader.rs` and `host_process/tasks.rs`: the files under `readers/` go, with `reader::current`, `reader::Follow` and the host process's look for an older `sluice run`'s driver lock.
+- The site's pages on the host's state and settings: the files under `readers/` that go.
 - `profiles/records.rs:results_for`: no read of the results in the command's own process.
 - The record of the host process: an amendment with this change's decisions, each with Before and Now.

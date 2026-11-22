@@ -28,3 +28,27 @@ Before: a command that could not ask the host process read the results itself. N
 
 - **WHEN** a `sluice exec` needs the results of a key, and no host process answers it
 - **THEN** it says that sluice's host process did not answer, reads no line of the results log, and exits 3
+
+### Requirement: A newer sluice's command has an older host process hand over
+
+A newer command that reaches an older host process SHALL have it hand its repositories over and end. It finishes each task's round, starts none, and lets its locks go. The command SHALL wait for it as long as it gives its tasks, then start its own. An older daemon starts afresh in place. An older command's request that the newer process does not know SHALL get an error naming the sluice to run.
+
+Before: an older command used a newer host process. Now: it gets that error.
+
+#### Scenario: The host's sluice is upgraded
+
+- **WHEN** a host process of sluice 0.71.0 runs, and a submit of sluice 0.72.0 runs on the host
+- **THEN** the 0.71.0 process ends, a 0.72.0 host process runs, and the submission lands
+
+#### Scenario: A round that outlasts a start's wait
+
+- **WHEN** a 0.72.0 command asks a 0.71.0 host process to hand over, and one of its tasks takes twelve seconds to finish its round
+- **THEN** the command waits for the 0.71.0 process to end, and then reaches a 0.72.0 host process of its own start
+
+## REMOVED Requirements
+
+### Requirement: An older sluice run keeps the repository it drives
+
+**Reason**: `sluice host` moves each repository that it holds, and looks for no driver's lock. A `sluice run` follows `sluice host` on a subscription.
+
+**Migration**: A `sluice run` of an earlier release gets an error from `sluice host` that names the sluice to run. The host's unit runs `sluice daemon`, or the new `sluice run`.

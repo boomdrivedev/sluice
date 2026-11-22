@@ -1,6 +1,6 @@
 ## Purpose
 
-`sluice host` answers each read of sluice's state from the state that it keeps. A read command sends its folder to `sluice host` and prints the answer. It reads nothing itself.
+`sluice host` answers each read of sluice's state from the state that it keeps. A read command sends its folder to `sluice host` and prints the answer. It reads nothing itself. `sluice host` answers only the requests of its own release.
 
 ## ADDED Requirements
 
@@ -59,19 +59,22 @@ Any process that speaks the protocol on the socket of `sluice host` SHALL get th
 - **WHEN** a test client, which is no sluice command, says `hello` on the socket and asks `status` of `main` for a worktree's folder
 - **THEN** it gets the output that `sluice status main` prints, and no sluice command was started
 
-### Requirement: An older command keeps working against a newer sluice host
+### Requirement: sluice host names its version to a request that it does not know
 
-`sluice host` SHALL keep answering each request of the protocol of the released sluice: `read`, `results`, `follow`, `serve`, `step`, `pass`, `hold`, `room` and `hand-over`. While anything follows a repository, `sluice host` SHALL keep writing that repository's reader's document in the host's state. The new requests SHALL go beside the old ones. (`never-break-an-existing-client@ed293965fc5c`)
+`sluice host` SHALL answer a request that it does not know with an error. The error SHALL name the client's version and the version of `sluice host`, and SHALL say to run sluice of that version. `sluice host` SHALL NOT answer `read`, `follow` or `room`. A newer command SHALL have an older `sluice host` hand over before it asks.
 
-#### Scenario: An older one-shot status
+Before: `sluice host` answered each request of each earlier release. Now: it answers only the requests that a command of its own release sends.
 
-- **WHEN** the new `sluice host` runs, and a client sends `read` for a repository as an older status does
-- **THEN** `sluice host` answers with a current reading in the form that it answered before
+#### Scenario: An older one-shot read
+
+- **WHEN** a client says `hello` as sluice 0.97.0 to a newer `sluice host`, and asks `read` of a repository
+- **THEN** it gets an error that names 0.97.0 and the version of `sluice host`, and says to run sluice of that version
+- **AND** `sluice host` read nothing for it
 
 #### Scenario: An older watch
 
-- **WHEN** the new `sluice host` runs, a client sends `follow` of kind `watch` as an older watch does, and a submission is queued
-- **THEN** the reader's document in the host's state holds the submission, as an older watch reads it
+- **WHEN** a client says `hello` as sluice 0.97.0 to a newer `sluice host`, and asks `follow` of a repository as a watch
+- **THEN** it gets the same error, and `sluice host` writes no file under `readers/` for that repository
 
 #### Scenario: A newer command at an older host process
 

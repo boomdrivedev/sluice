@@ -1,6 +1,6 @@
 ## Purpose
 
-A client holds one subscription to `sluice host` for many folders. `sluice host` makes one read in flight for each thing that it reads, however many asks come.
+A client holds one subscription to `sluice host` for many folders, as a watch, a wait or `sluice run`. `sluice host` makes one read in flight for each thing that it reads, however many asks come.
 
 ## ADDED Requirements
 
@@ -22,6 +22,21 @@ A client holds one subscription to `sluice host` for many folders. `sluice host`
 
 - **WHEN** a subscription serves two folders, the client removes the first, and a submission then lands in the first folder's repository
 - **THEN** the client gets no overview for the first folder
+
+### Requirement: A subscription follows each folder as a watch, a wait or sluice run
+
+A client SHALL name, for each folder that it adds, how it follows the folder: as a watch, a wait or `sluice run`. A watch is the default. While a watch follows a repository with work in play, `sluice host` SHALL read it each second. A folder that `sluice run` follows SHALL get each pass's report, in order, and no overview. Each follower SHALL keep `sluice host` running.
+
+#### Scenario: A watch's folder is read each second
+
+- **WHEN** a subscription follows a folder as a watch, and a submission of its repository is under test
+- **THEN** each overview that the client gets holds `"tick": 1`
+
+#### Scenario: sluice run prints the passes of its subscription
+
+- **WHEN** `sluice run --rounds 1` runs in a repository whose `main` has one submission queued
+- **THEN** it prints the report of the pass that its subscription got, and exits 0
+- **AND** it sent no request but `hello` and `subscribe`, and `pass` where `sluice host` passes only when asked
 
 ### Requirement: A slow client gets only the newest overview
 
