@@ -221,9 +221,9 @@ Sources: `workers-end-with-their-owner@292e869158d6`, `sluices-runs-end-with-its
 
 ## Amendment, 2026-11-22: sluice host answers every read
 
-Status: accepted. The user approved the change `sluice-host-answers-every-read` on 2026-11-22. The points below are the change's decisions and the build's choices within it.
+Status: accepted. The user approved the change `sluice-host-answers-every-read`, and points 1 to 8 below, on 2026-11-22.
 
-Deciders: the user, on 2026-11-22. The build of the change `sluice-host-answers-every-read` made the choices in points 9 to 14.
+Deciders: the user, on 2026-11-22.
 
 Sources: `reads-go-through-the-resident@69134e5825d7`, `one-read-in-flight@e99acda774d0`, `flume-has-a-resident@49876bc5c73c`, `never-break-an-existing-client@b539ef8e2413`, and the change `sluice-host-answers-every-read`, design D1 to D10.
 
@@ -237,12 +237,3 @@ Sources: `reads-go-through-the-resident@69134e5825d7`, `one-read-in-flight@e99ac
 6. **No file under `readers/`.** Before: `sluice host` wrote each repository's document, its version and its lease under `readers/`, and held a driver's lock, so that the watches, the waits and `sluice run` of earlier releases followed it. Now: the document is in `sluice host` alone, and no command reads a file under `readers/`. `sluice host` moves each repository that it holds, and looks for no older `sluice run`.
 7. **The protocol keeps only the requests that a command of this release sends.** Before: `sluice host` answered `read`, `follow` and `room` for each earlier release. Now: it answers a request that it does not know with an error that names the client's version and its own, and says to run sluice of its version. This rests on `never-break-an-existing-client@b539ef8e2413`.
 8. **The joined reads and the subscription name no type of sluice.** Before: no code of sluice's was ready for a resident of another tool. Now: `host_process/joined.rs` and `host_process/subscription.rs` use tokio, tokio-util, tokio-stream, futures-util and serde alone, so that a later change moves them into the weir crate.
-9. **A folder resolves as a command bound it.** Before: a command opened its folder with gix in its own process. Now: `sluice host` opens the folder with gix on the pool for blocking work, so a folder in no repository gets the words that a command gave before.
-10. **A read's binding holds what the last ask read as last fetched.** Before: only the binding that a pass held knew which branches its ask read as last fetched, and the reader's file carried it to a watch. Now: each reading hands those branches, with the remote's refusal, to the reads that it answers, so a document says that a branch is as last fetched, in the remote's words.
-11. **A wait and `sluice run` get each pass's report.** Before: a follow of any kind got each pass's report. Now: a folder added as `run` or as `wait` gets each pass's report on its subscription, and a watch gets none. A wait says what each pass released, and a round's failure once, as before.
-12. **Each round of `sluice run` is a pass.** Before: each pass of a followed repository wrote the reader's file, whose file event started the next pass, so a repository with nothing in play was passed again and again. Now: where the last pass found nothing in play, a tick that brings no pass asks one, so `--rounds` counts passes as before.
-13. **A follower names its folder in a `pass`.** Before: a `pass` named the repository's git directory, which a follower read from its own binding. Now: `sluice host` resolves the path that a `pass` names, so a client that binds nothing asks a pass of its folder.
-14. **A stop ends the document reads.** Before: a stop waited for each scheduler's reading. Now: it also ends each document read in flight, since no follower reads its document after the stop.
-15. **A read names its caller's session.** Before: a read took the agent's name and the pane it runs in from its own process's environment. Now: a read sends the caller's `SLUICE_AGENT`, `HERDR_PANE_ID` and `HERDR_SOCKET_PATH`, and the read's call takes them in place of the host process's own, so `sluice inbox` hands over to the caller's pane and names the caller's agent, as before.
-16. **A read reads the host's settings as it starts.** Before: a read command read the host's settings file as it started, and refused a field it did not know. Now: the command still reads the file and refuses such a field before it asks, and the read's call binds the repository under the file as it stands, where it reads. A round takes up a change only between rounds, as before.
-17. **A repository gone stays gone.** Before: a watch found its repository gone by its own look. Now: `sluice host` sends the gone repository's document, in the words its last read failed with, whatever ended the repository's scheduler, and no document read in flight replaces it.

@@ -47,13 +47,19 @@ Not taken: the reading's data sent to the client, which renders it. The client t
 
 Not taken: one request that runs any command's arguments in `sluice host`. A typed request says which reads `sluice host` answers, and a change cannot come in as a read.
 
+**A read names its caller's session.** Before: a read command took the agent's name and its pane from the environment of its own process. Now: each read also sends three variables of the caller's environment, `SLUICE_AGENT`, `HERDR_PANE_ID` and `HERDR_SOCKET_PATH`, as `caller`. The read's call in `sluice host` uses them in place of the host process's own environment. So `sluice inbox` hands an outcome over to the caller's pane, and names the caller's agent.
+
 ### D2. A client sends its folder and binds nothing
 
 `main.rs` sends a read command to `sluice host` before it binds a repository. The client reaches `sluice host`, starting it on a bare install as today, sends its folder, and prints the answer. It runs no git, and opens no file of a repository or of the records. Its folder is its working folder, or `--worktree` where the command takes one.
 
-`sluice host` resolves a folder with a git worker: the repository's common folder, the worktree, its branch and its head. A folder in no repository gets the error that the command gave before, with its exit code. A folder that is no worktree, such as a bare repository, resolves as the command resolved it before.
+`sluice host` resolves a folder with gix, in one call on the pool for blocking work: the repository's common folder, the worktree, its branch and its head. A folder in no repository gets the error that the command gave before, with its exit code. A folder that is no worktree, such as a bare repository, resolves as the command resolved it before.
 
 The tests' host process, which answers in the test's own process, answers the new requests through the same `HostProcess` trait (`host_process/ask.rs`).
+
+**A folder resolves with gix.** Before: a read command opened its folder with gix in its own process. Now: `sluice host` opens the folder with gix, on the pool for blocking work. A git worker gives other words for a folder in no repository, and gix gives the words that the command gave before.
+
+**A read command reads the host's settings.** Before: a read command read the host's settings file as it started, and refused a field that it did not know. Now: the read command still reads that file and refuses such a field, before it asks `sluice host`. It reads no record and no result.
 
 ### D3. A read is one call on the blocking pool, beside the round
 
@@ -74,6 +80,10 @@ The read's git commands are workers of `sluice host`. Each starts through `crate
 A read of results asks the host process's index of results, as `results` does today. `sluice inbox` reads what is owed and records each hand-over, as the command did, and `--confirm` confirms in the same call.
 
 Not taken: a thread of its own for each repository's reads, with a binding that it keeps. The edge runs each core call through `spawn_blocking` (the edge's D1), and a binding that a read keeps would hold state across reads.
+
+**A read's binding uses the settings file as it is now.** Before: a read command bound the repository under the host's settings file as the command read it when it started. Now: the read's call binds the repository under the settings file as it is when the call starts. Where the file does not read, the call uses the settings that `sluice host` holds. A round takes up a change of the file only between two rounds, as before.
+
+**A read's binding knows the branches that the last ask read as last fetched.** Before: only the binding of a pass knew which branches its ask could not fetch, and the reader's file carried that to a watch. Now: each reading gives those branches, with the remote's refusal, to the reads that it answers. So a status and a document say that a branch is as last fetched, in the remote's words.
 
 ### D4. A read's bound and tick are timers on tokio's clock
 
@@ -106,6 +116,8 @@ Two maps use `Joined`:
 Each map is behind a `std::sync::Mutex`. No task holds the lock across an `.await`. The readings of the repository stay one in flight, by the `Marks` channel of the edge's D3. (`one-read-in-flight@e99acda774d0`, `tokio-streams-before-rxrust@0b9fc11cda8b`)
 
 Not taken: futures-util's `Shared`. It joins asks to one future, but it keeps no newest answer after the future ends and has no generation for an ask that comes after a change. Not taken: tokio's `broadcast` channel. It keeps a queue of the older answers. Not taken: tokio's `OnceCell` for each call. It holds one answer and never replaces it.
+
+**Each read's call is one line in the log.** Before: `sluice host` wrote no line for a read. Now: `sluice host` writes one line in its log for each read's call, with the request. The asks that join a call share its line. The tests count joined reads by these lines.
 
 ### D6. A subscription is a `StreamMap` of `WatchStream`s, keyed by folder
 
@@ -144,6 +156,12 @@ A folder whose repository is gone, or has no sluice, gets the document that says
 
 Not taken: one connection for each folder. A plugin that serves many repositories then holds many connections, which `one-subscription-per-plugin@dcc7b7fec9ee` rules out. Not taken: tokio-stream's `StreamExt::merge` of the streams. A merge cannot take a folder out, and `StreamMap` adds and removes by key.
 
+**A folder added as `wait` gets each pass's report too.** Before: a follow of each kind got each pass's report. Now: a folder added as `run` gets each pass's report and no document. A folder added as `wait` gets each document and each pass's report. A folder added as `watch` gets each document alone. A wait uses the reports to say what each pass released, and a round's failure once.
+
+**A gone repository stays gone.** Before: a watch found that its repository was gone by its own look. Now: `sluice host` sends the document that says that the repository is gone, whatever ends the repository's scheduler. The document has the words that its last read failed with, and `"gone": true`. No document read that is in flight replaces it.
+
+**A stop ends the document reads.** Before: a stop waited for the reading of each scheduler. Now: a stop also ends each document read that is in flight, because no follower reads its document after the stop.
+
 ### D7. `sluice overview --json --watch --stdin` is a client with two threads and no runtime
 
 `--stdin` needs `--watch`. The command opens one subscription with no folder. It reads its standard input: a line `add <folder>` adds the folder, and a line `remove <folder>` removes it. A relative folder is read from the command's working folder. It prints each document as one line, with `folder` in it. It ends when its input closes and no folder stays, or when it is stopped.
@@ -175,11 +193,37 @@ Not taken: a tokio runtime in the client, which the edge's D1 rules out, for a j
 
 ### D8. A wait and `sluice run` follow a subscription on one thread
 
-`sluice wait`, a waiting `sluice submit` and `wt submit` open a subscription of their folder as `wait`, and read their submission, its combination's progress and its branch's hold from each document. Where a document no longer holds the submission, the wait asks `status` of its number once for that document, on a second connection, and reports its outcome from the answer. A wait that follows a later submission or a request asks `sluice host` in the same way.
+`sluice wait`, a waiting `sluice submit` and `wt submit` follow their submission with two things:
 
-The wait builds no tokio runtime. It reads the subscription's lines on one thread with std's `UnixStream`, with a read timeout (`UnixStream::set_read_timeout`). The timeout is the time that is left of its `--timeout`, or the next tick where `sluice host` passes only when asked, whichever comes first. At a tick, the wait asks `pass` on a second connection, and reads on. At its own timeout, it exits 5, as today.
+- A subscription of their folder as `wait`. From each document, the wait reads its submission, its combination's progress and its branch's hold, and prints them as it printed them before.
+- The request `wait`, a step that `sluice host` answers. The step names the folder, the caller's session (D1) and the wait's arguments: its target, `--branch`, `--pull-request`, the waiting worktree, `--json` and `--confirm`. After the first step, it also names the submission that the wait waits on and the submission that it follows now.
+
+```json
+{"ask":"wait","folder":"/w/sluice/feat","target":"7","worktree":"/w/sluice/feat","own":{"id":7,"branch":"main"}}
+{"waited":{"follow":{"own":{"id":7,...},"follows":{"id":7,...}}}}
+```
+
+`sluice host` takes each step from the records as it holds them. It answers with one of these:
+
+- `ended`: the wait ends. The answer is the wait's report, as `output` (D1), with its exit code. `sluice host` records the hand-over of the outcome to the waiting worktree, and confirms it where `--confirm` asks.
+- `follow`: the wait follows a submission, its own or a later submission that carries its work (record 0100), with what the step said.
+- `pull-request`: the wait follows a pull request.
+
+The wait asks a step at its start, where a document no longer holds the submission that it follows, where a document holds it decided or held, and where a round of its branch failed. Out of time or stopped, the wait prints its submission as the last document held it, and exits 5 or 130, as before.
+
+**A wait reads no record.** Before: a wait read its submission's record itself, found what carried its work, and wrote its report and the hand-over in its own process. Now: `sluice host` does each of these in a step. `sluice wait` binds no repository, and runs no git. A waiting `sluice submit` and `wt submit` still bind the repository for the submit, which is a change.
+
+**A wait that follows a pull request follows it as before.** Before: a wait that followed a pull request asked the forge from its own process. Now: the same. `sluice host` answers `pull-request`, and the command follows the request with its own binding. `sluice-host-is-the-only-github-client` moves the forge reads into `sluice host`.
+
+**A group's wait reads its records as before.** Before: a `sluice submit` of several worktrees waited on each submission in its own process. Now: the same. The group is a change, and `sluice-host-does-every-change` moves it into `sluice host`.
+
+The wait builds no tokio runtime. It reads the subscription's lines on one thread with std's `UnixStream`, with a read timeout. Where `sluice host` passes only when asked, the wait asks `pass` at each tick on a second connection. At its own timeout, it exits 5, as today.
+
+**A `pass` names a folder or a repository.** Before: a `pass` named the repository's common folder, which a follower read from its own binding. Now: `sluice host` resolves the path that a `pass` names, as it resolves a read's folder (D2). So a client that binds nothing asks a pass of its folder.
 
 `sluice run` adds its folder as `run`. It reads the `pass` lines on one thread with std's `UnixStream`, and prints each report.
+
+**Each round of `sluice run` is a pass.** Before: each pass wrote the reader's file. The file event of that write started the next pass, so a repository with nothing in play was passed again and again, and `--rounds` counted those passes. Now: where the last pass found nothing in play, a tick that brings no pass asks one. So `--rounds` counts passes as before.
 
 ### D9. The protocol keeps only the requests that a command sends
 
@@ -188,6 +232,7 @@ The wait builds no tokio runtime. It reads the subscription's lines on one threa
 - `serve`: a submit and each other change tell `sluice host` of work. `sluice-host-does-every-change` moves the changes into `sluice host`.
 - `step`: `sluice step` runs one round in `sluice host`.
 - `pass`: a follower asks a pass at each tick where `sluice host` passes only when asked.
+- `wait`: a wait asks each step (D8). This request is new.
 - `hold`: `sluice exec`, `sluice preview` and a pool's job hold room for a run.
 - `results`: the session run of `sluice exec` reads its results. `sluice-host-does-every-change` moves `sluice exec` into `sluice host`.
 - `hand-over`: a newer command has an older `sluice host` hand over.
