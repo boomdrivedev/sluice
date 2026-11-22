@@ -224,9 +224,7 @@ fn followed(
 }
 
 /// `tick` is how long `pause` pauses, which a watch that reads names in
-/// its documents (64, 129). A one-shot overview prints the reader's
-/// document only where `documented`: the host process's reading was no
-/// look (design D16).
+/// its documents (64, 129).
 #[allow(clippy::too_many_arguments)]
 pub fn run(
     s: &Sluice<'_>,
@@ -235,22 +233,17 @@ pub fn run(
     pulls: &dyn PullRequests,
     json: bool,
     watch: bool,
-    documented: bool,
     pause: &dyn Pause,
     out: &mut dyn Write,
 ) -> Result<i32> {
     if !watch {
-        // 129 (design D16): once the host process's reading is current, the
-        // reader's document of that reading, the text rendered from it as
-        // the watch's is; where no reader keeps its tick, or the look made
-        // the reading, which writes no document, the records as the host
-        // holds them, asking no remote, and the pull requests it follows as
-        // the host last kept them.
-        let read = documented.then(|| reader_document(host)).flatten();
-        let (branches, doc) = match read {
-            Some(read) => read,
-            None => document_held(s, host, clock, Follows::Kept(pulls))?,
-        };
+        // 129 (the change `sluice-host-answers-every-read`, design D3, D6):
+        // the records as `sluice host` holds them after its current
+        // reading, asking no remote, and the pull requests it follows as
+        // it last kept them: the document that a subscription gets too,
+        // which says `"set_up": false` where the repository has no sluice.
+        let doc = read_held(s, host, clock, Follows::Kept(pulls), &mut None)?;
+        let branches = serde_json::from_value::<Vec<BranchView>>(doc["branches"].clone())?;
         if json {
             writeln!(out, "{}", serde_json::to_string_pretty(&doc)?)?;
         } else {
@@ -322,23 +315,6 @@ pub fn run(
             return Ok(STOPPED);
         }
     }
-}
-
-/// 129 (design D16): the reader's document of the repository while its
-/// reader keeps its tick, with every branch's part read back from it, as a
-/// one-shot overview and the home view print it; `None` where no reader
-/// keeps its tick, its document is a read it could not make, or a branch's
-/// part cannot be read back.
-pub(crate) fn reader_document(host: &dyn Host) -> Option<(Vec<BranchView>, serde_json::Value)> {
-    let (readers, repository) = (host.readers().ok()?, host.repository().ok()?);
-    let doc =
-        crate::reader::current(&readers, &repository, std::time::SystemTime::now()).ok()??;
-    let branches = doc["branches"]
-        .as_array()?
-        .iter()
-        .map(|b| serde_json::from_value::<BranchView>(b.clone()).ok())
-        .collect::<Option<Vec<_>>>()?;
-    Some((branches, doc))
 }
 
 /// `doc` as a reader writes it: naming its tick, the pause between its

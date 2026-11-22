@@ -770,15 +770,45 @@ impl Telemetry {
 /// A line sluice says on stderr, sent as a warning while telemetry sends
 /// logs.
 pub fn warn(line: &str) {
-    eprintln!("{line}");
+    say(line);
     tracing::warn!("{line}");
 }
 
 /// A line sluice says on stderr, sent as an error while telemetry sends
 /// logs.
 pub fn error(line: &str) {
-    eprintln!("{line}");
+    say(line);
     tracing::error!("{line}");
+}
+
+thread_local! {
+    /// The lines this thread says on stderr, kept while `sluice host`
+    /// answers a read on it (the change `sluice-host-answers-every-read`,
+    /// design D1).
+    static CAPTURED: std::cell::RefCell<Option<Vec<String>>> = const { std::cell::RefCell::new(None) };
+}
+
+/// Say `line` on stderr, or keep it where this thread keeps its lines.
+pub fn say(line: &str) {
+    let kept = CAPTURED.with(|c| match c.borrow_mut().as_mut() {
+        Some(lines) => {
+            lines.push(line.to_string());
+            true
+        }
+        None => false,
+    });
+    if !kept {
+        eprintln!("{line}");
+    }
+}
+
+/// Run `f`, and keep each line that it says on stderr on this thread
+/// (design D1): `sluice host` sends them to the client that asked.
+pub fn capturing<T>(f: impl FnOnce() -> T) -> (T, Vec<String>) {
+    let before = CAPTURED.with(|c| c.borrow_mut().replace(Vec::new()));
+    let ran = f();
+    let lines = CAPTURED.with(|c| std::mem::replace(&mut *c.borrow_mut(), before));
+    (ran, lines.unwrap_or_default())
 }
 
 /// What a log record's body is made before it is sent: a failure's output

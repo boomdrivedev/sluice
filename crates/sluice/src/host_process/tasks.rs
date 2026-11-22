@@ -50,6 +50,7 @@ use tokio_util::task::TaskTracker;
 
 use super::ask::Inside;
 use super::clock::TokioClock;
+use super::joined::Moment;
 use super::log;
 use super::pass::{self, Kept, Report};
 use super::protocol::{FollowKind, Named, Reading};
@@ -104,6 +105,23 @@ pub trait Worker {
 /// the words that say why it could not start.
 pub type Bind = Arc<dyn Fn(&Path) -> Result<Box<dyn Worker>, String> + Send + Sync>;
 
+/// A repository's overview document, read after a reading that ended at a
+/// moment: `None` where none could be made (the change
+/// `sluice-host-answers-every-read`, design D6).
+pub type DocumentRead = Arc<
+    dyn Fn(
+            PathBuf,
+            Moment,
+        )
+            -> std::pin::Pin<Box<dyn std::future::Future<Output = Option<serde_json::Value>> + Send>>
+        + Send
+        + Sync,
+>;
+
+/// A repository's documents, as its subscribers receive them: `None`
+/// before the first reading of a holding (design D6).
+pub type Documents = watch::Receiver<Option<serde_json::Value>>;
+
 /// How many times the schedulers woke, by what woke them: the measure of
 /// the claim that the host process waits on events, not on a poll.
 #[derive(Debug, Default)]
@@ -122,16 +140,14 @@ pub struct Wakes {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 struct Stamp {
     at: Instant,
-    n: u64,
+    n: Moment,
 }
-
-static STAMPS: AtomicU64 = AtomicU64::new(1);
 
 impl Stamp {
     fn now() -> Stamp {
         Stamp {
             at: Instant::now(),
-            n: STAMPS.fetch_add(1, Ordering::SeqCst),
+            n: Moment::now(),
         }
     }
 }
@@ -260,7 +276,8 @@ enum Job {
 struct Slot {
     id: u64,
     kind: FollowKind,
-    tx: mpsc::UnboundedSender<Report>,
+    /// Where its reports go; `None` for a follower that takes none.
+    tx: Option<mpsc::UnboundedSender<Report>>,
     /// Whether a pass began since it came: it is told only of such passes,
     /// so its first report is of the pass it asked for (D9).
     armed: bool,
@@ -277,6 +294,8 @@ struct Repo {
     jobs: mpsc::UnboundedSender<Job>,
     marks: Arc<watch::Sender<Marks>>,
     followers: Followers,
+    /// The repository's overview document (design D6).
+    documents: Arc<watch::Sender<Option<serde_json::Value>>>,
 }
 
 impl Repo {
@@ -317,6 +336,8 @@ struct Inner {
     activity: watch::Sender<u64>,
     wakes: Arc<Wakes>,
     runtime: tokio::runtime::Handle,
+    /// How a repository's document is read (design D6).
+    document: std::sync::OnceLock<DocumentRead>,
 }
 
 fn locked<T>(m: &Mutex<T>) -> MutexGuard<'_, T> {
@@ -345,7 +366,20 @@ impl Tasks {
             activity: watch::Sender::new(0),
             wakes: Arc::default(),
             runtime: tokio::runtime::Handle::current(),
+            document: std::sync::OnceLock::new(),
         }))
+    }
+
+    /// Read each repository's document with `read` after each reading
+    /// that ends while a follower holds the repository (design D6).
+    pub fn documenting(&self, read: DocumentRead) {
+        let _ = self.0.document.set(read);
+    }
+
+    /// `repository`'s documents, its scheduler started where none runs;
+    /// `None` while the tasks stop (design D6).
+    pub fn documents(&self, repository: &Path) -> Option<Documents> {
+        self.repo(repository).map(|r| r.documents.subscribe())
     }
 
     /// The same tasks, passing only when asked (D14).
@@ -396,8 +430,10 @@ impl Tasks {
                 ..Marks::default()
             })),
             followers: Arc::default(),
+            documents: Arc::new(watch::Sender::new(None)),
         };
         let scheduler = Scheduler {
+            documents: repo.documents.clone(),
             tasks: self.clone(),
             repository: repository.to_path_buf(),
             id: repo.id,
@@ -483,6 +519,13 @@ impl Tasks {
         }
     }
 
+    /// When a command last told of a change to `repository`, in the order
+    /// of the moments that a read joins by (the change
+    /// `sluice-host-answers-every-read`, design D5).
+    pub fn told_at(&self, repository: &Path) -> Option<Moment> {
+        self.marks(repository).told.map(|t| t.n)
+    }
+
     /// The next reading of `repository` asks its remote at once, whatever
     /// is in play: a watch opened, a forecast asks a reading afresh, or a
     /// worker bound the repository afresh (129 as amended 2026-11-19).
@@ -553,6 +596,12 @@ impl Tasks {
             .get(repository)
             .map(|r| r.marks.borrow().clone())
             .unwrap_or_default()
+    }
+
+    /// `repository`'s last reading, as a read that it answers takes it
+    /// (the change `sluice-host-answers-every-read`, design D6).
+    pub fn last_reading(&self, repository: &Path) -> Reading {
+        self.marks(repository).answer(true)
     }
 
     /// Whether a look at `repository` is in flight.
@@ -659,7 +708,14 @@ impl Handle {
     /// once, whatever is in play (129 as amended 2026-11-19); `sluice run`
     /// follows the passes as they come.
     pub fn follow(&self, kind: FollowKind) -> Follower {
+        self.following(kind, true)
+    }
+
+    /// Follow the repository as [`Handle::follow`] does; where not
+    /// `reports`, no report is kept for the follower (design D6).
+    pub fn following(&self, kind: FollowKind, reports: bool) -> Follower {
         let (tx, rx) = mpsc::unbounded_channel();
+        let tx = reports.then_some(tx);
         let id = self.tasks.0.next.fetch_add(1, Ordering::SeqCst);
         let Some(repo) = &self.repo else {
             // The tasks stop: a follower whose task ended at once.
@@ -670,7 +726,9 @@ impl Handle {
                 jobs: None,
             };
         };
-        if kind == FollowKind::Watch {
+        // A watch's or a wait's coming asks the remote at once (the change
+        // `sluice-host-answers-every-read`, design D6).
+        if matches!(kind, FollowKind::Watch | FollowKind::Wait) {
             self.tasks.due(&self.repository);
         }
         locked(&repo.followers).push(Slot {
@@ -702,6 +760,13 @@ impl Follower {
     /// under it.
     pub async fn next(&mut self) -> Option<Report> {
         self.rx.recv().await
+    }
+
+    /// Its reports, and the follower that keeps the repository followed
+    /// while it lives (design D6).
+    pub fn reports(&mut self) -> mpsc::UnboundedReceiver<Report> {
+        let (_, empty) = mpsc::unbounded_channel();
+        std::mem::replace(&mut self.rx, empty)
     }
 }
 
@@ -824,6 +889,8 @@ enum Command {
 
 /// One repository's scheduler (D3).
 struct Scheduler {
+    /// The repository's overview document (design D6).
+    documents: Arc<watch::Sender<Option<serde_json::Value>>>,
     tasks: Tasks,
     repository: PathBuf,
     id: u64,
@@ -1063,8 +1130,50 @@ impl Scheduler {
                     self.reading_due = true;
                 }
             }
-            Job::Unfollowed => {}
+            Job::Unfollowed => {
+                // A repository held again is read afresh: no document of
+                // this holding is sent to the next follower (design D6).
+                if !self.followed() {
+                    self.documents.send_replace(None);
+                }
+            }
         }
+    }
+
+    /// Read the repository's document after a reading that ended now,
+    /// where a follower holds the repository, and send it where it changed
+    /// in a part other than its time (design D6). It names its tick (64,
+    /// 129).
+    fn document(&self) {
+        if !self.followed() {
+            return;
+        }
+        let Some(read) = self.tasks.0.document.get().cloned() else {
+            return;
+        };
+        let documents = self.documents.clone();
+        let repository = self.repository.clone();
+        let every = tick(self.watched());
+        let after = Moment::now();
+        let tracker = locked(&self.tasks.0.running).tracker.clone();
+        tracker.spawn_on(
+            async move {
+                let Some(doc) = read(repository, after).await else {
+                    return;
+                };
+                send_document(&documents, crate::overview::ticked(doc, every));
+            },
+            &self.tasks.0.runtime,
+        );
+    }
+
+    /// The repository is gone: its followers get the document that says
+    /// so, and it is held no longer (design D6).
+    fn gone(&self) {
+        let words = format!("the repository at {} is gone", self.repository.display());
+        let mut doc = crate::told::document(crate::told::Kind::Internal, &words, &[]);
+        doc["gone"] = true.into();
+        send_document(&self.documents, doc);
     }
 
     /// Start the next work, where none is in flight.
@@ -1306,11 +1415,14 @@ impl Scheduler {
                 );
                 self.last_pass = Some(Instant::now());
                 if let Ok(r) = &report {
-                    locked(&self.followers).retain(|s| !s.armed || s.tx.send(r.clone()).is_ok());
+                    locked(&self.followers).retain(|s| {
+                        !s.armed || s.tx.as_ref().is_none_or(|tx| tx.send(r.clone()).is_ok())
+                    });
                 }
                 for reply in replies {
                     let _ = reply.send(report.clone());
                 }
+                self.document();
             }
             Landed::Stepped(stepped, reply) => match stepped {
                 Some((answer, in_play)) => {
@@ -1326,6 +1438,7 @@ impl Scheduler {
             },
             Landed::Looked(looked, asks) => {
                 self.end_reading(asks, looked.refused.clone(), looked.in_play, true);
+                self.document();
                 self.in_play = looked.in_play;
                 if looked.in_play && !self.refused() && !self.stopping {
                     self.wants_worker = true;
@@ -1333,7 +1446,10 @@ impl Scheduler {
             }
             Landed::Unbound(ended) => match ended {
                 Ok(WorkerEnd::LetGo) => {}
-                Ok(WorkerEnd::Gone) => self.ended = true,
+                Ok(WorkerEnd::Gone) => {
+                    self.ended = true;
+                    self.gone();
+                }
                 Err(words) => {
                     log(&format!(
                         "sluice host: {}: its task panicked, and starts again at its next tick: {words}",
@@ -1346,6 +1462,22 @@ impl Scheduler {
             },
         }
     }
+}
+
+/// Send `doc` to a repository's followers, where any follows and it
+/// changed in a part other than its time (design D6).
+fn send_document(documents: &watch::Sender<Option<serde_json::Value>>, doc: serde_json::Value) {
+    if documents.receiver_count() == 0 {
+        return;
+    }
+    let now = crate::reader::untimed(&doc);
+    documents.send_if_modified(|d| {
+        let changed = d.as_ref().map(crate::reader::untimed).as_ref() != Some(&now);
+        if changed {
+            *d = Some(doc);
+        }
+        changed
+    });
 }
 
 /// A worker's thread: its binding of `repository`, then each work its

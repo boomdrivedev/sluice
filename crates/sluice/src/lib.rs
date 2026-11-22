@@ -1929,7 +1929,7 @@ fn dispatch(
             | Some(Command::Overview { watch: false, .. })
             | Some(Command::Submit { check: true, .. })
     );
-    let (s, reading) = match one_shot {
+    let (s, _reading) = match one_shot {
         true => {
             let reading = host_process::ask::read(
                 &host_process::Here {
@@ -1944,11 +1944,6 @@ fn dispatch(
         }
         false => (s, None),
     };
-    // 129 (design D16): a one-shot overview and the home view print the
-    // reader's document only where the reading the host process answered
-    // with is no look, which writes none, so neither prints a document an
-    // earlier pass wrote beside records the look read since.
-    let documented = !reading.as_ref().is_some_and(|r| r.looked);
     let here = host_process::Here {
         s: &s,
         host,
@@ -1956,7 +1951,7 @@ fn dispatch(
         clock,
     };
     let Some(command) = cli.command else {
-        return home::run(&s, host, &cli.worktree, cli.json, documented, out);
+        return home::run(&s, host, &cli.worktree, cli.json, out);
     };
     // 153 (design D4): the context the command was started under, which
     // each submission it makes keeps, whether or not it sends telemetry.
@@ -2337,7 +2332,7 @@ fn dispatch(
             let said = stepped["said"].as_array().cloned().unwrap_or_default();
             for line in said.iter().filter_map(|l| l.as_str()) {
                 if json {
-                    eprintln!("{line}");
+                    telemetry::say(line);
                 } else {
                     writeln!(out, "{line}")?;
                 }
@@ -2583,7 +2578,7 @@ fn dispatch(
             }
         },
         Command::Overview { json, watch } => {
-            overview::run(&s, host, clock, pulls, json, watch, documented, pause, out)
+            overview::run(&s, host, clock, pulls, json, watch, pause, out)
         }
         Command::Amend {
             id,
@@ -4557,7 +4552,7 @@ fn tell_released(
             .chain(r.released.get(branch).into_iter().flatten());
         for line in lines {
             if json {
-                eprintln!("{line}");
+                telemetry::say(line);
             } else {
                 writeln!(out, "{line}")?;
             }

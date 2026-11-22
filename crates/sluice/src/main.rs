@@ -153,6 +153,12 @@ fn main() {
             }
         }
     }
+    // A read is answered by sluice's host process: the command sends its
+    // folder and prints the answer, and binds no repository (the change
+    // `sluice-host-answers-every-read`, design D1, D2).
+    if let Some(code) = read(&cli) {
+        std::process::exit(code);
+    }
     let retry = Rc::new(retry(&cli));
     // The forge check reads the host's config itself, and says what in it
     // is wrong rather than failing on it.
@@ -356,6 +362,110 @@ fn main() {
     };
     finish(telemetry);
     std::process::exit(code);
+}
+
+/// `path` from `folder`, with no `.` in it: the path a read sends.
+fn from_folder(folder: &Path, path: &str) -> PathBuf {
+    folder
+        .join(path)
+        .components()
+        .filter(|c| !matches!(c, std::path::Component::CurDir))
+        .collect()
+}
+
+/// The request a read command sends to sluice's host process; `None` for a
+/// command that is no read, or a read that the command refuses as it is.
+fn read_request(cli: &Cli, folder: &Path) -> Option<sluice::host_process::protocol::Request> {
+    use sluice::host_process::protocol::Request;
+    let folder_of = |path: &str| from_folder(folder, path);
+    Some(match &cli.command {
+        None => Request::Home {
+            folder: folder.to_path_buf(),
+            worktree: folder_of(&cli.worktree),
+            json: cli.json,
+        },
+        Some(Command::Status {
+            target,
+            all,
+            json,
+            branch,
+        }) => Request::Status {
+            folder: folder.to_path_buf(),
+            target: target.clone(),
+            all: *all,
+            json: *json,
+            branch: branch.clone(),
+        },
+        Some(Command::Overview { json, watch: false }) => Request::Overview {
+            folder: folder.to_path_buf(),
+            json: *json,
+        },
+        Some(Command::Submit {
+            branch,
+            after,
+            check: true,
+            head,
+            worktree,
+            json,
+            ..
+        }) if worktree.len() <= 1 => Request::Forecast {
+            folder: folder.to_path_buf(),
+            branch: branch.clone(),
+            worktree: folder_of(worktree.first().map_or(".", String::as_str)),
+            head: head.clone(),
+            after: after.clone(),
+            json: *json,
+        },
+        Some(Command::Inbox {
+            worktree,
+            json,
+            confirm,
+            new,
+        }) => Request::Inbox {
+            folder: folder.to_path_buf(),
+            worktree: folder_of(worktree),
+            json: *json,
+            confirm: *confirm,
+            new: *new,
+        },
+        _ => return None,
+    })
+}
+
+/// A read, asked of sluice's host process, started where none answers: its
+/// output printed, and its exit code; `None` for a command that is no read.
+/// Where no host process answers, the command says so and exits 3, and
+/// reads nothing itself (the change `sluice-host-answers-every-read`,
+/// design D1, D2, D4).
+fn read(cli: &Cli) -> Option<i32> {
+    let folder = match std::env::current_dir() {
+        Ok(f) => f,
+        Err(e) => {
+            let e = anyhow::Error::from(e);
+            eprintln!("sluice: {e:#}");
+            tell_json(cli.json(), &e);
+            return Some(3);
+        }
+    };
+    let request = read_request(cli, &folder)?;
+    let asked = sluice::host_process::client::Client::host().and_then(|c| c.output(&request));
+    match asked {
+        Ok(output) => {
+            let mut out = std::io::stdout();
+            let _ = out.write_all(output.stdout.as_bytes());
+            let _ = out.flush();
+            for line in &output.stderr {
+                eprintln!("{line}");
+            }
+            Some(output.code)
+        }
+        Err(e) => {
+            let e = e.context("sluice's host process did not answer");
+            eprintln!("sluice: {e:#}");
+            tell_json(cli.json(), &e);
+            Some(3)
+        }
+    }
 }
 
 /// Raise this process's soft limit on open files to its hard limit, as

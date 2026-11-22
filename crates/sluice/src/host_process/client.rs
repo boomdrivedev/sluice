@@ -28,7 +28,7 @@ use sluice_seams::RunKind;
 
 use super::pass::Report;
 use super::protocol::{
-    receive, send, Answer, FollowKind, Hello, Named, Reading, Request, RoomView, Started,
+    receive, send, Answer, FollowKind, Hello, Named, Output, Reading, Request, RoomView, Started,
 };
 use super::{environment, Paths};
 use crate::reader::older;
@@ -354,6 +354,31 @@ impl Client {
     pub fn ask(&self, request: &Request) -> Result<Answer> {
         let mut c = self.reach()?;
         c.ask(request)
+    }
+
+    /// A read's output (the change `sluice-host-answers-every-read`, design
+    /// D1): the host process, started where none answers, answers
+    /// `request` with what the command prints and its exit code. A host
+    /// process that ends before it answers, or answers with an error, is
+    /// an error, in its words.
+    pub fn output(&self, request: &Request) -> Result<Output> {
+        let mut c = self.reach()?;
+        let named = c.named.clone();
+        send(&mut c.writer, request)?;
+        match receive::<Answer>(&mut c.reader) {
+            Ok(Answer::Output(output)) => Ok(output),
+            Ok(Answer::Error(words)) => bail!(
+                "sluice's host process, sluice {} (pid {}), did not answer: {words}",
+                named.version,
+                named.pid
+            ),
+            Ok(other) => Err(unexpected(other)),
+            Err(e) => bail!(
+                "sluice's host process, sluice {} (pid {}), ended before it answered: {e:#}",
+                named.version,
+                named.pid
+            ),
+        }
     }
 
     /// Tell the host process `repository` has work (D2): it holds it and

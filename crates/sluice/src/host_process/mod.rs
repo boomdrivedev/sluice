@@ -58,6 +58,7 @@ pub mod index;
 pub mod joined;
 pub mod pass;
 pub mod protocol;
+pub mod reads;
 pub mod results;
 pub mod room;
 pub mod subscription;
@@ -87,7 +88,7 @@ use crate::instance::Instance;
 use crate::profiles::places::{repository_key, user_scratch, USER_SCRATCH_VAR};
 pub use ask::{Following, Here, Holding, Holds, HostProcess, Socketed};
 use folder::{Folder, How};
-use protocol::{Answer, Hello, Named, Request, RoomView, Started};
+use protocol::{Answer, FollowKind, Hello, Named, Request, RoomView, Started};
 use room::{Asked, Asker, Room, Shared};
 
 /// Set to `record` in tests: the host process takes no pass of its own,
@@ -276,6 +277,9 @@ pub(crate) struct Hosting {
     /// no git call or API call of its gets a repository's token while one
     /// it holds lasts (record 0108 as amended 2026-11-19).
     pub tokens: crate::profiles::Tokens,
+    /// The reads joined: a folder's repository, and each read of a
+    /// repository (the change `sluice-host-answers-every-read`, design D5).
+    pub reads: reads::Reads,
 }
 
 /// What a connection asks of the host process itself.
@@ -830,7 +834,9 @@ fn run_holding(runtime: &tokio::runtime::Runtime, holder: Holder) -> Result<i32>
         let told = tasks.clone();
         room.on_free(move |r| told.owed(r));
         let (control, controls) = mpsc::unbounded_channel();
+        let connected = TaskTracker::new();
         let hosting = Arc::new(Hosting {
+            reads: reads::Reads::new(connected.clone()),
             tasks,
             paths,
             named,
@@ -839,11 +845,23 @@ fn run_holding(runtime: &tokio::runtime::Runtime, holder: Holder) -> Result<i32>
             nudge: Notify::new(),
             stop: CancellationToken::new(),
             control,
-            connected: TaskTracker::new(),
+            connected,
             folder,
             settings,
             tokens,
         });
+        // Design D6: each repository's document is the one-shot overview's
+        // read, joined with it.
+        let documenting = Arc::downgrade(&hosting);
+        hosting
+            .tasks
+            .documenting(Arc::new(move |repository, after| {
+                let hosting = documenting.clone();
+                Box::pin(async move {
+                    let hosting = hosting.upgrade()?;
+                    reads::document(&hosting, repository, after).await
+                })
+            }));
         log(&format!(
             "sluice {} {} started{}, pid {}{}",
             if daemon { "daemon" } else { "host" },
@@ -1810,7 +1828,18 @@ async fn answer(hosting: &Arc<Hosting>, stream: UnixStream) -> Result<()> {
             return send(&mut writer, &Answer::Error(words)).await;
         }
     };
+    if reads::is_read(&request) {
+        let output = reads::answer(hosting, request).await;
+        return send(&mut writer, &Answer::Output(output)).await;
+    }
     match request {
+        // Answered above.
+        Request::Status { .. }
+        | Request::Overview { .. }
+        | Request::Home { .. }
+        | Request::Forecast { .. }
+        | Request::Inbox { .. } => Ok(()),
+        Request::Subscribe { folders } => subscribe(hosting, folders, lines, writer).await,
         Request::Serve { repository } => {
             note(hosting, &repository);
             // D16: no reading begun before the change is current.
@@ -1923,6 +1952,88 @@ async fn answer(hosting: &Arc<Hosting>, stream: UnixStream) -> Result<()> {
     }
 }
 
+/// sluice's part in a subscription (the change
+/// `sluice-host-answers-every-read`, design D6): a folder resolves to its
+/// repository's document channel, a follower of the kind its `add` line
+/// names, and, for `sluice run`, the follower's reports.
+struct Subscribed(Arc<Hosting>);
+
+impl subscription::Serves for Subscribed {
+    type Kind = FollowKind;
+    type Document = serde_json::Value;
+    type Report = pass::Report;
+    type Guard = tasks::Follower;
+
+    async fn serve(
+        &self,
+        folder: PathBuf,
+        kind: FollowKind,
+    ) -> Result<
+        subscription::Served<serde_json::Value, pass::Report, tasks::Follower>,
+        serde_json::Value,
+    > {
+        let hosting = &self.0;
+        let resolving = folder.clone();
+        let resolved = hosting
+            .reads
+            .folders
+            .ask(folder, None, None, move || async move {
+                tokio::task::spawn_blocking(move || reads::resolve(&resolving))
+                    .await
+                    .unwrap_or_else(|e| Err(format!("resolving the folder: {e}")))
+            })
+            .await
+            .unwrap_or_else(|| Err("resolving the folder ended with no answer".to_string()));
+        let gone = |words: &str| {
+            let mut doc = crate::told::document(crate::told::Kind::Internal, words, &[]);
+            doc["gone"] = true.into();
+            doc
+        };
+        let repository = resolved.map_err(|words| gone(&words))?;
+        note(hosting, &repository);
+        // The channel first, so the first reading's document has a
+        // receiver to go to.
+        let documents = hosting
+            .tasks
+            .documents(&repository)
+            .ok_or_else(|| gone("sluice's host process stops"))?;
+        let run = kind == FollowKind::Run;
+        let mut follower = hosting.tasks.handle(&repository).following(kind, run);
+        let reports = run.then(|| follower.reports());
+        Ok(subscription::Served {
+            documents,
+            reports,
+            guard: follower,
+        })
+    }
+
+    fn ends(&self, document: &serde_json::Value) -> bool {
+        crate::reader::no_sluice(document) || document["gone"] == true
+    }
+}
+
+/// Serve a subscription on the connection (design D6), until the client
+/// closes it or the host process stops.
+async fn subscribe(
+    hosting: &Arc<Hosting>,
+    folders: Vec<protocol::Added>,
+    lines: Lines,
+    writer: tokio::net::unix::OwnedWriteHalf,
+) -> Result<()> {
+    let sink =
+        tokio_util::codec::FramedWrite::new(writer, LinesCodec::new_with_max_length(LINE_MAX));
+    let folders = folders.into_iter().map(|a| (a.folder, a.kind)).collect();
+    subscription::serve(
+        &Subscribed(hosting.clone()),
+        folders,
+        lines,
+        sink,
+        hosting.stop.child_token(),
+    )
+    .await
+    .map_err(|e| anyhow::anyhow!("{e}"))
+}
+
 /// The results `ask` names of `repository`, as `branch`'s gate reads them,
 /// from the host process's index, on the connection's own thread and with
 /// no wait on the repository's task: its binding reads every remote as the
@@ -1948,7 +2059,7 @@ fn results_of(
 }
 
 /// Note `repository` in the index (design D4).
-fn note(hosting: &Hosting, repository: &Path) {
+pub(crate) fn note(hosting: &Hosting, repository: &Path) {
     // The edge watches it at once, where it does not yet: a change made
     // before the index's own event would come is read all the same.
     let _ = hosting

@@ -63,26 +63,15 @@ pub fn run(
     host: &dyn Host,
     worktree: &str,
     json: bool,
-    documented: bool,
     out: &mut dyn Write,
 ) -> Result<i32> {
-    // 129 (design D16): from the reader's document of the host process's
-    // current reading, where its reader keeps its tick and the look did not
-    // make the reading; otherwise from the records as the host holds them,
-    // asking no remote.
-    let read = documented
-        .then(|| crate::overview::reader_document(host))
-        .flatten();
-    let (branches, room) = match read {
-        Some((branches, doc)) => match serde_json::from_value(doc["room"].clone()) {
-            Ok(room) => (branches, room),
-            Err(_) => (branches, s.room(host.reserved())?),
-        },
-        None => (
-            s.overview(host.default_branch()?.as_ref())?,
-            s.room(host.reserved())?,
-        ),
-    };
+    // 129: from the records as `sluice host` holds them after its current
+    // reading, asking no remote (the change `sluice-host-answers-every-read`,
+    // design D3).
+    let (branches, room) = (
+        s.overview(host.default_branch()?.as_ref())?,
+        s.room(host.reserved())?,
+    );
     let counts = counts(&branches);
     let held: Vec<String> = branches
         .iter()
