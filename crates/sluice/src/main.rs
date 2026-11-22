@@ -369,6 +369,7 @@ fn read_request(cli: &Cli, folder: &Path) -> Option<sluice::host_process::protoc
     Some(match &cli.command {
         None => Request::Home {
             folder: folder.to_path_buf(),
+            caller: sluice::caller::here(),
             worktree: folder_of(&cli.worktree),
             json: cli.json,
         },
@@ -379,6 +380,7 @@ fn read_request(cli: &Cli, folder: &Path) -> Option<sluice::host_process::protoc
             branch,
         }) => Request::Status {
             folder: folder.to_path_buf(),
+            caller: sluice::caller::here(),
             target: target.clone(),
             all: *all,
             json: *json,
@@ -388,6 +390,7 @@ fn read_request(cli: &Cli, folder: &Path) -> Option<sluice::host_process::protoc
             json, watch: false, ..
         }) => Request::Overview {
             folder: folder.to_path_buf(),
+            caller: sluice::caller::here(),
             json: *json,
         },
         Some(Command::Submit {
@@ -400,6 +403,7 @@ fn read_request(cli: &Cli, folder: &Path) -> Option<sluice::host_process::protoc
             ..
         }) if worktree.len() <= 1 => Request::Forecast {
             folder: folder.to_path_buf(),
+            caller: sluice::caller::here(),
             branch: branch.clone(),
             worktree: folder_of(worktree.first().map_or(".", String::as_str)),
             head: head.clone(),
@@ -413,6 +417,7 @@ fn read_request(cli: &Cli, folder: &Path) -> Option<sluice::host_process::protoc
             new,
         }) => Request::Inbox {
             folder: folder.to_path_buf(),
+            caller: sluice::caller::here(),
             worktree: folder_of(worktree),
             json: *json,
             confirm: *confirm,
@@ -438,6 +443,13 @@ fn read(cli: &Cli) -> Option<i32> {
         }
     };
     let request = read_request(cli, &folder)?;
+    // 124: a command still reads the host's settings in full, and refuses
+    // a field it does not know, naming the file and the field.
+    if let Err(e) = Instance::read() {
+        eprintln!("sluice: {e:#}");
+        tell_json(cli.json(), &e);
+        return Some(3);
+    }
     let asked = sluice::host_process::client::Client::host().and_then(|c| c.output(&request));
     match asked {
         Ok(output) => {

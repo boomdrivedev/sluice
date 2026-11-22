@@ -75,11 +75,23 @@ pub fn is_read(request: &Request) -> bool {
 fn folder_of(request: &Request) -> (PathBuf, bool) {
     match request {
         Request::Status { folder, json, .. }
-        | Request::Overview { folder, json }
+        | Request::Overview { folder, json, .. }
         | Request::Home { folder, json, .. }
         | Request::Forecast { folder, json, .. }
         | Request::Inbox { folder, json, .. } => (folder.clone(), *json),
         _ => (PathBuf::new(), false),
+    }
+}
+
+/// The caller's session variables that a read names.
+fn caller_of(request: &Request) -> std::collections::BTreeMap<String, String> {
+    match request {
+        Request::Status { caller, .. }
+        | Request::Overview { caller, .. }
+        | Request::Home { caller, .. }
+        | Request::Forecast { caller, .. }
+        | Request::Inbox { caller, .. } => caller.clone(),
+        _ => Default::default(),
     }
 }
 
@@ -176,6 +188,7 @@ pub(crate) async fn document(
     let folder = super::tasks::open_dir(&repository);
     let request = Request::Overview {
         folder: folder.clone(),
+        caller: Default::default(),
         json: true,
     };
     let reading = hosting.tasks.last_reading(&repository);
@@ -311,14 +324,20 @@ fn render(
     runtime: tokio::runtime::Handle,
 ) -> Output {
     let json = folder_of(&request).1;
+    let caller = caller_of(&request);
     let Some(cli) = cli_of(request) else {
         return failed("the request is no read", json);
     };
     let (ran, mut stderr) = crate::telemetry::capturing(|| -> Result<(i32, Vec<u8>)> {
+        // A read reads the host's settings as its command read them as it
+        // started; a round takes a change up only between rounds (rule
+        // core.54).
+        let settings =
+            crate::instance::Instance::read().unwrap_or_else(|_| hosting.settings.instance());
         let bound = crate::profiles::Bound::open_holding(
             folder,
             std::env::current_exe()?,
-            hosting.settings.instance(),
+            settings,
             Rc::new(crate::retry::Policy::command().recording_where_set()),
             &hosting.tokens,
         )?;
@@ -339,16 +358,18 @@ fn render(
         };
         let clock = super::clock::TokioClock::new();
         let mut out = Vec::new();
-        let code = crate::run(
-            cli,
-            bound.seams(),
-            &bound,
-            &bound.branch,
-            &*bound.pulls,
-            &clock,
-            &NoPause,
-            &mut out,
-        )?;
+        let code = crate::caller::as_caller(caller, || {
+            crate::run(
+                cli,
+                bound.seams(),
+                &bound,
+                &bound.branch,
+                &*bound.pulls,
+                &clock,
+                &NoPause,
+                &mut out,
+            )
+        })?;
         Ok((code, out))
     });
     match ran {

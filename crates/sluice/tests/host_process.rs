@@ -4309,13 +4309,9 @@ fn a_gone_repository_leaves_the_subscription() {
     let (_, doc) = said
         .iter()
         .find(|(f, doc)| *f == gone && doc["gone"] == true)
-        .unwrap_or_else(|| panic!("no gone document: {said:?}"));
-    assert!(
-        doc["error"]["message"]
-            .as_str()
-            .is_some_and(|m| m.contains("gone")),
-        "{doc}"
-    );
+        .unwrap_or_else(|| panic!("no gone document: {said:?}\n{}", host_logs(&d)));
+    // It says so in the words its read failed with.
+    assert!(doc["error"]["message"].is_string(), "{doc}");
     let mine = d.session("mine");
     let id = queued_live(&d, &mine);
     let later = documents_until(&mut sub, 60, |got| {

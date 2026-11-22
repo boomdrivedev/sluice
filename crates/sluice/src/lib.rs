@@ -6,6 +6,7 @@
 //! [`profiles`] binds.
 
 pub mod branch;
+pub mod caller;
 pub mod equip;
 pub mod exec;
 pub mod hand_over;

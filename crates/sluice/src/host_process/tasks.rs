@@ -991,6 +991,11 @@ impl Scheduler {
                 Command::Step(_, reply) => drop(reply.send(Err(ended))),
             }
         }
+        // A repository gone, whatever ended its scheduler: its followers
+        // get the document that says so (design D6).
+        if !self.repository.is_dir() {
+            self.gone();
+        }
         locked(&self.followers).clear();
         self.marks.send_modify(|m| {
             m.busy = false;
@@ -1411,6 +1416,12 @@ impl Scheduler {
                     self.reading_due = true;
                 }
             }
+            Landed::Bound(Err(_), _) if !self.repository.is_dir() => {
+                // The repository is gone: held no longer (design D6).
+                self.wants_worker = false;
+                self.ended = true;
+                self.gone();
+            }
             Landed::Bound(Err(words), _) => {
                 self.wants_worker = false;
                 {
@@ -1475,6 +1486,12 @@ impl Scheduler {
                     looked.in_play,
                     true,
                 );
+                // The repository is gone: held no longer (design D6).
+                if !self.repository.is_dir() {
+                    self.ended = true;
+                    self.gone();
+                    return;
+                }
                 self.document();
                 self.in_play = looked.in_play;
                 if looked.in_play && !self.refused() && !self.stopping {
@@ -1509,6 +1526,11 @@ fn send_document(documents: &watch::Sender<Option<serde_json::Value>>, doc: serd
     }
     let now = crate::overview::untimed(&doc);
     documents.send_if_modified(|d| {
+        // A repository gone stays gone: a read in flight as it went sends
+        // nothing after it.
+        if d.as_ref().is_some_and(|d| d["gone"] == true) {
+            return false;
+        }
         let changed = d.as_ref().map(crate::overview::untimed).as_ref() != Some(&now);
         if changed {
             *d = Some(doc);

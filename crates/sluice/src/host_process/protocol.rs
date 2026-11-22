@@ -90,6 +90,10 @@ pub enum Request {
     /// `sluice status`, in each form.
     Status {
         folder: PathBuf,
+        /// The caller's session variables (the change
+        /// `sluice-host-answers-every-read`, design D1).
+        #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+        caller: BTreeMap<String, String>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         target: Option<String>,
         #[serde(default, skip_serializing_if = "std::ops::Not::not")]
@@ -102,6 +106,10 @@ pub enum Request {
     /// `sluice overview` without `--watch`.
     Overview {
         folder: PathBuf,
+        /// The caller's session variables (the change
+        /// `sluice-host-answers-every-read`, design D1).
+        #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+        caller: BTreeMap<String, String>,
         #[serde(default, skip_serializing_if = "std::ops::Not::not")]
         json: bool,
     },
@@ -109,6 +117,10 @@ pub enum Request {
     /// `worktree`.
     Home {
         folder: PathBuf,
+        /// The caller's session variables (the change
+        /// `sluice-host-answers-every-read`, design D1).
+        #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+        caller: BTreeMap<String, String>,
         worktree: PathBuf,
         #[serde(default, skip_serializing_if = "std::ops::Not::not")]
         json: bool,
@@ -117,6 +129,10 @@ pub enum Request {
     /// branch `head`, on `branch`.
     Forecast {
         folder: PathBuf,
+        /// The caller's session variables (the change
+        /// `sluice-host-answers-every-read`, design D1).
+        #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+        caller: BTreeMap<String, String>,
         branch: String,
         worktree: PathBuf,
         #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -129,6 +145,10 @@ pub enum Request {
     /// `sluice inbox` of the worktree at `worktree`.
     Inbox {
         folder: PathBuf,
+        /// The caller's session variables (the change
+        /// `sluice-host-answers-every-read`, design D1).
+        #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+        caller: BTreeMap<String, String>,
         worktree: PathBuf,
         #[serde(default, skip_serializing_if = "std::ops::Not::not")]
         json: bool,
@@ -361,6 +381,7 @@ mod tests {
         let reads = [
             Request::Status {
                 folder: "/w/feat".into(),
+                caller: BTreeMap::new(),
                 target: Some("main".into()),
                 all: false,
                 json: true,
@@ -368,15 +389,18 @@ mod tests {
             },
             Request::Overview {
                 folder: "/w/feat".into(),
+                caller: BTreeMap::new(),
                 json: false,
             },
             Request::Home {
                 folder: "/w/feat".into(),
+                caller: BTreeMap::new(),
                 worktree: "/w/feat".into(),
                 json: true,
             },
             Request::Forecast {
                 folder: "/w/feat".into(),
+                caller: BTreeMap::new(),
                 branch: "main".into(),
                 worktree: "/w/feat".into(),
                 head: None,
@@ -385,6 +409,7 @@ mod tests {
             },
             Request::Inbox {
                 folder: "/w/feat".into(),
+                caller: BTreeMap::new(),
                 worktree: "/w/feat".into(),
                 json: false,
                 confirm: true,
@@ -401,6 +426,7 @@ mod tests {
             serde_json::from_slice::<Request>(line).unwrap(),
             Request::Status {
                 folder: "/w/feat".into(),
+                caller: BTreeMap::new(),
                 target: Some("main".into()),
                 all: false,
                 json: true,

@@ -85,8 +85,7 @@ pub fn dirty(status: &[u8]) -> Vec<String> {
 /// Who submitted: the session's own name when its harness sets one
 /// (`SLUICE_AGENT`), else `branch` (3).
 fn agent_or(branch: &str) -> String {
-    std::env::var("SLUICE_AGENT")
-        .ok()
+    crate::caller::var("SLUICE_AGENT")
         .filter(|a| !a.is_empty())
         .unwrap_or_else(|| branch.to_string())
 }
