@@ -139,7 +139,7 @@ The two `add` lines go to `sluice host` on the one connection. The first two out
 
 An older sluice program that sends `read`, `follow` or `room` gets that error, and acts on it as its own code acts on an error of `sluice host`. A newer command that reaches an older `sluice host` has it hand over first (`host_process/client.rs:Client::reach`), so a newer command asks a `sluice host` of its own release. An older `sluice host` that does not hand over answers a new request with an error. The newer command then exits 3 and names the version of that `sluice host`.
 
-Before: `sluice host` answered each request of each earlier release, and kept the files under `readers/` for the watches, waits and `sluice run`s of earlier releases. Now: it answers the requests that a command of its own release sends, and keeps no file under `readers/`. This rests on the amendment `never-break-an-existing-client@31c68a310b0c`: before the first public release of sluice, a change may break a client.
+Before: `sluice host` answered each request of each earlier release, and kept the files under `readers/` for the watches, waits and `sluice run`s of earlier releases. Now: it answers the requests that a command of its own release sends, and keeps no file under `readers/`. This rests on the amendment `never-break-an-existing-client@3e4073c64ec2`: before the first public release of sluice, a change may break a client.
 
 ## Risks / Trade-offs
 
