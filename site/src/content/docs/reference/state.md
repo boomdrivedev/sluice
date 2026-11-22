@@ -155,21 +155,6 @@ every repository on the host and never pushed:
                        first command of sluice's that found it has sluice
   ports/.lock          held while a port is held or let go
   ports/held/<port>    a port a checkout holds, naming the checkout's record
-  readers/<repository>.lock
-                       held by sluice's host process while it holds the
-                       repository, or by a watch or wait of a sluice from
-                       before it
-  readers/<repository>.json
-                       the overview it last read, as `sluice overview --json`
-                       prints it, for every watch and wait to follow
-  readers/<repository>.driver
-                       held by sluice's host process while it holds the
-                       repository
-  readers/<repository>.version
-                       the version of sluice that holds the lock
-  readers/<repository>.lease
-                       held by sluice's host process while it takes the
-                       reading over from an older sluice's watch or wait
   running/.lock        held while a run is counted against the bound
   running/<run>.json   each run going on the host, every repository's:
                        a submission's or an agent's, its repository, its
@@ -238,41 +223,25 @@ nothing: the next run that starts removes it. A file in `sessions/` is there whi
 its `sluice exec` rewrites it as each task ends, for `sluice overview`
 to show; nothing that decides a result reads it.
 
-One process on the host reads a repository's queues for every watch and
-wait of it: sluice's host process, for every repository it holds. It
-holds the repository's `.driver` file's lock and its `readers/` lock,
-and writes the overview file beside them after each of its passes,
-whether or not anything is queued. A watch or wait that finds no host
-process answering starts it, and follows the file; none takes a lock or
-a lease, and none reads the queues itself. The host process keeps the
-overview in the file, rewritten whole each time it changes, so nothing
-reads half of one. A read of the queues it couldn't make goes in the
-file in its place, as the error document `sluice overview --json`
-prints when it fails. It holds the words the read was refused with, and
-the host process reads again at its next pass. Where the repository has
-no sluice, the file holds the overview with `"set_up": false`, every
-watch ends on it, and the host process holds the repository no longer.
-A host process that takes the lock removes that file before it reads, so
-nothing that starts once sluice is set up ends on it. A wait takes its
-submission's progress from that file, and reads its submission's own
-file once, when the submission leaves the queue, to say how it ended.
-When the host process stops, however it stops, the lock goes with it,
-and every watch and wait starts it again at its next look, a second for
-a watch, three for a wait, following the last file until the new one
-writes. Where a watch or wait of a sluice from before the host process
-holds the lock, the host process takes its lease; the older one lets go
-at its next look and follows from then on, and the host process reads
-from its own next pass. A sluice from before the lease takes no part:
-it names no version and never looks at the lease, so it reads until its
-watch or wait ends, and the host process follows it meanwhile. Where an
-older `sluice run` holds the `.driver` file's lock, the host process runs
-no round of that repository and follows its file until it ends. The file
-names take the repository's git directory, which all its worktrees
-share, written as one file name as a checkout's is. A status, a
-one-shot `sluice overview`, `sluice` with no command and a forecast
-read none of these files' locks: each asks the host process for a
-reading, starting it where none answers, and reads the state as the
-host holds it since, fetching nothing of its own
+One process on the host reads a repository's queues: sluice's host
+process, for each repository that it holds. It keeps each repository's
+overview document in its own process, and writes no file of it. A
+watch, a wait and `sluice run` follow it on a subscription of their
+folder on its socket. A watch and a wait get the document at once, and
+again each time it changes in a part other than its time. `sluice run`
+gets each pass's report. A read of the queues that it couldn't make is
+the document, as the error document `sluice overview --json` prints
+when it fails, with the words the read was refused with. Where the
+repository has no sluice, the document is the overview with `"set_up":
+false`, and each watch ends on it. A wait reads its submission's
+progress from the document, and asks the host process for its
+submission's record once, when the submission leaves the queue. When
+the host process stops, however it stops, each watch and wait reaches it
+again at its next tick, starting it where none answers, and keeps the
+last document until the new one comes. A status, a one-shot `sluice
+overview`, `sluice` with no command, a forecast and `sluice inbox` read
+no file: each sends its folder to the host process, which answers with
+what the command prints, starting it where none answers
 ([one-shot reads](/sluice/reference/commands/#one-shot-reads)).
 
 ## A branch whose state is on its remote
