@@ -73,6 +73,9 @@ pub const FINISH_FOR: Duration = Duration::from_secs(60);
 pub struct Looked {
     pub in_play: bool,
     pub refused: Option<String>,
+    /// The branches it read as last fetched, each with the remote's
+    /// refusal (the change `sluice-host-answers-every-read`, design D3).
+    pub stale: BTreeMap<String, sluice_seams::ReadRefused>,
 }
 
 /// How the host process looks at a repository that no worker holds, and
@@ -171,6 +174,9 @@ pub struct Marks {
     /// Whether the look made the last reading, which writes no reader's
     /// document.
     looked: bool,
+    /// The branches the last ask read as last fetched, with the remote's
+    /// refusal, kept as `refused` is.
+    stale: BTreeMap<String, sluice_seams::ReadRefused>,
     /// When a command last told of a change, its `serve`.
     told: Option<Stamp>,
     /// 129 as amended 2026-11-19: when a reading last began that asked the
@@ -242,6 +248,7 @@ impl Marks {
             ended: self.ended_at.clone(),
             refused: self.refused.clone(),
             looked: self.looked,
+            stale: self.stale.clone(),
         }
     }
 }
@@ -953,6 +960,7 @@ impl Scheduler {
                     let looked = looked.unwrap_or(Looked {
                         in_play: true,
                         refused: None,
+                        ..Looked::default()
                     });
                     self.landed(Landed::Looked(looked, asks));
                 }
@@ -1299,7 +1307,14 @@ impl Scheduler {
     /// a look having made it where `looked` (D16). Where it `asked` the
     /// remote, its words are the remote's refusal, `refused`, or none; a
     /// reading that asked nothing keeps the last ask's.
-    fn end_reading(&self, asked: bool, refused: Option<String>, in_play: bool, looked: bool) {
+    fn end_reading(
+        &self,
+        asked: bool,
+        refused: Option<String>,
+        stale: BTreeMap<String, sluice_seams::ReadRefused>,
+        in_play: bool,
+        looked: bool,
+    ) {
         self.marks.send_modify(|m| {
             m.ended = Some(Stamp::now());
             m.ended_began = m.began;
@@ -1307,6 +1322,7 @@ impl Scheduler {
                 Some(chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true));
             if asked {
                 m.refused = refused;
+                m.stale = stale;
             }
             m.in_play = in_play;
             m.looked = looked;
@@ -1410,6 +1426,7 @@ impl Scheduler {
                 self.end_reading(
                     asks,
                     report.as_ref().ok().and_then(|r| r.refused.clone()),
+                    report.as_ref().map(|r| r.stale.clone()).unwrap_or_default(),
                     self.in_play,
                     false,
                 );
@@ -1437,7 +1454,13 @@ impl Scheduler {
                 }
             },
             Landed::Looked(looked, asks) => {
-                self.end_reading(asks, looked.refused.clone(), looked.in_play, true);
+                self.end_reading(
+                    asks,
+                    looked.refused.clone(),
+                    looked.stale.clone(),
+                    looked.in_play,
+                    true,
+                );
                 self.document();
                 self.in_play = looked.in_play;
                 if looked.in_play && !self.refused() && !self.stopping {
@@ -1740,6 +1763,10 @@ impl Worker for RepositoryWorker {
         let s = sluice_of(&self.bound, &self.policies, clock);
         let report = self.task.pass(&s, &self.bound, clock, tick, asks);
         drop(s);
+        let report = report.map(|r| crate::host_process::pass::Report {
+            stale: self.bound.state.stale_all(),
+            ..r
+        });
         if self.asked_only && at.is_none() {
             self.skipped.pause();
         }
@@ -2067,6 +2094,7 @@ mod tests {
                 Looked {
                     in_play: work.load(Ordering::SeqCst),
                     refused: refused.clone().filter(|_| asks),
+                    ..Looked::default()
                 }
             })
         }
@@ -2663,6 +2691,7 @@ mod tests {
                 Looked {
                     in_play: true,
                     refused: None,
+                    ..Looked::default()
                 }
             }),
         );

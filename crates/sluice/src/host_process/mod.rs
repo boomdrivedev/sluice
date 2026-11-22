@@ -822,6 +822,7 @@ fn run_holding(runtime: &tokio::runtime::Runtime, holder: Holder) -> Result<i32>
                     tasks::Looked {
                         in_play: true,
                         refused: None,
+                        ..Default::default()
                     },
                 )
             }),
@@ -1853,6 +1854,12 @@ async fn answer(hosting: &Arc<Hosting>, stream: UnixStream) -> Result<()> {
             send(&mut writer, &Answer::Ok).await
         }
         Request::Pass { repository, at } => {
+            // A follower names its folder or its repository (the change
+            // `sluice-host-answers-every-read`, design D8).
+            let repository = match reads::resolved(hosting, &repository).await {
+                Ok(r) => r,
+                Err(words) => return send(&mut writer, &Answer::Error(words)).await,
+            };
             note(hosting, &repository);
             let at = at.and_then(|at| at.parse::<chrono::DateTime<chrono::Utc>>().ok());
             let answer = match hosting.tasks.handle(&repository).pass(at).await {
@@ -1973,17 +1980,7 @@ impl subscription::Serves for Subscribed {
         serde_json::Value,
     > {
         let hosting = &self.0;
-        let resolving = folder.clone();
-        let resolved = hosting
-            .reads
-            .folders
-            .ask(folder, None, None, move || async move {
-                tokio::task::spawn_blocking(move || reads::resolve(&resolving))
-                    .await
-                    .unwrap_or_else(|e| Err(format!("resolving the folder: {e}")))
-            })
-            .await
-            .unwrap_or_else(|| Err("resolving the folder ended with no answer".to_string()));
+        let resolved = reads::resolved(hosting, &folder).await;
         let gone = |words: &str| {
             let mut doc = crate::told::document(crate::told::Kind::Internal, words, &[]);
             doc["gone"] = true.into();
@@ -1997,9 +1994,14 @@ impl subscription::Serves for Subscribed {
             .tasks
             .documents(&repository)
             .ok_or_else(|| gone("sluice's host process stops"))?;
-        let run = kind == FollowKind::Run;
-        let mut follower = hosting.tasks.handle(&repository).following(kind, run);
-        let reports = run.then(|| follower.reports());
+        // `sluice run` and a wait take each pass's report; a watch takes
+        // none.
+        let reports_kept = kind != FollowKind::Watch;
+        let mut follower = hosting
+            .tasks
+            .handle(&repository)
+            .following(kind, reports_kept);
+        let reports = reports_kept.then(|| follower.reports());
         // Where passes are taken only when asked, the follower's first
         // document is of a reading afresh, which its coming asks for: the
         // repository is read before its first document is sent (D14).

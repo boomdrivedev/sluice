@@ -261,3 +261,191 @@ pub fn watch_input(cwd: &Path, out: &mut dyn Write) -> Result<i32> {
         }
     }
 }
+
+/// `sluice run`'s part in following `sluice host` (design D8): a
+/// subscription of its folder as `run`, each pass's report as it comes,
+/// and a pass asked at a tick that brought none, so each of its rounds is
+/// a pass; where `sluice host` passes only when asked, a pass asked at
+/// each of its ticks, whose report is the pass's (D14).
+pub struct Runner<'a> {
+    reached: Reached<'a>,
+    folder: PathBuf,
+    tick: Duration,
+    waiting: std::collections::VecDeque<crate::host_process::pass::Report>,
+    /// Whether the last pass found nothing in play, so no pass comes at a
+    /// tick of the host process's own.
+    idle: bool,
+}
+
+impl<'a> Runner<'a> {
+    pub fn new(
+        process: &'a dyn HostProcess,
+        here: Option<&'a Here<'a, 'a>>,
+        folder: PathBuf,
+        tick: Duration,
+    ) -> Runner<'a> {
+        let folders = vec![Added {
+            folder: folder.clone(),
+            kind: FollowKind::Run,
+        }];
+        Runner {
+            reached: Reached::new(process, here, folders),
+            folder,
+            tick,
+            waiting: Default::default(),
+            idle: true,
+        }
+    }
+
+    /// The next pass's report, waiting up to a tick for one; `None` where
+    /// none came, or the host process could not be reached.
+    pub fn next(&mut self, clock: &dyn Clock) -> Option<crate::host_process::pass::Report> {
+        self.reached.open()?;
+        if self.reached.asked_only() {
+            // The passes the subscription reports are those it asked.
+            self.reached.lines(Duration::from_millis(1));
+            return match self.reached.process.pass_of(
+                self.reached.here,
+                &self.folder,
+                Some(clock.now()),
+            ) {
+                Ok(r) => Some(r),
+                Err(e) => {
+                    telemetry::warn(&format!("sluice: warning: {e:#}"));
+                    None
+                }
+            };
+        }
+        if self.waiting.is_empty() {
+            for line in self.reached.lines(self.tick) {
+                if let SubscriptionLine::Pass(p) = line {
+                    self.waiting.push_back(p.report);
+                }
+            }
+        }
+        // A repository with nothing in play has no pass at a tick of its
+        // own: a tick with no pass asks one, so each round is a pass. The
+        // pass comes as each pass does, on the subscription.
+        if self.waiting.is_empty() && self.idle && self.reached.open.is_some() {
+            if let Err(e) =
+                self.reached
+                    .process
+                    .pass_of(self.reached.here, &self.folder, Some(clock.now()))
+            {
+                telemetry::warn(&format!("sluice: warning: {e:#}"));
+            }
+            for line in self.reached.lines(self.tick) {
+                if let SubscriptionLine::Pass(p) = line {
+                    self.waiting.push_back(p.report);
+                }
+            }
+        }
+        let report = self.waiting.pop_front();
+        if let Some(r) = &report {
+            self.idle = !r.in_play;
+        }
+        report
+    }
+
+    /// Whether the host process passes only when asked.
+    pub fn asked_only(&self) -> bool {
+        self.reached.asked_only()
+    }
+}
+
+/// A wait's part in following `sluice host` (design D8): a subscription
+/// of its folder as `wait`, from whose documents it reads its submission,
+/// its combination and its branch's hold, and whose pass reports say what
+/// each pass released and where a round failed; where `sluice host`
+/// passes only when asked, a pass asked at each of its ticks (D14).
+pub struct Waiter<'a> {
+    reached: Reached<'a>,
+    folder: PathBuf,
+    document: Option<serde_json::Value>,
+}
+
+impl<'a> Waiter<'a> {
+    pub fn new(
+        process: &'a dyn HostProcess,
+        here: Option<&'a Here<'a, 'a>>,
+        folder: PathBuf,
+    ) -> Waiter<'a> {
+        let folders = vec![Added {
+            folder: folder.clone(),
+            kind: FollowKind::Wait,
+        }];
+        Waiter {
+            reached: Reached::new(process, here, folders),
+            folder,
+            document: None,
+        }
+    }
+
+    /// The last document that `sluice host` sent; `None` before the first.
+    pub fn document(&self) -> Option<&serde_json::Value> {
+        self.document.as_ref()
+    }
+
+    /// One tick: a pass asked first where passes are taken only when
+    /// asked; the newest document, and the reports of the passes since the
+    /// last tick.
+    pub fn tick(&mut self, clock: &dyn Clock) -> Vec<crate::host_process::pass::Report> {
+        self.take(clock, Duration::from_millis(1))
+    }
+
+    /// Its first tick: as [`Waiter::tick`], waiting up to `wait` for the
+    /// first document where none came yet.
+    pub fn first(
+        &mut self,
+        clock: &dyn Clock,
+        wait: Duration,
+    ) -> Vec<crate::host_process::pass::Report> {
+        let until = std::time::Instant::now() + wait;
+        let mut reports = self.take(clock, LINE_WAIT);
+        while self.document.is_none() && std::time::Instant::now() < until {
+            if INTERRUPTED.load(Ordering::SeqCst) || self.reached.open.is_none() {
+                break;
+            }
+            reports.extend(self.take_lines(LINE_WAIT));
+        }
+        reports
+    }
+
+    fn take(
+        &mut self,
+        clock: &dyn Clock,
+        wait: Duration,
+    ) -> Vec<crate::host_process::pass::Report> {
+        let mut reports = Vec::new();
+        if self.reached.open().is_none() {
+            return reports;
+        }
+        if self.reached.asked_only() {
+            match self
+                .reached
+                .process
+                .pass_of(self.reached.here, &self.folder, Some(clock.now()))
+            {
+                Ok(r) => reports.push(r),
+                Err(e) => telemetry::warn(&format!("sluice: warning: {e:#}")),
+            }
+            // The passes the subscription reports are those it asked.
+            self.take_lines(wait);
+            return reports;
+        }
+        reports.extend(self.take_lines(wait));
+        reports
+    }
+
+    fn take_lines(&mut self, wait: Duration) -> Vec<crate::host_process::pass::Report> {
+        let mut reports = Vec::new();
+        for line in self.reached.lines(wait) {
+            match line {
+                SubscriptionLine::Document(d) => self.document = Some(d.overview),
+                SubscriptionLine::Pass(p) => reports.push(p.report),
+                SubscriptionLine::Error(_) => {}
+            }
+        }
+        reports
+    }
+}

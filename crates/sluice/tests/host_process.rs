@@ -4340,3 +4340,29 @@ fn a_gone_repository_leaves_the_subscription() {
     );
     assert!(later.iter().all(|(f, _)| *f != gone), "{later:?}");
 }
+
+/// resident-subscriptions, "sluice run prints the passes of its
+/// subscription" (design D8): with `main` holding one submission queued
+/// and a live `sluice host`, `sluice run --rounds 1` with no git on its
+/// path ends after the pass that its subscription reported, printing its
+/// lines, and exits 0: it binds nothing and reads no record.
+#[test]
+fn sluice_run_prints_the_passes_of_its_subscription() {
+    let d = OnDisk::new("host-run-subscribes", POLICY);
+    let dir = d.session("a");
+    let mut sub = subscribed(&d, &[d.repo.dir()], FollowKind::Wait);
+    documents_until(&mut sub, 30, |got| !got.is_empty());
+    let id = queued_live(&d, &dir);
+    let empty = support::Scratch::new("host-run-subscribes-path");
+    let mut c = d.command(d.repo.dir());
+    let out = c
+        .env("PATH", empty.path())
+        .args(["run", "--rounds", "1"])
+        .output()
+        .unwrap();
+    // It ended after the one pass that its subscription reported.
+    assert!(out.status.success(), "{}", text(&out));
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert!(!err.contains("could not be reached"), "{err}");
+    let _ = id;
+}

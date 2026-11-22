@@ -5,7 +5,6 @@ use std::rc::Rc;
 use std::time::{Duration, Instant};
 
 use clap::Parser;
-use sluice::exec::Host;
 use sluice::hand_over::HandOver;
 use sluice::host_settings::{HostSettings, Look};
 use sluice::instance::{Instance, AFRESH};
@@ -13,7 +12,7 @@ use sluice::profiles::Bound;
 use sluice::retry::Policy;
 use sluice::telemetry::{Caller, Settings, Telemetry};
 use sluice::{run, Cli, Command, Driven, Following, Pause, Skipped, Sleep};
-use sluice_core::{Clock, Sluice, SystemClock};
+use sluice_core::{Clock, SystemClock};
 
 fn main() {
     // 135: what a `sluice run` this process started afresh from handed it,
@@ -263,6 +262,14 @@ fn main() {
     } else {
         None
     };
+    // A kept `sluice run` follows sluice's host process on a subscription,
+    // and binds no repository (the change `sluice-host-answers-every-read`,
+    // design D8).
+    if let (Some(Command::Run { rounds }), Some(settings)) = (&cli.command, held) {
+        let code = keep(&cli, *rounds, settings, started, handed, telemetry.as_ref());
+        finish(telemetry);
+        std::process::exit(code);
+    }
     let opened = repository_dir(&cli).and_then(|dir| {
         let program = std::env::current_exe()?;
         let bound = Bound::open_with(&dir, program.clone(), instance, retry.clone())?;
@@ -288,17 +295,10 @@ fn main() {
             }
             _ => bound,
         };
-        let kept = held.map(|settings| Kept {
-            dir,
-            program,
-            settings,
-            retry: retry.clone(),
-            started,
-            handed,
-        });
-        Ok((bound, kept))
+        let _ = (dir, program);
+        Ok(bound)
     });
-    let (bound, kept) = match opened {
+    let bound = match opened {
         Ok(opened) => opened,
         Err(e) => {
             eprintln!("sluice: {e:#}");
@@ -330,33 +330,16 @@ fn main() {
         Ok("record") => (&skipped, &skipped),
         _ => (&SystemClock, &Sleep(every)),
     };
-    let ran = match (kept, &cli.command) {
-        // 153 (design D2): a kept `sluice run`, which goes through no
-        // `run`, is one span in its caller's trace all the same.
-        (Some(kept), Some(Command::Run { rounds })) => {
-            sluice::telemetry::command(cli.caller.as_ref(), &cli.words(), || {
-                keep_running(
-                    kept,
-                    bound,
-                    *rounds,
-                    telemetry.as_ref(),
-                    clock,
-                    pause,
-                    &mut out,
-                )
-            })
-        }
-        _ => run(
-            cli,
-            bound.seams(),
-            &bound,
-            &bound.branch,
-            &*bound.pulls,
-            clock,
-            pause,
-            &mut out,
-        ),
-    };
+    let ran = run(
+        cli,
+        bound.seams(),
+        &bound,
+        &bound.branch,
+        &*bound.pulls,
+        clock,
+        pause,
+        &mut out,
+    );
     let code = match ran {
         Ok(code) => code,
         Err(e) => {
@@ -545,11 +528,49 @@ fn finish(telemetry: Option<Telemetry>) {
 /// afresh itself (135; record 0107; design D3, D4).
 struct Kept {
     dir: PathBuf,
-    program: PathBuf,
     settings: HostSettings,
-    retry: Rc<Policy>,
     started: Started,
     handed: Option<HandOver>,
+}
+
+/// A kept `sluice run` of the folder it runs in: its exit. 153 (design
+/// D2): it goes through no `run`, and is one span in its caller's trace
+/// all the same.
+fn keep(
+    cli: &Cli,
+    rounds: Option<usize>,
+    settings: HostSettings,
+    started: Started,
+    handed: Option<HandOver>,
+    telemetry: Option<&Telemetry>,
+) -> i32 {
+    let every = sluice::tick(cli.command.as_ref());
+    let skipped = Skipped::new(every);
+    let (clock, pause): (&dyn Clock, &dyn Pause) = match std::env::var(ROUND_SLEEP_VAR).as_deref() {
+        Ok("record") => (&skipped, &skipped),
+        _ => (&SystemClock, &Sleep(every)),
+    };
+    let mut out = std::io::stdout();
+    let ran = sluice::stop_on_interrupt()
+        .and_then(|()| Ok(std::env::current_dir()?))
+        .and_then(|dir| {
+            let kept = Kept {
+                dir,
+                settings,
+                started,
+                handed,
+            };
+            sluice::telemetry::command(cli.caller.as_ref(), &cli.words(), || {
+                keep_running(kept, rounds, telemetry, clock, pause, &mut out)
+            })
+        });
+    match ran {
+        Ok(code) => code,
+        Err(e) => {
+            sluice::telemetry::error(&format!("sluice: {e:#}"));
+            3
+        }
+    }
 }
 
 /// The run as it started, which it starts afresh as (design D3): its
@@ -572,7 +593,6 @@ struct Started {
 /// said once.
 fn keep_running(
     mut kept: Kept,
-    bound: Bound,
     rounds: Option<usize>,
     telemetry: Option<&Telemetry>,
     clock: &dyn Clock,
@@ -584,7 +604,6 @@ fn keep_running(
         .path()
         .map(|p| p.display().to_string())
         .unwrap_or_default();
-    let s = Sluice::new(bound.seams(), clock).as_peer(bound.peer());
     let mut following = match kept.handed.take() {
         Some(doc) => {
             eprintln!(
@@ -596,22 +615,17 @@ fn keep_running(
         }
         None => {
             let mut following = Following::new(rounds);
-            following.start(&s)?;
+            following.start()?;
             following
         }
     };
-    let here = sluice::host_process::Here {
-        s: &s,
-        host: &bound,
-        pulls: &*bound.pulls,
-        clock,
-    };
-    let mut follower = sluice::host_process::ask::Follower::new(
-        &here,
-        sluice::host_process::protocol::FollowKind::Run,
-    );
+    // Design D8 of `sluice-host-answers-every-read`: a subscription of its
+    // folder as `run`, on the host process's socket, with no binding.
+    let process = sluice::host_process::Socketed::default();
+    let mut runner =
+        sluice::subscriber::Runner::new(&process, None, kept.dir.clone(), following.tick());
     loop {
-        if let Driven::Ended(code) = following.next(&here, &mut follower, pause, out)? {
+        if let Driven::Ended(code) = following.next(&mut runner, clock, pause, out)? {
             return Ok(code);
         }
         let refused = |why: &str| {
@@ -621,8 +635,8 @@ fn keep_running(
             ))
         };
         // A change it takes up only by starting afresh that it could not
-        // start afresh for, because its settings do not bind or the start
-        // failed, said once with the tables (rule core.54; design D5).
+        // start afresh for said once with the tables (rule core.54; design
+        // D5).
         let not_afresh = |tables: &[&str], cause: &str, why: &str| {
             sluice::telemetry::warn(&format!(
                 "sluice: warning: {file} changed {}, which this sluice run takes up only by \
@@ -641,30 +655,12 @@ fn keep_running(
                     kept.settings.accept(instance);
                     continue;
                 }
-                let rebound = Bound::open_with(
-                    &kept.dir,
-                    kept.program.clone(),
-                    instance.clone(),
-                    kept.retry.clone(),
-                )
-                .and_then(|b| {
-                    Sluice::new(b.seams(), clock)
-                        .as_peer(b.peer())
-                        .check_host_systems()?;
-                    Ok(b)
-                });
-                match rebound {
-                    Ok(b) => {
-                        drop(b);
-                        if let Some(t) = telemetry {
-                            t.flush();
-                        }
-                        let _ = out.flush();
-                        let why = start_afresh(&kept.started, &following, &tables, text);
-                        not_afresh(&tables, "it could not start afresh", &format!("{why:#}"));
-                    }
-                    Err(e) => not_afresh(&tables, "its settings do not bind", &format!("{e:#}")),
+                if let Some(t) = telemetry {
+                    t.flush();
                 }
+                let _ = out.flush();
+                let why = start_afresh(&kept.started, &following, &tables, text);
+                not_afresh(&tables, "it could not start afresh", &format!("{why:#}"));
             }
         }
     }

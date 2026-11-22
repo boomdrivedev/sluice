@@ -861,6 +861,7 @@ impl sluice::host_process::HostProcess for FakeProcess {
             ),
             refused: None,
             looked: false,
+            stale: Default::default(),
         })
     }
 

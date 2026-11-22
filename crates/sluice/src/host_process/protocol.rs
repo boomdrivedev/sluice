@@ -225,6 +225,12 @@ pub struct Reading {
     /// never a document an earlier pass wrote (design D16).
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub looked: bool,
+    /// The branches the reading's last ask read as last fetched, each with
+    /// the remote's refusal: what a read's call binds the repository with,
+    /// as the host holds it (the change `sluice-host-answers-every-read`,
+    /// design D3). It stays in the host process.
+    #[serde(skip)]
+    pub stale: std::collections::BTreeMap<String, sluice_seams::ReadRefused>,
 }
 
 /// What a held room's command says once its run has begun.

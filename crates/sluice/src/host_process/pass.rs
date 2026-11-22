@@ -81,6 +81,11 @@ pub struct Report {
     /// ask with, where one did.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub refused: Option<String>,
+    /// The branches its binding reads as last fetched, each with the
+    /// remote's refusal (the change `sluice-host-answers-every-read`,
+    /// design D3). It stays in the host process.
+    #[serde(skip)]
+    pub stale: BTreeMap<String, sluice_seams::ReadRefused>,
 }
 
 /// One pass of the repository `s` and `host` bind, writing `reader`'s

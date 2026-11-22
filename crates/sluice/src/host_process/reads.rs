@@ -110,21 +110,27 @@ pub fn failed(words: &str, json: bool) -> Output {
     }
 }
 
-/// Answer the read `request` (design D1 to D5).
-pub(crate) async fn answer(hosting: &Arc<Hosting>, request: Request) -> Output {
-    let (folder, json) = folder_of(&request);
-    let tracker = hosting.connected.clone();
-    let resolving = folder.clone();
-    let resolved = hosting
+/// The repository that holds `folder`, joined by the host's map of
+/// folders (design D2, D5).
+pub(crate) async fn resolved(hosting: &Hosting, folder: &Path) -> Result<PathBuf, String> {
+    let resolving = folder.to_path_buf();
+    hosting
         .reads
         .folders
-        .ask(folder.clone(), None, None, move || async move {
+        .ask(folder.to_path_buf(), None, None, move || async move {
             tokio::task::spawn_blocking(move || resolve(&resolving))
                 .await
                 .unwrap_or_else(|e| Err(format!("resolving the folder: {e}")))
         })
         .await
-        .unwrap_or_else(|| Err("resolving the folder ended with no answer".to_string()));
+        .unwrap_or_else(|| Err("resolving the folder ended with no answer".to_string()))
+}
+
+/// Answer the read `request` (design D1 to D5).
+pub(crate) async fn answer(hosting: &Arc<Hosting>, request: Request) -> Output {
+    let (folder, json) = folder_of(&request);
+    let tracker = hosting.connected.clone();
+    let resolved = resolved(hosting, &folder).await;
     let repository = match resolved {
         Ok(r) => r,
         Err(words) => return failed(&words, json),
@@ -319,7 +325,8 @@ fn render(
         let bound = crate::profiles::Bound {
             state: bound
                 .state
-                .reading_results(crate::profiles::records::ResultsFrom::Indexed),
+                .reading_results(crate::profiles::records::ResultsFrom::Indexed)
+                .seeded(reading.stale.clone()),
             host_process: Box::new(Answering {
                 room: hosting.room.clone(),
                 named: hosting.named.clone(),

@@ -9941,8 +9941,7 @@ mod number_on_two_branches {
 /// said.
 #[test]
 fn a_run_handed_over_keeps_following_and_counts_its_passes() {
-    use sluice::host_process::ask::Follower;
-    use sluice::host_process::protocol::FollowKind;
+    use sluice::subscriber::Runner;
     use sluice::{Driven, Following};
     let f = one_queued();
     f.world.hold_runs(true);
@@ -9958,10 +9957,12 @@ fn a_run_handed_over_keeps_following_and_counts_its_passes() {
     let mut out = Vec::new();
 
     let mut following = Following::new(Some(3));
-    following.start(&s).unwrap();
-    let mut follower = Follower::new(&here, FollowKind::Run);
+    following.start().unwrap();
+    let folder = std::path::PathBuf::from(".");
+    let tick = following.tick();
+    let mut runner = Runner::new(&host.process, Some(&here), folder.clone(), tick);
     let first = following
-        .next(&here, &mut follower, &pause, &mut out)
+        .next(&mut runner, &f.clock, &pause, &mut out)
         .unwrap();
     assert_eq!(first, Driven::Next);
     let doc = sluice::hand_over::HandOver {
@@ -9973,10 +9974,14 @@ fn a_run_handed_over_keeps_following_and_counts_its_passes() {
     assert_eq!((doc.passes, doc.told), (1, true));
 
     let mut afresh = Following::handed(Some(3), &doc);
-    let mut follower = Follower::new(&here, FollowKind::Run);
-    let next = afresh.next(&here, &mut follower, &pause, &mut out).unwrap();
+    let mut runner = Runner::new(&host.process, Some(&here), folder, tick);
+    let next = afresh
+        .next(&mut runner, &f.clock, &pause, &mut out)
+        .unwrap();
     assert_eq!(next, Driven::Next);
-    let last = afresh.next(&here, &mut follower, &pause, &mut out).unwrap();
+    let last = afresh
+        .next(&mut runner, &f.clock, &pause, &mut out)
+        .unwrap();
     assert_eq!(last, Driven::Ended(0));
     assert_eq!(afresh.passes(), 3);
     assert!(afresh.told(), "it says again nothing it said");

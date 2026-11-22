@@ -44,6 +44,10 @@ pub struct Records {
     /// this pass, read again at every lock, read and write and forgotten
     /// at the next pass.
     routes: RefCell<BTreeMap<String, Route>>,
+    /// The branches `sluice host`'s last ask read as last fetched, with the
+    /// remote's refusal, which a read's binding holds as the host does (the
+    /// change `sluice-host-answers-every-read`, design D3).
+    seeded: BTreeMap<String, ReadRefused>,
     /// Where each branch was last read from, so a write is refused where
     /// a move took its records elsewhere since (62).
     read_from: RefCell<BTreeMap<String, Option<String>>>,
@@ -191,6 +195,7 @@ impl Records {
             signing,
             remotes: RefCell::default(),
             routes: RefCell::default(),
+            seeded: BTreeMap::new(),
             read_from: RefCell::default(),
             host: super::checks::hostname(),
             listed: RefCell::default(),
@@ -214,6 +219,25 @@ impl Records {
     }
 
     /// The same binding, reading the results log from `from` (design D17).
+    /// The same records, reading each branch of `stale` as last fetched,
+    /// with the refusal, where its own remote's read says nothing of it
+    /// (design D3).
+    pub fn seeded(self, stale: BTreeMap<String, ReadRefused>) -> Self {
+        Records {
+            seeded: stale,
+            ..self
+        }
+    }
+
+    /// Each branch its remotes read as last fetched, with the refusal.
+    pub fn stale_all(&self) -> BTreeMap<String, ReadRefused> {
+        let mut all = self.seeded.clone();
+        for r in self.remotes.borrow().values() {
+            all.extend(r.stale_all());
+        }
+        all
+    }
+
     pub fn reading_results(self, from: ResultsFrom) -> Self {
         Records {
             results_from: from,
@@ -964,9 +988,12 @@ impl State for Records {
     }
 
     fn stale(&self, branch: &str) -> Option<ReadRefused> {
-        let remote = self.routes.borrow().get(branch)?.remote.clone()?;
-        let r = self.remotes.borrow().get(&remote).cloned()?;
-        r.stale(branch)
+        let own = || {
+            let remote = self.routes.borrow().get(branch)?.remote.clone()?;
+            let r = self.remotes.borrow().get(&remote).cloned()?;
+            r.stale(branch)
+        };
+        own().or_else(|| self.seeded.get(branch).cloned())
     }
 
     fn refusal(&self, branch: &str) -> Result<Option<Vec<u8>>> {
