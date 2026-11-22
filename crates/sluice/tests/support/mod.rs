@@ -921,6 +921,77 @@ impl sluice::host_process::HostProcess for FakeProcess {
         };
         Ok(Some((named, view)))
     }
+
+    fn subscribe<'a>(
+        &'a self,
+        here: Option<&'a sluice::host_process::Here<'a, 'a>>,
+        _: Vec<sluice::host_process::protocol::Added>,
+    ) -> anyhow::Result<Box<dyn sluice::host_process::Subscription + 'a>> {
+        if ENDS.with(|e| e.replace(false)) {
+            anyhow::bail!("sluice's host process ended");
+        }
+        let here = here.ok_or_else(|| anyhow::anyhow!("the fakes' host reads in a binding"))?;
+        Ok(Box::new(FakeSubscription { here, last: None }))
+    }
+
+    fn pass_of(
+        &self,
+        here: Option<&sluice::host_process::Here<'_, '_>>,
+        _: &std::path::Path,
+        _: Option<chrono::DateTime<chrono::Utc>>,
+    ) -> anyhow::Result<sluice::host_process::pass::Report> {
+        let here = here.ok_or_else(|| anyhow::anyhow!("the fakes' host reads in a binding"))?;
+        sluice::host_process::HostProcess::pass(self, here)
+    }
+}
+
+/// A subscription of the fakes' host process (the change
+/// `sluice-host-answers-every-read`, design D6): the overview of the
+/// repository that the command binds, sent where it changed in a part
+/// other than its time, as `sluice host` sends it.
+struct FakeSubscription<'a> {
+    here: &'a sluice::host_process::Here<'a, 'a>,
+    last: Option<serde_json::Value>,
+}
+
+impl sluice::host_process::Subscription for FakeSubscription<'_> {
+    fn asked_only(&self) -> bool {
+        true
+    }
+
+    fn say(&mut self, _: &sluice::host_process::protocol::SubscriptionAsk) -> anyhow::Result<()> {
+        Ok(())
+    }
+
+    fn next(
+        &mut self,
+        _: std::time::Duration,
+    ) -> anyhow::Result<Option<sluice::host_process::protocol::SubscriptionLine>> {
+        let h = self.here;
+        let doc = sluice::overview::subscribed(
+            h.s,
+            h.host,
+            h.clock,
+            h.pulls,
+            std::time::Duration::from_secs(1),
+        );
+        let mut untimed = doc.clone();
+        if let Some(o) = untimed.as_object_mut() {
+            o.remove("at");
+        }
+        if self.last.as_ref() == Some(&untimed) {
+            return Ok(None);
+        }
+        self.last = Some(untimed);
+        Ok(Some(
+            sluice::host_process::protocol::SubscriptionLine::Document(
+                sluice::host_process::subscription::Document {
+                    folder: std::path::PathBuf::from("."),
+                    overview: doc,
+                },
+            ),
+        ))
+    }
 }
 
 /// A follow of the fakes' host process, which reports nothing of its own:

@@ -30,6 +30,7 @@ pub mod runs;
 pub mod scrub;
 pub mod sessions;
 pub mod signing;
+pub mod subscriber;
 pub mod telemetry;
 pub mod told;
 pub mod words;
@@ -456,6 +457,11 @@ pub enum Command {
         /// Print the document again, as one line, each time it changes.
         #[arg(long, requires = "json")]
         watch: bool,
+        /// Watch the folders that the lines of standard input name: `add
+        /// <folder>` and `remove <folder>`, each document printed with
+        /// its `folder`.
+        #[arg(long, requires = "watch")]
+        stdin: bool,
     },
     /// Change a queued submission's order, until it is under test.
     #[command(
@@ -2577,7 +2583,13 @@ fn dispatch(
                 Ok(0)
             }
         },
-        Command::Overview { json, watch } => {
+        // The change `sluice-host-answers-every-read`, design D7: a watch
+        // follows `sluice host` on a subscription of its folder.
+        Command::Overview { watch: true, .. } => {
+            let folder = std::env::current_dir()?;
+            subscriber::watch(host.host_process(), Some(&here), folder, clock, pause, out)
+        }
+        Command::Overview { json, watch, .. } => {
             overview::run(&s, host, clock, pulls, json, watch, pause, out)
         }
         Command::Amend {

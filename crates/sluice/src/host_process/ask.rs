@@ -11,7 +11,9 @@ use sluice_seams::{Part, RunKind};
 
 use super::client::{Client, Connection};
 use super::pass::Report;
-use super::protocol::{Answer, FollowKind, Named, Reading, RoomView};
+use super::protocol::{
+    Added, Answer, FollowKind, Named, Reading, RoomView, SubscriptionAsk, SubscriptionLine,
+};
 use super::room::Why;
 use crate::{exec, PullRequests};
 
@@ -44,6 +46,19 @@ pub trait Following {
     /// A pass's report, waiting up to `wait` for one; `None` where none
     /// came. An error where the host process ended under it.
     fn next(&mut self, wait: Duration) -> Result<Option<Report>>;
+}
+
+/// A subscription to the host process, while it lives (the change
+/// `sluice-host-answers-every-read`, design D6 to D8).
+pub trait Subscription {
+    /// Whether the host process passes only when asked: its follower asks
+    /// a pass at each of its ticks (D14).
+    fn asked_only(&self) -> bool;
+    /// Send an `add` or a `remove` line.
+    fn say(&mut self, ask: &SubscriptionAsk) -> Result<()>;
+    /// The next line, waiting up to `wait`; `None` where none came. An
+    /// error where the host process ended under it.
+    fn next(&mut self, wait: Duration) -> Result<Option<SubscriptionLine>>;
 }
 
 /// A session's or a preview's ask for room, while it lives (D12).
@@ -102,6 +117,25 @@ pub trait HostProcess {
     /// The process that answers now and its room; `None` where none
     /// answers, and nothing is started.
     fn room(&self, here: &Here<'_, '_>) -> Result<Option<(Named, RoomView)>>;
+
+    /// A subscription of `folders`, the host process started where none
+    /// answers (design D6). `here` is the binding a test's host process
+    /// reads in; the socket's takes none.
+    fn subscribe<'a>(
+        &'a self,
+        here: Option<&'a Here<'a, 'a>>,
+        folders: Vec<Added>,
+    ) -> Result<Box<dyn Subscription + 'a>>;
+
+    /// A pass of `repository` now, at the asker's time `at`, once it ends:
+    /// a follower's ask at its tick where passes are taken only when asked
+    /// (D14). `here` as for [`HostProcess::subscribe`].
+    fn pass_of(
+        &self,
+        here: Option<&Here<'_, '_>>,
+        repository: &Path,
+        at: Option<chrono::DateTime<chrono::Utc>>,
+    ) -> Result<Report>;
 }
 
 /// The host process reached through its socket: the binding's.
@@ -190,6 +224,45 @@ impl HostProcess for Socketed {
 
     fn room(&self, _: &Here<'_, '_>) -> Result<Option<(Named, RoomView)>> {
         self.client()?.room()
+    }
+
+    fn subscribe<'a>(
+        &'a self,
+        _: Option<&'a Here<'a, 'a>>,
+        folders: Vec<Added>,
+    ) -> Result<Box<dyn Subscription + 'a>> {
+        let c = self.client()?.subscribe(folders)?;
+        self.mode.set(Some(c.named.asked_only));
+        Ok(Box::new(Subscribed(c)))
+    }
+
+    fn pass_of(
+        &self,
+        _: Option<&Here<'_, '_>>,
+        repository: &Path,
+        at: Option<chrono::DateTime<chrono::Utc>>,
+    ) -> Result<Report> {
+        self.client()?.pass(repository, at)
+    }
+}
+
+/// A subscription on the host process's socket (design D6).
+struct Subscribed(Connection);
+
+impl Subscription for Subscribed {
+    fn asked_only(&self) -> bool {
+        self.0.named.asked_only
+    }
+
+    fn say(&mut self, ask: &SubscriptionAsk) -> Result<()> {
+        self.0.say(ask)
+    }
+
+    fn next(&mut self, wait: Duration) -> Result<Option<SubscriptionLine>> {
+        match self.0.line(Some(wait))? {
+            Some(SubscriptionLine::Error(words)) => Err(anyhow!("{words}")),
+            line => Ok(line),
+        }
     }
 }
 
@@ -473,5 +546,24 @@ impl HostProcess for Inside {
 
     fn room(&self, _: &Here<'_, '_>) -> Result<Option<(Named, RoomView)>> {
         Ok(Some((self.named.clone(), super::view_of(&self.room)?)))
+    }
+
+    fn subscribe<'a>(
+        &'a self,
+        _: Option<&'a Here<'a, 'a>>,
+        _: Vec<Added>,
+    ) -> Result<Box<dyn Subscription + 'a>> {
+        Err(anyhow!("the host process subscribes to nothing of its own"))
+    }
+
+    fn pass_of(
+        &self,
+        _: Option<&Here<'_, '_>>,
+        _: &Path,
+        _: Option<chrono::DateTime<chrono::Utc>>,
+    ) -> Result<Report> {
+        Err(anyhow!(
+            "a pass is asked of the host process, not from within it"
+        ))
     }
 }

@@ -86,7 +86,7 @@ use crate::exec::Host;
 use crate::host_settings::{HostSettings, Look};
 use crate::instance::Instance;
 use crate::profiles::places::{repository_key, user_scratch, USER_SCRATCH_VAR};
-pub use ask::{Following, Here, Holding, Holds, HostProcess, Socketed};
+pub use ask::{Following, Here, Holding, Holds, HostProcess, Socketed, Subscription};
 use folder::{Folder, How};
 use protocol::{Answer, FollowKind, Hello, Named, Request, RoomView, Started};
 use room::{Asked, Asker, Room, Shared};
@@ -2000,6 +2000,16 @@ impl subscription::Serves for Subscribed {
         let run = kind == FollowKind::Run;
         let mut follower = hosting.tasks.handle(&repository).following(kind, run);
         let reports = run.then(|| follower.reports());
+        // Where passes are taken only when asked, the follower's first
+        // document is of a reading afresh, which its coming asks for: the
+        // repository is read before its first document is sent (D14).
+        if asked_only() && kind != FollowKind::Run {
+            let tasks = hosting.tasks.clone();
+            let read = repository.clone();
+            hosting.connected.spawn(async move {
+                tasks.read(&read, READ_TICK, read_for(), true).await;
+            });
+        }
         Ok(subscription::Served {
             documents,
             reports,

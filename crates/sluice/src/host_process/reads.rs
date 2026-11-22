@@ -219,7 +219,11 @@ fn cli_of(request: Request) -> Option<Cli> {
             ".".to_string(),
         ),
         Request::Overview { json, .. } => (
-            Some(Command::Overview { json, watch: false }),
+            Some(Command::Overview {
+                json,
+                watch: false,
+                stdin: false,
+            }),
             false,
             ".".to_string(),
         ),
@@ -423,5 +427,22 @@ impl HostProcess for Answering {
 
     fn room(&self, _: &Here<'_, '_>) -> Result<Option<(Named, RoomView)>> {
         Ok(Some((self.named.clone(), super::view_of(&self.room)?)))
+    }
+
+    fn subscribe<'a>(
+        &'a self,
+        _: Option<&'a Here<'a, 'a>>,
+        _: Vec<super::protocol::Added>,
+    ) -> Result<Box<dyn super::ask::Subscription + 'a>> {
+        Err(anyhow!("a read subscribes to nothing"))
+    }
+
+    fn pass_of(
+        &self,
+        _: Option<&Here<'_, '_>>,
+        _: &Path,
+        _: Option<chrono::DateTime<chrono::Utc>>,
+    ) -> Result<Report> {
+        Err(anyhow!("a read runs no pass"))
     }
 }

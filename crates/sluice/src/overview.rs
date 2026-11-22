@@ -317,6 +317,23 @@ pub fn run(
     }
 }
 
+/// The overview document that `sluice host` sends a subscription of the
+/// repository `s` binds, naming its tick (the change
+/// `sluice-host-answers-every-read`, design D6): as a one-shot overview
+/// prints it, a read it could not make its error document.
+pub fn subscribed(
+    s: &Sluice<'_>,
+    host: &dyn Host,
+    clock: &dyn Clock,
+    pulls: &dyn PullRequests,
+    tick: Duration,
+) -> serde_json::Value {
+    let doc = read_held(s, host, clock, Follows::Kept(pulls), &mut None).unwrap_or_else(|e| {
+        crate::told::document(crate::told::Kind::Internal, &format!("{e:#}"), &[])
+    });
+    ticked(doc, tick)
+}
+
 /// `doc` as a reader writes it: naming its tick, the pause between its
 /// reads, in whole seconds, so a forecast can tell whether it keeps it
 /// (64, 129).

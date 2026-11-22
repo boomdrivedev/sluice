@@ -58,9 +58,20 @@ impl Watch {
         Watch::spawn(d.command(d.repo.dir()), stderr, None)
     }
 
-    fn spawn(mut c: Command, stderr: PathBuf, own: Option<(Scratch, Scratch)>) -> Watch {
+    fn spawn(c: Command, stderr: PathBuf, own: Option<(Scratch, Scratch)>) -> Watch {
+        Watch::spawn_with(c, stderr, own, &[])
+    }
+
+    /// [`Watch::spawn`], with `more` after its arguments.
+    fn spawn_with(
+        mut c: Command,
+        stderr: PathBuf,
+        own: Option<(Scratch, Scratch)>,
+        more: &[&str],
+    ) -> Watch {
         let mut child = c
             .args(["overview", "--json", "--watch"])
+            .args(more)
             .stdout(Stdio::piped())
             .stderr(File::create(&stderr).unwrap())
             .spawn()
@@ -395,4 +406,145 @@ fn a_followers_overview_carries_refused_writes() {
         followed["branches"][0]["refused_writes"], *causes,
         "{followed}"
     );
+}
+
+/// `sluice overview --json --watch --stdin` in `d`'s repository, its input
+/// held by the test, ended when dropped (the change
+/// `sluice-host-answers-every-read`, design D7).
+struct Served {
+    watch: Watch,
+    input: Option<std::process::ChildStdin>,
+}
+
+impl Served {
+    fn start(d: &OnDisk) -> Served {
+        let stderr = d.state.path().join("served-stderr");
+        let mut c = d.command(d.repo.dir());
+        c.stdin(Stdio::piped());
+        let mut watch = Watch::spawn_with(c, stderr, None, &["--stdin"]);
+        let input = watch.child.stdin.take();
+        Served { watch, input }
+    }
+
+    fn say(&mut self, line: &str) {
+        use std::io::Write;
+        let input = self.input.as_mut().expect("its input is open");
+        writeln!(input, "{line}").unwrap();
+        input.flush().unwrap();
+    }
+
+    /// Its input closed.
+    fn close(&mut self) {
+        self.input = None;
+    }
+}
+
+/// resident-subscriptions, "Two folders from the input": the watch reads
+/// `add <a>` and `add <b>`, for worktrees of two repositories, prints one
+/// line for each with its `folder`, and holds one connection to `sluice
+/// host`.
+#[test]
+fn the_watch_serves_the_folders_on_its_input() {
+    let d = OnDisk::new("served-two", MAIN);
+    let b = d.another("served-two-b", MAIN);
+    let mut served = Served::start(&d);
+    served.say(&format!("add {}", d.repo.dir().display()));
+    served.say(&format!("add {}", b.dir().display()));
+    let mut folders = std::collections::BTreeSet::new();
+    let until = Instant::now() + Duration::from_secs(20);
+    while folders.len() < 2 && Instant::now() < until {
+        for line in served.watch.lines_within(Duration::from_millis(500)) {
+            assert_eq!(line["schema"], "sluice/overview@1", "{line}");
+            folders.insert(line["folder"].as_str().unwrap().to_string());
+        }
+    }
+    let want: std::collections::BTreeSet<String> = [d.repo.dir(), b.dir()]
+        .iter()
+        .map(|p| p.display().to_string())
+        .collect();
+    assert_eq!(folders, want, "{}", served.watch.stderr());
+    // One connection: the host process accepted one for the watch, which
+    // subscribed once.
+    let log = std::fs::read_to_string(d.state.path().join("sluice/host/log")).unwrap_or_default();
+    assert!(!log.contains("a connection:"), "{log}");
+}
+
+/// resident-subscriptions, "The watch command serves the folders named on
+/// its input": its input ends while it serves no folder: it ends, 0.
+#[test]
+fn the_watch_ends_when_its_input_ends_with_no_folder() {
+    let d = OnDisk::new("served-ends", MAIN);
+    let mut served = Served::start(&d);
+    served.say(&format!("add {}", d.repo.dir().display()));
+    assert_eq!(served.watch.first_line()["schema"], "sluice/overview@1");
+    served.say(&format!("remove {}", d.repo.dir().display()));
+    served.close();
+    let status = served.watch.ended_within(ENDS_WITHIN);
+    assert!(
+        status.is_some_and(|s| s.success()),
+        "{status:?}: {}",
+        served.watch.stderr()
+    );
+}
+
+/// Its input ends while it serves a folder: the watch goes on.
+#[test]
+fn the_watch_goes_on_when_its_input_ends_with_folders() {
+    let d = OnDisk::new("served-goes-on", MAIN);
+    let mut served = Served::start(&d);
+    served.say(&format!("add {}", d.repo.dir().display()));
+    assert_eq!(served.watch.first_line()["schema"], "sluice/overview@1");
+    served.close();
+    assert_eq!(
+        served.watch.ended_within(TICKS),
+        None,
+        "{}",
+        served.watch.stderr()
+    );
+}
+
+/// `sluice host` ends under the watch: the watch exits 3, as a read that
+/// `sluice host` did not answer.
+#[test]
+fn the_watch_exits_3_when_sluice_host_ends() {
+    let d = OnDisk::new("served-host-ends", MAIN);
+    let mut served = Served::start(&d);
+    served.say(&format!("add {}", d.repo.dir().display()));
+    let first = served.watch.first_line();
+    let pid = first["host_process"]["pid"]
+        .as_i64()
+        .expect("a host process") as i32;
+    let _ = nix::sys::signal::kill(
+        nix::unistd::Pid::from_raw(pid),
+        nix::sys::signal::Signal::SIGKILL,
+    );
+    let status = served.watch.ended_within(ENDS_WITHIN);
+    assert_eq!(
+        status.and_then(|s| s.code()),
+        Some(3),
+        "{}",
+        served.watch.stderr()
+    );
+    assert!(
+        served
+            .watch
+            .stderr()
+            .contains("sluice's host process did not answer"),
+        "{}",
+        served.watch.stderr()
+    );
+}
+
+/// resident-subscriptions, "A watch of one folder": with no `--stdin`,
+/// each line is the overview as a watch printed it before this change,
+/// with no `folder`.
+#[test]
+fn a_watch_of_one_folder_prints_as_before() {
+    let d = OnDisk::new("watch-one-folder", MAIN);
+    let watch = Watch::of(&d);
+    let first = watch.first_line();
+    assert_eq!(first["schema"], "sluice/overview@1", "{first}");
+    assert!(first.get("folder").is_none(), "{first}");
+    assert_eq!(first["tick"], 1, "{first}");
+    assert!(first.get("set_up").is_none(), "{first}");
 }

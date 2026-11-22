@@ -159,6 +159,11 @@ fn main() {
     if let Some(code) = read(&cli) {
         std::process::exit(code);
     }
+    // A watch follows sluice's host process on a subscription, and binds
+    // no repository either (design D7).
+    if let Some(code) = watch(&cli) {
+        std::process::exit(code);
+    }
     let retry = Rc::new(retry(&cli));
     // The forge check reads the host's config itself, and says what in it
     // is wrong rather than failing on it.
@@ -396,7 +401,9 @@ fn read_request(cli: &Cli, folder: &Path) -> Option<sluice::host_process::protoc
             json: *json,
             branch: branch.clone(),
         },
-        Some(Command::Overview { json, watch: false }) => Request::Overview {
+        Some(Command::Overview {
+            json, watch: false, ..
+        }) => Request::Overview {
             folder: folder.to_path_buf(),
             json: *json,
         },
@@ -466,6 +473,47 @@ fn read(cli: &Cli) -> Option<i32> {
             Some(3)
         }
     }
+}
+
+/// `sluice overview --json --watch`, with `--stdin` or without, as a
+/// client of a subscription to sluice's host process: its exit; `None` for
+/// any other command (the change `sluice-host-answers-every-read`, design
+/// D7).
+fn watch(cli: &Cli) -> Option<i32> {
+    let Some(Command::Overview {
+        watch: true, stdin, ..
+    }) = &cli.command
+    else {
+        return None;
+    };
+    let mut out = std::io::stdout();
+    let every = sluice::tick(cli.command.as_ref());
+    let skipped = Skipped::new(every);
+    let (clock, pause): (&dyn Clock, &dyn Pause) = match std::env::var(ROUND_SLEEP_VAR).as_deref() {
+        Ok("record") => (&skipped, &skipped),
+        _ => (&SystemClock, &Sleep(every)),
+    };
+    let watched = sluice::stop_on_interrupt()
+        .and_then(|()| Ok(std::env::current_dir()?))
+        .and_then(|folder| match stdin {
+            true => sluice::subscriber::watch_input(&folder, &mut out),
+            false => sluice::subscriber::watch(
+                &sluice::host_process::Socketed::default(),
+                None,
+                folder,
+                clock,
+                pause,
+                &mut out,
+            ),
+        });
+    Some(match watched {
+        Ok(code) => code,
+        Err(e) => {
+            sluice::telemetry::error(&format!("sluice: {e:#}"));
+            tell_json(true, &e);
+            3
+        }
+    })
 }
 
 /// Raise this process's soft limit on open files to its hard limit, as

@@ -566,6 +566,13 @@ impl Connection {
         }
     }
 
+    /// A second handle of the connection's stream, which writes the lines
+    /// of a subscription from another thread and shuts it down (design
+    /// D7).
+    pub fn stream(&self) -> Result<UnixStream> {
+        Ok(self.writer.try_clone()?)
+    }
+
     /// Send `ask` on a subscription: an `add` or a `remove` line (design
     /// D6).
     pub fn say(&mut self, ask: &super::protocol::SubscriptionAsk) -> Result<()> {
