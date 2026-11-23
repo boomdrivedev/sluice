@@ -14,6 +14,6 @@ tasks:
   # rule makes a transition the model does not declare. A warning fails it.
   typecheck:
     command: 'allium check models'
-    inputs: ['*.allium', '/devenv.nix', '/devenv.lock']
+    inputs: ['**/*.allium', '/devenv.nix', '/devenv.lock']
     tags: [check-fast]
     options: {runFromWorkspaceRoot: true}
