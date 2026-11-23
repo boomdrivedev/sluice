@@ -185,10 +185,12 @@ an agent's `sluice exec`, a preview's command, `sluice equip`'s steps
 and a worktree's release command. Each run is its child, in a process
 group of its own, named in `host/workers/` before it starts, and ends
 when the host process stops, unless the host process starts afresh in
-place, which keeps them. `sluice exec`, `sluice preview`, `sluice equip`
-and `sluice release` in a worktree send their folder and their
-arguments, and print what the host process sends as it comes; Ctrl-C on
-one ends its run, and a preview's command stays up until its release.
+place, which keeps them. `sluice exec`, `sluice preview` and `sluice
+equip` send their folder and their arguments, and print what the host
+process sends as it comes; Ctrl-C on one ends its run, and a preview's
+command stays up until its release. `sluice release` in a worktree is
+sent the same way where a host process answers; where none does, it
+frees what it reads of the records itself and starts none.
 
 A checkout's name is written as one file name, each `/` of it as `%2F`
 (or `+2F` for a directory a test works in), so a worktree's whole path
