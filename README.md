@@ -106,6 +106,10 @@ combination passes.
   its uncommitted and untracked files included, in its worktree with
   ports of its own and the branch's limits, sharing the host with the
   queue's runs; a clean run is recorded for the submission that follows.
+  sluice's host process runs them, as it runs the queue's, and the
+  command prints their output as it comes. Ctrl-C on the command, or the
+  command killed, ends its run; a preview's command stays up after
+  `sluice preview` returns, until its release.
 - **Try what landed.** `sluice preview` brings a revision a branch landed
   up on the repository's own stack, at addresses a person opens, and
   keeps it until it is released: one per landing, with nothing kept

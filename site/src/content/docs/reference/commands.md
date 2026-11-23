@@ -366,6 +366,17 @@ once `moon setup` has, though it runs in place of moon's tasks. When a
 step fails, the command never starts, and exec exits `3`, naming the
 step and what it printed.
 
+sluice's host process runs the tests or the command, as it runs a
+combination's: `sluice exec` sends it the worktree, the arguments and
+the variables of its own environment that a run keeps, `PATH`, `HOME`
+and the locale among them, and prints what the run writes as it comes.
+The run takes those variables, so it finds what the agent's own shell
+finds. Ctrl-C on `sluice exec`, or the command killed, ends the run,
+gives its part of the bound back and leaves the worktree's last result
+`stopped`; a `sluice exec` stopped while it waits for room is counted
+nowhere. When sluice's host process stops, the run ends with it, and
+`sluice exec` says that sluice's host process ended and exits `3`.
+
 Run suites through `sluice exec` so the agents on one host take turns
 under its bound rather than all running at once. A quick, narrow call,
 such as a type check or one unit test, can run directly.
@@ -457,6 +468,11 @@ It holds nothing: no ports, no record of the worktree and no part of
 the host's bound, and it never waits for room in it. Nothing of its own
 is left once it answers, so `sluice release` there runs the policy's
 release command, as in any worktree sluice holds nothing for.
+
+sluice's host process runs the steps, with the variables of the
+command's own environment that a run keeps, and `sluice equip` prints
+each step as it ends. So a worktree is equipped with no toolchain and no
+runner on the command's own `PATH`, where the toolchain puts them there.
 
 ## Worktrees sluice holds
 
@@ -821,6 +837,10 @@ runs, waiting while the bound is full and never using the part
 `[runs] reserved` keeps for submissions; once it has ended, the preview
 counts against nothing. Ctrl-C while it waits leaves the preview to be
 started by the next `sluice preview` of that revision.
+
+sluice's host process runs the command, as it runs a combination's
+tests, and the command stays up after `sluice preview` returns, until
+its release or its failure ends it.
 
 Before the command, sluice equips the preview's checkout as it equips a
 combination's ([`sluice equip`](#sluice-equip)): under moon, it installs

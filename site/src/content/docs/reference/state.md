@@ -180,6 +180,16 @@ ends. One process runs for each user: a second one started while the
 first holds `host/lock` ends at once. Removing `host/`, or the whole
 state folder, ends the process at its next look.
 
+sluice's host process runs every run on the host: a combination's tests,
+an agent's `sluice exec`, a preview's command, `sluice equip`'s steps
+and a worktree's release command. Each run is its child, in a process
+group of its own, named in `host/workers/` before it starts, and ends
+when the host process stops, unless the host process starts afresh in
+place, which keeps them. `sluice exec`, `sluice preview`, `sluice equip`
+and `sluice release` in a worktree send their folder and their
+arguments, and print what the host process sends as it comes; Ctrl-C on
+one ends its run, and a preview's command stays up until its release.
+
 A checkout's name is written as one file name, each `/` of it as `%2F`
 (or `+2F` for a directory a test works in), so a worktree's whole path
 is one name. macOS and Linux allow a file name of 255 bytes, so a name
@@ -220,8 +230,9 @@ room from the count that chose the run to its start, and holds its
 host process counts the same, so the two count each other. One whose
 run has ended, or whose starter stopped before the run began, holds
 nothing: the next run that starts removes it. A file in `sessions/` is there while its agent's run is going, and
-its `sluice exec` rewrites it as each task ends, for `sluice overview`
-to show; nothing that decides a result reads it.
+sluice's host process, which runs the `sluice exec`, rewrites it as each
+task ends, for `sluice overview` to show; nothing that decides a result
+reads it.
 
 One process on the host reads a repository's queues: sluice's host
 process, for each repository that it holds. It keeps each repository's
