@@ -10,126 +10,52 @@ it (129; ADR 0056; rule core.25).
 
 ### Requirement: A watch that finds a reader follows its document
 
-A `sluice overview --json --watch` that finds a live reader of its
-repository on the host SHALL read no records, policy or checkouts itself.
-It SHALL print the reader's document at its start and again each time it
-changes, all but its time, each as one line, exactly as it would have
-printed what it read itself.
+A `sluice overview --json --watch` SHALL follow its repository's document on a subscription to `sluice host`, and SHALL read no records, policy or checkouts itself. It SHALL print the document at its start and at each change in a part other than its time, each as one line.
+
+Before: a watch read a file under `readers/`. Now: it gets the document on a subscription. (`reads-go-through-the-resident@69134e5825d7`)
 
 #### Scenario: A follower prints what the reader wrote
 
-- **WHEN** a live reader's document holds submission `#7` testing on
-  `main`, which the repository's records do not hold, and `sluice overview
-  --json --watch` runs in the repository
-- **THEN** its first line is that document, with `#7` testing, and no
-  line it prints is read from the records
+- **WHEN** the document of `sluice host` holds submission `#7` testing on `main`, which the repository's records do not hold, and `sluice overview --json --watch` runs in the repository
+- **THEN** its first line is that document, with `#7` testing, and no line that it prints is read from the records
 
 #### Scenario: A follower prints each change once
 
-- **WHEN** a watch follows a reader whose document changes from `#7`
-  testing to `#7` landed, and is then written again with only its time
-  changed
+- **WHEN** a watch follows `sluice host`, whose document changes from `#7` testing to `#7` landed, and then changes only in its time
 - **THEN** the watch prints two lines, the second with `#7` landed
 
 ### Requirement: A follower wait reads its own record once its submission leaves the queue
 
-When a follower wait's submission is no longer among the reader's
-document's submissions still in play, the wait SHALL read that one
-submission's record once and report its outcome from it, as
-`submission-wait` states: landed, failed, conflict or withdrawn.
+When the reader's document no longer holds a wait's submission among the submissions in play, the wait SHALL ask `sluice host` for that submission's record once. It SHALL report its outcome from the answer, as `submission-wait` states: landed, failed, conflict or withdrawn.
+
+Before: the wait read the record itself. Now: `sluice host` answers it. (`reads-go-through-the-resident@69134e5825d7`)
 
 #### Scenario: Landed while followed
 
-- **WHEN** a wait on `#7` follows a reader, and `#7` lands, so the next
-  document no longer holds it among the queue's submissions
-- **THEN** the wait prints `passed · landed as <rev>`, the landing's
-  revision as submission 7's record holds it, and exits 0
+- **WHEN** a wait on `#7` follows `sluice host`, and `#7` lands, so the next document no longer holds it among the queue's submissions
+- **THEN** the wait prints `passed · landed as <rev>`, the landing's revision as `sluice host` answers submission 7's record, and exits 0
+- **AND** the wait read no file of the records
 
 #### Scenario: Withdrawn while followed
 
-- **WHEN** a wait on `#7` follows a reader and `#7` is withdrawn
-- **THEN** the wait exits 4, as a wait that read the records would
+- **WHEN** a wait on `#7` follows `sluice host`, and `#7` is withdrawn
+- **THEN** the wait exits 4, as a wait that read the records did, and read no file of the records
 
 ### Requirement: A reader serves its own host
 
-The host process SHALL read each repository it holds apart, as its
-common git directory names it, and only on its own host: each
-repository's lock and document are in the host's own sluice state,
-beside no other host's. A watch or wait of a repository SHALL follow
-only that repository's document.
+`sluice host` SHALL read each repository that it holds apart, as its common git directory names it, and only on its own host. It SHALL keep each repository's document in its own process, and SHALL send it only on its own socket. A watch or a wait of a repository SHALL follow only that repository's document.
+
+Before: each repository's lock and document were files in the host's state. Now: the document is in `sluice host`, and no file holds it.
 
 #### Scenario: Two repositories
 
-- **WHEN** `sluice overview --json --watch` runs in one repository, and a
-  second watch runs in another repository on the host
-- **THEN** one host process reads both, and each watch prints its own
-  repository's queues
+- **WHEN** `sluice overview --json --watch` runs in one repository, and a second watch runs in another repository on the host
+- **THEN** one `sluice host` reads both, and each watch prints its own repository's queues
 
 #### Scenario: Two worktrees of one repository
 
-- **WHEN** a watch runs in one worktree of a repository and another watch
-  runs in another worktree of the same repository
-- **THEN** both follow the one document the host process writes for the
-  repository
-
-### Requirement: No other reader's lease is taken
-
-The host process SHALL NOT take the lease of a reader of its own
-version, of a newer one, or of one that names no version, and no watch,
-`sluice wait` or waiting `sluice submit` SHALL take a lease at all: each
-follows the reader as it finds it.
-
-#### Scenario: A watch of the same version
-
-- **WHEN** the host process of sluice 0.72.0 is a repository's reader and
-  a watch of 0.72.0 runs in the repository
-- **THEN** the watch follows the host process's document for as long as
-  it runs, and never takes a lease
-
-#### Scenario: A reader that names no version
-
-- **WHEN** a live reader's lock is held and the host's state names no
-  version for it, as a reader of a sluice from before versions were
-  named does, and a submit of 0.72.0 runs in the repository
-- **THEN** the host process follows that reader's document for as long
-  as the reader runs, and runs no round of the repository meanwhile
-
-#### Scenario: A newer wait beside an older reader
-
-- **WHEN** a watch of sluice 0.70.0 is the reader and `sluice wait 7` of
-  sluice 0.72.0 runs in the repository
-- **THEN** the wait follows the reader's document, and takes no lease of
-  its own
-
-### Requirement: An older reader whose lease is taken follows
-
-A reader of an older sluice, whether a watch, a `sluice wait` or a
-waiting `sluice submit`, SHALL look at each tick, before it reads,
-whether a newer process has taken its lease. When one has, it SHALL let
-go of its lock and follow the reader's document from then on, reading
-no records, policy or checkouts itself, as any follower does. No two
-processes SHALL read the repository's queues at once.
-
-#### Scenario: An older watch lets go
-
-- **WHEN** a watch of sluice 0.70.0 is the reader, the host process takes
-  its lease, and a submission `#7` is then queued
-- **THEN** the 0.70.0 watch reads nothing after its next tick, and the
-  line it prints with `#7` queued is the document the host process wrote
-
-#### Scenario: An older wait lets go
-
-- **WHEN** `sluice wait 7` of sluice 0.70.0 is the reader and the host
-  process takes its lease
-- **THEN** the wait goes on as a follower: it takes `#7`'s progress from
-  the document the host process writes, and ends as it would have
-
-#### Scenario: Only one reads during the handover
-
-- **WHEN** the host process takes the lease of a reader of 0.70.0
-- **THEN** at every moment until the 0.70.0 reader lets go, the reader's
-  document is written only by the 0.70.0 reader, and after it, only by
-  the host process
+- **WHEN** a watch runs in one worktree of a repository, and another watch runs in another worktree of the same repository
+- **THEN** both follow the one document that `sluice host` keeps for the repository
 
 ### Requirement: A reader that could not read the queues writes the failure as its document
 
@@ -185,33 +111,22 @@ the failure.
 
 ### Requirement: A watch ends only when asked, when its repository is gone, or where it has no sluice
 
-A `sluice overview --json --watch` SHALL end only when it is stopped, when
-whoever reads its output has closed it, when its repository's git
-directory no longer exists, or when its repository has no sluice. A
-failed read of the queues, a failed write of the reader's document, or a
-host process that stopped SHALL NOT end it. A watch whose repository is
-gone SHALL end as a failing overview does, its error document on stdout
-and exit 3.
+A `sluice overview --json --watch` SHALL end only when it is stopped or the reader of its output closed it. It SHALL also end when its repository's git directory is gone, or its repository has no sluice. A failed read of the queues, a document that `sluice host` could not send, or a `sluice host` that stopped SHALL NOT end it. A watch whose repository is gone SHALL end as a failing overview does, with its error document on stdout and exit 3.
 
 #### Scenario: The reader's document cannot be written
 
-- **WHEN** a watch follows the host process and one write of the
-  reader's document fails
-- **THEN** the watch still prints the overview at a later tick, once the
-  document is written, and is still running
+- **WHEN** a watch follows `sluice host`, and its subscription closes before `sluice host` sends one document
+- **THEN** the watch subscribes again at its next tick, prints the overview, and is still running
 
 #### Scenario: The repository is removed
 
-- **WHEN** a watch follows the host process and its repository's git
-  directory is removed
-- **THEN** the watch prints the error document with the read's words and
-  exits 3
+- **WHEN** a watch follows `sluice host`, and its repository's git directory is removed
+- **THEN** the watch prints the error document with the read's words, and exits 3
 
 #### Scenario: Stopped while a failure stands
 
-- **WHEN** a watch has followed an error document for ten ticks and it is
-  stopped with Ctrl-C
-- **THEN** it ends as a stopped watch does, exit 130
+- **WHEN** a watch followed an error document for ten ticks, and it is stopped with Ctrl-C
+- **THEN** it ends as a stopped watch does, with exit 130
 
 ### Requirement: A follower wait passes over a failure document
 
@@ -309,29 +224,6 @@ A watch that follows a reader SHALL print a reader's document with
 - **THEN** the follower prints that document and exits 0, and read no
   records, policy or checkouts itself
 
-### Requirement: A reader that takes the lock passes over an earlier reader's finding
-
-The host process, as it becomes a repository's reader, SHALL remove a
-reader's document with `"set_up": false` left by an earlier reader
-before it reads, so that no watch that starts while it reads ends on
-that earlier finding.
-
-#### Scenario: sluice set up after a watch ended
-
-- **WHEN** a watch ended leaving the reader's document with `"set_up":
-  false`, sluice is then set up and `main` holds `.config/sluice.toml`,
-  and a watch runs again
-- **THEN** it prints the overview with no `set_up` field, the reader's
-  document is that overview, and it is still running
-
-#### Scenario: A watch that starts while the new reader reads
-
-- **WHEN** an earlier reader left the document with `"set_up": false`,
-  the host process has taken the lock and not yet written, and a watch
-  starts
-- **THEN** the watch prints nothing until the host process writes, and
-  does not end
-
 ### Requirement: Whether the repository has sluice is asked again only once the host's revisions or the records' list changed
 
 The host process SHALL ask whether any revision the host holds has a
@@ -361,21 +253,19 @@ policy. The question SHALL start no process (129).
 
 ### Requirement: A reader marks each read and names its tick
 
-The host process SHALL mark in the host's state, beside each
-repository's document, when each read begins, as a pass or a look of the
-repository begins, and when it ends, as that pass or look ends, whether
-or not the document changed, and without rewriting the document when it
-did not. The document SHALL name its tick, the pause between its reads,
-in whole seconds as `tick`: one second while a watch follows the
-repository, three otherwise (64, 129).
+`sluice host` SHALL keep, with each repository's document, when each pass or look of the repository begins and ends, whether or not the document changed. It SHALL NOT make the document again where it did not change. The document SHALL name its tick, the pause between reads, in whole seconds as `tick`: one second while a watch follows the repository, and three otherwise.
+
+Before: the marks were files in the host's state. Now: `sluice host` keeps them in its process.
 
 #### Scenario: A read that changes nothing
-- **WHEN** a watch follows the host process and three of its reads find the queues as they were
-- **THEN** the document's content is as it was after the first, and the mark of its last read's end is the time the third ended
+
+- **WHEN** a watch follows `sluice host`, and three of its reads find the queues as they were
+- **THEN** the document's content is as it was after the first read, and `sluice host` keeps the end of the third read as its last
 
 #### Scenario: The tick is named
-- **WHEN** `sluice overview --json --watch` follows the host process
-- **THEN** the document holds `"tick": 1`, and once the watch has ended and only `sluice wait` follows, it holds `"tick": 3`
+
+- **WHEN** `sluice overview --json --watch` follows `sluice host`
+- **THEN** the document holds `"tick": 1`, and once the watch ended and only `sluice wait` follows, it holds `"tick": 3`
 
 ### Requirement: A reader's ask of a remote brings what a forecast forms from
 
@@ -395,30 +285,20 @@ branch, and it SHALL make no other call to that remote for them (64,
 
 ### Requirement: The host process is each repository's reader
 
-sluice's host process SHALL be the reader of every repository it holds
-on the host (129, 135). A watch or a wait that finds no live reader of
-its repository SHALL reach the host process, starting it where none
-answers, and follow its document, reading no queue itself. Each time the
-overview, all but its time, changes, the host process SHALL replace the
-reader's document with the whole document `sluice overview --json`
-prints, while anything follows the repository.
+`sluice host` SHALL be the reader of each repository that it holds. A watch or a wait SHALL follow its repository on a subscription, starting `sluice host` where none answers, and SHALL read no queue itself. While anything follows the repository, `sluice host` SHALL make the whole document of `sluice overview --json` at each change in a part other than its time.
+
+Before: a follower read a file that `sluice host` wrote. Now: it gets the document on its subscription.
 
 #### Scenario: A watch with no reader
 
-- **WHEN** nothing of sluice's runs on a host, `sluice overview --json
-  --watch` runs in a repository, and a submission is then queued
-- **THEN** a host process is running, the reader's document in the host's
-  state holds the overview at the start, then the overview with the
-  submission queued, each a whole `sluice/overview@1` document, and the
-  watch read no records itself
+- **WHEN** no process of sluice runs on a host, `sluice overview --json --watch` runs in a repository, and a submission is then queued
+- **THEN** `sluice host` runs, and the watch prints the overview at its start and then the overview with the submission queued, each a whole `sluice/overview@1` document
+- **AND** the watch read no records itself
 
 #### Scenario: A wait with no reader
 
-- **WHEN** nothing of sluice's runs on a host and `sluice wait 4` runs in
-  a repository
-- **THEN** the reader's document, written by the host process, holds the
-  whole overview, every branch, checkout and preview of the repository,
-  not only submission 4's branch
+- **WHEN** no process of sluice runs on a host, and `sluice wait 4` runs in a repository
+- **THEN** the document that its subscription gets holds the whole overview, each branch, checkout and preview of the repository, and not only submission 4's branch
 
 ### Requirement: A wait takes its submission from the host process's document
 
@@ -452,72 +332,20 @@ Its exits, its lines and its `--json` record SHALL be as
 
 ### Requirement: A host process that stops is started again within a tick
 
-When the host process ends, by Ctrl-C, a kill or a crash, every watch and
-wait that follows it SHALL reach it again at its own next tick, starting
-it where none answers. Until the new host process writes, each follower
-SHALL go on following the document the last one wrote, and SHALL read
-no records itself (129).
+Where `sluice host` ends by Ctrl-C, a kill or a crash, each watch and wait that follows it SHALL reach it again at its own next tick. It SHALL start `sluice host` where none answers. Until the new `sluice host` sends a document, each follower SHALL keep the last document that it got. It SHALL read no records itself.
+
+Before: a follower read the last document file that the ended `sluice host` wrote. Now: it keeps the last document that its subscription got.
 
 #### Scenario: The host process is killed
 
-- **WHEN** a watch follows the host process and the host process is
-  killed
-- **THEN** within one tick of the watch a host process runs again, and
-  the next document written is the one it read from the records
+- **WHEN** a watch follows `sluice host`, and `sluice host` is killed
+- **THEN** within one tick of the watch a `sluice host` runs again
+- **AND** the next document that the watch gets is the one that `sluice host` read from the records
 
 #### Scenario: The host process is killed under a wait
 
-- **WHEN** `sluice wait 4` follows the host process and the host process
-  is killed before submission 4 is decided
-- **THEN** within one tick of the wait a host process runs again, and the
-  wait reports submission 4's outcome once that process decides it
-
-### Requirement: The host process holding the lease is the one to read
-
-When the host process holds the lease of an older reader that stopped, it
-SHALL be the one to become the reader, and no watch or wait SHALL take
-the reader's place before it.
-
-#### Scenario: An older reader stops
-
-- **WHEN** a watch of a sluice from before the host process is a
-  repository's reader, a host process holds its lease, and that watch is
-  stopped
-- **THEN** the host process is the reader at its next tick, and every
-  watch and wait of the repository follows it
-
-### Requirement: The host process names the version of sluice it is
-
-The host process, as it becomes a repository's reader, SHALL write,
-beside its lock in the host's state, the version of sluice it is, whole,
-so a command that finds it live can tell which sluice reads. The
-reader's document SHALL be unchanged by it.
-
-#### Scenario: The host process becomes the reader
-
-- **WHEN** no sluice watches a repository on the host and `sluice overview
-  --json --watch` of sluice 0.72.0 runs in it
-- **THEN** the host's state names 0.72.0 as the version of the
-  repository's reader, and the reader's document is the overview as
-  `sluice overview --json` prints it, with nothing added
-
-### Requirement: The host process takes an older reader's lease
-
-Where a reader of an older sluice, a watch or a wait of a release from
-before the host process, holds a repository's reader lock, the host
-process SHALL take that reader's lease at its next tick. It SHALL follow
-that reader, reading nothing itself and running no round of the
-repository, until the reader lets go, and SHALL then become the reader
-at its own next tick. Versions SHALL be compared as release numbers.
-
-#### Scenario: A host process beside an older watch
-
-- **WHEN** a watch of sluice 0.70.0 is a repository's reader, and a
-  submit of sluice 0.72.0 runs in the repository
-- **THEN** the host process holds the lease within its next tick, and
-  once the older reader lets go, it is the reader within its next tick,
-  writes the document it read from the records, and the host's state
-  names 0.72.0 as the reader's version
+- **WHEN** `sluice wait 4` follows `sluice host`, and `sluice host` is killed before submission 4 is decided
+- **THEN** within one tick of the wait a `sluice host` runs again, and the wait reports submission 4's outcome once that `sluice host` decides it
 
 ### Requirement: A branch the host process could not read is written unread
 
@@ -538,50 +366,36 @@ written once while it stands.
 
 ### Requirement: A one-shot read waits for a current reading only so long
 
-A one-shot read whose host process has no current reading of its
-repository SHALL wait for the reading it asked for within the round's
-retry bound and a tick. Past that, it SHALL read the records as the host
-holds them, fetching nothing, and say on stderr when the host process
-last read the repository (129; rule core.29).
+A one-shot read whose `sluice host` has no current reading of its repository SHALL wait for one within the round's retry bound and a tick. Past that, `sluice host` SHALL answer from the state that it last kept, fetching nothing, and SHALL say on standard error when it last read the repository.
+
+Before: past the bound, the command read the records itself. Now: `sluice host` answers. (`reads-go-through-the-resident@69134e5825d7`)
 
 #### Scenario: A host process held in a slow look
 
-- **WHEN** the repository's remote does not answer, so the host
-  process's look of it does not end, and `sluice status main` runs
-- **THEN** it prints `main`'s queue as the host holds it, says when the
-  host process last read the repository, fetches nothing itself, and
-  exits 0
+- **WHEN** the repository's remote does not answer, so the reading of it by `sluice host` does not end, and `sluice status main` runs
+- **THEN** it prints `main`'s queue as `sluice host` last kept it, says when `sluice host` last read the repository, and exits 0
+- **AND** the status ran no git and read no file of the records
 
 ### Requirement: A one-shot read is answered from the host process's last reading
 
-`sluice status` in each form, `sluice overview` without `--watch` and
-the home view SHALL ask the host process for a current reading of their
-repository, starting it where none answers, and SHALL then answer from
-it: the overview and the home view from the reader's document, a status
-from the records as the host holds them, its results from the host
-process. None SHALL fetch, become a reader or write the reader's
-document (129; record 0093 as amended 2026-11-13; rule core.25).
+`sluice status` in each form, `sluice overview` without `--watch` and the home view SHALL be answered by `sluice host` from a current reading that it keeps, started where none answers. No read command SHALL fetch, read the records or the results, or write the reader's document.
+
+Before: the command read the records and the results itself. Now: `sluice host` answers. (`reads-go-through-the-resident@69134e5825d7`)
 
 #### Scenario: A one-shot overview beside a current reading
 
-- **WHEN** the host process read the repository within its tick, `main`
-  is on a remote, and `sluice overview --json` runs
-- **THEN** it prints the reader's document of that reading, asks the
-  remote nothing, and reads no result
+- **WHEN** `sluice host` read the repository within its tick, `main` is on a remote, and `sluice overview --json` runs
+- **THEN** it prints the reader's document of that reading, the remote is asked nothing, and the command read no record and no result
 
 #### Scenario: A status with no host process
 
-- **WHEN** no host process runs, `main` is on a remote with `#4`
-  queued, and `sluice status main --json` runs
-- **THEN** a host process is running, `#4` is shown as that process's
-  first reading found it, and the status itself fetched nothing
+- **WHEN** no `sluice host` runs on a bare install, `main` is on a remote with `#4` queued, and `sluice status main --json` runs
+- **THEN** a `sluice host` is running, `#4` is shown as its first reading found it, and the status itself fetched nothing and read no record
 
 #### Scenario: A status during a long round
 
-- **WHEN** the host process's pass of the repository is landing a
-  combination and has run for a minute, and `sluice status main` runs
-- **THEN** it answers at once from the records as the host holds them,
-  with nothing fetched
+- **WHEN** a pass of the repository by `sluice host` started to land a combination a minute ago, and `sluice status main` runs
+- **THEN** `sluice host` answers at once from the state that it keeps, with nothing fetched
 
 ### Requirement: A one-shot read reads what a command changed
 
@@ -599,3 +413,17 @@ records as the host holds them (129; rule core.11).
   stay, and `sluice overview` runs
 - **THEN** it shows `bolt/x` gone, as `sluice status bolt/x` says it is,
   never at its last revision as the reading before the removal had it
+
+### Requirement: A repository held again is read afresh
+
+When `sluice host` holds a repository again after it let the repository go, it SHALL read the repository before it sends a document of it. It SHALL send no finding of an earlier holding, such as an overview with `"set_up": false`.
+
+#### Scenario: sluice set up after a watch ended
+
+- **WHEN** a watch ended on the overview with `"set_up": false`, sluice is then set up so that `main` holds `.config/sluice.toml`, and a watch runs again
+- **THEN** it prints the overview with no `set_up` field, and is still running
+
+#### Scenario: A watch that starts during the first reading
+
+- **WHEN** `sluice host` holds a repository again after a watch ended on `"set_up": false`, and a watch starts before the first reading ends
+- **THEN** the watch prints nothing until that reading ends, and does not end

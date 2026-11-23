@@ -241,7 +241,7 @@ command that started the host process (135).
 
 ### Requirement: A newer sluice's command has an older host process hand over
 
-A newer sluice's command SHALL have an older host process hand over. The older process SHALL finish each task's round and let its locks and socket go. It SHALL then start the newer sluice in its place, with the same pid and its workers. A command of an older sluice SHALL use a newer host process.
+A newer sluice's command SHALL have an older host process hand over. The older process SHALL finish each task's round and let its locks and socket go. It SHALL then start the newer sluice in its place, with the same pid and its workers. Where the older process ends instead, the command SHALL start its own.
 
 Before: the successor was detached, and the runs lost their owner. Now: the successor starts in place and owns the runs. (`sluices-runs-end-with-its-host-process@e814b716f3b1`)
 
@@ -252,23 +252,8 @@ Before: the successor was detached, and the runs lost their owner. Now: the succ
 
 #### Scenario: A round that outlasts a start's wait
 
-- **WHEN** a 0.72.0 command asks a 0.71.0 host process to hand over, and one of its tasks takes twelve seconds to finish its round
-- **THEN** the command waits until a 0.72.0 host process answers with the same pid, and then gets its answer
-
-### Requirement: An older sluice run keeps the repository it drives
-
-Where a `sluice run` of a sluice from before the host process drives a
-repository on the host, the host process SHALL run no round of that
-repository while it lives. It SHALL follow that run's document, and
-SHALL move every other repository. It SHALL take the repository's rounds
-at its first tick after that run ends.
-
-#### Scenario: A repository an older run drives
-
-- **WHEN** an older `sluice run` holds repository A's driver lock, and a
-  submission is queued in A and another in B
-- **THEN** the host process lands B's and runs no round of A, and A's
-  submission is landed by the older run
+- **WHEN** a 0.72.0 command asks a 0.71.0 host process to hand over, and the process ends after one of its tasks takes twelve seconds to finish its round
+- **THEN** the command waits for the 0.71.0 process to end, and then reaches a 0.72.0 host process of its own start
 
 ### Requirement: The overview names the host process and the runs waiting
 
@@ -305,33 +290,40 @@ target SHALL print the same room on its line (150, 71).
 
 ### Requirement: The host process reads each result once and answers by key
 
-The host process SHALL read each recorded result and each signed run
-record once for its life, verifying each signature once, and SHALL
-answer a gate, a status, a verdict and a session run by the keys and
-combinations they ask for, so no read loads or verifies the whole
-history again (129, 69; record 0093 as amended 2026-11-13). A command
-that reads results SHALL ask the host process for them, starting it
-where none answers.
+The host process SHALL read each result and each signed run record once for its life, and verify each signature once. It SHALL answer a gate, a status, a verdict and a session run by the keys and combinations that they ask for. A command SHALL get results only from the host process. Where none answers, the command SHALL exit 3.
+
+Before: a command that could not ask the host process read the results itself. Now: it exits 3. (`reads-go-through-the-resident@69134e5825d7`)
 
 #### Scenario: A signed record verified once
 
-- **WHEN** a branch's records are on its remote with forty signed run
-  records, the host process passes the repository ten times, and `sluice
-  status <n>` runs three times for a submission under test
-- **THEN** each of the forty records was verified once, and no command
-  verified any
+- **WHEN** a branch's records are on its remote with forty signed run records, and the host process passes the repository ten times
+- **AND** `sluice status <n>` runs three times for a submission under test
+- **THEN** each of the forty records was verified once, and no command verified any
 
 #### Scenario: A status reads what it asks for
 
-- **WHEN** the repository's results log holds results of two hundred
-  combinations, and `sluice status <n> --json` runs for a submission
-  whose combination has three
-- **THEN** the status shows the three, and the command read no line of
-  the results log itself
+- **WHEN** the repository's results log holds results of two hundred combinations
+- **AND** `sluice status <n> --json` runs for a submission whose combination has three results
+- **THEN** the status shows the three, and the command read no line of the results log itself
 
 #### Scenario: A result recorded after the index was read
 
-- **WHEN** the host process has read the results log, and a run then
-  records a pass under a key
-- **THEN** the next gate that asks for that key reads the pass, the host
-  process having read the log from where it last read it
+- **WHEN** the host process read the results log, and a run then records a pass under a key
+- **THEN** the next gate that asks for that key reads the pass
+- **AND** the host process read the log from the point where it last read it
+
+#### Scenario: Results with no host process that answers
+
+- **WHEN** a `sluice exec` needs the results of a key, and no host process answers it
+- **THEN** it says that sluice's host process did not answer, reads no line of the results log, and exits 3
+
+### Requirement: A newer host process names the sluice to run for an older command's request
+
+A host process SHALL answer only the requests of its own release. It SHALL answer a request of an older command that it does not know with an error. The error SHALL name both versions and the sluice to run. (`never-break-an-existing-client@b539ef8e2413`)
+
+Before: a newer host process answered each request that an older command sends. Now: it answers only the requests of its own release, and names the sluice to run for any other.
+
+#### Scenario: An older command asks what a newer host process does not know
+
+- **WHEN** a command of sluice 0.71.0 sends a request that a host process of sluice 9.0.0 does not know
+- **THEN** the command gets an error that names both versions and tells it to run sluice 9.0.0
