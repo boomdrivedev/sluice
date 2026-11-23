@@ -38,11 +38,11 @@ Each check runs through sluice, one suite at a time: `sluice exec main -- cargo 
 
 ## 5. Records, rules, docs and the gate
 
-- [ ] 5.1 Amend records 0124, 0077, 0031, 0043, 0044 and 0093 with this change's decisions, each with Before and Now in plain words. Check: `sluice exec main -- moon run root:changes`.
-- [ ] 5.2 Rewrite the rules that this change departs from, each with Before and Now. Check: `sluice exec main -- moon run root:changes`.
+- [x] 5.1 Amend records 0124, 0077, 0031, 0043, 0044 and 0093 with this change's decisions, each with Before and Now in plain words. Check: `sluice exec main -- moon run root:changes`.
+- [x] 5.2 Rewrite the rules that this change departs from, each with Before and Now. Check: `sluice exec main -- moon run root:changes`.
   - the rule that a landing the forge refuses is held and never pushed again by itself
   - the rule that each check run is recorded before any verdict is read, for its parts on a set-aside
   - the rule that sluice runs no readiness command, for its part on the operator's set-aside
   - the rule that each signed record is of a catalogued kind
-- [ ] 5.3 Say in the README, the site's pages `reference/commands.md`, `reference/state.md`, `reference/configuration.md` and `architecture/rules.md`, and the using-sluice skill's references `verdicts.md` and `exec.md` that each change command is a client of `sluice host`, that a held landing is pushed again at each round, and that no result is set aside. No gate task reads a page's words, by the rule that no task reads Markdown, so the review of the diff checks it. Check: `sluice exec main -- moon run plugin-sluice:validate`.
+- [x] 5.3 Say in the README, the site's pages `reference/commands.md`, `reference/state.md`, `reference/configuration.md` and `architecture/rules.md`, and the using-sluice skill's references `verdicts.md` and `exec.md` that each change command is a client of `sluice host`, that a held landing is pushed again at each round, and that no result is set aside. No gate task reads a page's words, by the rule that no task reads Markdown, so the review of the diff checks it. Check: `sluice exec main -- moon run plugin-sluice:validate`.
 - [ ] 5.4 Run the gate. Check: `sluice exec main`, then `devenv shell -- moon run cli:sandbox` outside the gate's sandbox, one suite at a time.

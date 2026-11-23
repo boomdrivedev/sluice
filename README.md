@@ -91,10 +91,16 @@ combination passes.
   The commit that lands carries exactly the tree that passed.
 - **One culprit, one message.** When a combination fails, sluice works
   out the one submission at fault and tells only that agent, with the
-  failing tasks and their logs. Everyone else's work keeps moving.
+  failing tasks and their logs. Everyone else's work keeps moving. Every
+  result recorded counts, and none is set aside: a test that fails
+  because of the host and not the code is a fault of sluice, fixed in
+  sluice so that such a run records no result.
 - **The branch only moves to green.** A git hook refuses every update to
   a protected branch except sluice's, and sluice moves it only from the
-  revision it tested on.
+  revision it tested on. A landing the forge refuses, for a rule of its
+  own, is held with the forge's words and pushed again at each round,
+  once a minute at most, until the forge takes it or its submitter
+  withdraws or replaces the work.
 - **Parallel, and frugal.** Several candidates are tested at once, each
   starting from the build cache its policy declares. With
   [moon](https://moonrepo.dev), only the tasks a change affects run, and
@@ -112,8 +118,9 @@ combination passes.
   checked out by hand. It is a cheap environment on the tests' own fakes,
   not a deployment ([previews](https://boomdrivedev.github.io/sluice/guides/previews/)).
 - **Nothing to install.** sluice is one binary, and nothing needs a
-  service kept for it. A submit queues its head and tells sluice's own host process,
-  which the first command that needs the host's queues moved starts; it
+  service kept for it. A submit, like every command that reads or
+  changes a queue, asks sluice's own host process, which makes the
+  change and answers; the first command that needs it starts it, and it
   moves every repository's queues on the host, each apart, and ends once
   none has work and nothing follows it. A submit waits for the outcome,
   or returns at once with `--no-wait`; waits and watches follow the host
@@ -283,6 +290,11 @@ sets it up.
 | `sluice previews` | Every preview on the host, with its addresses and state. |
 | `sluice release <preview>` | Release a preview, by its name or its revision. `--json` for scripts. |
 | `sluice branch create <branch> --from <branch>` | Make a branch sluice lands on, such as a feature branch, on its remote when its policy names one; `sluice branch delete <branch>` deletes it once it has landed into `main`; `sluice branch accept <branch> <revision>` accepts the revision a held branch is read at, which lacks its last landing. |
+
+A submit, `amend`, `withdraw`, `protect`, `branch`, `previews` and the
+release of a preview are made by sluice's host process: the command
+sends its folder and prints what the host process answers, starting it
+where none runs, and exits `3`, changing nothing, where none answers.
 
 An agent names itself with `SLUICE_AGENT`. How many runs a host tests at
 once is the host's own setting, in `~/.config/sluice/config.toml`:
