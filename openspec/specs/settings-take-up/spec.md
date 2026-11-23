@@ -241,35 +241,23 @@ holds SHALL be taken up silently, with nothing bound afresh.
 
 ### Requirement: A change no binding takes up in place goes to a fresh host process
 
-Where the tables a change moves include one no binding takes up in
-place, `[telemetry]` alone of today's, the host process SHALL bind the
-new settings and check the host's systems under them, send what its
-telemetry holds, let each task finish its pass, and start a fresh host
-process of its own, which reads the file itself. Nothing SHALL pass
-between the two but what the records and the host's state hold (135;
-record 0107 as amended 2026-11-13; rule core.54).
+A change can move a table that no binding takes up in place, `[telemetry]` alone of today's. The host process SHALL then bind the new settings, send what its telemetry holds, and let each task finish its pass. It SHALL then start afresh in its place, with the same pid and its workers. The new image SHALL read the file itself.
+
+Before: a successor of another pid started detached. Now: the process starts afresh in place. (`sluices-runs-end-with-its-host-process@e814b716f3b1`)
 
 #### Scenario: Which tables hand over
 
-- **WHEN** a change moves `[telemetry]`, alone or with other tables, or
-  moves `[runs]` and `[forge]` alone
-- **THEN** the first hands over and the second is taken up in place
-  (`a_changed_telemetry_table_is_named_and_taken_up_afresh` in
-  `crates/sluice/src/instance.rs`)
+- **WHEN** a change moves `[telemetry]`, alone or with other tables, or moves `[runs]` and `[forge]` alone
+- **THEN** the first starts the host process afresh, and the second is taken up in place
 
 #### Scenario: The host process sends to the collector it is changed to
 
-- **WHEN** the host's settings say `[runs] max = 1` and `[telemetry]`
-  with `send = true` and one collector, the host process runs with two
-  submissions queued on `bolt/a`, and the file is changed to name another
-  collector while the first combination's run is going
-- **THEN** the first collector is sent traces and metrics, the second is
-  sent traces, both submissions land, and a host process of another pid
-  answers
-- **AND** each combination's run started once, given every core sluice
-  may use
-  (`the_host_process_hands_a_changed_telemetry_table_to_a_fresh_one` in
-  `crates/sluice/tests/instance.rs`)
+- **WHEN** the host's settings say `[runs] max = 2` and `[telemetry]` with `send = true` and one collector
+- **AND** the host process runs with two submissions queued on `bolt/a`
+- **AND** the file is changed to name another collector while the first combination's run is going
+- **THEN** the first collector is sent traces and metrics, the second is sent traces, and both submissions land
+- **AND** the host process that answers has the same pid with another `since`
+- **AND** each combination's run started once
 
 ### Requirement: A kept sluice run counts its passes across a hand-over
 
@@ -311,62 +299,35 @@ for it (rule core.54).
 
 ### Requirement: Work in play never waits for a command across the host process's hand-over
 
-The host process SHALL start its successor itself, holding the host's
-start lock from before it lets its own lock go until its successor
-answers: a host process of another pid, or a daemon started afresh in
-place with its own pid (host-daemon). So a command that meets neither
-waits on the start lock and reaches the successor, and work in play
-never waits for another command to start a host process (135; record
-0107 as amended 2026-11-13).
+The host process SHALL take the host's start lock before it lets its own lock go. It SHALL hold the start lock until the image started afresh in its place answers. So a command during the start afresh reaches the new image, and work in play never waits for another command.
+
+Before: the successor had another pid. Now: it is the same pid. (`sluices-runs-end-with-its-host-process@e814b716f3b1`)
 
 #### Scenario: A submit during the hand-over
 
-- **WHEN** the host process is handing over for a changed `[telemetry]`
-  and a submit runs on the host meanwhile
-- **THEN** the submit reaches the successor, exactly one host process
-  runs once the hand-over ends, and the submission lands with no other
-  command run
-  (`a_submit_during_a_hand_over_reaches_the_successor` in
-  `crates/sluice/tests/host_process.rs`)
+- **WHEN** the host process is starting afresh for a changed `[telemetry]`, and a submit runs on the host meanwhile
+- **THEN** the submit reaches the image started afresh, exactly one host process runs, and the submission lands with no other command run
 
 #### Scenario: A submit during a daemon's start afresh
 
-- **WHEN** `sluice daemon` is starting afresh in place for a changed
-  `[telemetry]`, and a submit runs on the host meanwhile
-- **THEN** the submit reaches the daemon started afresh, exactly one host
-  process runs, and the submission lands
-  (`a_submit_during_a_daemons_start_afresh_reaches_it` in
-  `crates/sluice/tests/host_process.rs`)
+- **WHEN** `sluice daemon` is starting afresh in place for a changed `[telemetry]`, and a submit runs on the host meanwhile
+- **THEN** the submit reaches the daemon started afresh, exactly one host process runs, and the submission lands
 
 ### Requirement: A successor that does not start leaves the host process as it was
 
-Where the host process's settings for a change it hands over for do not
-bind, or no successor answers within a start's ten seconds, it SHALL
-keep its repositories, the settings, binding and telemetry it holds, go
-on passing, and say once in its log the file, the tables and why. It
-SHALL read the file again once it changes again, and SHALL never end for
-it (rule core.54).
+The settings that a start afresh is for may not bind, or the start afresh may fail. The host process SHALL then keep its repositories, its workers and the settings that it holds. It SHALL take its lock and socket back, go on passing, and say once in its log why. It SHALL never end for it.
+
+Before: a successor that did not answer was a process of another pid. Now: a failed start afresh returns to the image that asked it. (`sluices-runs-end-with-its-host-process@e814b716f3b1`)
 
 #### Scenario: Settings it would hand over for that do not bind
 
-- **WHEN** the host's settings say `[runs] max = 1`, the host process
-  runs with two submissions queued on `bolt/a`, and the file is changed
-  in `[runs]`, `[forge]` and `[telemetry]`, with a `[forge]` key that
-  holds no private key, while the first combination's run is going
-- **THEN** the second combination's run starts only once the first has
-  ended, both submissions land, and the same host process runs throughout
-- **AND** its log says exactly once `sluice: warning: <path> changed
-  [runs], [forge], [telemetry], which the host process takes up only by
-  handing over, and its settings do not bind, so it keeps the settings it
-  holds until the file changes: <why>`, naming the key
-  (`the_host_process_keeps_its_settings_when_a_change_it_hands_over_for_does_not_bind`
-  in `crates/sluice/tests/instance.rs`)
+- **WHEN** the host's settings say `[runs] max = 2`, and the host process runs with two submissions queued on `bolt/a`
+- **AND** the file is changed in `[runs]`, `[forge]` and `[telemetry]`, with a `[forge]` key that holds no private key, while the first combination's run is going
+- **THEN** both submissions land, and the same host process image runs throughout
+- **AND** its log says once that it keeps the settings that it holds, naming the key
 
 #### Scenario: A successor that does not answer
 
-- **WHEN** the host process hands over and the successor it starts exits
-  at once
-- **THEN** it takes its lock back, its socket answers with its own pid,
-  and its log says once that its successor did not start
-  (`a_successor_that_does_not_start_leaves_the_host_process_as_it_was`
-  in `crates/sluice/tests/host_process.rs`)
+- **WHEN** the host process starts afresh, and its executable is gone
+- **THEN** it takes its lock back, and its socket answers with its own pid and `since`
+- **AND** its runs continue, and its log says once that the start afresh failed
