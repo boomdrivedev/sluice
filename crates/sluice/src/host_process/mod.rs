@@ -1298,6 +1298,12 @@ async fn serve(
     // at as it starts.
     scan_with(hosting, watch.as_mut());
     watch_runs(&registry, watch.as_mut());
+    // What the streams' starts may have missed, the scan above read.
+    if let Some(w) = &mut watch {
+        w.missed();
+    }
+    // When a stream the system would not start is started again.
+    let mut revive_at: Option<Instant> = None;
     let mut signalled = Box::pin(signalled_to_stop());
     let mut activity = hosting.tasks.activity();
     let mut room = hosting.room.subscribe();
@@ -1333,6 +1339,19 @@ async fn serve(
                 }
                 drop(start);
             }
+        }
+        if let Some(w) = watch.as_mut() {
+            let missed = w.missed();
+            if !missed.is_empty() {
+                if let Some(ending) = act(hosting, &mut take_up, w, &registry, missed).await {
+                    return ending;
+                }
+            }
+            revive_at = match (w.stalled(), revive_at) {
+                (false, _) => None,
+                (true, None) => Some(Instant::now() + watch::STALLED_FOR),
+                (true, at) => at,
+            };
         }
         let lapse = hosting.room.lock().next_lapse();
         let again = take_up.again;
@@ -1424,6 +1443,13 @@ async fn serve(
                     hosting, &mut listener, &mut take_up, lock, successor, telemetry, bound,
                 ).await {
                     return Ok(ending);
+                }
+            }
+            () = tokio::time::sleep_until(revive_at.unwrap_or(far)), if revive_at.is_some() => {
+                count(&EDGE.timers);
+                revive_at = None;
+                if let Some(w) = watch.as_mut() {
+                    w.revive();
                 }
             }
             () = tokio::time::sleep_until(again.unwrap_or(far)), if again.is_some() => {
@@ -1519,6 +1545,18 @@ async fn take_events(
             .iter()
             .flat_map(|e| e.paths.iter().map(PathBuf::as_path)),
     );
+    act(hosting, take_up, w, registry, seen).await
+}
+
+/// What a burst of events touched, or what the watch may have missed,
+/// acted on. `Some` where the process ends.
+async fn act(
+    hosting: &Arc<Hosting>,
+    take_up: &mut TakeUp,
+    w: &mut watch::Watch,
+    registry: &crate::host_count::HostCount,
+    seen: watch::Seen,
+) -> Option<Result<Ending>> {
     if seen.state {
         // 135: a state folder removed ends it, its socket with it, though
         // another made a folder at its path again since; it reads no
