@@ -219,8 +219,12 @@ fn make(
             let made = match submit {
                 true => {
                     // 136: a submit's own read of its request is what its
-                    // wait's first step follows on from.
-                    bound.pulls.remember(hosting.followed(repository));
+                    // wait's first step follows on from. `--status` reads
+                    // the forge afresh, as its own command did.
+                    let status = matches!(cli.command, Some(Command::Submit { status: true, .. }));
+                    if !status {
+                        bound.pulls.remember(hosting.followed(repository));
+                    }
                     let made = crate::submit_run(
                         cli,
                         bound.seams(),
@@ -230,7 +234,9 @@ fn make(
                         &clock,
                         &mut out,
                     );
-                    hosting.keep_followed(repository, bound.pulls.remembered());
+                    if !status {
+                        hosting.keep_followed(repository, bound.pulls.remembered());
+                    }
                     Made::Submitted(made?)
                 }
                 false => Made::Code(crate::run(

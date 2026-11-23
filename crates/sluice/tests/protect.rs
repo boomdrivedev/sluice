@@ -221,10 +221,14 @@ fn queued(name: &str) -> Repo {
     std::fs::write(session.join("s.txt"), "s\n").unwrap();
     git_in(&repo, &session, &["add", "-A"]);
     git_in(&repo, &session, &["commit", "-q", "-m", "s"]);
+    // The host process it starts passes only when asked, so #1 stays
+    // queued for the test (design D14).
     let out = support::isolated(&mut Command::new(sluice()))
         .current_dir(&session)
         .args(["submit", "bolt/x", "--no-wait"])
+        .env("SLUICE_ROUND_SLEEP", "record")
         .env("XDG_CONFIG_HOME", repo.dir().join(".git/no-config"))
+        .env("XDG_STATE_HOME", repo.dir().join(".git/no-state"))
         .stdin(Stdio::null())
         .output()
         .unwrap();
@@ -1011,6 +1015,7 @@ fn the_protection_judges_the_repository_git_names() {
         .current_dir(x.path())
         .arg("protect")
         .env("XDG_CONFIG_HOME", x.path().join("no-config"))
+        .env("XDG_STATE_HOME", x.path().join("no-state"))
         .stdin(Stdio::null())
         .output()
         .unwrap();
@@ -1270,6 +1275,7 @@ fn a_newer_sluices_next_command_reinstalls_the_hook() {
             .current_dir(repo.dir())
             .arg("protect")
             .env("XDG_CONFIG_HOME", repo.dir().join(".git/no-config"))
+            .env("XDG_STATE_HOME", repo.dir().join(".git/no-state"))
             .stdin(Stdio::null())
             .output()
     });
@@ -1324,6 +1330,7 @@ fn a_sluice_on_the_callers_path_is_not_the_one_that_judges() {
         .args(["update-ref", "refs/heads/bolt/x", &head])
         .env("PATH", path)
         .env("XDG_CONFIG_HOME", repo.dir().join(".git/no-config"))
+        .env("XDG_STATE_HOME", repo.dir().join(".git/no-state"))
         .env_remove("GIT_DIR")
         .env_remove("GIT_WORK_TREE")
         .stdin(Stdio::null())
@@ -1361,6 +1368,7 @@ fn the_hook_reads_its_whole_transaction_before_it_leaves() {
             .current_dir(&scratch.0)
             .args(["hook", "reference-transaction", state])
             .env("XDG_CONFIG_HOME", scratch.0.join("no-config"))
+            .env("XDG_STATE_HOME", scratch.0.join("no-state"))
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());
