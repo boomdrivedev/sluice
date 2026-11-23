@@ -1,0 +1,19 @@
+$schema: 'https://moonrepo.dev/schemas/project.json'
+
+# sluice's design model, in Allium: what the design states of a
+# submission's life, beside the code it describes (Boom's decision that a
+# design model lives in its repository). Allium has no formatter, lint or
+# test of its own; its checker is the one check, in the fast tier, run by
+# the allium devenv.nix pins (core.21, core.24).
+language: 'allium'
+layer: 'configuration'
+
+tasks:
+  # Each model parses, and holds the language's structural rules: every
+  # status has a way out, every declared transition has a rule, and no
+  # rule makes a transition the model does not declare. A warning fails it.
+  typecheck:
+    command: 'allium check models'
+    inputs: ['*.allium', '/devenv.nix', '/devenv.lock']
+    tags: [check-fast]
+    options: {runFromWorkspaceRoot: true}

@@ -1,0 +1,289 @@
+-- allium: 3
+-- sluice's design model: a submission's life on one branch, as the design
+-- states it (requirements 5, 7, 17, 24, 26, 49, 67, 122, 152). Drawn from
+-- crates/sluice-core/src/{records,step,ops,line}.rs, with the ruling of
+-- 2026-11-23 on 152: each round pushes a held landing again.
+
+------------------------------------------------------------
+-- Value Types
+------------------------------------------------------------
+
+-- The place a submission comes from, and the branch it lands on, by name.
+value Worktree {
+    name: String
+}
+
+value Branch {
+    name: String
+}
+
+------------------------------------------------------------
+-- Enumerations
+------------------------------------------------------------
+
+enum Requester { submitter | planner | operator | resubmission }
+
+------------------------------------------------------------
+-- Entities and Variants
+------------------------------------------------------------
+
+entity Submission {
+    branch: Branch
+    from: Worktree
+    after: Set<Submission>
+    status: queued | waiting | testing | passed | landing | refused
+          | landed | failed | conflict | withdrawn
+    landed_elsewhere: Boolean
+    -- When the forge last refused its landing.
+    refused_at: Timestamp when status = refused
+    withdrawn_by: Requester when status = withdrawn
+
+    -- A combination holding it is under test (step.rs derive_states).
+    in_chain: Boolean
+    combination_passed: Boolean
+    combination_failed: Boolean
+
+    transitions status {
+        queued -> waiting
+        testing -> waiting
+        passed -> waiting
+        waiting -> queued
+        queued -> testing
+        testing -> queued
+        testing -> passed
+        passed -> queued
+        testing -> failed
+        queued -> conflict
+        passed -> landing
+        queued -> landing
+        landing -> landed
+        landing -> refused
+        landing -> queued
+        refused -> landing
+        refused -> queued
+        queued -> landed
+        waiting -> landed
+        queued -> withdrawn
+        waiting -> withdrawn
+        testing -> withdrawn
+        passed -> withdrawn
+        refused -> withdrawn
+        failed -> withdrawn
+        conflict -> withdrawn
+        terminal: landed, withdrawn
+    }
+}
+
+------------------------------------------------------------
+-- Config
+------------------------------------------------------------
+
+config {
+    -- How long a held landing waits before a round pushes it again.
+    held_push_pace: Duration = 1.minute
+}
+
+------------------------------------------------------------
+-- Rules
+------------------------------------------------------------
+
+-- ops.rs submit: a new submission is queued; the worktree's earlier
+-- live submissions are withdrawn by the resubmission.
+rule Submit {
+    when: SessionSubmits(worktree, branch, after)
+    ensures: Submission.created(
+        branch: branch, from: worktree, after: after,
+        status: queued, landed_elsewhere: false,
+        in_chain: false, combination_passed: false, combination_failed: false)
+    ensures: ResubmissionWithdraws(worktree)
+}
+
+rule ResubmissionWithdrawsEarlier {
+    when: ResubmissionWithdraws(worktree)
+    for s in Submissions where from = worktree and status in {queued, waiting, testing, passed, refused, failed, conflict}:
+        ensures: s.status = withdrawn
+        ensures: s.withdrawn_by = resubmission
+}
+
+-- step.rs derive_states, run each round.
+rule RoundLeavesOutOfChain {
+    when: RoundDerives(s)
+    requires: s.status = queued
+    requires: not s.in_chain
+    ensures: s.status = waiting
+}
+
+-- 152: while a held landing stands, the entries behind it wait.
+rule WaitBehindHeldLanding {
+    when: HeldLandingStands(s)
+    requires: s.status = queued or s.status = testing or s.status = passed
+    ensures: s.status = waiting
+}
+
+rule RoundTakesBackIntoQueue {
+    when: RoundRequeues(s)
+    requires: s.status = waiting
+    ensures: s.status = queued
+}
+
+rule RoundTests {
+    when: CombinationStarts(s)
+    requires: s.status = queued
+    requires: s.in_chain
+    ensures: s.status = testing
+}
+
+rule CombinationPasses {
+    when: CombinationPassed(s)
+    requires: s.status = testing
+    ensures: s.status = passed
+    ensures: s.combination_passed = true
+}
+
+rule ChainReformed {
+    when: ChainDropsCandidate(s)
+    requires: s.status = testing or s.status = passed
+    ensures: s.status = queued
+    ensures: s.in_chain = false
+}
+
+-- step.rs blame: the newest submission of the first failed combination.
+rule Blame {
+    when: CombinationFailed(s)
+    requires: s.status = testing
+    ensures: s.status = failed
+    ensures: s.combination_failed = true
+    ensures: OutcomeOwed(s)
+}
+
+-- step.rs form: a head that does not merge onto the chain.
+rule Conflict {
+    when: FormConflicts(s)
+    requires: s.status = queued
+    ensures: s.status = conflict
+    ensures: OutcomeOwed(s)
+}
+
+rule StartLanding {
+    when: LandingWritten(s)
+    requires: s.status = passed
+    ensures: s.status = landing
+}
+
+-- step.rs 3455: work no required check reads lands beside the chain.
+rule StartLandingBeside {
+    when: LandingBesideWritten(s)
+    requires: s.status = queued
+    ensures: s.status = landing
+}
+
+rule Landed {
+    when: BranchMoved(s)
+    requires: s.status = landing
+    ensures: s.status = landed
+    ensures: OutcomeOwed(s)
+}
+
+rule ForgeRefuses {
+    when: ForgeRefusedLanding(s)
+    requires: s.status = landing
+    ensures: s.status = refused
+    ensures: s.refused_at = now
+    ensures: OutcomeOwed(s)
+}
+
+rule BranchMovedElsewhere {
+    when: BranchFoundElsewhere(s)
+    requires: s.status = landing
+    ensures: s.status = queued
+}
+
+-- 152 (the user's ruling of 2026-11-23): each round pushes a held
+-- landing again, once a minute at most; no command pushes it.
+rule PushHeldAgain {
+    when: s: Submission.refused_at + config.held_push_pace <= now
+    requires: s.status = refused
+    ensures: s.status = landing
+}
+
+-- line.rs drop_left_landing: one of the held landing's submissions left.
+rule HeldLandingDropped {
+    when: HeldLandingLost(s)
+    requires: s.status = refused
+    ensures: s.status = queued
+}
+
+-- step.rs 2105: the branch already holds the work.
+rule LandedElsewhere {
+    when: BranchHoldsWork(s)
+    requires: s.status = queued or s.status = waiting
+    ensures: s.status = landed
+    ensures: s.landed_elsewhere = true
+    ensures: OutcomeOwed(s)
+}
+
+-- ops.rs withdraw_in: refused once final or landing.
+rule Withdraw {
+    when: RequesterWithdraws(s, by)
+    requires: s.status = queued or s.status = waiting or s.status = testing
+        or s.status = passed or s.status = refused
+        or s.status = failed or s.status = conflict
+    requires: by = submitter or by = planner or by = operator
+    ensures: s.status = withdrawn
+    ensures: s.withdrawn_by = by
+}
+
+------------------------------------------------------------
+-- Invariants
+------------------------------------------------------------
+
+invariant LandedElsewhereIsLanded {
+    for s in Submissions:
+        s.landed_elsewhere implies s.status = landed
+}
+
+------------------------------------------------------------
+-- Actor Declarations
+------------------------------------------------------------
+
+actor Session {
+    identified_by: Submission where status != landed
+}
+
+actor HostProcess {
+    identified_by: Submission where status != withdrawn
+}
+
+------------------------------------------------------------
+-- Surfaces
+------------------------------------------------------------
+
+surface SubmitCommand {
+    facing session: Session
+    provides:
+        SessionSubmits(session, branch, after)
+        RequesterWithdraws(s, by)
+}
+
+-- One round of the branch's queue in sluice's host process: what it
+-- reads from the runs, the branch and the forge.
+surface QueueRound {
+    facing host: HostProcess
+    context s: Submission where branch = host.branch
+    provides:
+        RoundDerives(s)
+        HeldLandingStands(s)
+        RoundRequeues(s)
+        CombinationStarts(s)
+        CombinationPassed(s)
+        CombinationFailed(s)
+        ChainDropsCandidate(s)
+        FormConflicts(s)
+        LandingWritten(s)
+        LandingBesideWritten(s)
+        BranchMoved(s)
+        ForgeRefusedLanding(s)
+        BranchFoundElsewhere(s)
+        HeldLandingLost(s)
+        BranchHoldsWork(s)
+}
