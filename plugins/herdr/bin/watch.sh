@@ -4,9 +4,13 @@
 # (0094). `--ensure` registers the server in its environment and wakes the
 # lease's watcher where it lives and runs this plugin folder and version,
 # else starts one. Running, it finds the repositories every server's panes
-# are in, runs one source in each, its command and its reader, document.sh,
-# stops it once no pane of any server is in it (D7), and keeps each
-# server's sidebar and the forecasts current, until it serves no server.
+# are in, and runs each source once, its command and its reader,
+# document.sh (D7). A source that names its folders, the default one among
+# them, is told each repository's folder on its input, `add <folder>`, and
+# `remove <folder>` once no pane of any server is in it: one subscription
+# for every repository (the change `the-plugins-hold-one-subscription-each`,
+# D1, D2). It keeps each server's sidebar and the forecasts current, until
+# it serves no server.
 # Between changes it waits on its tick's one sleep, and a tick forks
 # nothing unless the shell's own tests find a change (D4, D5).
 # `--ticks N` stops it after N ticks, the first at its start (the tests).
@@ -205,6 +209,11 @@ for d in "$state"/run/*; do
   rm -rf "$d"
 done
 mkdir -p "$runs"
+
+# A former version's state of the host: the reads of whether a repository
+# had records, and the blamed tests it learned from sluice, which the
+# documents carry now (D3, D4).
+rm -rf "$state/probe" "$state/failed"
 
 # A former version's watchers, one for each server, each with its lease
 # and state in its server's folder (D11). Their leases go now, each under
@@ -418,22 +427,37 @@ take_dirty() {
   return 0
 }
 
-# Run one source in a directory, as one pipeline of two processes, both
-# the watcher's children (D7): its command, in the directory, and its
+# Run one source, as one pipeline of two processes, both the watcher's
+# children (D7): its command, in the plugin's config directory, and its
 # reader, document.sh, which keeps each document it prints, wakes the
 # watcher for each kept, and marks the source ended at its input's end, for
 # the next tick to start it again (D4). The command's pid is kept as it
 # starts, so a stop in its first second still ends it, and its identity
 # once it has become the source's command, by a helper that runs that once;
-# the reader's, as the watcher's child.
+# the reader's, as the watcher's child. A source that names its folders
+# reads a named pipe beside its run file, which the watcher holds open for
+# writing on the descriptor $4 while the source runs, so its input stays
+# open between looks (D2); any other's input is closed. Neither process
+# holds another source's descriptor.
 start() {
-  # $1 run file, $2 source name, $3 directory ("" for a source run once), $4 argv as JSON
+  # $1 run file, $2 source name, $3 argv as JSON, $4 descriptor, "" for none
   run=$1
   name=$2
-  where=$3
-  argv=$4
+  argv=$3
+  st_fd=$4
+  st_in=/dev/null
+  if [ -n "$st_fd" ]; then
+    eval "exec $st_fd>&-"
+    rm -f "$run.in"
+    if ! mkfifo "$run.in"; then
+      say "cannot make $run.in; $name is not started"
+      return 1
+    fi
+    st_in=$run.in
+  fi
   (
-    cd "${where:-$config}" || exit 1
+    exec 3>&- 4>&- 5>&- 6>&- 7>&- 8>&- 9>&-
+    cd "$config" || exit 1
     eval "set -- $(printf '%s' "$argv" | jq -r 'map(@sh) | join(" ")')"
     me=$(exec sh -c 'echo $PPID')
     printf '%s\tpid:%s:%s\n' "$me" "$me" $$ >>"$run.pids"
@@ -442,8 +466,30 @@ start() {
       settle "$me" "$run.pids"
     ) </dev/null >/dev/null 2>&1 &
     exec "$@"
-  ) | sh "$root/bin/document.sh" "$name" "$where" "$run" $$ &
+  ) <"$st_in" | sh "$root/bin/document.sh" "$name" "$run" $$ 3>&- 4>&- 5>&- 6>&- 7>&- 8>&- 9>&- &
   remember $! "$run.pids"
+  if [ -n "$st_fd" ]; then
+    # Opened once the source's side has: each waits for the other.
+    eval "exec $st_fd>\"\$run.in\""
+    eval "fd_${run##*/}=$st_fd"
+  fi
+  return 0
+}
+
+# Write the line $2 on the input of the source of run file $1, in a
+# subshell, so a source that ended ends that subshell and not the watcher;
+# where the write fails, the source is marked ended for the next tick to
+# start it again (D2).
+send() {
+  eval "sd_fd=\${fd_${1##*/}:-}"
+  if [ -n "$sd_fd" ] && (eval "printf '%s\\n' \"\$2\" >&$sd_fd") 2>/dev/null; then return 0; fi
+  { : >"$1.ended"; } 2>/dev/null
+  return 1
+}
+
+# Close the input the watcher holds of every source.
+close_inputs() {
+  exec 3>&- 4>&- 5>&- 6>&- 7>&- 8>&- 9>&-
 }
 
 alive() {
@@ -499,17 +545,21 @@ heads_moved() {
 }
 
 # What a look found no pane of any server in (D7): each repository's
-# source run in it is stopped, and its documents, learned worktrees,
-# blamed tests and told list go with it, so its return is a first sight;
-# a source run once is never stopped for want of panes. Each worktree's
-# head stamp and forecast go too.
+# folder is removed from the source that serves it, and its documents,
+# learned worktrees and told list go with it, so its return is a first
+# sight; a source is never stopped for want of panes. Each worktree's head
+# stamp and forecast go too.
 gone_by() {
-  for gb_f in "$runs"/*.repo; do
+  for gb_f in "$runs"/*.folder; do
     [ -e "$gb_f" ] || continue
+    gb_t=
     gb_r=
-    IFS= read -r gb_r 2>/dev/null <"$gb_f"
+    {
+      IFS= read -r gb_t
+      IFS= read -r gb_r
+    } 2>/dev/null <"$gb_f"
     case "$nl$found" in *"$nl$gb_r	"*) continue ;; esac
-    leave "${gb_f%.repo}" "$gb_r"
+    leave "$gb_f" "$gb_t" "$gb_r"
   done
   set --
   for gb_f in "$state"/checks/*.stamp; do
@@ -522,26 +572,38 @@ gone_by() {
   return 0
 }
 
-# Stop the source of run file $1, run in repository $2, and forget the
-# repository: every host's documents of it, by the key document.sh keeps
-# them under, as the segment finds them.
+# Remove the folder $2 of repository $3 from the source whose file of it
+# is $1, and forget the repository: every host's documents of it, by the
+# key document.sh keeps them under, as the segment finds them (D2).
 leave() {
-  lv_run=$1
-  lv_r=$2
-  if [ -f "$lv_run.pids" ]; then
-    for p in $(own_listed "$lv_run.pids"); do kill "$p" 2>/dev/null; done
-  fi
+  lv_f=$1
+  lv_t=$2
+  lv_r=$3
+  rm -f "$lv_f"
+  lv_run=${lv_f%.*.folder}
+  [ -e "$lv_run.ended" ] || send "$lv_run" "remove $lv_t"
   lv_s=$(name_of "$lv_r")-$(sum "$lv_r")
-  set -- "$lv_run.pids" "$lv_run.repo" "$lv_run.ended"
-  for lv_f in "$state"/docs/*--"$lv_s".* "$state"/told/*--"$lv_s".json "$state"/failed/*--"$lv_s"-*; do
-    [ -e "$lv_f" ] || continue
-    case $lv_f in
-    "$state"/failed/*) case ${lv_f##*--"$lv_s"-} in '' | *[!0-9]*) continue ;; esac ;;
-    esac
-    set -- "$@" "$lv_f"
+  set --
+  for lv_f in "$state"/docs/*--"$lv_s".* "$state"/told/*--"$lv_s".json; do
+    [ -e "$lv_f" ] && set -- "$@" "$lv_f"
   done
-  rm -f "$@"
-  say "no pane is in $lv_r; its watch stopped"
+  [ $# -gt 0 ] && rm -f "$@"
+  say "no pane is in $lv_r; its folder is off the subscription"
+}
+
+# Whether the repository $1 is to be added: unless sluice said it has no
+# records there less than five minutes since, with no nudge after (D4).
+due_add() {
+  da_m=$state/marks/$(sum "$1")
+  da_l=
+  IFS= read -r da_l 2>/dev/null <"$da_m"
+  case $da_l in
+  "none "*)
+    [ $(($(now) - ${da_l#none })) -ge 300 ] || [ "$state/nudge" -nt "$da_m" ]
+    return
+    ;;
+  esac
+  return 0
 }
 
 # Sources and repositories, and the worktrees whose heads the ticks test,
@@ -597,6 +659,9 @@ look() {
     r=$(repo_of "$d") && t=$(top_of "$d") && found="$found$r	$t$nl"
   done
   [ "$lk_n" -gt 0 ] && [ "$lk_all" = true ] && gone_by
+  # A sources.toml refused is said in the log and the popup, and no
+  # source runs from it (D5).
+  problem=$(printf '%s' "$cfg" | jq -r '.refused // empty')
   n=$(printf '%s' "$cfg" | jq '.sources | length')
   i=0
   while [ "$i" -lt "$n" ]; do
@@ -604,17 +669,35 @@ look() {
     i=$((i + 1))
     name=$(printf '%s' "$s" | jq -r .name)
     argv=$(printf '%s' "$s" | jq -c .command)
-    if [ "$(printf '%s' "$s" | jq -r .each_repository)" != true ]; then
-      run=$runs/$(sum "$name")
+    run=$runs/$(sum "$name")
+    if [ "$(printf '%s' "$s" | jq -r .folders)" != true ]; then
       dead "$run" && {
         rm -f "$run.pids"
-        start "$run" "$name" "" "$argv"
+        start "$run" "$name" "$argv" ""
       }
       continue
     fi
     if ! command -v sluice >/dev/null 2>&1; then
-      set_problem "$(sluice_problem)"
+      problem=$(sluice_problem)
       continue
+    fi
+    # A descriptor of the watcher's own for each source that names its
+    # folders, 3 to 9.
+    fd=$((i + 2))
+    if [ "$fd" -gt 9 ]; then
+      say "$name: no more than seven sources name their folders; not started"
+      continue
+    fi
+    if dead "$run"; then
+      rm -f "$run.pids" "$run.ended"
+      start "$run" "$name" "$argv" "$fd" || continue
+      # The new subscription holds no folder: each the former one served
+      # is added again (D1).
+      for f in "$run".*.folder; do
+        [ -e "$f" ] || continue
+        IFS= read -r ft 2>/dev/null <"$f"
+        send "$run" "add $ft" || break
+      done
     fi
     old_ifs=$IFS
     IFS=$nl
@@ -622,31 +705,20 @@ look() {
       [ -n "$line" ] || continue
       r=${line%%	*}
       t=${line#*	}
-      run=$runs/$(sum "$name $r")
-      dead "$run" || continue
-      rm -f "$run.pids" "$run.repo"
-      # Probed once, and again at a look five minutes on or after a nudge:
-      # a source runs only where sluice has records.
-      probe=$state/probe/$(sum "$r")
-      if [ -f "$probe" ] && [ "$(cut -d' ' -f1 "$probe")" = none ]; then
-        since=$(($(now) - $(cut -d' ' -f2 "$probe")))
-        [ "$since" -lt 300 ] && [ ! "$state/nudge" -nt "$probe" ] && continue
-      fi
-      if got=$(cd "$t" && sluice overview --json 2>"$state/probe.err"); then
-        set_problem ""
-        if [ "$(printf '%s' "$got" | jq '((.branches // []) | length) + ((.sessions // []) | length)' 2>/dev/null)" -gt 0 ] 2>/dev/null; then
-          echo "records $(now)" >"$probe"
-          printf '%s\n' "$r" >"$run.repo"
-          start "$run" "$name" "$t" "$argv"
-          continue
-        fi
-      elif grep -q "unrecognized subcommand" "$state/probe.err"; then
-        set_problem "$(sluice --version 2>/dev/null | head -1) has no overview: the plugin needs sluice 0.12 or later."
-      fi
-      echo "none $(now)" >"$probe"
+      f=$run.$(sum "$r").folder
+      [ -e "$f" ] && continue
+      due_add "$r" || continue
+      # Kept before the line is written, so the reader can tell the
+      # folder's repository from its first document.
+      printf '%s\n%s\n' "$t" "$r" >"$f"
+      send "$run" "add $t" || {
+        rm -f "$f"
+        break
+      }
     done
     IFS=$old_ifs
   done
+  set_problem "$problem"
 }
 
 # Whether the server folder $1 is among the lines of $2.
@@ -836,8 +908,9 @@ while :; do
   ticked=$((ticked + 1))
   [ "$ticks" -gt 0 ] && ticks=$((ticks - 1))
   if [ "$ticks" -eq 0 ]; then
-    # A bounded run lets its sources finish before it stops; a signal ends
-    # the shell's wait, which is taken up again.
+    # A bounded run lets its sources finish before it stops, their inputs
+    # closed; a signal ends the shell's wait, which is taken up again.
+    close_inputs
     until wait; do :; done
     each_tokens
     break

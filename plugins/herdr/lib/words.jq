@@ -378,10 +378,10 @@ def named_line($branch; $now):
       | join(" · ") end;
 
 # The `sluice` token for the worktree $w, from its repository's documents,
-# the submissions learned for it ($paths: id -> {path, branch}), the
-# blamed tests ($failed: id -> [task]), its last forecast ($check) and the
-# branch named for its pane ($named, or null).
-def pane_token($w; $paths; $failed; $check; $now; $named):
+# the submissions learned for it ($paths: id -> {path, branch}), its last
+# forecast ($check) and the branch named for its pane ($named, or null). A
+# blame's tests are its branch's `recent_failed`.
+def pane_token($w; $paths; $check; $now; $named):
   . as $docs
   | ($paths | to_entries | map(select(.value.path == $w) | .key | tonumber)) as $mine
   | [ $docs[].branches[] | . as $b | .submissions[] | select(.from.path == $w)
@@ -389,9 +389,9 @@ def pane_token($w; $paths; $failed; $check; $now; $named):
       | if $c then "#\($s.id) testing" + ($c | progress | if . then " " + . else "" end)
           + (($c.started | since($now)) as $took | if $took == null then "" else " \($took | minutes)" + (if $c.limit then "/\($c.limit | minutes)" else "" end) end)
         else "#\($s.id) \($s.state)" end ] as $live
-  | [ $docs[].branches[].recent[]
+  | [ $docs[].branches[] | (.recent_failed | objects // {}) as $f | .recent[]
       | select((.event == "blamed" or .event == "conflict") and (.id as $i | $mine | index($i)))
-      | . as $r | select($mine | all(. <= $r.id)) ] | sort_by(.at) | last as $out
+      | . as $r | select($mine | all(. <= $r.id)) | . + {failed: $f[.id | tostring]} ] | sort_by(.at) | last as $out
   | [ $docs[].branches[].recent[] | select(.event == "landed")
       | select(any(.ids[]; . as $i | $mine | index($i)))
       | {at, id: ([.ids[] | . as $i | select($mine | index($i))] | max)} ] | sort_by(.at) | last as $landed
@@ -400,7 +400,7 @@ def pane_token($w; $paths; $failed; $check; $now; $named):
     elif $out and (($landed == null) or ($landed.id < $out.id)) then
       # Only a task with a plain name fits the line: a command runner's
       # task is its whole command, which the popup still shows.
-      if $out.event == "blamed" then "#\($out.id) BLAMED" + (($failed[$out.id | tostring] // []) | map(select(test("^\\S{1,24}$")))
+      if $out.event == "blamed" then "#\($out.id) BLAMED" + (($out.failed | arrays // []) | map(strings | select(test("^\\S{1,24}$")))
           | if length > 0 then " · " + join(", ") else "" end)
       else "#\($out.id) CONFLICT" + (($out.paths // []) | if length > 0 then " · " + .[0] else "" end) end
     # A worktree several agents share says nothing of each one's branch.

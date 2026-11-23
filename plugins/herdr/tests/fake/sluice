@@ -1,51 +1,60 @@
 #!/bin/sh
 # A stand-in sluice: logs each call with where it ran, and answers from
-# the test's files, keyed by the directory's name.
+# the test's files, keyed by a folder's name.
 here=$(basename "$PWD")
 printf '%s: %s\n' "$here" "$*" >>"$FAKE/sluice-calls"
-# An older sluice, before overview.
-if [ -f "$FAKE/old" ] && [ "$1" = overview ]; then
-  echo "error: unrecognized subcommand 'overview'" >&2
-  exit 2
-fi
-[ "$*" = --version ] && echo "sluice 0.11.0" && exit 0
+[ "$*" = --version ] && echo "sluice 0.0.0" && exit 0
+
+# The lines of watch-<folder>.jsonl, each with `folder` in it, as
+# `sluice host` sends a folder's first document; none where the test left
+# none, as before `sluice host` answers.
+first() {
+  b=$(basename "$1")
+  [ -f "$FAKE/watch-$b.jsonl" ] || return 0
+  jq -c --arg f "$1" '{folder: $f} + .' "$FAKE/watch-$b.jsonl"
+}
+
 case "$*" in
-"overview --watch --json")
+"overview --json --watch --stdin")
   # Its pid, under the test's own directory, for the test to tell that
   # this source ended: the watcher execs it, so it is the source's pid.
   echo $$ >>"$FAKE/watch-pids"
-  [ -f "$FAKE/watch-$here.jsonl" ] || exit 1
-  cat "$FAKE/watch-$here.jsonl"
-  # Held open, as a real watch is, while the test wants it, printing
-  # next-<directory>.jsonl when a test puts it there, as a real watch prints
-  # a document when the queue changes.
-  while [ -f "$FAKE/hold" ]; do
-    if [ -f "$FAKE/next-$here.jsonl" ]; then
-      cat "$FAKE/next-$here.jsonl"
-      rm -f "$FAKE/next-$here.jsonl"
-    fi
-    sleep 1
+  served=$FAKE/served.$$
+  : >"$served"
+  # While the test holds it, each folder served prints next-<folder>.jsonl
+  # when a test puts it there, as `sluice host` sends a document when the
+  # queue changes; it ends with this process.
+  me=$$
+  (
+    while kill -0 "$me" 2>/dev/null; do
+      if [ -f "$FAKE/hold" ]; then
+        while IFS= read -r f; do
+          n=$FAKE/next-$(basename "$f").jsonl
+          [ -f "$n" ] || continue
+          jq -c --arg f "$f" '{folder: $f} + .' "$n"
+          rm -f "$n"
+        done <"$served"
+      fi
+      sleep 1
+    done
+  ) &
+  while IFS= read -r l; do
+    printf '%s %s\n' "$me" "$l" >>"$FAKE/stdin-lines"
+    case $l in
+    "add "*)
+      echo "${l#add }" >>"$served"
+      first "${l#add }"
+      ;;
+    "remove "*)
+      grep -vxF -- "${l#remove }" "$served" >"$served.tmp"
+      mv -f "$served.tmp" "$served"
+      ;;
+    esac
   done
-  ;;
-"overview --json")
-  [ -f "$FAKE/probe-sleep" ] && sleep "$(cat "$FAKE/probe-sleep")"
-  if [ -f "$FAKE/overview-$here.json" ]; then cat "$FAKE/overview-$here.json"; else
-    printf '{"schema":"sluice/overview@1","host":"test","repository":"%s","at":"2026-10-16T19:45:10Z","branches":[],"sessions":[],"previews":[]}\n' "$PWD"
-  fi
-  ;;
-"status "*" --branch "*" --json")
-  # The branch named alone is read: #$2's record on it, status-$2.json, or
-  # status-$2-<branch, / as _>.json where another branch holds #$2 too;
-  # none where the record is another branch's.
-  f="$FAKE/status-$2-$(printf '%s' "$4" | tr / _).json"
-  [ -f "$f" ] || f="$FAKE/status-$2.json"
-  grep -qF "\"branch\":\"$4\"" "$f" 2>/dev/null || exit 1
-  cat "$f"
-  ;;
-"status "*" --json")
-  # A number with no branch, which sluice refuses where another branch
-  # holds it: the plugin always names the branch.
-  exit 2
+  # Its input closed: held open while the test wants it, as a watch that
+  # serves folders goes on.
+  while [ -f "$FAKE/hold" ]; do sleep 1; done
+  rm -f "$served"
   ;;
 "submit "*" --check --json")
   [ -f "$FAKE/check-sleep" ] && sleep "$(cat "$FAKE/check-sleep")"

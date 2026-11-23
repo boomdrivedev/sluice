@@ -88,7 +88,7 @@ frame() {
     echo "No repository with sluice's records is open in a pane."
   elif [ -z "$repo" ]; then
     echo "No sluice records in this repository."
-  elif [ "$(cut -d' ' -f1 "$state/probe/$(sum "$repo")" 2>/dev/null)" = none ]; then
+  elif [ "$(cut -d' ' -f1 "$state/marks/$(sum "$repo")" 2>/dev/null)" = none ]; then
     echo "No sluice records in this repository."
   else
     echo "Waiting for sluice to read $repo..."

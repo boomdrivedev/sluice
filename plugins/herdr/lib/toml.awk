@@ -1,6 +1,7 @@
 # The subset of TOML sources.toml is read as, one JSON line per key:
 #   {"i": <0 at the top, n in the nth [[sources]]>, "k": "<key>", "v": <value>}
-# Exits 1, naming the line, at anything outside the subset.
+# Exits 1, naming the line, at anything outside the subset; exits 2 at the
+# former key `each_repository`, printing {"refused": "<the error>"}.
 
 function fail(why) {
   printf "sources.toml:%d: %s: %s\n", NR, why, $0 > "/dev/stderr"
@@ -43,6 +44,13 @@ BEGIN { n = 0 }
   if (!match(line, /^[A-Za-z0-9_-]+[ \t]*=[ \t]*/)) fail("not key = value")
   key = line
   sub(/[ \t]*=.*/, "", key)
+  # The former key, refused with the one that replaced it: no source runs
+  # from the file, and none in its place (exit 2).
+  if (key == "each_repository") {
+    printf "{\"refused\":\"sources.toml line %d: each_repository is not a key: use folders = true\"}\n", NR
+    refused = 1
+    exit 2
+  }
   val = substr(line, RLENGTH + 1)
   if (val ~ /^(true|false)([ \t#]|$)/) {
     v = val; sub(/[^a-z].*$/, "", v)
@@ -66,4 +74,4 @@ BEGIN { n = 0 }
   printf "{\"i\":%d,\"k\":\"%s\",\"v\":%s}\n", n, key, v
 }
 
-END { if (bad) exit 1 }
+END { if (refused) exit 2; if (bad) exit 1 }

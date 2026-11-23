@@ -1,25 +1,27 @@
 #!/bin/sh
 # shellcheck disable=SC1091,SC2154,SC2016 # jq programs; common.sh, sourced, sets root, lib, state and config.
 # The reader of one source's sluice/overview@1 documents, a line each on
-# stdin, from the source named $1 run in the directory $2 (empty for a
-# source run once). Each line is read whole by one jq (lib/keep.jq), with
-# its repository's told list, learned worktrees and blamed tests: it is
-# kept as its repository's latest document, its submissions' worktrees are
-# learned, and a toast is raised for each landing, blame or conflict not yet
-# told (D8), in each herdr server it is told in (D9). The rest it forks is
-# the files it replaces, `sluice status` for a blame or a conflict it knows
-# too little of, and herdr to tell.
-# Run by the watcher as a source's reader, with the source's run file $3
-# and the watcher's pid $4: it wakes the watcher for each document kept,
-# and marks its source ended at its input's end (D4, D7).
+# stdin, from the source named $1. Each line is read whole by one jq
+# (lib/keep.jq), with its repository's told list and learned worktrees: it
+# is kept as its repository's latest document, its submissions' worktrees
+# are learned, and a toast is raised for each landing, blame or conflict
+# not yet told (D8), in each herdr server it is told in (D9). A blame's
+# tests and a submission's worktree come from the document; the reader
+# runs no sluice (the change `the-plugins-hold-one-subscription-each`,
+# D3). The rest it forks is the files it replaces and herdr to tell.
+# Run by the watcher as a source's reader, with the source's run file $2
+# and the watcher's pid $3: it wakes the watcher for each document kept,
+# and marks its source ended at its input's end (D4, D7). A line of a
+# source that names its folders carries `folder`: the reader marks the
+# folder's repository as having records or none, by the folder the watcher
+# added for it, and keeps no document of one with none (D4).
 set -u
 . "$(dirname "$0")/../lib/common.sh"
 . "$lib/panes.sh"
 
 source_name=${1:-local}
-dir=${2:-}
-run=${3:-}
-watcher=${4:-}
+run=${2:-}
+watcher=${3:-}
 tab='	'
 nl='
 '
@@ -49,56 +51,70 @@ slurp() {
   return 0
 }
 
-# The files of the repository whose key is $key: its told list, learned
-# worktrees and blamed tests, read by the shell for the jq.
+# The files of the repository whose key is $key: its told list and
+# learned worktrees, read by the shell for the jq.
 inputs() {
   slurp "$state/told/$key.json"
   told=$sl_v
   slurp "$state/docs/$key.paths"
   paths=$sl_v
-  read_failed
-}
-
-read_failed() {
-  failed=
-  for g in "$state/failed/$key"-*; do
-    [ -e "$g" ] || continue
-    slurp "$g"
-    failed="$failed${g##*-}$tab$sl_v$nl"
-  done
 }
 
 # The one jq of a line, for the repository the reader takes it to be.
 read_line() {
   out=$(printf '%s\n' "$1" | jqw -R -r --arg hr "$hr" --arg told "$told" --arg paths "$paths" \
-    --arg failed "$failed" -f "$lib/keep.jq" 2>/dev/null)
+    -f "$lib/keep.jq" 2>/dev/null)
 }
 
-# A submission's worktree, and for a blame its tests, read once from
-# sluice when the document did not carry them: $1 its id, $2 its kind, $3
-# the branch its event is on, which sluice reads alone, since another
-# branch may hold its number too (record 0114). Prints the tests,
-# comma-separated, for a blame's toast.
-learn() {
-  [ -n "$dir" ] || return 0
-  got=$(cd "$dir" && sluice status "$1" --branch "$3" --json 2>/dev/null) || return 0
-  ln=$(printf '%s' "$got" | jq -r --arg i "$1" --arg paths "$paths" '
-    ([.failed // [] | .[] | .task | select(type == "string") | gsub("[[:cntrl:]]"; "")]) as $f
-    | ((.from.path // "") | tostring | gsub("[[:cntrl:]]"; "")) as $p
-    | (($paths | try fromjson catch {}) | if type == "object" then . else {} end)
-      + (if $p != "" then {($i): {path: $p, branch: (.branch // "" | tostring | gsub("[[:cntrl:]]"; ""))}} else {} end)
-    | "\($f | tojson)\t\($f | join(", "))\t\(tojson)"' 2>/dev/null) || return 0
-  ln_f=${ln%%"$tab"*}
-  ln=${ln#*"$tab"}
-  ln_t=${ln%%"$tab"*}
-  ln_p=${ln#*"$tab"}
-  if [ "$2" = blamed ]; then
-    write "$state/failed/$key-$1" "$ln_f" && failed="$failed$1$tab$ln_f$nl"
-    learned_tests=$ln_t
+# The repository the watcher added the folder $1 for, from the files it
+# keeps beside the source's run file, a folder and its repository each,
+# in $mk_r, and that file in $mk_f; 1 where it added none.
+added() {
+  mk_r=
+  mk_f=
+  [ -n "$run" ] || return 1
+  for mk_g in "$run".*.folder; do
+    [ -e "$mk_g" ] || continue
+    mk_a=
+    mk_b=
+    {
+      IFS= read -r mk_a
+      IFS= read -r mk_b
+    } 2>/dev/null <"$mk_g"
+    [ "$mk_a" = "$1" ] || continue
+    mk_r=$mk_b
+    mk_f=$mk_g
+    return 0
+  done
+  return 1
+}
+
+# Mark the repository of folder $1 by how it stands, $2: `records`, or
+# `none` with no document of it kept; `unset`, where sluice is not set up
+# there or the repository is gone, is `none`, and the folder is off the
+# subscription, so the watcher adds it again at a later look (D4).
+mark() {
+  added "$1" || return 0
+  mk_m=$state/marks/$(sum "$mk_r")
+  slurp "$mk_m"
+  if [ "$2" = records ]; then
+    case $sl_v in records\ *) ;; *) write "$mk_m" "records $(now)" ;; esac
+    return 0
   fi
-  if [ "$ln_p" != "$paths" ]; then
-    write "$state/docs/$key.paths" "$ln_p" && paths=$ln_p
-  fi
+  [ "$2" = unset ] && rm -f "$mk_f"
+  case $sl_v in none\ *) [ "$2" = unset ] || return 0 ;; esac
+  write "$mk_m" "none $(now)"
+  # Its documents, of any host, and what was told of them go: a later
+  # document with records is a first sight.
+  mk_s=$(name_of "$mk_r")-$(sum "$mk_r")
+  set --
+  for mk_g in "$state"/docs/*--"$mk_s".* "$state"/told/*--"$mk_s".json; do
+    [ -e "$mk_g" ] && set -- "$@" "$mk_g"
+  done
+  [ $# -gt 0 ] && rm -f "$@"
+  hr=
+  { printf '%s\n' "$mk_r" >>"$state/dirty"; } 2>/dev/null
+  rouse
 }
 
 # The fields of a tab-separated line $1 into f1, f2, ..., by the shell.
@@ -124,6 +140,13 @@ fields() {
 keep() {
   read_line "$1"
   case $out in
+  folder"$tab"*)
+    fd_l=${out%%"$nl"*}
+    fields "$fd_l"
+    mark "$f2" "$f3"
+    [ "$f3" = records ] || return 0
+    out=${out#*"$nl"}
+    ;;
   key"$tab"*) ;;
   *)
     say "$source_name printed a line it cannot read as an overview document; keeping the last good one"
@@ -132,20 +155,18 @@ keep() {
   esac
   # A repository other than the one taken: its key and its files, and the
   # line read again with them. A source of one repository reads each of
-  # its lines once.
+  # its lines once in a row.
   at=${out%%"$nl"*}
   at=${at#key"$tab"}
   if [ "$at" != "$hr" ]; then
     hr=$at
     key=$(key_of "${at%%"$tab"*}" "${at#*"$tab"}")
     inputs
-    dir_kept=false
     read_line "$1"
   fi
   doc=
   learned=
   told_now=
-  forget=
   events=
   old_ifs=$IFS
   IFS=$nl
@@ -155,7 +176,6 @@ keep() {
     doc"$tab"*) doc=${l#doc"$tab"} ;;
     paths"$tab"*) learned=${l#paths"$tab"} ;;
     told"$tab"*) told_now=${l#told"$tab"} ;;
-    forget"$tab"*) forget="$forget ${l#forget"$tab"}" ;;
     blamed"$tab"* | conflict"$tab"* | landed"$tab"*) events="$events$l$nl" ;;
     esac
   done
@@ -165,9 +185,6 @@ keep() {
   if ! write "$state/docs/$key.json" "$doc"; then
     say "cannot keep a document in $state/docs"
     return 0
-  fi
-  if [ -n "$dir" ] && [ "$dir_kept" = false ]; then
-    write "$state/docs/$key.dir" "$dir" && dir_kept=true
   fi
   write "$state/docs/$key.paths" "$learned" && paths=$learned
   # Nothing is told when it cannot be kept as told, or every document would
@@ -184,16 +201,8 @@ keep() {
       say "cannot record events as told in $state/told: no toasts until it can be written"
     fi
   fi
-  if [ -n "$forget" ]; then
-    set --
-    for id in $forget; do
-      set -- "$@" "$state/failed/$key-$id"
-    done
-    rm -f "$@"
-    read_failed
-  fi
-  # What the toasts say, the worktrees and tests learned first, so the
-  # sidebar reads them when the watcher wakes.
+  # What the toasts say, the worktrees learned first, so the sidebar reads
+  # them when the watcher wakes.
   toasts=
   landings=
   old_ifs=$IFS
@@ -203,12 +212,9 @@ keep() {
     fields "$e"
     case $f1 in
     blamed)
-      learned_tests=$f4
-      [ "$f5" = learn ] && learn "$f2" blamed "$f3"
-      toasts="${toasts}sluice: #$f2 blamed on $f3$tab${learned_tests:+$learned_tests failed. }Run jump to go to its pane.$nl"
+      toasts="${toasts}sluice: #$f2 blamed on $f3$tab${f4:+$f4 failed. }Run jump to go to its pane.$nl"
       ;;
     conflict)
-      [ "$f5" = learn ] && learn "$f2" conflict "$f3"
       toasts="${toasts}sluice: #$f2 conflicts on $f3$tab$f4$nl"
       ;;
     landed) landings="$landings$f2$tab$f3$tab$f4$tab$f5$nl" ;;
@@ -309,8 +315,6 @@ hr=
 key=
 told=
 paths=
-failed=
-dir_kept=false
 while IFS= read -r line || [ -n "$line" ]; do
   keep "$line"
   line=

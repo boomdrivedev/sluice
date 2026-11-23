@@ -32,20 +32,15 @@ if [ -f "$server/panes.json" ]; then { IFS= read -r panes <"$server/panes.json";
 [ -n "$panes" ] || panes='[]'
 docs=$(all_docs)
 
-# Each document's learned submissions and blamed tests, by repository.
+# Each document's learned submissions, by repository.
 extra='{}'
 for f in "$state"/docs/*.json; do
   [ -e "$f" ] || continue
   k=$(basename "$f" .json)
   p=$(jq -c 'objects' "$state/docs/$k.paths" 2>/dev/null)
   [ -n "$p" ] || p='{}'
-  fl='{}'
-  for g in "$state/failed/$k"-*; do
-    [ -e "$g" ] || continue
-    fl=$(printf '%s' "$fl" | jq -c --arg i "${g##*-}" --slurpfile v "$g" '. + {($i): ($v[0] | arrays)}' 2>/dev/null) || fl='{}'
-  done
-  extra=$(printf '%s' "$extra" | jq -c --arg r "$(jq -r .repository "$f")" --argjson p "$p" --argjson fl "$fl" \
-    '.[$r] = {paths: ((.[$r].paths // {}) + $p), failed: ((.[$r].failed // {}) + $fl)}')
+  extra=$(printf '%s' "$extra" | jq -c --arg r "$(jq -r .repository "$f")" --argjson p "$p" \
+    '.[$r] = {paths: ((.[$r].paths // {}) + $p)}')
 done
 
 checks='{}'
@@ -61,7 +56,7 @@ want=$(jqw -n -c --argjson panes "$panes" --argjson docs "$docs" --argjson extra
   { panes: [ $panes[] | select(.top) | . as $p
       | ($docs | map(select(.repository == $p.repo))) as $d
       | {id: .pane_id, v: (if ($d | length) == 0 then ""
-          else $d | pane_token($p.top; $extra[$p.repo].paths // {}; $extra[$p.repo].failed // {}; $checks[$p.top]; $now; $p.named) end)} ],
+          else $d | pane_token($p.top; $extra[$p.repo].paths // {}; $checks[$p.top]; $now; $p.named) end)} ],
     spaces: [ $panes | group_by(.workspace_id)[] | .[0].workspace_id as $w
       | (map(.repo) | unique) as $repos
       | {id: $w, v: ($docs | map(select(.repository as $r | $repos | index($r))) | queue_token)} ] }')
