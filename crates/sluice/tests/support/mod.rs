@@ -932,14 +932,17 @@ impl sluice::host_process::HostProcess for FakeProcess {
                     own,
                     follows,
                     said: String::from_utf8_lossy(&out).into_owned(),
+                    stderr: Vec::new(),
                 },
                 sluice::WaitStepped::Pull(pull) => WaitStep::Pull {
                     pull: Box::new(pull),
                     said: String::from_utf8_lossy(&out).into_owned(),
+                    stderr: Vec::new(),
                 },
                 sluice::WaitStepped::Pulls(pulls) => WaitStep::Pulls {
                     pulls: Box::new(pulls),
                     said: String::from_utf8_lossy(&out).into_owned(),
+                    stderr: Vec::new(),
                 },
             },
         )

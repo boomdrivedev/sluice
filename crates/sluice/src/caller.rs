@@ -70,7 +70,43 @@ pub fn folder() -> std::io::Result<PathBuf> {
     }
 }
 
+thread_local! {
+    /// Within a wait's call in `sluice host`, the end of the spent
+    /// allowance the wait has said already, which none of its steps says
+    /// again (134; the change `sluice-host-makes-each-change`, design D2).
+    static TOLD: std::cell::Cell<Option<Option<chrono::DateTime<chrono::Utc>>>> =
+        const { std::cell::Cell::new(None) };
+}
+
+/// Run `f` as a step of a wait that has said a spent allowance until
+/// `told` already: what it says in `f` it says once over every step. The
+/// allowance the wait has said after `f`.
+pub fn telling<T>(
+    told: Option<chrono::DateTime<chrono::Utc>>,
+    f: impl FnOnce() -> T,
+) -> (T, Option<chrono::DateTime<chrono::Utc>>) {
+    let before = TOLD.with(|t| t.replace(Some(told)));
+    let ran = f();
+    let after = TOLD.with(|t| t.replace(before)).flatten();
+    (ran, after)
+}
+
+/// Whether a spent allowance until `until` is still to be said: always
+/// outside a wait's step, and within one where the wait has not said it,
+/// which it is from now on.
+pub fn untold(until: chrono::DateTime<chrono::Utc>) -> bool {
+    TOLD.with(|t| match t.get() {
+        None => true,
+        Some(Some(said)) if said == until => false,
+        Some(_) => {
+            t.set(Some(Some(until)));
+            true
+        }
+    })
+}
+
 /// The session variables of this process's environment, which a read
+/// sends./// The session variables of this process's environment, which a read
 /// sends.
 pub fn here() -> BTreeMap<String, String> {
     vars_of(&SESSION)
@@ -132,5 +168,23 @@ mod tests {
         assert_eq!(seen.2, PathBuf::from("/w/feat/../a"));
         assert_eq!(seen.3, PathBuf::from("/x"));
         assert_eq!(path("."), PathBuf::from("."));
+    }
+
+    /// 134, design D2: a wait's steps say a spent allowance once over all
+    /// of them, the mark carried from one step to the next; a new end is
+    /// said again; outside a wait's step it is always said.
+    #[test]
+    fn a_wait_says_a_pause_once_over_its_steps() {
+        let until = chrono::Utc::now();
+        let ((first, again), told) = telling(None, || (untold(until), untold(until)));
+        assert!(first && !again);
+        assert_eq!(told, Some(until));
+        let (next_step, told) = telling(told, || untold(until));
+        assert!(!next_step, "a later step says it no more");
+        let later = until + chrono::TimeDelta::minutes(5);
+        let (new_end, told) = telling(told, || untold(later));
+        assert!(new_end);
+        assert_eq!(told, Some(later));
+        assert!(untold(until) && untold(until), "outside a step, always");
     }
 }

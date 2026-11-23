@@ -169,6 +169,10 @@ pub struct PullWait {
     /// The submission it was last read taken in as.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub taken: Option<u64>,
+    /// 134: the end of the spent allowance the wait has said, which no
+    /// later step says again.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub told: Option<chrono::DateTime<chrono::Utc>>,
 }
 
 /// One worktree of an act a wait follows (125).
@@ -222,6 +226,10 @@ pub struct PullItem {
 pub struct PullGroupWait {
     pub branch: String,
     pub items: Vec<PullItem>,
+    /// 134: the end of the spent allowance the wait has said, which no
+    /// later step says again.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub told: Option<chrono::DateTime<chrono::Utc>>,
 }
 
 /// What `sluice submit` asks of `sluice host`: its command's arguments
@@ -284,6 +292,9 @@ pub enum WaitStep {
         /// carries its work.
         #[serde(default, skip_serializing_if = "String::is_empty")]
         said: String,
+        /// The lines the step said on standard error.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        stderr: Vec<String>,
     },
     /// The wait follows a pull request, as this step left it, and says
     /// `said` (the change `sluice-host-makes-each-change`, design D2).
@@ -291,6 +302,8 @@ pub enum WaitStep {
         pull: Box<PullWait>,
         #[serde(default, skip_serializing_if = "String::is_empty")]
         said: String,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        stderr: Vec<String>,
     },
     /// The wait follows an act's pull requests, as this step left them
     /// (125; design D2).
@@ -298,6 +311,8 @@ pub enum WaitStep {
         pulls: Box<PullGroupWait>,
         #[serde(default, skip_serializing_if = "String::is_empty")]
         said: String,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        stderr: Vec<String>,
     },
 }
 
@@ -912,6 +927,7 @@ mod tests {
                 ..Default::default()
             }),
             said: "waiting: review\n".into(),
+            stderr: vec![],
         };
         let line = serde_json::to_string(&step).unwrap();
         assert_eq!(serde_json::from_str::<WaitStep>(&line).unwrap(), step);
@@ -932,6 +948,7 @@ mod tests {
                 target: "main".into(),
                 pulls: Some(Box::new(PullGroupWait {
                     branch: "main".into(),
+                    told: None,
                     items: vec![PullItem {
                         number: 1,
                         worktree: "/w/a".into(),

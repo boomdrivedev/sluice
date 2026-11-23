@@ -4181,16 +4181,28 @@ fn wait_ask(
             }
             Stepped::Ended(o.code)
         }
-        WaitStep::Follow { own, follows, said } => {
+        WaitStep::Follow {
+            own,
+            follows,
+            said,
+            stderr,
+        } => {
             out.write_all(said.as_bytes())?;
+            stderr.iter().for_each(|l| telemetry::say(l));
             Stepped::Follow(own, follows)
         }
-        WaitStep::Pull { pull, said } => {
+        WaitStep::Pull { pull, said, stderr } => {
             out.write_all(said.as_bytes())?;
+            stderr.iter().for_each(|l| telemetry::say(l));
             Stepped::Pull(pull)
         }
-        WaitStep::Pulls { pulls, said } => {
+        WaitStep::Pulls {
+            pulls,
+            said,
+            stderr,
+        } => {
             out.write_all(said.as_bytes())?;
+            stderr.iter().for_each(|l| telemetry::say(l));
             Stepped::Pulls(pulls)
         }
     })
@@ -6570,6 +6582,7 @@ fn submit_pull_group(
     }
     let mut group = host_process::protocol::PullGroupWait {
         branch: branch.clone(),
+        told: None,
         items: names
             .iter()
             .zip(&opened)

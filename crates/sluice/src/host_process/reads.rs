@@ -484,10 +484,29 @@ pub(crate) async fn wait(
                         .as_peer(crate::exec::Host::peer(&bound))
                         .holding();
                     let mut out = Vec::new();
-                    let stepped =
-                        crate::wait_step(&s, &bound, &*bound.pulls, &clock, &ask, &mut out);
+                    // 134: the spent allowance the wait has said already,
+                    // which this step says no more.
+                    let told = ask
+                        .pull
+                        .as_ref()
+                        .and_then(|p| p.told)
+                        .or(ask.pulls.as_ref().and_then(|p| p.told));
+                    let (stepped, told) = crate::caller::telling(told, || {
+                        crate::wait_step(&s, &bound, &*bound.pulls, &clock, &ask, &mut out)
+                    });
                     held.keep_followed(&repository, bound.pulls.remembered());
-                    Ok((stepped?, out))
+                    let stepped = match stepped? {
+                        crate::WaitStepped::Pull(mut p) => {
+                            p.told = told;
+                            crate::WaitStepped::Pull(p)
+                        }
+                        crate::WaitStepped::Pulls(mut p) => {
+                            p.told = told;
+                            crate::WaitStepped::Pulls(p)
+                        }
+                        other => other,
+                    };
+                    Ok((stepped, out))
                 },
             )
         });
@@ -513,14 +532,17 @@ pub(crate) async fn wait(
             own,
             follows,
             said: String::from_utf8_lossy(&out).into_owned(),
+            stderr,
         }),
         Ok((crate::WaitStepped::Pull(pull), out)) => Answer::Waited(WaitStep::Pull {
             pull: Box::new(pull),
             said: String::from_utf8_lossy(&out).into_owned(),
+            stderr,
         }),
         Ok((crate::WaitStepped::Pulls(pulls), out)) => Answer::Waited(WaitStep::Pulls {
             pulls: Box::new(pulls),
             said: String::from_utf8_lossy(&out).into_owned(),
+            stderr,
         }),
         Err(e) => {
             let mut output = failed(&format!("{e:#}"), json);

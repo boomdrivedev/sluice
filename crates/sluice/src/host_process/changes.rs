@@ -225,15 +225,31 @@ fn make(
                     if !status {
                         bound.pulls.remember(hosting.followed(repository));
                     }
-                    let made = crate::submit_run(
-                        cli,
-                        bound.seams(),
-                        &bound,
-                        &bound.branch,
-                        &*bound.pulls,
-                        &clock,
-                        &mut out,
-                    );
+                    // 134: a spent allowance the submit said is said by
+                    // none of its wait's steps again.
+                    let (made, told) = crate::caller::telling(None, || {
+                        crate::submit_run(
+                            cli,
+                            bound.seams(),
+                            &bound,
+                            &bound.branch,
+                            &*bound.pulls,
+                            &clock,
+                            &mut out,
+                        )
+                    });
+                    let made = made.map(|m| match m {
+                        crate::Submitted::Wait { mut ask, queued } => {
+                            if let Some(p) = ask.pull.as_mut() {
+                                p.told = told;
+                            }
+                            if let Some(p) = ask.pulls.as_mut() {
+                                p.told = told;
+                            }
+                            crate::Submitted::Wait { ask, queued }
+                        }
+                        done => done,
+                    });
                     if !status {
                         hosting.keep_followed(repository, bound.pulls.remembered());
                     }

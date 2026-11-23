@@ -1145,7 +1145,10 @@ impl App {
     /// A try not made, or refused, for an allowance spent until `until`;
     /// said once on stderr when the policy waits it out.
     fn limited(&self, until: DateTime<Utc>, words: &str) -> Failed<anyhow::Error> {
-        if self.policy.waits() && self.told.get() != Some(until) {
+        // Said once by this binding, and once by a wait over every step
+        // `sluice host` takes of it (the change
+        // `sluice-host-makes-each-change`, design D2).
+        if self.policy.waits() && self.told.get() != Some(until) && crate::caller::untold(until) {
             self.told.set(Some(until));
             // Said to the caller, whose call `sluice host` makes keeps
             // what it says on stderr (the change
