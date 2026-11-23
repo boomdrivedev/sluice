@@ -45,4 +45,4 @@ Each check runs through sluice, one suite at a time: `sluice exec main -- cargo 
 
 - [x] 6.1 Amend the record of the host process with this change's decisions, each with Before and Now in plain words. Rewrite in the same form the rule that a watch and a wait follow one reader, the rule that each read goes through `sluice host`, and the rule that no process runs between commands, for the files under `readers/` and the older `sluice run`. Check: `sluice exec main -- moon run root:changes`.
 - [x] 6.2 Remove the files under `readers/` from the site's page of the host's state, and say there that a watch, a wait and `sluice run` follow `sluice host` on a subscription. No gate task reads a page's words, by the rule that no task reads Markdown, so the review of the diff checks it.
-- [ ] 6.3 Run the gate. Check: `sluice exec main`, then `devenv shell -- moon run cli:sandbox` outside the gate's sandbox, one suite at a time.
+- [x] 6.3 Run the gate. Check: `sluice exec main`, then `devenv shell -- moon run cli:sandbox` outside the gate's sandbox, one suite at a time.
