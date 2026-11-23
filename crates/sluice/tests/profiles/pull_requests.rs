@@ -1459,7 +1459,12 @@ fn a_standing_intake_failure_is_said_once_for_each_cause_and_host() {
     g.discovery_passes();
     let out = g.skipping(g.repo.dir(), &["run", "--rounds", "2"]);
     assert!(out.status.success(), "{}", text(&out));
-    assert_eq!(g.host_log().matches(&line).count(), 1, "{}", g.host_log());
+    // The host process started afresh writes `log`, and the start keeps
+    // only the log before it as `log.1`. A host process can end idle
+    // between the two runs above, so the log that says the cause can be
+    // gone: this reads the new host process's own log alone.
+    let own = std::fs::read_to_string(g.state.path().join("sluice/host/log")).unwrap();
+    assert_eq!(own.matches(&line).count(), 0, "{own}");
     assert_eq!(logged(&g), 1);
 }
 
