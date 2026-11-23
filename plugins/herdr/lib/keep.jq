@@ -1,19 +1,24 @@
 # One line a source printed, read whole by the one jq the reader runs for it
-# (D8), with the repository's told list, learned worktrees and blamed tests
-# as it found them. Run with -R on the line, and:
+# (D8), with the repository's told list and learned worktrees as it found
+# them. Run with -R on the line, and:
 #   $hr      the host and repository, tab between, whose files these are,
 #            or "" before the reader knows;
 #   $told    the told list's text, "" where there is none: a first sight;
-#   $paths   the learned worktrees' text;
-#   $failed  the blamed tests, a line `<id>\t<json>` for each.
-# Prints `bad` for a line it cannot read as sluice/overview@1, else `key`
-# with the document's host and repository, and, where those are $hr's, what
-# to keep and to tell, a line each:
+#   $paths   the learned worktrees' text.
+# Prints `bad` for a line it cannot read as sluice/overview@1, `folder`
+# with the line's folder and how its repository stands for a line of a
+# source that names its folders (`unset` where sluice is not set up there
+# or the repository is gone, which takes the folder off the subscription;
+# `none` where nothing is recorded; else `records`), then
+# `key` with the document's host and repository, and, where those are
+# $hr's and it has records, what to keep and to tell, a line each:
 #   doc, paths, told   the document, the learned worktrees and the told list
-#   forget <id>        blamed tests no longer recent or queued
-#   blamed <id> <branch> <tests> <known|learn>
-#   conflict <id> <branch> <paths> <known|learn>
+#   blamed <id> <branch> <tests>
+#   conflict <id> <branch> <paths>
 #   landed <id> <branch> <worktree> <revision>
+# A submission's worktree and a blame's tests come from the document:
+# `submissions[].from.path`, `recent_paths` and `recent_failed` (the
+# change `the-plugins-hold-one-subscription-each`, D3).
 # Fields are tab-separated; no field holds a control character.
 include "words";
 
@@ -52,25 +57,33 @@ def normalized:
   # path holding an escape would reach the terminal as one.
   | walk(if type == "string" then gsub("[[:cntrl:]]"; "") else . end);
 
-def parsed: (try fromjson catch null) as $v | [$v | normalized] | first;
-
 def row: map(if . == null then "" else tostring end | gsub("[[:cntrl:]]"; "")) | join("\t");
 
-parsed as $d
-| if $d == null then "bad"
+# Whether a document holds anything to show: a branch or a session.
+def records: (.branches | length) + (.sessions | length) > 0;
+
+(try fromjson catch null) as $raw
+| ($raw | if type == "object" and (.folder | type) == "string" then .folder | gsub("[[:cntrl:]]"; "") else null end) as $folder
+| ($raw | [normalized] | first) as $d
+# A folder sluice is not set up in, or whose repository is gone: no
+# document to keep (D4).
+| if $folder != null and ($raw.set_up == false or $raw.gone == true) then ["folder", $folder, "unset"] | row
+  elif $d == null then "bad"
   else
+    (select($folder != null) | ["folder", $folder, (if $d | records then "records" else "none" end)] | row),
     (["key", $d.host, $d.repository] | row),
-    (select("\($d.host)\t\($d.repository)" == $hr)
+    (select("\($d.host)\t\($d.repository)" == $hr and ($folder == null or ($d | records)))
       # Each submission's worktree and branch, kept while its id is recent
       # or queued; a finished one leaves submissions[] but stays in recent[].
       | ([$d.branches[].recent[] | (.id // empty), (.ids // [])[]] + [$d.branches[].submissions[].id]
           | map(tostring) | map({(.): true}) | add // {}) as $live
       | (($paths | try fromjson catch {}) | if type == "object" then . else {} end) as $known
-      | ($known + ([$d.branches[] | .branch as $b | .submissions[] | select(.from.path | type == "string")
-          | {(.id | tostring): {path: .from.path, branch: $b}}] | add // {})
+      | ($known
+          + ([$d.branches[] | .branch as $b | (.recent_paths | if type == "object" then . else {} end)
+              | to_entries[] | select(.value | type == "string") | {(.key): {path: .value, branch: $b}}] | add // {})
+          + ([$d.branches[] | .branch as $b | .submissions[] | select(.from.path | type == "string")
+              | {(.id | tostring): {path: .from.path, branch: $b}}] | add // {})
         | with_entries(select($live[.key]))) as $learned
-      | ([$failed | splits("\n") | select(length > 0) | index("\t") as $i | select($i != null)
-          | {(.[:$i]): (.[$i + 1:] | try fromjson catch null)}] | add // {}) as $blamed
       # The events told, by their keys, while they are among the recent; a
       # list missing or unreadable is a first sight, which tells nothing.
       | (if $told == "" then null else ($told | try fromjson catch null) end
@@ -79,17 +92,15 @@ parsed as $d
       | ("doc\t" + ($d | tojson)),
         ("paths\t" + ($learned | tojson)),
         ("told\t" + ([$events[].key] | unique | tojson)),
-        ($blamed | keys[] | select($live[.] | not) | ["forget", .] | row),
         (select($was != null) | $events[] | select($was[.key] | not)
           | .branch as $b | .event as $e
           | if $e.event == "blamed" then
               ($e.id | tostring) as $i
-              | ["blamed", $i, $b, ($blamed[$i] | if type == "array" then map(tostring) | join(", ") else "" end),
-                 (if $learned[$i].path and ($blamed[$i] | type) == "array" then "known" else "learn" end)] | row
+              | ([$d.branches[] | select(.branch == $b) | .recent_failed | objects | .[$i]] | first) as $f
+              | ["blamed", $i, $b, ($f | if type == "array" then map(tostring) | join(", ") else "" end)] | row
             elif $e.event == "conflict" then
               ($e.id | tostring) as $i
-              | ["conflict", $i, $b, (($e.paths // []) | map(tostring) | join(", ")),
-                 (if $learned[$i].path then "known" else "learn" end)] | row
+              | ["conflict", $i, $b, (($e.paths // []) | map(tostring) | join(", "))] | row
             elif $e.event == "landed" then
               ($e.ids // [])[] | tostring as $i | select($learned[$i].path)
               | ["landed", $i, $b, $learned[$i].path, (($e.to // "") | tostring | .[0:7])] | row

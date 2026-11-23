@@ -11,14 +11,15 @@ sluice's merge queue beside your agents in [herdr](https://herdr.dev).
 herdr plugin install agentplot/sluice/plugins/herdr
 ```
 
-Needs herdr 0.9.3 or later, `sluice` 0.12 or later and `jq` on `PATH`, on
-Linux or macOS. It reads everything from `sluice overview --watch --json`,
-run once in each repository with sluice's records that a pane of any of
-your herdr servers is in, and does nothing elsewhere. One watcher does
-this for all of your herdr servers on a host: the first server's startup
-starts it, each server's startup and new panes and worktrees have it
-serve that server, and it stops once none of them runs. It never submits,
-withdraws or lands anything.
+Needs herdr 0.9.3 or later, the `sluice` of the same release and `jq` on
+`PATH`, on Linux or macOS. It reads everything from one
+`sluice overview --json --watch --stdin`, which it tells the folder of
+each repository that a pane of any of your herdr servers is in, and shows
+the repositories with sluice's records. One watcher does this for all of
+your herdr servers on a host: the first server's startup starts it, each
+server's startup and new panes and worktrees have it serve that server,
+and it stops once none of them runs. It never submits, withdraws or lands
+anything.
 
 ## What you get
 
@@ -213,27 +214,38 @@ in the session's environment.
 
 ## Sources
 
-By default the plugin runs `sluice overview --watch --json` once in every
-repository with sluice's records that a pane of any herdr server is in,
-and stops it once no pane of any server is there. To read documents from
-anywhere else, list the commands in `sources.toml`, in the plugin's config
-directory (`herdr plugin config-dir agentplot.sluice`):
+By default the plugin runs `sluice overview --json --watch --stdin` once,
+for every repository. It writes `add <folder>` on its input for each
+repository that a pane of any herdr server is in, and `remove <folder>`
+once no pane of any server is there. A repository where sluice is not set
+up, or that has no records, shows `No sluice records in this repository.`
+To read documents from anywhere else, list the commands in `sources.toml`,
+in the plugin's config directory (`herdr plugin config-dir
+agentplot.sluice`):
 
 ```toml
 # Show the ahead count without forecasting.
 ahead_check = false
 
-# The default, kept: run in every repository a pane is in.
+# The default, kept: run once, told the folder of each repository a pane
+# is in.
 [[sources]]
 name = "local"
-command = ["sluice", "overview", "--watch", "--json"]
-each_repository = true
+command = ["sluice", "overview", "--json", "--watch", "--stdin"]
+folders = true
 
-# Any command printing sluice/overview@1 documents, one per line; run once.
+# Any command printing sluice/overview@1 documents, one per line; run
+# once, with its input closed.
 [[sources]]
 name = "build machine"
 command = ["my-overview-stream", "app"]
 ```
+
+A source with `folders = true` gets the `add` and `remove` lines on its
+input, and prints each document with its `folder`. The key
+`each_repository` is no key of the file: a file that names it runs no
+source, and the plugin's log and the popup say
+`sources.toml line <n>: each_repository is not a key: use folders = true`.
 
 Each document is shown under its own `host` and `repository`; a repository
 of the same name read from two hosts shows as two blocks. A pane is tied to

@@ -217,7 +217,8 @@ function host(
  * watch stays open, printing what the test hands it, until the test ends it;
  * while `failing`, one fails to start, and while `refusing`, one writes it to
  * stderr and exits 2 at once. It keeps when each watch started and ended, by
- * the mocked clock.
+ * the mocked clock, what each ran and where, and the most that ran at one
+ * time.
  */
 function watches(on: On, clock: MockClock) {
   type Piece = { stream: "stdout" | "stderr"; text: string };
@@ -232,6 +233,9 @@ function watches(on: On, clock: MockClock) {
     refusing: null as string | null,
     started: [] as number[],
     ended: [] as number[],
+    spawned: [] as { argv: string; cwd: string | undefined }[],
+    running: 0,
+    most: 0,
     isOpen: () => open !== null,
     /** Prints `text` on the open watch as it is. */
     async say(text: string) {
@@ -257,9 +261,12 @@ function watches(on: On, clock: MockClock) {
       await clock.settle();
     },
   };
-  on("process.spawn", async function* () {
+  on("process.spawn", async function* ($, e) {
     w.started.push(clock.now());
+    w.spawned.push({ argv: e.argv.join(" "), cwd: e.cwd });
     if (w.failing) throw new Error("sluice: command not found");
+    w.running += 1;
+    w.most = Math.max(w.most, w.running);
     const me: Open = w.refusing
       ? {
           pieces: [{ stream: "stderr", text: w.refusing }],
@@ -277,6 +284,7 @@ function watches(on: On, clock: MockClock) {
       }
     } finally {
       if (open === me) open = null;
+      w.running -= 1;
       w.ended.push(clock.now());
     }
   });
@@ -1923,6 +1931,67 @@ test("/sluice twice with the watch open leaves one watch running", async ($, on)
 function noSluice(): Overview {
   return { ...overview(), branches: [], sessions: [], previews: [], set_up: false };
 }
+
+// One subscription for the session (the change
+// `the-plugins-hold-one-subscription-each`, D6): at most one watch runs at
+// any time over the session's life.
+
+test("the board's watch serves the session's folder with no --stdin", async ($, on) => {
+  const clock = mock.clock(on);
+  await clock.set(NOW);
+  const watch = watchedHost(on, clock, nothingSeen());
+  await $.session.start({ cwd: ROOT, surface: "terminal", isInteractive: true });
+  await clock.settle();
+  expect(watch.spawned).toEqual([{ argv: "sluice overview --json --watch", cwd: ROOT }]);
+});
+
+test("a watch that ends three times never runs beside the next", async ($, on) => {
+  const clock = mock.clock(on);
+  await clock.set(NOW);
+  const watch = watchedHost(on, clock, nothingSeen());
+  await $.session.start({ cwd: ROOT, surface: "terminal", isInteractive: true });
+  await clock.settle();
+  await watch.print(overview());
+  for (let i = 0; i < 3; i++) {
+    // Each has run ten minutes, so the next follows a second later.
+    await clock.advance(600_000);
+    await watch.end();
+    await startedAgainAfter(clock, watch, 1000);
+    await watch.print(overview());
+  }
+  expect(watch.started).toHaveLength(4);
+  expect(watch.most).toBe(1);
+});
+
+test("/sluice twice where the repository has no sluice starts one watch", async ($, on) => {
+  const clock = mock.clock(on);
+  await clock.set(NOW);
+  const watch = watchedHost(on, clock, nothingSeen());
+  panes(on);
+  await $.session.start({ cwd: ROOT, surface: "terminal", isInteractive: true });
+  await clock.settle();
+  await watch.print(noSluice());
+  await watch.exit(0, "");
+  await $.command.run(slash(true));
+  await $.command.run(slash(true));
+  await clock.settle();
+  expect(watch.started).toHaveLength(2);
+  expect(watch.isOpen()).toBe(true);
+  expect(watch.most).toBe(1);
+});
+
+test("a second session start in one load leaves one watch", async ($, on) => {
+  const clock = mock.clock(on);
+  await clock.set(NOW);
+  const watch = watchedHost(on, clock, nothingSeen());
+  await $.session.start({ cwd: ROOT, surface: "terminal", isInteractive: true });
+  await clock.settle();
+  await watch.print(overview());
+  await $.session.start({ cwd: ROOT, surface: "terminal", isInteractive: true });
+  await clock.settle();
+  expect(watch.started).toHaveLength(1);
+  expect(watch.most).toBe(1);
+});
 
 const NOT_SET_UP = [
   "sluice isn't set up in this repository.",

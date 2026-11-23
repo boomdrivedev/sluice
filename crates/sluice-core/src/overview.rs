@@ -107,6 +107,18 @@ pub struct BranchView {
     /// names by `recent_from`, and `{}` in a document from before it.
     #[serde(default)]
     pub recent_subjects: BTreeMap<u64, String>,
+    /// The folder each submission the recent lines name was submitted
+    /// from, as its `from.path` says, for one the live records hold (26,
+    /// 61; rule core.41): a blame's and a conflict's, which stay live. A
+    /// submission with no path, a pull request's, or one moved to the
+    /// finished records, whose index keeps none, has no key.
+    #[serde(default)]
+    pub recent_paths: BTreeMap<u64, String>,
+    /// The checks each submission a recent `blamed` line names failed, as
+    /// its record's `failed[].task` says in its order, for one the live
+    /// records hold (20, 26).
+    #[serde(default)]
+    pub recent_failed: BTreeMap<u64, Vec<String>>,
     /// 121: the branch was last read at a revision lacking its last
     /// landing, and nothing is formed or landed on it.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -221,6 +233,8 @@ impl BranchView {
             recent: Vec::new(),
             recent_from: BTreeMap::new(),
             recent_subjects: BTreeMap::new(),
+            recent_paths: BTreeMap::new(),
+            recent_failed: BTreeMap::new(),
             held: None,
             held_checkouts: Vec::new(),
             refused_writes: Vec::new(),
@@ -504,6 +518,20 @@ pub fn branch_view(read: BranchRead) -> Result<BranchView> {
             Some((id, subject?))
         })
         .collect();
+    let recent_paths = recent
+        .iter()
+        .flat_map(named)
+        .filter_map(|id| Some((id, line.subs.get(&id)?.from.path.clone()?)))
+        .collect();
+    let recent_failed = recent
+        .iter()
+        .filter(|r| r["event"] == "blamed")
+        .flat_map(named)
+        .filter_map(|id| {
+            let failed = &line.subs.get(&id)?.failed;
+            Some((id, failed.iter().map(|f| f.task.clone()).collect()))
+        })
+        .collect();
     Ok(BranchView {
         branch,
         at: line.doc.base.clone(),
@@ -520,6 +548,8 @@ pub fn branch_view(read: BranchRead) -> Result<BranchView> {
         recent,
         recent_from,
         recent_subjects,
+        recent_paths,
+        recent_failed,
         held: line.doc.held.clone(),
         held_checkouts: line.doc.failed_releases.clone(),
         refused_writes: line.doc.refused_writes.clone(),
@@ -1077,6 +1107,8 @@ mod tests {
             recent,
             recent_from: BTreeMap::new(),
             recent_subjects: BTreeMap::new(),
+            recent_paths: BTreeMap::new(),
+            recent_failed: BTreeMap::new(),
             held: None,
             held_checkouts: Vec::new(),
             refused_writes: Vec::new(),
@@ -1360,6 +1392,118 @@ mod tests {
         let queued = read(GATE, &[(one.as_str(), one_doc)]);
         assert_eq!(
             serde_json::to_value(&queued).unwrap()["recent_subjects"],
+            serde_json::json!({})
+        );
+    }
+
+    /// `id`'s record in `state` from `worktree`, submitted from `path`.
+    fn from_path(id: u64, worktree: &str, path: &str, state: &str) -> (String, String) {
+        let (file, doc) = submission(id, worktree, state);
+        let from = format!("\"worktree\":\"{worktree}\",\"path\":\"{path}\"");
+        (
+            file,
+            doc.replacen(&format!("\"worktree\":\"{worktree}\""), &from, 1),
+        )
+    }
+
+    /// 26, 61: the folder of each live submission the recent lines name,
+    /// a blame's and a conflict's, from its record's `from.path`.
+    #[test]
+    fn a_branch_names_the_folders_of_its_recent_live_submissions() {
+        let mut log = String::new();
+        log += &line("blamed", ",\"id\":2,\"combination\":\"c\"");
+        log += &line("conflict", ",\"id\":3,\"paths\":[\"p\"],\"with\":[]");
+        let (two, two_doc) = from_path(2, "unit/b", "/w/unit-b", "failed");
+        let (three, three_doc) = from_path(3, "unit/c", "/w/unit-c", "conflict");
+        let v = read(
+            "[branches.main]\nrequired = []\n",
+            &[
+                (LOG_FILE, log),
+                (two.as_str(), two_doc),
+                (three.as_str(), three_doc),
+            ],
+        );
+        assert_eq!(
+            serde_json::to_value(&v).unwrap()["recent_paths"],
+            serde_json::json!({"2": "/w/unit-b", "3": "/w/unit-c"})
+        );
+    }
+
+    /// Rule core.41: a landed submission moved to the finished records,
+    /// whose index keeps no folder, has no path; its worktree stays.
+    #[test]
+    fn a_landed_submission_has_no_recent_path() {
+        let v = read(
+            "[branches.main]\nrequired = []\n",
+            &[
+                (LOG_FILE, line("landed", ",\"ids\":[1],\"to\":\"b\"")),
+                (
+                    crate::records::FINISHED_INDEX,
+                    "{\"id\":1,\"state\":\"landed\",\"worktree\":\"unit/a\"}\n".to_string(),
+                ),
+            ],
+        );
+        let json = serde_json::to_value(&v).unwrap();
+        assert_eq!(json["recent_paths"], serde_json::json!({}));
+        assert_eq!(json["recent_from"], serde_json::json!({"1": "unit/a"}));
+    }
+
+    /// 124: a pull request's submission records no `from.path`, so a blame
+    /// of it has no path.
+    #[test]
+    fn a_pull_requests_submission_has_no_recent_path() {
+        let (five, five_doc) = submission(5, "pull/41", "failed");
+        let v = read(
+            "[branches.main]\nrequired = []\n",
+            &[
+                (LOG_FILE, line("blamed", ",\"id\":5,\"combination\":\"c\"")),
+                (five.as_str(), five_doc),
+            ],
+        );
+        assert_eq!(
+            serde_json::to_value(&v).unwrap()["recent_paths"],
+            serde_json::json!({})
+        );
+    }
+
+    /// 20, 26: the failed checks of each blamed submission a recent line
+    /// names, in its record's order.
+    #[test]
+    fn a_branch_names_the_failed_tests_of_its_recent_blames() {
+        let (two, two_doc) = submission(2, "unit/b", "failed");
+        let two_doc = two_doc.replacen(
+            "\"state\":",
+            "\"failed\":[{\"task\":\"cli:test\",\"hash\":\"h1\"},\
+             {\"task\":\"core:test\",\"hash\":\"h2\"}],\"state\":",
+            1,
+        );
+        let v = read(
+            "[branches.main]\nrequired = []\n",
+            &[
+                (LOG_FILE, line("blamed", ",\"id\":2,\"combination\":\"c\"")),
+                (two.as_str(), two_doc),
+            ],
+        );
+        assert_eq!(
+            serde_json::to_value(&v).unwrap()["recent_failed"],
+            serde_json::json!({"2": ["cli:test", "core:test"]})
+        );
+    }
+
+    /// A branch whose recent lines name a landing and a conflict alone
+    /// names no failed tests.
+    #[test]
+    fn a_branch_with_no_blame_has_no_recent_failed() {
+        let mut log = String::new();
+        log += &line("landed", ",\"ids\":[1],\"to\":\"b\"");
+        log += &line("conflict", ",\"id\":3,\"paths\":[\"p\"],\"with\":[1]");
+        let (three, three_doc) = submission(3, "unit/c", "conflict");
+        let v = read(
+            "[branches.main]\nrequired = []\n",
+            &[(LOG_FILE, log), (three.as_str(), three_doc)],
+        );
+        assert_eq!(
+            serde_json::to_value(&v).unwrap()["recent_failed"],
             serde_json::json!({})
         );
     }

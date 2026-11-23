@@ -7,9 +7,10 @@
 : "${HERDR_PLUGIN_CONFIG_DIR:=${XDG_CONFIG_HOME:-$HOME/.config}/herdr/plugins/config/agentplot.sluice}"
 root=$HERDR_PLUGIN_ROOT
 # The host's state, one for every herdr server of the user's: the lease,
-# each repository's documents, learned worktrees and blamed tests, the
-# events told, forecasts, probes, the popup's asks, the problem with
-# sluice, and the tab-bar copy, at a path that lasts (D3).
+# each repository's documents and learned worktrees, the events told,
+# forecasts, the marks of which repositories have records, the popup's
+# asks, the problem with sluice, and the tab-bar copy, at a path that
+# lasts (D3).
 state=$HERDR_PLUGIN_STATE_DIR
 # The folder of the herdr server in the environment, told apart by its
 # socket: what is that server's alone, the tokens last set in it and their
@@ -20,7 +21,7 @@ server=$state/servers/$(printf '%s' "${HERDR_SOCKET_PATH:-none}" | cksum | cut -
 # shellcheck disable=SC2034 # read by the scripts that source this
 config=$HERDR_PLUGIN_CONFIG_DIR
 lib=$root/lib
-mkdir -p "$state/docs" "$state/told" "$state/checks" "$state/probe" "$state/want" "$state/run" "$state/failed"
+mkdir -p "$state/docs" "$state/told" "$state/checks" "$state/marks" "$state/want" "$state/run"
 
 # The one source of the time, so the tests can fix it.
 now() {
@@ -98,11 +99,11 @@ put() {
   fi
 }
 
-# Why sluice cannot be asked here, or nothing: not on PATH, or, as the
-# watcher found, too old for overview.
+# Why sluice cannot be asked here, or nothing: not on PATH, or what the
+# watcher found, a sources.toml it refused.
 sluice_problem() {
   if ! command -v sluice >/dev/null 2>&1; then
-    echo "sluice is not on PATH: install sluice 0.12 or later."
+    echo "sluice is not on PATH: install sluice."
     return
   fi
   cat "$state/problem" 2>/dev/null

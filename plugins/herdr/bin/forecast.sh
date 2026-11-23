@@ -44,7 +44,7 @@ EOF
   done
   # Nothing to forecast while the worktree's token is about a submission.
   busy=$(jqw -n -r --argjson d "$d" --argjson p "$paths" --arg w "$top" --argjson now "$t" 'include "words";
-    $d | pane_token($w; $p; {}; null; $now; null) | test("^#") and (test("^#[0-9]+ landed ") | not)')
+    $d | pane_token($w; $p; null; $now; null) | test("^#") and (test("^#[0-9]+ landed ") | not)')
   if [ "$busy" = true ]; then
     rm -f "$out"
     continue
