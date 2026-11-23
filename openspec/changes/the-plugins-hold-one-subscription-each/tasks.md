@@ -26,4 +26,4 @@ Each check runs through sluice: `sluice exec main -- <command>`. A herdr test is
 
 - [x] 4.1 Rewrite the section "Sources" of `plugins/herdr/README.md`: the default source with `folders = true`, what `folders = true` gives a source of the user's, and the error for `each_repository`. A person reads the diff. No task reads the README.
 - [x] 4.2 Run `openspec validate the-plugins-hold-one-subscription-each --strict` and `boom terms check --repository sluice` on the change's files and on each file that the change edits. Check: `sluice exec main -- moon run root:specs root:changes`.
-- [ ] 4.3 Get the gate's verdict at the change's head: `sluice exec main`.
+- [x] 4.3 Get the gate's verdict at the change's head: `sluice exec main`.
