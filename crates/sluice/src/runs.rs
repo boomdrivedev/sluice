@@ -28,9 +28,7 @@
 //!   pgid           the command's process group, once it is spawned
 //!   out.log        the command's stdout and stderr
 //!   out.times      when out.log grew: `<length> <time>` a line (ADR 0042)
-//!   result.json    how it ended; written last while `lock` is held, by
-//!                  rename
-//!   unlocked       written once the supervisor let go of `lock`
+//!   result.json    how it ended; written last, by rename
 //!   release.log    the release command's stdout and stderr
 //!   released       the release command finished; written last
 //!   watch.out      the watch's stdout, where the request names a watch
@@ -755,13 +753,29 @@ pub fn supervise(dir: &Path) -> Result<()> {
     lock.lock()?;
     std::fs::write(dir.join("lock"), format!("{}\n", std::process::id()))?;
     let ran = run_held(dir, started);
-    // The run counts while `lock` is held, and letting it go is no event
-    // of the file system: `unlocked`, written once it is let go, is the
-    // event that tells a watch of the run folder the run no longer counts,
-    // which `result.json`, written while it is held, cannot.
     drop(lock);
-    let _ = write_atomic(&dir.join("unlocked"), now().as_bytes());
+    let_go_is_seen();
     ran
+}
+
+/// The run counts toward the host's bound while its supervisor holds
+/// `lock`, and letting it go is no event of the file system, which
+/// `result.json`, written while it is held, cannot tell: `.let-go` in the
+/// host's registry of running checks, written over once it is let go, is
+/// the event that tells the host process's watch the run no longer
+/// counts. The registry passes over a file whose name starts with `.`.
+/// Nothing is written in the run folder, which its remover may be removing
+/// by then.
+fn let_go_is_seen() {
+    let Ok(registry) = crate::host_count::HostCount::host() else {
+        return;
+    };
+    if registry.dir().is_dir() {
+        let _ = std::fs::write(
+            registry.dir().join(".let-go"),
+            format!("{}\n", std::process::id()),
+        );
+    }
 }
 
 /// The run in `dir`, its supervisor holding its lock, to its end.
