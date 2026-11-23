@@ -1,0 +1,139 @@
+-- allium: 3
+-- sluice at its seams (flume B.6; sluice 5, 50, 51, 67, 152). sluice
+-- names its submitter and a change record by their names and hashes,
+-- and reads no other tool.
+
+entity Submission {
+    submitter: String
+    branch: String
+    -- What its landing names: the change record's version, or for a
+    -- chore, millpond's routed record, by hash.
+    change_record: String?
+    route: String?
+    status: queued | landed | failed | conflict | held | withdrawn
+
+    outcomes: Outcome with submission = this
+
+    transitions status {
+        queued -> landed
+        queued -> failed
+        queued -> conflict
+        queued -> held
+        held -> landed
+        held -> queued
+        queued -> withdrawn
+        failed -> withdrawn
+        conflict -> withdrawn
+        held -> withdrawn
+        terminal: landed, withdrawn
+    }
+}
+
+-- A decided outcome, owed to the submitter until it confirms it (a
+-- delivery, as weir defines it). A withdrawal is delivered by nothing.
+entity Outcome {
+    submission: Submission
+    word: landed | failed | conflict | held
+    status: owed | confirmed
+
+    transitions status {
+        owed -> confirmed
+        terminal: confirmed
+    }
+}
+
+rule Submitted {
+    when: Submit(submitter, branch, change_record, route)
+    ensures: Submission.created(submitter: submitter, branch: branch,
+        change_record: change_record, route: route, status: queued)
+}
+
+-- A later submission from the same place withdraws the one before (67).
+rule LaterSubmissionWithdraws {
+    when: s: Submission.created
+    for old in Submissions where submitter = s.submitter:
+        requires: old.status = failed or old.status = conflict or old.status = held
+        ensures: old.status = withdrawn
+}
+
+rule Lands {
+    when: GatePassesAndBranchMoves(s)
+    requires: s.status = queued or s.status = held
+    ensures: s.status = landed
+    ensures: Outcome.created(submission: s, word: landed, status: owed)
+}
+
+rule Blamed {
+    when: GateFails(s)
+    requires: s.status = queued
+    ensures: s.status = failed
+    ensures: Outcome.created(submission: s, word: failed, status: owed)
+}
+
+rule Conflicts {
+    when: FormConflicts(s)
+    requires: s.status = queued
+    ensures: s.status = conflict
+    ensures: Outcome.created(submission: s, word: conflict, status: owed)
+}
+
+-- 152: held with the forge's words; each round pushes it again.
+rule ForgeRefuses {
+    when: ForgeRefusesPush(s)
+    requires: s.status = queued
+    ensures: s.status = held
+    ensures: Outcome.created(submission: s, word: held, status: owed)
+}
+
+rule HeldLandingDropped {
+    when: HeldLandingLost(s)
+    requires: s.status = held
+    ensures: s.status = queued
+}
+
+rule Withdrawn {
+    when: RequesterWithdraws(s)
+    requires: s.status = queued or s.status = held
+        or s.status = failed or s.status = conflict
+    ensures: s.status = withdrawn
+}
+
+rule OutcomeConfirmed {
+    when: Confirm(outcome)
+    requires: outcome.status = owed
+    ensures: outcome.status = confirmed
+}
+
+invariant ALandingNamesWhereItCameFrom {
+    for s in Submissions:
+        s.status = landed implies s.change_record != null or s.route != null
+}
+
+actor Submitter {
+    identified_by: Submission where submitter != ""
+}
+
+actor HostProcess {
+    identified_by: Submission where branch != ""
+}
+
+-- sluice's commands: anyone may submit, withdraw and confirm.
+surface SluiceCommand {
+    facing submitter: Submitter
+    provides:
+        Submit(submitter, branch, change_record, route)
+        RequesterWithdraws(s)
+        Confirm(outcome)
+}
+
+-- One round of a branch's queue, in sluice's own host process.
+surface Round {
+    facing host: HostProcess
+    context s: Submission where branch = host.branch
+    provides:
+        GatePassesAndBranchMoves(s)
+        GateFails(s)
+        FormConflicts(s)
+        ForgeRefusesPush(s)
+        HeldLandingLost(s)
+}
