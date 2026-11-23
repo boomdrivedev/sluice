@@ -786,10 +786,25 @@ thread_local! {
     /// answers a read on it (the change `sluice-host-answers-every-read`,
     /// design D1).
     static CAPTURED: std::cell::RefCell<Option<Vec<String>>> = const { std::cell::RefCell::new(None) };
+    /// Where this thread sends each line it says on stderr, as it says
+    /// it, while `sluice host` runs a session's command on it (the change
+    /// `sluice-host-runs-a-sessions-checks`, design D1).
+    static STREAMED: std::cell::RefCell<Option<Box<dyn FnMut(&str)>>> = const { std::cell::RefCell::new(None) };
 }
 
-/// Say `line` on stderr, or keep it where this thread keeps its lines.
+/// Say `line` on stderr, send it where this thread sends its lines, or
+/// keep it where this thread keeps them.
 pub fn say(line: &str) {
+    let sent = STREAMED.with(|c| match c.borrow_mut().as_mut() {
+        Some(send) => {
+            send(line);
+            true
+        }
+        None => false,
+    });
+    if sent {
+        return;
+    }
     let kept = CAPTURED.with(|c| match c.borrow_mut().as_mut() {
         Some(lines) => {
             lines.push(line.to_string());
@@ -800,6 +815,17 @@ pub fn say(line: &str) {
     if !kept {
         eprintln!("{line}");
     }
+}
+
+/// Run `f`, and send each line that it says on stderr on this thread to
+/// `send` as it says it (design D1 of the change
+/// `sluice-host-runs-a-sessions-checks`): `sluice host` sends them to the
+/// client of a session's command.
+pub fn streaming<T>(send: Box<dyn FnMut(&str)>, f: impl FnOnce() -> T) -> T {
+    let before = STREAMED.with(|c| c.borrow_mut().replace(send));
+    let ran = f();
+    STREAMED.with(|c| *c.borrow_mut() = before);
+    ran
 }
 
 /// Run `f`, and keep each line that it says on stderr on this thread

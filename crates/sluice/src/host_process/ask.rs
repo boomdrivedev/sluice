@@ -11,7 +11,7 @@ use sluice_seams::{Part, RunKind};
 
 use super::client::{Client, Connection};
 use super::pass::Report;
-use super::protocol::{Added, Answer, Named, Reading, RoomView, SubscriptionAsk, SubscriptionLine};
+use super::protocol::{Added, Named, Reading, RoomView, SubscriptionAsk, SubscriptionLine};
 use super::room::Why;
 use crate::{exec, PullRequests};
 
@@ -31,7 +31,7 @@ impl Here<'_, '_> {
     }
 }
 
-/// What a held room's asker is told next.
+/// What a session's or a preview's wait for a slot is told next.
 pub enum Holds {
     /// It waits, for this.
     Waiting(Why),
@@ -192,20 +192,19 @@ impl HostProcess for Socketed {
         Err(anyhow!("a read is asked of sluice's host process"))
     }
 
+    /// A session's or a preview's slot is held in `sluice host`, which
+    /// runs its command (the change `sluice-host-runs-a-sessions-checks`,
+    /// design D3): a command asks none.
     fn hold<'a>(
         &'a self,
-        here: &Here<'a, '_>,
-        kind: RunKind,
-        place: &str,
-        branch: &str,
+        _: &Here<'a, '_>,
+        _: RunKind,
+        _: &str,
+        _: &str,
     ) -> Result<Box<dyn Holding + 'a>> {
-        let c = self
-            .client()?
-            .hold(kind, &here.repository()?, place, Some(branch))?;
-        Ok(Box::new(Asking {
-            connection: Some(c),
-            kind,
-        }))
+        Err(anyhow!(
+            "a session's slot is held in sluice's host process, which runs its command"
+        ))
     }
 
     /// `sluice host` renders the room with each read (design D9): a
@@ -279,39 +278,6 @@ pub fn has_sluice(here: &Here<'_, '_>) -> Result<bool> {
     }
     let tips = here.host.tips()?;
     here.host.holds_policy(&tips)
-}
-
-struct Asking {
-    connection: Option<Connection>,
-    kind: RunKind,
-}
-
-impl Holding for Asking {
-    fn next(&mut self, wait: Duration) -> Result<Option<Holds>> {
-        let Some(c) = self.connection.as_mut() else {
-            return Err(anyhow!("the room was held already"));
-        };
-        match c.next(Some(wait))? {
-            Some(Answer::Waiting(why)) => Ok(Some(Holds::Waiting(why))),
-            Some(Answer::Held) => {
-                let c = self.connection.take().expect("asked above");
-                Ok(Some(Holds::Held(Part::new(self.kind, Lent(c)))))
-            }
-            Some(Answer::Error(e)) => Err(anyhow!("{e}")),
-            Some(_) | None => Ok(None),
-        }
-    }
-}
-
-/// A part of the host process's room, held over its connection until the
-/// run begins (D12).
-pub struct Lent(pub Connection);
-
-impl Lent {
-    /// The run began in `place`, in `run_dir`, its supervisor holding it.
-    pub fn started(mut self, place: &str, run_dir: &Path) -> Result<()> {
-        self.0.started(place, run_dir)
-    }
 }
 
 /// Tell the host process the repository `here` binds has work, starting

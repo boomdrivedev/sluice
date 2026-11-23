@@ -587,14 +587,14 @@ impl crate::exec::Host for Bound {
     }
 
     fn worktree(&self, dir: &str) -> Result<String> {
-        let path = std::fs::canonicalize(dir)?;
+        let path = std::fs::canonicalize(crate::caller::path(dir)?)?;
         path.to_str()
             .map(str::to_string)
             .ok_or_else(|| anyhow::anyhow!("{} is not UTF-8", path.display()))
     }
 
     fn working_copy(&self, dir: &str) -> Result<Option<String>> {
-        match worktree_top(Path::new(dir))? {
+        match worktree_top(&crate::caller::path(dir)?)? {
             Some(top) => self.worktree(&top).map(Some),
             None => Ok(None),
         }
@@ -631,8 +631,12 @@ impl crate::exec::Host for Bound {
         self.tests.runs().end(&run.0)
     }
 
+    /// Read in the caller's folder: `sluice host`, which runs a session's
+    /// command, works in `/` (the change
+    /// `sluice-host-runs-a-sessions-checks`, design D1).
     fn revision(&self, rev: &str) -> Result<Option<String>> {
         let out = crate::workers::command("git", "git")
+            .current_dir(crate::caller::folder()?)
             .args(["rev-parse", "--verify", "--quiet", "--end-of-options"])
             .arg(format!("{rev}^{{commit}}"))
             .env_remove("GIT_DIR")

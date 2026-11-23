@@ -36,7 +36,7 @@ impl Equip<'_> {
             Ok(CONFLICT)
         };
         let Some(working_copy) = self.host.working_copy(".")? else {
-            let folder = std::env::current_dir()
+            let folder = crate::caller::folder()
                 .map(|d| d.display().to_string())
                 .unwrap_or_else(|_| ".".into());
             return refuse(out, &format!("refused: {folder} is in no worktree"), &[]);

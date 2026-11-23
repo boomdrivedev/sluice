@@ -295,10 +295,12 @@ impl Runs {
     /// Start `request` in a new run directory for the place `name`, under
     /// a supervisor. In `sluice host`, the supervisor is a worker: a child
     /// of the host process in a process group of its own, which ends with
-    /// its owner (`workers-end-with-their-owner@292e869158d6`). In another
-    /// process, the supervisor starts in a session of its own, so a
-    /// terminal's Ctrl-C or hang-up never reaches the run. Returns without
-    /// waiting for it.
+    /// its owner (`workers-end-with-their-owner@292e869158d6`). A pool's
+    /// job, which runs on a machine with no host process, and a test that
+    /// stands for one, start it as a child in a process group of its own,
+    /// and never in a session of its own (the change
+    /// `sluice-host-runs-a-sessions-checks`; `nothing-detached@f807c7f5fcea`).
+    /// Returns without waiting for it.
     pub fn start(&self, name: &str, request: &Request) -> Result<()> {
         let dir = self.dir(name);
         if session_run(name).is_none() && dir.join("request.json").exists() {
@@ -318,13 +320,9 @@ impl Runs {
                 cmd.env(crate::workers::VAR, crate::workers::var(owner));
                 crate::workers::take(&mut cmd, "run");
             }
-            // SAFETY: setsid is async-signal-safe and touches no memory.
-            None => unsafe {
-                cmd.pre_exec(|| {
-                    nix::unistd::setsid().map_err(std::io::Error::from)?;
-                    Ok(())
-                });
-            },
+            None => {
+                cmd.process_group(0);
+            }
         }
         let mut child = cmd
             .spawn()
@@ -355,9 +353,7 @@ impl Runs {
             std::thread::sleep(Duration::from_millis(10));
         }
         // A worker is waited on by its owner, which a hand-over in place
-        // keeps. A supervisor in a session of its own is reaped by this
-        // thread while the process lasts, and after it ends by whatever
-        // adopts it.
+        // keeps. Any other supervisor is reaped by this thread.
         match owner {
             Some(_) => crate::workers::wait(child),
             None => {
