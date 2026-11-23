@@ -664,10 +664,6 @@ impl crate::exec::Host for Bound {
         holds_policy(self.branch.local(), tips)
     }
 
-    fn readers(&self) -> Result<PathBuf> {
-        Ok(crate::instance::state_dir()?.join("readers"))
-    }
-
     fn next_pass(&self) {
         self.branch.next_pass();
         self.state.next_pass();

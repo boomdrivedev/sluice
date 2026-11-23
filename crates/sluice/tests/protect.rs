@@ -51,6 +51,8 @@ fn sl(repo: &Repo, args: &[&str]) -> Output {
         .current_dir(repo.dir())
         .args(args)
         .env("XDG_CONFIG_HOME", repo.dir().join(".git/no-config"))
+        // The test's own state folder, which its host process keeps.
+        .env("XDG_STATE_HOME", repo.dir().join(".git/no-state"))
         .stdin(Stdio::null())
         .output()
         .unwrap()

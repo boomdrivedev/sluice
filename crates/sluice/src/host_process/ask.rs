@@ -11,7 +11,7 @@ use sluice_seams::{Part, RunKind};
 
 use super::client::{Client, Connection};
 use super::pass::Report;
-use super::protocol::{Answer, FollowKind, Named, Reading, RoomView};
+use super::protocol::{Added, Answer, Named, Reading, RoomView, SubscriptionAsk, SubscriptionLine};
 use super::room::Why;
 use crate::{exec, PullRequests};
 
@@ -39,11 +39,17 @@ pub enum Holds {
     Held(Part),
 }
 
-/// A follow of a repository's passes, while it lives (D7).
-pub trait Following {
-    /// A pass's report, waiting up to `wait` for one; `None` where none
-    /// came. An error where the host process ended under it.
-    fn next(&mut self, wait: Duration) -> Result<Option<Report>>;
+/// A subscription to the host process, while it lives (the change
+/// `sluice-host-answers-every-read`, design D6 to D8).
+pub trait Subscription {
+    /// Whether the host process passes only when asked: its follower asks
+    /// a pass at each of its ticks (D14).
+    fn asked_only(&self) -> bool;
+    /// Send an `add` or a `remove` line.
+    fn say(&mut self, ask: &SubscriptionAsk) -> Result<()>;
+    /// The next line, waiting up to `wait`; `None` where none came. An
+    /// error where the host process ended under it.
+    fn next(&mut self, wait: Duration) -> Result<Option<SubscriptionLine>>;
 }
 
 /// A session's or a preview's ask for room, while it lives (D12).
@@ -82,13 +88,6 @@ pub trait HostProcess {
     /// none answers (D16).
     fn read(&self, here: &Here<'_, '_>, afresh: bool) -> Result<Reading>;
 
-    /// Follow the repository's passes as `kind`.
-    fn follow<'a>(
-        &'a self,
-        here: &Here<'a, '_>,
-        kind: FollowKind,
-    ) -> Result<Box<dyn Following + 'a>>;
-
     /// Ask for a session's or a preview's room for the place `place`, held
     /// for `branch`, the branch its run is held to (154).
     fn hold<'a>(
@@ -102,6 +101,35 @@ pub trait HostProcess {
     /// The process that answers now and its room; `None` where none
     /// answers, and nothing is started.
     fn room(&self, here: &Here<'_, '_>) -> Result<Option<(Named, RoomView)>>;
+
+    /// A subscription of `folders`, the host process started where none
+    /// answers (design D6). `here` is the binding a test's host process
+    /// reads in; the socket's takes none.
+    fn subscribe<'a>(
+        &'a self,
+        here: Option<&'a Here<'a, 'a>>,
+        folders: Vec<Added>,
+    ) -> Result<Box<dyn Subscription + 'a>>;
+
+    /// A wait's step of `ask`, from the folder `folder` (the change
+    /// `sluice-host-answers-every-read`, design D8). `here` as for
+    /// [`HostProcess::subscribe`].
+    fn wait(
+        &self,
+        here: Option<&Here<'_, '_>>,
+        folder: &Path,
+        ask: &super::protocol::WaitAsk,
+    ) -> Result<super::protocol::WaitStep>;
+
+    /// A pass of `repository` now, at the asker's time on `clock`, once it ends:
+    /// a follower's ask at its tick where passes are taken only when asked
+    /// (D14). `here` as for [`HostProcess::subscribe`].
+    fn pass_of(
+        &self,
+        here: Option<&Here<'_, '_>>,
+        repository: &Path,
+        clock: &dyn sluice_core::Clock,
+    ) -> Result<Report>;
 }
 
 /// The host process reached through its socket: the binding's.
@@ -158,18 +186,10 @@ impl HostProcess for Socketed {
             .pass(&here.repository()?, Some(here.clock.now()))
     }
 
-    fn read(&self, here: &Here<'_, '_>, afresh: bool) -> Result<Reading> {
-        self.client()?.read(&here.repository()?, afresh)
-    }
-
-    fn follow<'a>(
-        &'a self,
-        here: &Here<'a, '_>,
-        kind: FollowKind,
-    ) -> Result<Box<dyn Following + 'a>> {
-        let c = self.client()?.follow(&here.repository()?, kind)?;
-        self.mode.set(Some(c.named.asked_only));
-        Ok(Box::new(Followed(c)))
+    /// A command reads through `sluice host`'s reads, never a reading of
+    /// its own (the change `sluice-host-answers-every-read`, design D1).
+    fn read(&self, _: &Here<'_, '_>, _: bool) -> Result<Reading> {
+        Err(anyhow!("a read is asked of sluice's host process"))
     }
 
     fn hold<'a>(
@@ -188,8 +208,66 @@ impl HostProcess for Socketed {
         }))
     }
 
+    /// `sluice host` renders the room with each read (design D9): a
+    /// command asks it for none of its own.
     fn room(&self, _: &Here<'_, '_>) -> Result<Option<(Named, RoomView)>> {
-        self.client()?.room()
+        Ok(None)
+    }
+
+    fn subscribe<'a>(
+        &'a self,
+        _: Option<&'a Here<'a, 'a>>,
+        folders: Vec<Added>,
+    ) -> Result<Box<dyn Subscription + 'a>> {
+        let c = self.client()?.subscribe(folders)?;
+        self.mode.set(Some(c.named.asked_only));
+        Ok(Box::new(Subscribed(c)))
+    }
+
+    fn pass_of(
+        &self,
+        _: Option<&Here<'_, '_>>,
+        repository: &Path,
+        clock: &dyn sluice_core::Clock,
+    ) -> Result<Report> {
+        self.client()?.pass(repository, Some(clock.now()))
+    }
+
+    fn wait(
+        &self,
+        _: Option<&Here<'_, '_>>,
+        folder: &Path,
+        ask: &super::protocol::WaitAsk,
+    ) -> Result<super::protocol::WaitStep> {
+        // The worktree as `sluice host` finds it, from its own folder.
+        let ask = super::protocol::WaitAsk {
+            worktree: ask
+                .worktree
+                .as_ref()
+                .map(|w| folder.join(w).display().to_string()),
+            ..ask.clone()
+        };
+        self.client()?.wait(folder, &ask)
+    }
+}
+
+/// A subscription on the host process's socket (design D6).
+struct Subscribed(Connection);
+
+impl Subscription for Subscribed {
+    fn asked_only(&self) -> bool {
+        self.0.named.asked_only
+    }
+
+    fn say(&mut self, ask: &SubscriptionAsk) -> Result<()> {
+        self.0.say(ask)
+    }
+
+    fn next(&mut self, wait: Duration) -> Result<Option<SubscriptionLine>> {
+        match self.0.line(Some(wait))? {
+            Some(SubscriptionLine::Error(words)) => Err(anyhow!("{words}")),
+            line => Ok(line),
+        }
     }
 }
 
@@ -201,18 +279,6 @@ pub fn has_sluice(here: &Here<'_, '_>) -> Result<bool> {
     }
     let tips = here.host.tips()?;
     here.host.holds_policy(&tips)
-}
-
-struct Followed(Connection);
-
-impl Following for Followed {
-    fn next(&mut self, wait: Duration) -> Result<Option<Report>> {
-        match self.0.next(Some(wait))? {
-            Some(Answer::Pass(r)) => Ok(Some(r)),
-            Some(Answer::Error(e)) => Err(anyhow!("{e}")),
-            Some(_) | None => Ok(None),
-        }
-    }
 }
 
 struct Asking {
@@ -266,12 +332,12 @@ pub fn note(here: &Here<'_, '_>) {
     let _ = here.host.host_process().note(here);
 }
 
-/// 129 (design D16): a reading of the repository `here` binds current
-/// within the host process's tick, asked of it and started where none
-/// answers. One that does not come within the round's retry bound and a
-/// tick, or a host process that cannot be reached, is said on stderr, with
-/// when the host process last read the repository where it says, and the
-/// command reads the records as the host holds them all the same. A
+/// 129 (design D16): the reading of the repository `here` binds that
+/// `sluice host` answers a read with, current within its tick. One that did
+/// not come within the round's retry bound and a tick is said on stderr,
+/// with when `sluice host` last read the repository, and the read is
+/// answered from the records as the host holds them all the same (the
+/// change `sluice-host-answers-every-read`, design D4). A
 /// current reading whose ask a remote refused says so in the remote's
 /// words (133), the records read as last fetched. With `afresh`, the
 /// reading is one begun after the ask.
@@ -300,115 +366,6 @@ pub fn read(here: &Here<'_, '_>, afresh: bool) -> Option<Reading> {
                 "sluice: warning: sluice's host process could not be reached; this reads the repository as the host holds it: {e:#}"
             ));
             None
-        }
-    }
-}
-
-/// A watch's, a wait's or `sluice run`'s part in following the host
-/// process (129; design D7, D9, D11): it asks a pass at each of its ticks
-/// where passes are taken only when asked, keeps a follow open otherwise,
-/// and reaches the process again at the tick after it ended, starting it
-/// where none answers.
-pub struct Follower<'a> {
-    process: &'a dyn HostProcess,
-    kind: FollowKind,
-    following: Option<Box<dyn Following + 'a>>,
-}
-
-impl<'a> Follower<'a> {
-    pub fn new(here: &Here<'a, '_>, kind: FollowKind) -> Follower<'a> {
-        let mut f = Follower {
-            process: here.host.host_process(),
-            kind,
-            following: None,
-        };
-        f.reach(here);
-        f
-    }
-
-    /// Follow again where it follows nothing: the process ended under it,
-    /// or could not be reached at its last tick.
-    fn reach(&mut self, here: &Here<'a, '_>) {
-        if self.following.is_some() {
-            return;
-        }
-        match self.process.follow(here, self.kind) {
-            Ok(f) => self.following = Some(f),
-            Err(e) => crate::telemetry::warn(&format!(
-                "sluice: warning: sluice's host process could not be reached; tried again at the next tick: {e:#}"
-            )),
-        }
-    }
-
-    /// The first tick of a wait or a watch: the host process's pass its
-    /// follow asked for, waited for up to `wait`, then any reports after
-    /// it; where passes are taken only when asked, a pass asked first, as
-    /// at every tick (D9, D14). A follow that could not be opened, or that
-    /// tells nothing within `wait`, leaves the follower reading the
-    /// document as it stands.
-    pub fn first(&mut self, here: &Here<'a, '_>, wait: Duration) -> Vec<Report> {
-        if self.process.asked_only() {
-            return self.tick(here);
-        }
-        self.reach(here);
-        let mut reports = Vec::new();
-        if let Some(f) = self.following.as_mut() {
-            match f.next(wait) {
-                Ok(Some(r)) => reports.push(r),
-                Ok(None) => {}
-                Err(_) => self.following = None,
-            }
-        }
-        reports.extend(self.tick(here));
-        reports
-    }
-
-    /// One tick: a pass asked first where passes are taken only when
-    /// asked; the reports of the passes since the last tick.
-    pub fn tick(&mut self, here: &Here<'a, '_>) -> Vec<Report> {
-        let mut reports = Vec::new();
-        if self.process.asked_only() {
-            match self.process.pass(here) {
-                Ok(r) => reports.push(r),
-                Err(e) => crate::telemetry::warn(&format!("sluice: warning: {e:#}")),
-            }
-        }
-        self.reach(here);
-        if let Some(f) = self.following.as_mut() {
-            loop {
-                match f.next(Duration::from_millis(1)) {
-                    Ok(Some(r)) => reports.push(r),
-                    Ok(None) => break,
-                    Err(_) => {
-                        self.following = None;
-                        break;
-                    }
-                }
-            }
-        }
-        reports
-    }
-
-    /// The next pass's report, waiting up to `wait` for one, a pass asked
-    /// where passes are taken only when asked: as `sluice run` prints each.
-    pub fn next(&mut self, here: &Here<'a, '_>, wait: Duration) -> Option<Report> {
-        if self.process.asked_only() {
-            return match self.process.pass(here) {
-                Ok(r) => Some(r),
-                Err(e) => {
-                    crate::telemetry::warn(&format!("sluice: warning: {e:#}"));
-                    None
-                }
-            };
-        }
-        self.reach(here);
-        let f = self.following.as_mut()?;
-        match f.next(wait) {
-            Ok(r) => r,
-            Err(_) => {
-                self.following = None;
-                None
-            }
         }
     }
 }
@@ -455,10 +412,6 @@ impl HostProcess for Inside {
         ))
     }
 
-    fn follow<'a>(&'a self, _: &Here<'a, '_>, _: FollowKind) -> Result<Box<dyn Following + 'a>> {
-        Err(anyhow!("the host process follows nothing of its own"))
-    }
-
     fn hold<'a>(
         &'a self,
         _: &Here<'a, '_>,
@@ -473,5 +426,35 @@ impl HostProcess for Inside {
 
     fn room(&self, _: &Here<'_, '_>) -> Result<Option<(Named, RoomView)>> {
         Ok(Some((self.named.clone(), super::view_of(&self.room)?)))
+    }
+
+    fn subscribe<'a>(
+        &'a self,
+        _: Option<&'a Here<'a, 'a>>,
+        _: Vec<Added>,
+    ) -> Result<Box<dyn Subscription + 'a>> {
+        Err(anyhow!("the host process subscribes to nothing of its own"))
+    }
+
+    fn pass_of(
+        &self,
+        _: Option<&Here<'_, '_>>,
+        _: &Path,
+        _: &dyn sluice_core::Clock,
+    ) -> Result<Report> {
+        Err(anyhow!(
+            "a pass is asked of the host process, not from within it"
+        ))
+    }
+
+    fn wait(
+        &self,
+        _: Option<&Here<'_, '_>>,
+        _: &Path,
+        _: &super::protocol::WaitAsk,
+    ) -> Result<super::protocol::WaitStep> {
+        Err(anyhow!(
+            "a wait is asked of the host process, not from within it"
+        ))
     }
 }

@@ -236,6 +236,12 @@ impl RemoteRefs {
         self.pushed.remote()
     }
 
+    /// Each branch it reads as last fetched, with the refusal (the change
+    /// `sluice-host-answers-every-read`, design D3).
+    pub fn stale_all(&self) -> BTreeMap<String, ReadRefused> {
+        self.stale.borrow().clone()
+    }
+
     /// Record 0122 (design D5; record 0114): raise the remote's count past
     /// `number`, so it gives no number up to it, by a leased write of
     /// `refs/sluice/ids`; a count already past it is left as it is.

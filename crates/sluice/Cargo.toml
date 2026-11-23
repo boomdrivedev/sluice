@@ -54,6 +54,7 @@ aws-smithy-http-client.workspace = true
 tokio.workspace = true
 tokio-util.workspace = true
 tokio-stream.workspace = true
+futures-util.workspace = true
 notify-debouncer-full.workspace = true
 zip.workspace = true
 sigstore-verify.workspace = true

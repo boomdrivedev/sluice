@@ -6,6 +6,7 @@
 //! [`profiles`] binds.
 
 pub mod branch;
+pub mod caller;
 pub mod equip;
 pub mod exec;
 pub mod hand_over;
@@ -24,12 +25,12 @@ pub mod preview;
 pub mod profiles;
 pub mod progress;
 pub mod protect;
-pub mod reader;
 pub mod retry;
 pub mod runs;
 pub mod scrub;
 pub mod sessions;
 pub mod signing;
+pub mod subscriber;
 pub mod telemetry;
 pub mod told;
 pub mod words;
@@ -456,6 +457,11 @@ pub enum Command {
         /// Print the document again, as one line, each time it changes.
         #[arg(long, requires = "json")]
         watch: bool,
+        /// Watch the folders that the lines of standard input name: `add
+        /// <folder>` and `remove <folder>`, each document printed with
+        /// its `folder`.
+        #[arg(long, requires = "watch")]
+        stdin: bool,
     },
     /// Change a queued submission's order, until it is under test.
     #[command(
@@ -1791,6 +1797,11 @@ impl Following {
         }
     }
 
+    /// How long it waits for the host process's next pass.
+    pub fn tick(&self) -> Duration {
+        self.tick
+    }
+
     /// The passes followed toward `--rounds`.
     pub fn passes(&self) -> usize {
         self.n
@@ -1801,10 +1812,10 @@ impl Following {
         self.told
     }
 
-    /// Its start, where it was not handed over: the host's systems checked
-    /// (87), and said once that nothing needs `sluice run` (design D11).
-    pub fn start(&mut self, s: &Sluice<'_>) -> Result<()> {
-        s.check_host_systems()?;
+    /// Its start, where it was not handed over: said once that nothing
+    /// needs `sluice run` (design D11). `sluice host` checks the host's
+    /// systems as it binds the repository (87).
+    pub fn start(&mut self) -> Result<()> {
         if !self.told {
             // D13 of `sluice-runs-as-a-daemon`: a machine that chooses to
             // keep the host process running keeps `sluice daemon`.
@@ -1822,14 +1833,14 @@ impl Following {
     /// pass of `sluice run` printed them (135; design D11). A follower
     /// that could not reach the process, or was told no pass within its
     /// tick, pauses and reaches it again at its next.
-    pub fn next<'a>(
+    pub fn next(
         &mut self,
-        here: &host_process::Here<'a, '_>,
-        follower: &mut host_process::ask::Follower<'a>,
+        runner: &mut subscriber::Runner<'_>,
+        clock: &dyn Clock,
         pause: &dyn Pause,
         out: &mut dyn Write,
     ) -> Result<Driven> {
-        let Some(report) = follower.next(here, self.tick) else {
+        let Some(report) = runner.next(clock) else {
             if INTERRUPTED.load(Ordering::SeqCst) || !pause.pause() {
                 return Ok(Driven::Ended(STOPPED));
             }
@@ -1854,7 +1865,7 @@ impl Following {
         }
         // Where passes are taken only when asked, the next is asked after
         // the follower's own pause.
-        if here.host.host_process().asked_only() && !pause.pause() {
+        if runner.asked_only() && !pause.pause() {
             return Ok(Driven::Ended(STOPPED));
         }
         Ok(Driven::Next)
@@ -1929,7 +1940,7 @@ fn dispatch(
             | Some(Command::Overview { watch: false, .. })
             | Some(Command::Submit { check: true, .. })
     );
-    let (s, reading) = match one_shot {
+    let (s, _reading) = match one_shot {
         true => {
             let reading = host_process::ask::read(
                 &host_process::Here {
@@ -1944,11 +1955,6 @@ fn dispatch(
         }
         false => (s, None),
     };
-    // 129 (design D16): a one-shot overview and the home view print the
-    // reader's document only where the reading the host process answered
-    // with is no look, which writes none, so neither prints a document an
-    // earlier pass wrote beside records the look read since.
-    let documented = !reading.as_ref().is_some_and(|r| r.looked);
     let here = host_process::Here {
         s: &s,
         host,
@@ -1956,7 +1962,7 @@ fn dispatch(
         clock,
     };
     let Some(command) = cli.command else {
-        return home::run(&s, host, &cli.worktree, cli.json, documented, out);
+        return home::run(&s, host, &cli.worktree, cli.json, out);
     };
     // 153 (design D4): the context the command was started under, which
     // each submission it makes keeps, whether or not it sends telemetry.
@@ -2175,6 +2181,34 @@ fn dispatch(
             let deadline = timeout.map(|t| {
                 clock.now() + chrono::Duration::from_std(t).unwrap_or(chrono::Duration::MAX)
             });
+            // The change `sluice-host-answers-every-read`, design D8: the
+            // wait follows `sluice host`, which takes each of its steps; it
+            // follows a pull request itself, as before.
+            let folder = std::env::current_dir()?;
+            let ask = host_process::protocol::WaitAsk {
+                target: target.clone(),
+                branch: branch.clone(),
+                pull_request,
+                worktree: Some(worktree.clone()),
+                json,
+                confirm,
+                confirm_landing,
+                ..Default::default()
+            };
+            let followed = follow_wait(
+                host.host_process(),
+                Some(&here),
+                folder,
+                ask,
+                None,
+                deadline,
+                clock,
+                pause,
+                out,
+            )?;
+            if let Some(code) = followed {
+                return Ok(code);
+            }
             let number = target.parse::<u64>();
             // Record 0130 D3: a pull request is into a branch, so its
             // number goes with a branch's name, never a submission's.
@@ -2337,7 +2371,7 @@ fn dispatch(
             let said = stepped["said"].as_array().cloned().unwrap_or_default();
             for line in said.iter().filter_map(|l| l.as_str()) {
                 if json {
-                    eprintln!("{line}");
+                    telemetry::say(line);
                 } else {
                     writeln!(out, "{line}")?;
                 }
@@ -2354,11 +2388,13 @@ fn dispatch(
             // working, as a follower of the host process, which moves every
             // repository on the host; it runs no round itself.
             let mut following = Following::new(rounds);
-            following.start(&s)?;
-            let mut follower =
-                host_process::ask::Follower::new(&here, host_process::protocol::FollowKind::Run);
+            following.start()?;
+            let folder = std::env::current_dir()?;
+            let tick = following.tick();
+            let mut runner =
+                subscriber::Runner::new(host.host_process(), Some(&here), folder, tick);
             loop {
-                if let Driven::Ended(code) = following.next(&here, &mut follower, pause, out)? {
+                if let Driven::Ended(code) = following.next(&mut runner, clock, pause, out)? {
                     return Ok(code);
                 }
             }
@@ -2582,9 +2618,13 @@ fn dispatch(
                 Ok(0)
             }
         },
-        Command::Overview { json, watch } => {
-            overview::run(&s, host, clock, pulls, json, watch, documented, pause, out)
+        // The change `sluice-host-answers-every-read`, design D7: a watch
+        // follows `sluice host` on a subscription of its folder.
+        Command::Overview { watch: true, .. } => {
+            let folder = std::env::current_dir()?;
+            subscriber::watch(host.host_process(), Some(&here), folder, clock, pause, out)
         }
+        Command::Overview { json, .. } => overview::run(&s, host, clock, pulls, json, out),
         Command::Amend {
             id,
             after,
@@ -3233,17 +3273,15 @@ fn forecast(
     json: bool,
     out: &mut dyn Write,
 ) -> Result<i32> {
-    let (s, host) = (here.s, here.host);
+    let s = here.s;
+    // 64, 129 (the change `sluice-host-answers-every-read`, design D3):
+    // `sluice host` forms it on the branch and its records as it holds
+    // them after its current reading, fetching nothing.
     let formed = || -> Result<Result<Forecasted, SubmitRefusal>> {
-        Ok(
-            match forecast_read(s, host, worktree, from, branch, after)? {
-                Some(got) => got,
-                None => match from {
-                    Some(from) => s.forecast_branch(from, branch, after)?,
-                    None => s.forecast(worktree, branch, after)?,
-                },
-            },
-        )
+        Ok(match from {
+            Some(from) => s.forecast_branch(from, branch, after)?,
+            None => s.forecast(worktree, branch, after)?,
+        })
     };
     let got = match formed() {
         Err(e) if e.downcast_ref::<sluice_core::Unheld>().is_some() => {
@@ -3289,52 +3327,6 @@ fn forecast(
         Forecast::Clear => LANDED,
         Forecast::Conflict { .. } => CONFLICT,
     })
-}
-
-/// 64, 129: the forecast formed on the read of `branch` in the document of
-/// the host's reader, while that reader keeps its tick (rule core.25):
-/// `--head`'s branch taken from the same read where it holds it, and read
-/// as today, once, where not. `None` where there is no such reader, its
-/// read does not hold the branch, or holds too little to form on.
-fn forecast_read(
-    s: &Sluice<'_>,
-    host: &dyn exec::Host,
-    worktree: &str,
-    from: Option<&str>,
-    branch: &str,
-    after: &[u64],
-) -> Result<Option<Result<Forecasted, SubmitRefusal>>> {
-    let now = std::time::SystemTime::now();
-    // A reader this cannot look for is none: the forecast reads as a round.
-    let found = host
-        .readers()
-        .and_then(|dir| reader::current(&dir, &host.repository()?, now));
-    let Ok(Some(doc)) = found else {
-        return Ok(None);
-    };
-    let Some(view) = branch_in(&doc, branch) else {
-        return Ok(None);
-    };
-    let Some(from) = from else {
-        let session = s.seams().driver.session(worktree)?;
-        if session.detached {
-            return Ok(None);
-        }
-        return s.forecast_read(&view, &session.head, &session.from.worktree, after);
-    };
-    if let Some(head) = branch_in(&doc, from).and_then(|v| v.revision) {
-        return s.forecast_read(&view, &head, from, after);
-    }
-    let Some(head) = s.branch_read(from)? else {
-        if s.is_held() {
-            return Err(sluice_core::Unheld::Branch(from.into()).into());
-        }
-        return Ok(Some(Err(SubmitRefusal::NoHead(from.into()))));
-    };
-    Ok(Some(match s.forecast_read(&view, &head, from, after)? {
-        Some(got) => got,
-        None => s.forecast_head(&head, from, branch, after)?,
-    }))
 }
 
 /// A forecast as `submit --check --json` and `exec --json` print it: its
@@ -3433,6 +3425,45 @@ fn submit(
     }
     if no_wait {
         return Ok(0);
+    }
+    // The change `sluice-host-answers-every-read`, design D8: the wait
+    // follows `sluice host`, which takes each of its steps.
+    let folder = std::env::current_dir()?;
+    let ask = host_process::protocol::WaitAsk {
+        target: id.to_string(),
+        worktree: match &req.head {
+            SubmitHead::Worktree(w) => Some(w.clone()),
+            SubmitHead::Branch(_) => None,
+        },
+        json,
+        confirm: confirms == Confirms::Every,
+        confirm_landing: confirms == Confirms::Landing,
+        own: Some(host_process::protocol::Followed {
+            id,
+            branch: req.branch.clone(),
+        }),
+        copy: copy.cloned(),
+        ..Default::default()
+    };
+    let here = host_process::Here {
+        s,
+        host,
+        pulls,
+        clock,
+    };
+    let followed = follow_wait(
+        host.host_process(),
+        Some(&here),
+        folder,
+        ask,
+        Some(State::Queued),
+        None,
+        clock,
+        pause,
+        out,
+    )?;
+    if let Some(code) = followed {
+        return Ok(code);
     }
     // Keep the queue moving while waiting (walkthrough section 6). Its
     // own submission is read on its target alone (record 0114).
@@ -3898,6 +3929,370 @@ fn await_submission(
     }
     Ok(code)
 }
+
+/// A wait's step, as `sluice host` takes it (the change
+/// `sluice-host-answers-every-read`, design D8).
+#[derive(Debug)]
+pub enum WaitStepped {
+    /// The wait ends with this exit, its report written and its hand-over
+    /// recorded.
+    Ended(i32),
+    /// The wait follows the second, its own submission the first, or what
+    /// carries its work.
+    Follow(Submission, Submission),
+    /// The wait follows a pull request, which the command follows itself.
+    PullRequest,
+}
+
+/// No pause: a wait's step waits for nothing.
+struct NoPause;
+
+impl Pause for NoPause {
+    fn pause(&self) -> bool {
+        false
+    }
+}
+
+/// One step of a wait, as `sluice host` answers `wait` (the change
+/// `sluice-host-answers-every-read`, design D8): the wait's own
+/// submission, found from its target where `ask` names none, and the
+/// submission it follows, read from the records as the host holds them. A
+/// decided submission ends the wait, its report written to `out` and its
+/// outcome handed over to the waiting worktree, as `sluice wait` reported
+/// and handed it over; a withdrawn one whose work goes on has the wait
+/// follow what carries it (record 0100). A target, a number or a branch,
+/// that names nothing, is refused as `sluice wait` refused it.
+pub fn wait_step(
+    s: &Sluice<'_>,
+    host: &dyn exec::Host,
+    pulls: &dyn PullRequests,
+    clock: &dyn Clock,
+    ask: &host_process::protocol::WaitAsk,
+    out: &mut dyn Write,
+) -> Result<WaitStepped> {
+    let json = ask.json;
+    let named = ask.branch.as_deref();
+    let worktree = ask.worktree.as_deref().unwrap_or(".");
+    let own = match &ask.own {
+        Some(o) => record(s, o.id, &o.branch)?,
+        None => {
+            let target = ask.target.as_str();
+            let number = target.parse::<u64>();
+            // Record 0130 D3: a pull request is into a branch, so its
+            // number goes with a branch's name, never a submission's.
+            if number.is_ok() && ask.pull_request.is_some() {
+                writeln!(out, "sluice wait: {PULL_REQUEST_GOES_WITH_A_BRANCH}")?;
+                return Ok(WaitStepped::Ended(USAGE));
+            }
+            if number.is_err() && named.is_some() {
+                writeln!(out, "sluice wait: {}", branch_goes_with_a_number(target))?;
+                return Ok(WaitStepped::Ended(USAGE));
+            }
+            match number {
+                Ok(id) => match lookup(s, id, named)? {
+                    Lookup::Found(sub) => sub,
+                    Lookup::Unfound(unread) if unread.is_empty() => {
+                        let (text, next) = no_such(id, named);
+                        told::tell(out, json, Kind::NotFound, &text, &next)?;
+                        return Ok(WaitStepped::Ended(FAILED));
+                    }
+                    Lookup::Unfound(unread) => {
+                        return Ok(WaitStepped::Ended(unfound(id, &unread, json, out)?))
+                    }
+                    // A wait's 2 is a conflict: the refusal exits 64.
+                    Lookup::Several(several) => {
+                        let code = refuse_several(id, "sluice wait", &several, json, USAGE, out)?;
+                        return Ok(WaitStepped::Ended(code));
+                    }
+                },
+                Err(_) if ask.pull_request.is_some() => return Ok(WaitStepped::PullRequest),
+                Err(_) if takes_pulls(s, target)? => return Ok(WaitStepped::PullRequest),
+                Err(_) => match last_submitted(s, worktree, target)? {
+                    Ok(sub) => sub,
+                    Err(from) => {
+                        let text = format!("nothing submitted from {from} to {target}");
+                        let next = [format!("sluice submit {target}")];
+                        told::tell(out, json, Kind::NotFound, &text, &next)?;
+                        return Ok(WaitStepped::Ended(FAILED));
+                    }
+                },
+            }
+        }
+    };
+    // A policy the wait cannot read is the host process's rounds' to say
+    // (133): the wait follows its submission all the same.
+    let intake = takes_pulls(s, &own.branch)
+        .unwrap_or(false)
+        .then_some(pulls);
+    let waiting = Waiting {
+        host,
+        clock,
+        pulls: intake,
+        follows: pulls,
+        deadline: None,
+        json,
+        pause: &NoPause,
+        copy: ask.copy.as_ref(),
+        worktree: ask.worktree.as_deref(),
+        confirms: Confirms::of(ask.confirm, ask.confirm_landing),
+        named,
+    };
+    let read = match &ask.following {
+        Some(f) if (f.id, f.branch.as_str()) != (own.id, own.branch.as_str()) => {
+            record(s, f.id, &f.branch)?
+        }
+        _ => own.clone(),
+    };
+    let waited = if read.state == State::Refused {
+        // 152, record 0124 (design D10): held, its end for the wait.
+        Waited::Decided(read, None)
+    } else if read.state.is_out() {
+        match decided(s, &waiting, &own, read, out)? {
+            Next::End(w) => w,
+            Next::Follow(e) => return Ok(WaitStepped::Follow(own, e)),
+        }
+    } else {
+        // 122: the branch took the work it follows; record 0100 D2: what
+        // it follows landed, its own end.
+        match landed(s, read.id, &read.branch) {
+            Some(l) if l.id == own.id => Waited::Decided(l, None),
+            Some(l) => {
+                let by = CarriedBy::Entry(l);
+                let end = own_end(s, own.clone(), Some(&by))?;
+                Waited::Decided(end, Some(by))
+            }
+            None => return Ok(WaitStepped::Follow(own, read)),
+        }
+    };
+    match waited {
+        Waited::Decided(sub, by) => {
+            let branch = sub.branch.clone();
+            let code = report_delivering(
+                s,
+                waiting.worktree,
+                sub,
+                &branch,
+                &BTreeMap::new(),
+                by.as_ref(),
+                waiting.copy,
+                json,
+                waiting.confirms,
+                out,
+            )?;
+            Ok(WaitStepped::Ended(code))
+        }
+        Waited::Request(..) => Ok(WaitStepped::PullRequest),
+        Waited::Undecided(..) => unreachable!("a step ends or follows"),
+    }
+}
+
+/// A wait as a client of `sluice host` (the change
+/// `sluice-host-answers-every-read`, design D8): it asks a step of `ask`,
+/// then follows its submission on a subscription of `folder` as `wait`,
+/// saying its state and its combination's progress, its branch's hold and
+/// what each pass released, from each document. Where a document no longer
+/// holds what it follows, or a round of its branch failed, it asks a step
+/// again: `sluice host` ends it, with its report and its hand-over, or
+/// names what it follows next. Out of time or stopped, it says its
+/// submission as the last document held it. It reads no record. `None`
+/// where it follows a pull request, which the command follows itself.
+#[allow(clippy::too_many_arguments)]
+pub fn follow_wait<'a>(
+    process: &'a dyn host_process::HostProcess,
+    here: Option<&'a host_process::Here<'a, 'a>>,
+    folder: std::path::PathBuf,
+    mut ask: host_process::protocol::WaitAsk,
+    said_before: Option<State>,
+    deadline: Option<chrono::DateTime<chrono::Utc>>,
+    clock: &dyn Clock,
+    pause: &dyn Pause,
+    out: &mut dyn Write,
+) -> Result<Option<i32>> {
+    use host_process::protocol::{Followed, WaitStep};
+    let json = ask.json;
+    let asked_from = folder.clone();
+    let step = |ask: &host_process::protocol::WaitAsk,
+                out: &mut dyn Write|
+     -> Result<Option<(Submission, Submission)>> {
+        match process.wait(here, &asked_from, ask)? {
+            WaitStep::Ended(o) => {
+                out.write_all(o.stdout.as_bytes())?;
+                out.flush()?;
+                for line in &o.stderr {
+                    telemetry::say(line);
+                }
+                Err(anyhow::Error::new(Ended(o.code)))
+            }
+            WaitStep::Follow { own, follows, said } => {
+                out.write_all(said.as_bytes())?;
+                Ok(Some((own, follows)))
+            }
+            WaitStep::PullRequest => Ok(None),
+        }
+    };
+    let ended = |e: anyhow::Error| -> Result<Option<i32>> {
+        match e.downcast_ref::<Ended>() {
+            Some(Ended(code)) => Ok(Some(*code)),
+            None => Err(e),
+        }
+    };
+    let (mut own, mut follows) = match step(&ask, out) {
+        Ok(Some(f)) => f,
+        Ok(None) => return Ok(None),
+        Err(e) => return ended(e),
+    };
+    ask.own = Some(Followed {
+        id: own.id,
+        branch: own.branch.clone(),
+    });
+    let branch = own.branch.clone();
+    type Moved = (State, Option<progress::Moved>);
+    let mut said: Option<Moved> = said_before.map(|t| (t, None));
+    let mut said_hold = None;
+    let mut said_failed: Option<String> = None;
+    let mut view: Option<BranchView> = None;
+    let mut lacked: Option<serde_json::Value> = None;
+    let mut first = true;
+    let mut waiter = subscriber::Waiter::new(process, here, folder);
+    waiter.look();
+    loop {
+        // The document: the submission it follows as it holds it, or a
+        // step where it holds it no longer.
+        if let Some(doc) = waiter
+            .document()
+            .filter(|d| d["branches"].is_array())
+            .cloned()
+        {
+            view = branch_in(&doc, &branch);
+            let held = view
+                .as_ref()
+                .and_then(|v| v.submissions.iter().find(|x| x.id == follows.id))
+                .filter(|x| sluice_core::home::same_work(x, &follows))
+                .cloned();
+            // 152, record 0124: held, as a decided one, is a step's to end.
+            let decided = held
+                .as_ref()
+                .is_some_and(|x| x.state == State::Refused || x.state.is_out());
+            match held {
+                Some(x) if !decided => {
+                    if (x.id, &x.branch) == (own.id, &own.branch) {
+                        own = x.clone();
+                    }
+                    follows = x;
+                }
+                _ if lacked.as_ref() != Some(&doc) => {
+                    lacked = Some(doc);
+                    ask.following = Some(Followed {
+                        id: follows.id,
+                        branch: follows.branch.clone(),
+                    });
+                    match step(&ask, out) {
+                        Ok(Some((o, f))) => {
+                            own = o;
+                            follows = f;
+                        }
+                        Ok(None) => return Ok(None),
+                        Err(e) => return ended(e),
+                    }
+                    continue;
+                }
+                _ => {}
+            }
+        }
+        let by = (follows.id != own.id).then(|| CarriedBy::Entry(follows.clone()));
+        let id = follows.id;
+        if !json {
+            let combination = view.as_ref().and_then(|v| progress::own(v, id));
+            let now: Moved = (follows.state, combination.map(progress::moved));
+            if said.as_ref() != Some(&now) {
+                match combination {
+                    Some(c) => {
+                        let line = progress::testing_line(&branch, c, clock.now(), None);
+                        writeln!(out, "{line}")?;
+                    }
+                    None => match detail(&branch, &follows, None, None, &mut BTreeSet::new()) {
+                        d if d.is_empty() => writeln!(out, "#{id} {}", follows.state.word())?,
+                        d => writeln!(out, "#{id} {} · {d}", follows.state.word())?,
+                    },
+                }
+                said = Some(now);
+            }
+            if let Some(v) = &view {
+                tell_hold(out, &branch, v.held.as_ref(), &mut said_hold)?;
+            }
+        }
+        // As it stands when its time ran out or it was stopped: its own
+        // record as the last document held it.
+        let undecided = |code: i32, out: &mut dyn Write| -> Result<Option<i32>> {
+            if json {
+                let doc = with_copy(serde_json::to_value(&own)?, ask.copy.as_ref())?;
+                let mut doc = with_carried(doc, by.as_ref());
+                if let Some(c) = view.as_ref().and_then(|v| progress::own(v, id)) {
+                    under_test(&mut doc, c);
+                }
+                writeln!(out, "{}", serde_json::to_string_pretty(&doc)?)?;
+            } else {
+                let again = asked("sluice wait", own.id, ask.branch.as_deref());
+                writeln!(out, "still waiting: {again}")?;
+            }
+            Ok(Some(code))
+        };
+        // Its first pass is the host process's whatever its deadline (1).
+        if !first {
+            if deadline.is_some_and(|d| clock.now() >= d) {
+                return undecided(WAITING, out);
+            }
+            if !pause.pause() {
+                return undecided(STOPPED, out);
+            }
+        }
+        let reports = match first {
+            true => waiter.first(clock, host_process::read_for()),
+            false => waiter.tick(clock),
+        };
+        first = false;
+        tell_released(&reports, &branch, json, out)?;
+        if INTERRUPTED.load(Ordering::SeqCst) {
+            return undecided(STOPPED, out);
+        }
+        let failed = reports
+            .into_iter()
+            .filter_map(|r| r.failed.get(&branch).cloned())
+            .next_back();
+        if let Some(words) = failed {
+            // 122: the branch may have taken the work it follows, and what
+            // failed came after: a step says.
+            ask.following = Some(Followed {
+                id: follows.id,
+                branch: follows.branch.clone(),
+            });
+            match step(&ask, out) {
+                Ok(Some((o, f))) => {
+                    own = o;
+                    follows = f;
+                }
+                Ok(None) => return Ok(None),
+                Err(e) => return ended(e),
+            }
+            if said_failed.as_deref() != Some(words.as_str()) {
+                telemetry::warn(&format!("sluice: {branch}: {words}"));
+                said_failed = Some(words);
+            }
+        }
+    }
+}
+
+/// A wait's step ended it with this exit.
+#[derive(Debug)]
+struct Ended(i32);
+
+impl std::fmt::Display for Ended {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "the wait ended with {}", self.0)
+    }
+}
+
+impl std::error::Error for Ended {}
 
 /// 51, D8: a submission's document, its record as it is, with, for one
 /// landed, failed or conflicting, its `notice`: the words the round pushes
@@ -4370,10 +4765,18 @@ fn wait_on(
         pulls: waiting.follows,
         clock: waiting.clock,
     };
-    let mut reading = Reading::follow(waiting.host)?;
-    let mut follower =
-        host_process::ask::Follower::new(&here, host_process::protocol::FollowKind::Wait);
-    reading.read(s, following.as_mut().unwrap_or(&mut own))?;
+    // The change `sluice-host-answers-every-read`, design D8: the wait
+    // follows `sluice host` on a subscription of its folder as `wait`.
+    let mut reading = Reading::new();
+    let mut waiter = subscriber::Waiter::new(
+        waiting.host.host_process(),
+        Some(&here),
+        std::env::current_dir()?,
+    );
+    // The document `sluice host` holds as the wait comes, where it holds
+    // one, is what the wait says first.
+    waiter.look();
+    reading.read(s, waiter.document(), following.as_mut().unwrap_or(&mut own))?;
     loop {
         let sub = following.as_ref().unwrap_or(&own);
         // 152, record 0124 (design D10): held, its end for the wait.
@@ -4385,7 +4788,7 @@ fn wait_on(
                 Next::End(w) => return Ok(w),
                 Next::Follow(e) => {
                     let e = following.insert(e);
-                    reading.read(s, e)?;
+                    reading.read(s, waiter.document(), e)?;
                     continue;
                 }
             }
@@ -4437,8 +4840,8 @@ fn wait_on(
         waiting.host.next_pass();
         // D9: its first tick is the pass its follow asked for, ended.
         let reports = match first {
-            true => follower.first(&here, host_process::read_for()),
-            false => follower.tick(&here),
+            true => waiter.first(waiting.clock, host_process::read_for()),
+            false => waiter.tick(waiting.clock),
         };
         tell_released(&reports, &branch, waiting.json, out)?;
         let failed = reports
@@ -4465,7 +4868,7 @@ fn wait_on(
                 said_failed = Some(words);
             }
         }
-        reading.read(s, following.as_mut().unwrap_or(&mut own))?;
+        reading.read(s, waiter.document(), following.as_mut().unwrap_or(&mut own))?;
     }
 }
 
@@ -4475,7 +4878,6 @@ fn wait_on(
 /// own record only once a document no longer holds it, as when it has left
 /// the queue. It takes no lock and no lease.
 struct Reading {
-    follow: reader::Follow,
     /// Its branch's part of the overview, as last read.
     view: Option<BranchView>,
     /// The reader's last document that did not hold the submission: its
@@ -4494,13 +4896,11 @@ impl Reading {
             .cloned()
     }
 
-    fn follow(host: &dyn exec::Host) -> Result<Reading> {
-        let (readers, repository) = (host.readers()?, host.repository()?);
-        Ok(Reading {
-            follow: reader::Follow::of(&readers, &repository, host.version()),
+    fn new() -> Reading {
+        Reading {
             view: None,
             lacked: None,
-        })
+        }
     }
 
     /// Read `sub` again, and its branch's part of the overview, from the
@@ -4514,11 +4914,16 @@ impl Reading {
     /// number, which follows the closed home's pointer to the submission
     /// under the number it has now; it is never another's, and what carried
     /// it is never worked out here.
-    fn read(&mut self, s: &Sluice<'_>, sub: &mut Submission) -> Result<()> {
+    fn read(
+        &mut self,
+        s: &Sluice<'_>,
+        doc: Option<&serde_json::Value>,
+        sub: &mut Submission,
+    ) -> Result<()> {
         let (id, branch) = (sub.id, sub.branch.clone());
-        // The reader's read that failed is no whole document either: the
-        // last view stands, and no record is read for it (129).
-        let Some(doc) = self.follow.read().filter(|d| d["branches"].is_array()) else {
+        // A read that failed is no whole document either: the last view
+        // stands, and no record is read for it (129).
+        let Some(doc) = doc.filter(|d| d["branches"].is_array()).cloned() else {
             return Ok(());
         };
         self.view = branch_in(&doc, &branch);
@@ -4557,7 +4962,7 @@ fn tell_released(
             .chain(r.released.get(branch).into_iter().flatten());
         for line in lines {
             if json {
-                eprintln!("{line}");
+                telemetry::say(line);
             } else {
                 writeln!(out, "{line}")?;
             }
@@ -4566,12 +4971,10 @@ fn tell_released(
     Ok(())
 }
 
-/// 121: `branch`'s hold, as the reader's document sluice's host process
-/// writes has it; `None` where it has none or none can be read.
-fn read_hold(host: &dyn exec::Host, branch: &str) -> Option<BranchHold> {
-    let (readers, repository) = (host.readers().ok()?, host.repository().ok()?);
-    let doc = reader::Follow::of(&readers, &repository, host.version()).read()?;
-    branch_in(&doc, branch)?.held
+/// 121: `branch`'s hold, as the last document `sluice host` sent the
+/// wait has it; `None` where it has none or none came.
+fn hold_in(doc: Option<&serde_json::Value>, branch: &str) -> Option<BranchHold> {
+    branch_in(doc?, branch)?.held
 }
 
 /// Submission `id`'s record, from the records of `branch` alone, whatever
@@ -5833,7 +6236,7 @@ fn submit_pull(
         pulls,
         clock,
     };
-    let mut follower: Option<host_process::ask::Follower<'_>> = None;
+    let mut waiter: Option<subscriber::Waiter<'_>> = None;
     loop {
         // 135: the first pass's intake is a submit's own, and `--status`'s:
         // the answer names what it took in. Every other, and all of `sluice
@@ -6146,16 +6549,21 @@ fn submit_pull(
         // 135: the host process runs the rounds; the wait follows it, says
         // what its passes released as a wait does, and says the branch's
         // hold as its reader's document has it (121).
-        let follower = follower.get_or_insert_with(|| {
-            host_process::ask::Follower::new(&here, host_process::protocol::FollowKind::Wait)
-        });
-        let reports = follower.tick(&here);
+        let waiter = match &mut waiter {
+            Some(w) => w,
+            None => waiter.insert(subscriber::Waiter::new(
+                host.host_process(),
+                Some(&here),
+                std::env::current_dir()?,
+            )),
+        };
+        let reports = waiter.tick(clock);
         tell_released(&reports, branch, json, out)?;
         if !json {
             tell_hold(
                 out,
                 branch,
-                read_hold(host, branch).as_ref(),
+                hold_in(waiter.document(), branch).as_ref(),
                 &mut said_hold,
             )?;
         }
@@ -6257,7 +6665,7 @@ fn submit_pull_group(
         pulls,
         clock,
     };
-    let mut follower: Option<host_process::ask::Follower<'_>> = None;
+    let mut waiter: Option<subscriber::Waiter<'_>> = None;
     let stopped = 'wait: loop {
         // 135: as `submit_pull`, the first pass's intake the submit's own,
         // every other sluice's host process's.
@@ -6330,16 +6738,21 @@ fn submit_pull_group(
             break None;
         }
         // 135: the host process runs the rounds; the wait follows it.
-        let follower = follower.get_or_insert_with(|| {
-            host_process::ask::Follower::new(&here, host_process::protocol::FollowKind::Wait)
-        });
-        let reports = follower.tick(&here);
+        let waiter = match &mut waiter {
+            Some(w) => w,
+            None => waiter.insert(subscriber::Waiter::new(
+                host.host_process(),
+                Some(&here),
+                std::env::current_dir()?,
+            )),
+        };
+        let reports = waiter.tick(clock);
         tell_released(&reports, branch, json, out)?;
         if !json {
             tell_hold(
                 out,
                 branch,
-                read_hold(host, branch).as_ref(),
+                hold_in(waiter.document(), branch).as_ref(),
                 &mut said_hold,
             )?;
         }

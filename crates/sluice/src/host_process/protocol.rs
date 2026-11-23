@@ -46,12 +46,15 @@ pub struct Named {
     pub program: Option<PathBuf>,
 }
 
-/// What follows the host process's passes of a repository (D7, D11).
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+/// What follows the host process's passes of a repository (D7, D11), and
+/// how a subscription follows a folder (the change
+/// `sluice-host-answers-every-read`, design D6).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum FollowKind {
     /// `sluice overview --watch`: its repository is read each second while
     /// work is in play, and on a file event otherwise.
+    #[default]
     Watch,
     /// `sluice wait`, a waiting submit or `wt submit`.
     Wait,
@@ -59,20 +62,179 @@ pub enum FollowKind {
     Run,
 }
 
+/// A folder that `subscribe` names, and how the client follows it (the
+/// change `sluice-host-answers-every-read`, design D6).
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Added {
+    pub folder: PathBuf,
+    #[serde(rename = "as", default)]
+    pub kind: FollowKind,
+}
+
+/// A line a client sends on a subscription: `add` or `remove` (design D6).
+pub type SubscriptionAsk = super::subscription::Ask<FollowKind>;
+
+/// A line `sluice host` sends on a subscription: a folder's `document`, a
+/// folder's `pass`, or an error (design D6).
+pub type SubscriptionLine = super::subscription::Sent<serde_json::Value, Report>;
+
+/// A submission a wait follows: its number and its branch.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Followed {
+    pub id: u64,
+    pub branch: String,
+}
+
+/// What a wait asks of `sluice host` (the change
+/// `sluice-host-answers-every-read`, design D8): its command's arguments,
+/// the submission it waits on and the one it follows, where it knows them.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WaitAsk {
+    /// `sluice wait`'s target: a submission's number or a branch.
+    pub target: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub branch: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pull_request: Option<u64>,
+    /// The waiting worktree, whose outcome the wait hands over; none for a
+    /// wait that hands over nothing, a submit by name's.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub worktree: Option<String>,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub json: bool,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub confirm: bool,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub confirm_landing: bool,
+    /// The submission it waits on, once it knows it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub own: Option<Followed>,
+    /// The submission it follows now, its own or what carries its work.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub following: Option<Followed>,
+    /// A waiting submit's copy, which its record's document carries.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub copy: Option<sluice_core::ops::CopyDiffers>,
+}
+
+/// How `sluice host` answers a wait's step (design D8).
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum WaitStep {
+    /// The wait ends: its report, the hand-over recorded, and its exit.
+    Ended(Output),
+    /// The wait follows `follows`, its own submission `own` or what carries
+    /// its work, as the records hold each now.
+    Follow {
+        own: sluice_core::records::Submission,
+        follows: sluice_core::records::Submission,
+        /// What the step said, as `sluice wait` said it, such as what
+        /// carries its work.
+        #[serde(default, skip_serializing_if = "String::is_empty")]
+        said: String,
+    },
+    /// The wait follows a pull request, which asks the forge: the command
+    /// follows it as before.
+    PullRequest,
+}
+
 /// A request, after `hello`.
+///
+/// The reads (`status`, `overview`, `home`, `forecast` and `inbox`) each
+/// name the client's folder, an absolute path, and the command's own
+/// arguments; `sluice host` answers each with `output` (the change
+/// `sluice-host-answers-every-read`, design D1, D2).
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "ask", rename_all = "kebab-case")]
 pub enum Request {
+    /// `sluice status`, in each form.
+    Status {
+        folder: PathBuf,
+        /// The caller's session variables (the change
+        /// `sluice-host-answers-every-read`, design D1).
+        #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+        caller: BTreeMap<String, String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        target: Option<String>,
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        all: bool,
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        json: bool,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        branch: Option<String>,
+    },
+    /// `sluice overview` without `--watch`.
+    Overview {
+        folder: PathBuf,
+        /// The caller's session variables (the change
+        /// `sluice-host-answers-every-read`, design D1).
+        #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+        caller: BTreeMap<String, String>,
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        json: bool,
+    },
+    /// The home view, `sluice` with no command, of the worktree at
+    /// `worktree`.
+    Home {
+        folder: PathBuf,
+        /// The caller's session variables (the change
+        /// `sluice-host-answers-every-read`, design D1).
+        #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+        caller: BTreeMap<String, String>,
+        worktree: PathBuf,
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        json: bool,
+    },
+    /// `sluice submit --check`: a forecast of `worktree`'s head, or of the
+    /// branch `head`, on `branch`.
+    Forecast {
+        folder: PathBuf,
+        /// The caller's session variables (the change
+        /// `sluice-host-answers-every-read`, design D1).
+        #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+        caller: BTreeMap<String, String>,
+        branch: String,
+        worktree: PathBuf,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        head: Option<String>,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        after: Vec<u64>,
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        json: bool,
+    },
+    /// `sluice inbox` of the worktree at `worktree`.
+    Inbox {
+        folder: PathBuf,
+        /// The caller's session variables (the change
+        /// `sluice-host-answers-every-read`, design D1).
+        #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+        caller: BTreeMap<String, String>,
+        worktree: PathBuf,
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        json: bool,
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        confirm: bool,
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        new: bool,
+    },
+    /// A wait's step: where its submission stands, as `wait` (design D8).
+    Wait {
+        folder: PathBuf,
+        #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+        caller: BTreeMap<String, String>,
+        #[serde(flatten)]
+        wait: WaitAsk,
+    },
+    /// Serve `folders`, and the folders that the client adds after on the
+    /// connection, each with its newest overview (design D6).
+    Subscribe {
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        folders: Vec<Added>,
+    },
     /// The repository has work: hold it, and pass it at once.
     Serve { repository: PathBuf },
     /// One round of `branch`, answered with the step's document (D10).
     Step { repository: PathBuf, branch: String },
-    /// Keep the repository read while the connection is open, each pass's
-    /// report written down it.
-    Follow {
-        repository: PathBuf,
-        kind: FollowKind,
-    },
     /// A pass of the repository now, answered once it ends (D14). `at`,
     /// RFC 3339, is the asker's time: where passes are taken only when
     /// asked, the pass is at that time, so the host process's time is its
@@ -81,14 +243,6 @@ pub enum Request {
         repository: PathBuf,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         at: Option<String>,
-    },
-    /// Answered once a reading of the repository is current (D16); with
-    /// `afresh`, once a reading begun after the ask ends, as a forecast's
-    /// second ask has it.
-    Read {
-        repository: PathBuf,
-        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
-        afresh: bool,
     },
     /// The results `wants` names, as `branch`'s gate reads them, answered
     /// from the host process's index of the repository on the connection's
@@ -110,9 +264,6 @@ pub enum Request {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         branch: Option<String>,
     },
-    /// The bound, what counts against it, the runs waiting and whose turn
-    /// is next.
-    Room,
     /// Hand over, for a newer sluice (D8). `program` is the asker's
     /// executable, resolved through every link, which the host process
     /// starts afresh in place as; an older command sends none, and the host
@@ -129,7 +280,7 @@ pub enum Request {
     },
 }
 
-/// A repository's reading, as the host process answers a `read` (129;
+/// A repository's reading, as the host process holds it for a read (129;
 /// design D16): whether it was current, when it ended, and the words a
 /// remote refused it with, where one did.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -145,6 +296,12 @@ pub struct Reading {
     /// never a document an earlier pass wrote (design D16).
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub looked: bool,
+    /// The branches the reading's last ask read as last fetched, each with
+    /// the remote's refusal: what a read's call binds the repository with,
+    /// as the host holds it (the change `sluice-host-answers-every-read`,
+    /// design D3). It stays in the host process.
+    #[serde(skip)]
+    pub stale: std::collections::BTreeMap<String, sluice_seams::ReadRefused>,
 }
 
 /// What a held room's command says once its run has begun.
@@ -170,10 +327,24 @@ pub struct RoomView {
     pub repositories: BTreeMap<PathBuf, Share>,
 }
 
+/// A read's answer: what the command prints on standard output, the lines
+/// it says on standard error, and its exit code (design D1).
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Output {
+    pub stdout: String,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub stderr: Vec<String>,
+    pub code: i32,
+}
+
 /// An answer.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum Answer {
+    /// A read's output (design D1).
+    Output(Output),
+    /// A wait's step (design D8).
+    Waited(WaitStep),
     /// Done, for a serve or a hand-over.
     Ok,
     /// A step's document, as `sluice step --json` prints it.
@@ -185,9 +356,6 @@ pub enum Answer {
     Waiting(Why),
     /// The room is the asker's.
     Held,
-    Room(RoomView),
-    /// A reading of the repository, as it stood when answered (D16).
-    Read(Reading),
     /// The results asked for, one JSON document per line (D17).
     Results(String),
     /// The request could not be answered, in these words.
@@ -221,7 +389,6 @@ mod tests {
     #[derive(Debug, PartialEq, Deserialize)]
     #[serde(tag = "ask", rename_all = "kebab-case")]
     enum Older {
-        Room,
         HandOver,
     }
 
@@ -274,6 +441,146 @@ mod tests {
         assert_eq!(
             serde_json::from_str::<Older>(&line).unwrap(),
             Older::HandOver
+        );
+    }
+
+    /// design D1, D2: each read names its folder and its command's
+    /// arguments, and reads back as it was sent; a read's output reads back.
+    #[test]
+    fn the_reads_read_back() {
+        let reads = [
+            Request::Status {
+                folder: "/w/feat".into(),
+                caller: BTreeMap::new(),
+                target: Some("main".into()),
+                all: false,
+                json: true,
+                branch: None,
+            },
+            Request::Overview {
+                folder: "/w/feat".into(),
+                caller: BTreeMap::new(),
+                json: false,
+            },
+            Request::Home {
+                folder: "/w/feat".into(),
+                caller: BTreeMap::new(),
+                worktree: "/w/feat".into(),
+                json: true,
+            },
+            Request::Forecast {
+                folder: "/w/feat".into(),
+                caller: BTreeMap::new(),
+                branch: "main".into(),
+                worktree: "/w/feat".into(),
+                head: None,
+                after: vec![4],
+                json: true,
+            },
+            Request::Inbox {
+                folder: "/w/feat".into(),
+                caller: BTreeMap::new(),
+                worktree: "/w/feat".into(),
+                json: false,
+                confirm: true,
+                new: false,
+            },
+        ];
+        for read in reads {
+            let mut line = Vec::new();
+            send(&mut line, &read).unwrap();
+            assert_eq!(receive::<Request>(&mut line.as_slice()).unwrap(), read);
+        }
+        let line = br#"{"ask":"status","folder":"/w/feat","target":"main","json":true}"#;
+        assert_eq!(
+            serde_json::from_slice::<Request>(line).unwrap(),
+            Request::Status {
+                folder: "/w/feat".into(),
+                caller: BTreeMap::new(),
+                target: Some("main".into()),
+                all: false,
+                json: true,
+                branch: None,
+            }
+        );
+        let output = Answer::Output(Output {
+            stdout: "{}\n".into(),
+            stderr: vec!["sluice: warning: late".into()],
+            code: 0,
+        });
+        let line = serde_json::to_string(&output).unwrap();
+        assert_eq!(
+            line,
+            r#"{"output":{"stdout":"{}\n","stderr":["sluice: warning: late"],"code":0}}"#
+        );
+        assert_eq!(serde_json::from_str::<Answer>(&line).unwrap(), output);
+    }
+
+    /// design D6: `subscribe` with its folders, its `add` and `remove`
+    /// lines, and its `document` and `pass` lines read back.
+    #[test]
+    fn a_subscription_reads_back() {
+        let subscribe = Request::Subscribe {
+            folders: vec![Added {
+                folder: "/w/feat".into(),
+                kind: FollowKind::Wait,
+            }],
+        };
+        let line = serde_json::to_string(&subscribe).unwrap();
+        assert_eq!(
+            line,
+            r#"{"ask":"subscribe","folders":[{"folder":"/w/feat","as":"wait"}]}"#
+        );
+        assert_eq!(serde_json::from_str::<Request>(&line).unwrap(), subscribe);
+        assert_eq!(
+            serde_json::from_str::<Request>(r#"{"ask":"subscribe"}"#).unwrap(),
+            Request::Subscribe { folders: vec![] }
+        );
+        let add: SubscriptionAsk = serde_json::from_str(r#"{"add":"/w/feat"}"#).unwrap();
+        assert_eq!(
+            add,
+            SubscriptionAsk::Add {
+                add: "/w/feat".into(),
+                kind: None
+            }
+        );
+        let add: SubscriptionAsk = serde_json::from_str(r#"{"add":"/w/main","as":"run"}"#).unwrap();
+        assert_eq!(
+            add,
+            SubscriptionAsk::Add {
+                add: "/w/main".into(),
+                kind: Some(FollowKind::Run)
+            }
+        );
+        let remove: SubscriptionAsk = serde_json::from_str(r#"{"remove":"/w/feat"}"#).unwrap();
+        assert_eq!(
+            remove,
+            SubscriptionAsk::Remove {
+                remove: "/w/feat".into()
+            }
+        );
+        let document: SubscriptionLine = serde_json::from_str(
+            r#"{"document":{"folder":"/w/feat","overview":{"schema":"sluice/overview@1"}}}"#,
+        )
+        .unwrap();
+        assert_eq!(
+            document,
+            SubscriptionLine::Document(super::super::subscription::Document {
+                folder: "/w/feat".into(),
+                overview: serde_json::json!({"schema": "sluice/overview@1"}),
+            })
+        );
+        let pass = SubscriptionLine::Pass(super::super::subscription::Pass {
+            folder: "/w/main".into(),
+            report: Report {
+                lines: vec!["main: #4 landed as 9c1e2f0".into()],
+                ..Report::default()
+            },
+        });
+        let line = serde_json::to_string(&pass).unwrap();
+        assert_eq!(
+            serde_json::from_str::<SubscriptionLine>(&line).unwrap(),
+            pass
         );
     }
 

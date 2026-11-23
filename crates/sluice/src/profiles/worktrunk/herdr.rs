@@ -22,7 +22,7 @@ const PREFIX: &str = "herdr:";
 /// 51: the session this process runs in, or `None` outside any herdr
 /// pane.
 pub fn session_here() -> Option<String> {
-    session_of(|k| std::env::var(k).ok())
+    session_of(crate::caller::var)
 }
 
 /// The session the variables `var` reads name: `herdr:<pane>@<socket>`,

@@ -27,11 +27,9 @@ use anyhow::{anyhow, bail, Context, Result};
 use sluice_seams::RunKind;
 
 use super::pass::Report;
-use super::protocol::{
-    receive, send, Answer, FollowKind, Hello, Named, Reading, Request, RoomView, Started,
-};
+use super::protocol::{receive, send, Answer, Hello, Named, Output, Request, Started};
+use super::version::older;
 use super::{environment, Paths};
-use crate::reader::older;
 
 /// How long a command waits for a process it started to answer (design
 /// D2).
@@ -356,6 +354,63 @@ impl Client {
         c.ask(request)
     }
 
+    /// A read's output (the change `sluice-host-answers-every-read`, design
+    /// D1): the host process, started where none answers, answers
+    /// `request` with what the command prints and its exit code. A host
+    /// process that ends before it answers, or answers with an error, is
+    /// an error, in its words.
+    pub fn output(&self, request: &Request) -> Result<Output> {
+        let mut c = self.reach()?;
+        let named = c.named.clone();
+        send(&mut c.writer, request)?;
+        match receive::<Answer>(&mut c.reader) {
+            Ok(Answer::Output(output)) => Ok(output),
+            Ok(Answer::Error(words)) => bail!(
+                "sluice's host process, sluice {} (pid {}), did not answer: {words}",
+                named.version,
+                named.pid
+            ),
+            Ok(other) => Err(unexpected(other)),
+            Err(e) => bail!(
+                "sluice's host process, sluice {} (pid {}), ended before it answered: {e:#}",
+                named.version,
+                named.pid
+            ),
+        }
+    }
+
+    /// A wait's step of `ask`, from `folder` (the change
+    /// `sluice-host-answers-every-read`, design D8), as `output` answers a
+    /// read.
+    pub fn wait(
+        &self,
+        folder: &Path,
+        ask: &super::protocol::WaitAsk,
+    ) -> Result<super::protocol::WaitStep> {
+        let mut c = self.reach()?;
+        let named = c.named.clone();
+        let request = Request::Wait {
+            folder: folder.to_path_buf(),
+            caller: crate::caller::here(),
+            wait: ask.clone(),
+        };
+        send(&mut c.writer, &request)?;
+        match receive::<Answer>(&mut c.reader) {
+            Ok(Answer::Waited(step)) => Ok(step),
+            Ok(Answer::Error(words)) => bail!(
+                "sluice's host process, sluice {} (pid {}), did not answer: {words}",
+                named.version,
+                named.pid
+            ),
+            Ok(other) => Err(unexpected(other)),
+            Err(e) => bail!(
+                "sluice's host process, sluice {} (pid {}), ended before it answered: {e:#}",
+                named.version,
+                named.pid
+            ),
+        }
+    }
+
     /// Tell the host process `repository` has work (D2): it holds it and
     /// passes it.
     pub fn serve(&self, repository: &Path) -> Result<()> {
@@ -376,27 +431,6 @@ impl Client {
         })? {
             Answer::Step(doc) => Ok(doc),
             other => Err(unexpected(other)),
-        }
-    }
-
-    /// A reading of `repository`, once one is current, or with `afresh`
-    /// once one begun after the ask ends, started where none answers
-    /// (D16): waited for the round's retry bound and a tick, then answered
-    /// as not current, the command reading as the host holds it.
-    pub fn read(&self, repository: &Path, afresh: bool) -> Result<Reading> {
-        let mut c = self.reach()?;
-        send(
-            &mut c.writer,
-            &Request::Read {
-                repository: repository.to_path_buf(),
-                afresh,
-            },
-        )?;
-        let wait = super::read_for() + super::READ_TICK;
-        match c.next(Some(wait))? {
-            Some(Answer::Read(r)) => Ok(r),
-            Some(other) => Err(unexpected(other)),
-            None => Ok(Reading::default()),
         }
     }
 
@@ -435,17 +469,13 @@ impl Client {
         }
     }
 
-    /// Follow `repository`'s passes while the connection is open (D7,
-    /// D11): each pass's report comes down it.
-    pub fn follow(&self, repository: &Path, kind: FollowKind) -> Result<Connection> {
+    /// A subscription of `folders`, each followed as its kind says, the
+    /// connection kept open for more `add` and `remove` lines and for the
+    /// lines that the host process sends (the change
+    /// `sluice-host-answers-every-read`, design D6).
+    pub fn subscribe(&self, folders: Vec<super::protocol::Added>) -> Result<Connection> {
         let mut c = self.reach()?;
-        send(
-            &mut c.writer,
-            &Request::Follow {
-                repository: repository.to_path_buf(),
-                kind,
-            },
-        )?;
+        send(&mut c.writer, &Request::Subscribe { folders })?;
         Ok(c)
     }
 
@@ -470,18 +500,6 @@ impl Client {
             },
         )?;
         Ok(c)
-    }
-
-    /// The room as the process that answers holds it; `None` where none
-    /// answers, and nothing is started.
-    pub fn room(&self) -> Result<Option<(Named, RoomView)>> {
-        let Some(mut c) = self.answering()? else {
-            return Ok(None);
-        };
-        match c.ask(&Request::Room)? {
-            Answer::Room(r) => Ok(Some((c.named, r))),
-            other => Err(unexpected(other)),
-        }
     }
 }
 
@@ -508,6 +526,40 @@ impl Connection {
                 }
             }
         }
+    }
+
+    /// The next line on a subscription, waiting up to `wait` where given:
+    /// `None` where none came within it (design D6).
+    pub fn line(
+        &mut self,
+        wait: Option<Duration>,
+    ) -> Result<Option<super::protocol::SubscriptionLine>> {
+        self.reader.get_ref().set_read_timeout(wait)?;
+        match receive(&mut self.reader) {
+            Ok(line) => Ok(Some(line)),
+            Err(e) => {
+                let timed_out = e.downcast_ref::<std::io::Error>().is_some_and(|io| {
+                    matches!(io.kind(), ErrorKind::WouldBlock | ErrorKind::TimedOut)
+                });
+                match timed_out {
+                    true => Ok(None),
+                    false => Err(e),
+                }
+            }
+        }
+    }
+
+    /// A second handle of the connection's stream, which writes the lines
+    /// of a subscription from another thread and shuts it down (design
+    /// D7).
+    pub fn stream(&self) -> Result<UnixStream> {
+        Ok(self.writer.try_clone()?)
+    }
+
+    /// Send `ask` on a subscription: an `add` or a `remove` line (design
+    /// D6).
+    pub fn say(&mut self, ask: &super::protocol::SubscriptionAsk) -> Result<()> {
+        send(&mut self.writer, ask)
     }
 
     /// Say a held room's run began, in `place` with `run_dir` (D12).

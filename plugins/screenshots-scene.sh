@@ -42,9 +42,9 @@ teardown() {
     rm -f "$dir/$p.pid"
   done
   # sluice's host process for the scene's state (135), which the commands
-  # above started: while the queue has work in play it lives on, starting
-  # runs and writing its reader's document under state/sluice/readers, so
-  # it ends before anything is removed. Its pid is in its version file.
+  # above started: while the queue has work in play it lives on and
+  # starts runs, so it ends before anything is removed. Its pid is in its
+  # version file.
   local pid
   pid=$(jq -r '.pid // empty' "$dir/state/sluice/host/version" 2>/dev/null || true)
   if [ -n "$pid" ]; then

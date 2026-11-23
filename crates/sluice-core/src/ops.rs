@@ -6,7 +6,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
 
 use anyhow::{bail, Context, Result};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use sluice_seams::{Contested, Formed, HostCopy, Rev, Session, Submitter};
 
 use crate::line::Line;
@@ -107,7 +107,7 @@ pub struct SubmittedHead {
 /// 124: a worktree on a branch sluice lands on, kept on a remote, whose
 /// head, this host's copy of the branch, differs from the remote's
 /// revision of it.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CopyDiffers {
     pub branch: String,
     /// The worktree's head: this host's copy.
@@ -120,7 +120,7 @@ pub struct CopyDiffers {
 }
 
 /// How a host's copy stands to the remote's revision.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum CopyHow {
     /// The remote's revision holds the copy.

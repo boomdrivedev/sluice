@@ -28,10 +28,11 @@
 //! work is in play, and where nothing is, once a minute at most, a
 //! command's change, a watch's opening and a forecast's second ask having
 //! the next reading ask at once (129 as amended 2026-11-19). The worker is
-//! the repository's reader on the host, and holds its driver's lock, so an
-//! older sluice's waits and watches follow it; where an older `sluice run`
-//! holds that lock, it runs no round and follows that run's document. A
-//! panic ends only the worker's thread, and the worker starts again at its
+//! the repository's one reader on the host, and moves each repository that
+//! the host process holds. After each reading that a follower holds the
+//! repository for, the scheduler sends the repository's overview document
+//! on a `watch` channel (the change `sluice-host-answers-every-read`,
+//! design D6). A panic ends only the worker's thread, and the worker starts again at its
 //! next tick.
 
 use std::collections::{BTreeMap, VecDeque};
@@ -50,6 +51,7 @@ use tokio_util::task::TaskTracker;
 
 use super::ask::Inside;
 use super::clock::TokioClock;
+use super::joined::Moment;
 use super::log;
 use super::pass::{self, Kept, Report};
 use super::protocol::{FollowKind, Named, Reading};
@@ -58,7 +60,6 @@ use crate::exec::Host;
 use crate::instance::Instance;
 use crate::profiles::checks::RoomHandle;
 use crate::profiles::{Bound, Tokens};
-use crate::reader::{Driver, Drives, Reader};
 use crate::{Pause, Skipped};
 
 /// How long a host process that ends gives its tasks to finish the round
@@ -72,6 +73,9 @@ pub const FINISH_FOR: Duration = Duration::from_secs(60);
 pub struct Looked {
     pub in_play: bool,
     pub refused: Option<String>,
+    /// The branches it read as last fetched, each with the remote's
+    /// refusal (the change `sluice-host-answers-every-read`, design D3).
+    pub stale: BTreeMap<String, sluice_seams::ReadRefused>,
 }
 
 /// How the host process looks at a repository that no worker holds, and
@@ -104,6 +108,23 @@ pub trait Worker {
 /// the words that say why it could not start.
 pub type Bind = Arc<dyn Fn(&Path) -> Result<Box<dyn Worker>, String> + Send + Sync>;
 
+/// A repository's overview document, read after a reading that ended at a
+/// moment: `None` where none could be made (the change
+/// `sluice-host-answers-every-read`, design D6).
+pub type DocumentRead = Arc<
+    dyn Fn(
+            PathBuf,
+            Moment,
+        )
+            -> std::pin::Pin<Box<dyn std::future::Future<Output = Option<serde_json::Value>> + Send>>
+        + Send
+        + Sync,
+>;
+
+/// A repository's documents, as its subscribers receive them: `None`
+/// before the first reading of a holding (design D6).
+pub type Documents = watch::Receiver<Option<serde_json::Value>>;
+
 /// How many times the schedulers woke, by what woke them: the measure of
 /// the claim that the host process waits on events, not on a poll.
 #[derive(Debug, Default)]
@@ -122,16 +143,14 @@ pub struct Wakes {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 struct Stamp {
     at: Instant,
-    n: u64,
+    n: Moment,
 }
-
-static STAMPS: AtomicU64 = AtomicU64::new(1);
 
 impl Stamp {
     fn now() -> Stamp {
         Stamp {
             at: Instant::now(),
-            n: STAMPS.fetch_add(1, Ordering::SeqCst),
+            n: Moment::now(),
         }
     }
 }
@@ -155,6 +174,9 @@ pub struct Marks {
     /// Whether the look made the last reading, which writes no reader's
     /// document.
     looked: bool,
+    /// The branches the last ask read as last fetched, with the remote's
+    /// refusal, kept as `refused` is.
+    stale: BTreeMap<String, sluice_seams::ReadRefused>,
     /// When a command last told of a change, its `serve`.
     told: Option<Stamp>,
     /// 129 as amended 2026-11-19: when a reading last began that asked the
@@ -226,6 +248,7 @@ impl Marks {
             ended: self.ended_at.clone(),
             refused: self.refused.clone(),
             looked: self.looked,
+            stale: self.stale.clone(),
         }
     }
 }
@@ -260,7 +283,8 @@ enum Job {
 struct Slot {
     id: u64,
     kind: FollowKind,
-    tx: mpsc::UnboundedSender<Report>,
+    /// Where its reports go; `None` for a follower that takes none.
+    tx: Option<mpsc::UnboundedSender<Report>>,
     /// Whether a pass began since it came: it is told only of such passes,
     /// so its first report is of the pass it asked for (D9).
     armed: bool,
@@ -277,6 +301,8 @@ struct Repo {
     jobs: mpsc::UnboundedSender<Job>,
     marks: Arc<watch::Sender<Marks>>,
     followers: Followers,
+    /// The repository's overview document (design D6).
+    documents: Arc<watch::Sender<Option<serde_json::Value>>>,
 }
 
 impl Repo {
@@ -317,6 +343,8 @@ struct Inner {
     activity: watch::Sender<u64>,
     wakes: Arc<Wakes>,
     runtime: tokio::runtime::Handle,
+    /// How a repository's document is read (design D6).
+    document: std::sync::OnceLock<DocumentRead>,
 }
 
 fn locked<T>(m: &Mutex<T>) -> MutexGuard<'_, T> {
@@ -345,7 +373,20 @@ impl Tasks {
             activity: watch::Sender::new(0),
             wakes: Arc::default(),
             runtime: tokio::runtime::Handle::current(),
+            document: std::sync::OnceLock::new(),
         }))
+    }
+
+    /// Read each repository's document with `read` after each reading
+    /// that ends while a follower holds the repository (design D6).
+    pub fn documenting(&self, read: DocumentRead) {
+        let _ = self.0.document.set(read);
+    }
+
+    /// `repository`'s documents, its scheduler started where none runs;
+    /// `None` while the tasks stop (design D6).
+    pub fn documents(&self, repository: &Path) -> Option<Documents> {
+        self.repo(repository).map(|r| r.documents.subscribe())
     }
 
     /// The same tasks, passing only when asked (D14).
@@ -396,8 +437,10 @@ impl Tasks {
                 ..Marks::default()
             })),
             followers: Arc::default(),
+            documents: Arc::new(watch::Sender::new(None)),
         };
         let scheduler = Scheduler {
+            documents: repo.documents.clone(),
             tasks: self.clone(),
             repository: repository.to_path_buf(),
             id: repo.id,
@@ -483,6 +526,13 @@ impl Tasks {
         }
     }
 
+    /// When a command last told of a change to `repository`, in the order
+    /// of the moments that a read joins by (the change
+    /// `sluice-host-answers-every-read`, design D5).
+    pub fn told_at(&self, repository: &Path) -> Option<Moment> {
+        self.marks(repository).told.map(|t| t.n)
+    }
+
     /// The next reading of `repository` asks its remote at once, whatever
     /// is in play: a watch opened, a forecast asks a reading afresh, or a
     /// worker bound the repository afresh (129 as amended 2026-11-19).
@@ -553,6 +603,12 @@ impl Tasks {
             .get(repository)
             .map(|r| r.marks.borrow().clone())
             .unwrap_or_default()
+    }
+
+    /// `repository`'s last reading, as a read that it answers takes it
+    /// (the change `sluice-host-answers-every-read`, design D6).
+    pub fn last_reading(&self, repository: &Path) -> Reading {
+        self.marks(repository).answer(true)
     }
 
     /// Whether a look at `repository` is in flight.
@@ -659,7 +715,14 @@ impl Handle {
     /// once, whatever is in play (129 as amended 2026-11-19); `sluice run`
     /// follows the passes as they come.
     pub fn follow(&self, kind: FollowKind) -> Follower {
+        self.following(kind, true)
+    }
+
+    /// Follow the repository as [`Handle::follow`] does; where not
+    /// `reports`, no report is kept for the follower (design D6).
+    pub fn following(&self, kind: FollowKind, reports: bool) -> Follower {
         let (tx, rx) = mpsc::unbounded_channel();
+        let tx = reports.then_some(tx);
         let id = self.tasks.0.next.fetch_add(1, Ordering::SeqCst);
         let Some(repo) = &self.repo else {
             // The tasks stop: a follower whose task ended at once.
@@ -670,7 +733,9 @@ impl Handle {
                 jobs: None,
             };
         };
-        if kind == FollowKind::Watch {
+        // A watch's or a wait's coming asks the remote at once (the change
+        // `sluice-host-answers-every-read`, design D6).
+        if matches!(kind, FollowKind::Watch | FollowKind::Wait) {
             self.tasks.due(&self.repository);
         }
         locked(&repo.followers).push(Slot {
@@ -702,6 +767,13 @@ impl Follower {
     /// under it.
     pub async fn next(&mut self) -> Option<Report> {
         self.rx.recv().await
+    }
+
+    /// Its reports, and the follower that keeps the repository followed
+    /// while it lives (design D6).
+    pub fn reports(&mut self) -> mpsc::UnboundedReceiver<Report> {
+        let (_, empty) = mpsc::unbounded_channel();
+        std::mem::replace(&mut self.rx, empty)
     }
 }
 
@@ -824,6 +896,8 @@ enum Command {
 
 /// One repository's scheduler (D3).
 struct Scheduler {
+    /// The repository's overview document (design D6).
+    documents: Arc<watch::Sender<Option<serde_json::Value>>>,
     tasks: Tasks,
     repository: PathBuf,
     id: u64,
@@ -886,6 +960,7 @@ impl Scheduler {
                     let looked = looked.unwrap_or(Looked {
                         in_play: true,
                         refused: None,
+                        ..Looked::default()
                     });
                     self.landed(Landed::Looked(looked, asks));
                 }
@@ -915,6 +990,11 @@ impl Scheduler {
                 Command::Pass(reply, _) => drop(reply.send(Err(ended))),
                 Command::Step(_, reply) => drop(reply.send(Err(ended))),
             }
+        }
+        // A repository gone, whatever ended its scheduler: its followers
+        // get the document that says so (design D6).
+        if !self.repository.is_dir() {
+            self.gone();
         }
         locked(&self.followers).clear();
         self.marks.send_modify(|m| {
@@ -1063,8 +1143,64 @@ impl Scheduler {
                     self.reading_due = true;
                 }
             }
-            Job::Unfollowed => {}
+            Job::Unfollowed => {
+                // A repository held again is read afresh: no document of
+                // this holding is sent to the next follower (design D6).
+                if !self.followed() {
+                    self.documents.send_replace(None);
+                }
+            }
         }
+    }
+
+    /// Read the repository's document after a reading that ended now,
+    /// where a follower holds the repository, and send it where it changed
+    /// in a part other than its time (design D6). It names its tick (64,
+    /// 129).
+    fn document(&self) {
+        if !self.followed() {
+            return;
+        }
+        let Some(read) = self.tasks.0.document.get().cloned() else {
+            return;
+        };
+        let documents = self.documents.clone();
+        let repository = self.repository.clone();
+        let every = tick(self.watched());
+        let after = Moment::now();
+        let tracker = locked(&self.tasks.0.running).tracker.clone();
+        // A stop ends the read: no follower reads its document after it.
+        let token = self.token.clone();
+        tracker.spawn_on(
+            async move {
+                let doc = tokio::select! {
+                    doc = read(repository, after) => doc,
+                    () = token.cancelled() => None,
+                };
+                let Some(doc) = doc else {
+                    return;
+                };
+                send_document(&documents, crate::overview::ticked(doc, every));
+            },
+            &self.tasks.0.runtime,
+        );
+    }
+
+    /// The repository is gone: its followers get the document that says
+    /// so, in the words its last read failed with where it failed, and it
+    /// is held no longer (design D6).
+    fn gone(&self) {
+        let failed = self
+            .documents
+            .borrow()
+            .clone()
+            .filter(|d| d.get("error").is_some());
+        let mut doc = failed.unwrap_or_else(|| {
+            let words = format!("the repository at {} is gone", self.repository.display());
+            crate::told::document(crate::told::Kind::Internal, &words, &[])
+        });
+        doc["gone"] = true.into();
+        send_document(&self.documents, doc);
     }
 
     /// Start the next work, where none is in flight.
@@ -1190,7 +1326,14 @@ impl Scheduler {
     /// a look having made it where `looked` (D16). Where it `asked` the
     /// remote, its words are the remote's refusal, `refused`, or none; a
     /// reading that asked nothing keeps the last ask's.
-    fn end_reading(&self, asked: bool, refused: Option<String>, in_play: bool, looked: bool) {
+    fn end_reading(
+        &self,
+        asked: bool,
+        refused: Option<String>,
+        stale: BTreeMap<String, sluice_seams::ReadRefused>,
+        in_play: bool,
+        looked: bool,
+    ) {
         self.marks.send_modify(|m| {
             m.ended = Some(Stamp::now());
             m.ended_began = m.began;
@@ -1198,6 +1341,7 @@ impl Scheduler {
                 Some(chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true));
             if asked {
                 m.refused = refused;
+                m.stale = stale;
             }
             m.in_play = in_play;
             m.looked = looked;
@@ -1229,18 +1373,18 @@ impl Scheduler {
         self.flight = Some(Flight::Pass { rx, asks, replies });
     }
 
-    /// Where passes are taken only when asked, a reading due is a look,
-    /// made beside work under way in the worker's lane that is no reading,
-    /// a step among it (D14).
+    /// A reading due during a step is a look made beside the step, so a
+    /// read during a long step is answered once the look ends (the change
+    /// `sluice-host-answers-every-read`, design D3); where passes are taken
+    /// only when asked, so is one due during any work of the worker's lane
+    /// that is no reading (D14).
     fn look_beside(&mut self) {
-        if self.reading_due
-            && self.asked_only()
-            && self.flight.is_some()
-            && !matches!(self.flight, Some(Flight::Pass { .. }))
-            && self.looking.is_none()
-            && !self.stopping
-            && !self.ended
-        {
+        let beside = match &self.flight {
+            Some(Flight::Step { .. }) => true,
+            Some(Flight::Pass { .. }) | None => false,
+            Some(_) => self.asked_only(),
+        };
+        if self.reading_due && beside && self.looking.is_none() && !self.stopping && !self.ended {
             self.reading_due = false;
             self.look();
         }
@@ -1272,6 +1416,12 @@ impl Scheduler {
                     self.reading_due = true;
                 }
             }
+            Landed::Bound(Err(_), _) if self.followed() && !self.repository.is_dir() => {
+                // The repository is gone: held no longer (design D6).
+                self.wants_worker = false;
+                self.ended = true;
+                self.gone();
+            }
             Landed::Bound(Err(words), _) => {
                 self.wants_worker = false;
                 {
@@ -1301,16 +1451,20 @@ impl Scheduler {
                 self.end_reading(
                     asks,
                     report.as_ref().ok().and_then(|r| r.refused.clone()),
+                    report.as_ref().map(|r| r.stale.clone()).unwrap_or_default(),
                     self.in_play,
                     false,
                 );
                 self.last_pass = Some(Instant::now());
                 if let Ok(r) = &report {
-                    locked(&self.followers).retain(|s| !s.armed || s.tx.send(r.clone()).is_ok());
+                    locked(&self.followers).retain(|s| {
+                        !s.armed || s.tx.as_ref().is_none_or(|tx| tx.send(r.clone()).is_ok())
+                    });
                 }
                 for reply in replies {
                     let _ = reply.send(report.clone());
                 }
+                self.document();
             }
             Landed::Stepped(stepped, reply) => match stepped {
                 Some((answer, in_play)) => {
@@ -1325,7 +1479,14 @@ impl Scheduler {
                 }
             },
             Landed::Looked(looked, asks) => {
-                self.end_reading(asks, looked.refused.clone(), looked.in_play, true);
+                self.end_reading(
+                    asks,
+                    looked.refused.clone(),
+                    looked.stale.clone(),
+                    looked.in_play,
+                    true,
+                );
+                self.document();
                 self.in_play = looked.in_play;
                 if looked.in_play && !self.refused() && !self.stopping {
                     self.wants_worker = true;
@@ -1333,7 +1494,10 @@ impl Scheduler {
             }
             Landed::Unbound(ended) => match ended {
                 Ok(WorkerEnd::LetGo) => {}
-                Ok(WorkerEnd::Gone) => self.ended = true,
+                Ok(WorkerEnd::Gone) => {
+                    self.ended = true;
+                    self.gone();
+                }
                 Err(words) => {
                     log(&format!(
                         "sluice host: {}: its task panicked, and starts again at its next tick: {words}",
@@ -1346,6 +1510,27 @@ impl Scheduler {
             },
         }
     }
+}
+
+/// Send `doc` to a repository's followers, where any follows and it
+/// changed in a part other than its time (design D6).
+fn send_document(documents: &watch::Sender<Option<serde_json::Value>>, doc: serde_json::Value) {
+    if documents.receiver_count() == 0 {
+        return;
+    }
+    let now = crate::overview::untimed(&doc);
+    documents.send_if_modified(|d| {
+        // A repository gone stays gone: a read in flight as it went sends
+        // nothing after it.
+        if d.as_ref().is_some_and(|d| d["gone"] == true) {
+            return false;
+        }
+        let changed = d.as_ref().map(crate::overview::untimed).as_ref() != Some(&now);
+        if changed {
+            *d = Some(doc);
+        }
+        changed
+    });
 }
 
 /// A worker's thread: its binding of `repository`, then each work its
@@ -1513,16 +1698,7 @@ impl RepositoryWorker {
             taken,
             asked_only,
             task: Task {
-                driver: None,
-                reader: None,
                 kept: Kept::default(),
-                said_driven: false,
-                readers: bound.readers().map_err(|e| {
-                    format!(
-                        "sluice host: {}: could not be opened: {e:#}",
-                        common.display()
-                    )
-                })?,
                 repository: common.to_string_lossy().into_owned(),
                 in_play: true,
             },
@@ -1606,8 +1782,13 @@ impl Worker for RepositoryWorker {
             false => &self.clock,
         };
         let s = sluice_of(&self.bound, &self.policies, clock);
-        let report = self.task.pass(&s, &self.bound, clock, tick, asks);
+        let _ = tick;
+        let report = self.task.pass(&s, &self.bound, clock, asks);
         drop(s);
+        let report = report.map(|r| crate::host_process::pass::Report {
+            stale: self.bound.state.stale_all(),
+            ..r
+        });
         if self.asked_only && at.is_none() {
             self.skipped.pause();
         }
@@ -1621,16 +1802,8 @@ impl Worker for RepositoryWorker {
             false => &self.clock,
         };
         let s = sluice_of(&self.bound, &self.policies, clock);
-        // D7: an older `sluice run` that drives the repository keeps its
-        // rounds while it lives, a step's among them.
-        let answer = match self.task.drives() {
-            true => pass::step(&s, &*self.bound.pulls, clock, branch).map_err(|e| format!("{e:#}")),
-            false => Err(format!(
-                "an older sluice run drives {}, so sluice's host process runs no round of it \
-                 while that run lives",
-                self.task.repository
-            )),
-        };
+        let answer =
+            pass::step(&s, &*self.bound.pulls, clock, branch).map_err(|e| format!("{e:#}"));
         let in_play = pass::in_play(&s);
         (answer, in_play)
     }
@@ -1690,90 +1863,22 @@ fn sluice_of<'a>(
 
 /// What a repository's worker holds between its passes.
 struct Task {
-    driver: Option<Driver>,
-    reader: Option<Reader>,
     kept: Kept,
     in_play: bool,
-    /// Whether it said that an older `sluice run` drives the repository.
-    said_driven: bool,
-    readers: PathBuf,
     repository: String,
 }
 
 impl Task {
-    /// Whether it drives the repository, its driver's lock taken where no
-    /// older `sluice run` holds it (D7).
-    fn drives(&mut self) -> bool {
-        if self.driver.is_none() {
-            self.driver = Driver::try_take(&self.readers, &self.repository).unwrap_or(None);
-        }
-        self.driver.is_some()
-    }
-
-    /// One pass, as the repository's driver and reader on the host; none
-    /// while an older `sluice run` drives it or an older reader reads it,
-    /// which it follows (D7).
+    /// One pass, as the repository's driver on the host.
     fn pass(
         &mut self,
         s: &Sluice<'_>,
         bound: &Bound,
         clock: &dyn Clock,
-        tick: Duration,
         asks: bool,
     ) -> Result<Report, String> {
-        if !self.drives() {
-            if !self.said_driven {
-                log(&format!(
-                    "sluice host: {}: an older sluice run drives it; this process follows it",
-                    self.repository
-                ));
-                self.said_driven = true;
-            }
-            self.in_play = pass::in_play(s);
-            return Ok(Report {
-                in_play: self.in_play,
-                ..Report::default()
-            });
-        }
-        self.said_driven = false;
-        // 129: it takes an older reader's lease as a newer watch does, and
-        // follows until that reader lets go.
-        match &mut self.reader {
-            Some(r) => {
-                let _ = r.step(true, Drives::Nobody);
-            }
-            None => match Reader::take_given(
-                &self.readers,
-                &self.repository,
-                bound.version(),
-                Drives::Nobody,
-            ) {
-                Ok(mut r) => {
-                    // An older reader's lease, taken at once.
-                    let _ = r.step(true, Drives::Nobody);
-                    self.reader = Some(r);
-                }
-                Err(e) => return Err(format!("{e:#}")),
-            },
-        }
-        let Some(Reader::Lead(lead)) = &mut self.reader else {
-            self.in_play = pass::in_play(s);
-            return Ok(Report {
-                in_play: self.in_play,
-                ..Report::default()
-            });
-        };
-        let report = pass::pass(
-            s,
-            bound,
-            &*bound.pulls,
-            clock,
-            Some(lead),
-            tick,
-            asks,
-            &mut self.kept,
-        )
-        .map_err(|e| format!("{e:#}"));
+        let report = pass::pass(s, bound, &*bound.pulls, clock, asks, &mut self.kept)
+            .map_err(|e| format!("{e:#}"));
         match &report {
             Ok(r) => {
                 for line in &r.lines {
@@ -1935,6 +2040,7 @@ mod tests {
                 Looked {
                     in_play: work.load(Ordering::SeqCst),
                     refused: refused.clone().filter(|_| asks),
+                    ..Looked::default()
                 }
             })
         }
@@ -2254,6 +2360,136 @@ mod tests {
 
     const IDLE_ASK_TEST: Duration = Duration::from_secs(61);
 
+    /// Tasks that pass only when asked, each document read giving the
+    /// next of `docs` (the change `sluice-host-answers-every-read`, design
+    /// D6), and how many documents were read.
+    fn documented(docs: Vec<serde_json::Value>) -> (Tasks, Arc<AtomicUsize>) {
+        let tasks = Fakes::default().tasks().passes_when_asked();
+        let read = Arc::new(AtomicUsize::new(0));
+        let n = read.clone();
+        let docs = Arc::new(docs);
+        tasks.documenting(Arc::new(move |_, _| {
+            let i = n.fetch_add(1, Ordering::SeqCst);
+            let doc = docs.get(i).or(docs.last()).cloned();
+            Box::pin(async move { doc })
+        }));
+        (tasks, read)
+    }
+
+    /// design D6: a document that changed only in its time, `at`, is not
+    /// sent: a subscriber's receiver does not wake for it.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_document_that_changed_only_its_time_wakes_no_receiver() {
+        let repo = PathBuf::from("/host/documented.git");
+        let (tasks, read) = documented(vec![
+            serde_json::json!({"at": "1", "branches": ["main"]}),
+            serde_json::json!({"at": "2", "branches": ["main"]}),
+            serde_json::json!({"at": "3", "branches": ["main", "bolt/x"]}),
+        ]);
+        let mut documents = tasks.documents(&repo).expect("its channel");
+        let handle = tasks.handle(&repo);
+        let _follower = handle.following(FollowKind::Watch, false);
+        handle.pass(None).await.expect("a pass");
+        documents.changed().await.expect("the first document");
+        assert_eq!(documents.borrow_and_update().as_ref().unwrap()["at"], "1");
+        handle.pass(None).await.expect("a pass");
+        soon("the second document is read", || {
+            read.load(Ordering::SeqCst) == 2
+        })
+        .await;
+        settle().await;
+        assert!(
+            !documents.has_changed().unwrap(),
+            "woken for its time alone"
+        );
+        handle.pass(None).await.expect("a pass");
+        documents.changed().await.expect("the third document");
+        let doc = documents.borrow_and_update().clone().unwrap();
+        assert_eq!(doc["branches"], serde_json::json!(["main", "bolt/x"]));
+        assert_eq!(doc["tick"], 1, "a watch follows: its tick is a second");
+    }
+
+    /// resident-subscriptions, "A client that reads nothing for ten
+    /// seconds" (design D6): three passes each change the document while a
+    /// subscriber reads nothing; the next document it reads is the newest,
+    /// and the two older ones never reach it.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_slow_subscriber_gets_the_newest_overview() {
+        let repo = PathBuf::from("/host/slow-subscriber.git");
+        let (tasks, read) = documented(
+            (1..=3)
+                .map(|n| serde_json::json!({"at": n.to_string(), "n": n}))
+                .collect(),
+        );
+        let documents = tasks.documents(&repo).expect("its channel");
+        let handle = tasks.handle(&repo);
+        let _follower = handle.following(FollowKind::Wait, false);
+        for _ in 0..3 {
+            handle.pass(None).await.expect("a pass");
+        }
+        soon("three documents are read", || {
+            read.load(Ordering::SeqCst) == 3
+        })
+        .await;
+        soon("the newest is sent", || {
+            documents.borrow().as_ref().is_some_and(|d| d["n"] == 3)
+        })
+        .await;
+        let mut stream = tokio_stream::wrappers::WatchStream::new(documents.clone());
+        use tokio_stream::StreamExt;
+        let first = stream.next().await.flatten().expect("a document");
+        assert_eq!(first["n"], 3, "the newest, alone");
+        assert!(documents.has_changed().is_ok());
+    }
+
+    /// resident-reads, "A read past its bound is answered from the last
+    /// state" (the change `sluice-host-answers-every-read`, design D4): a
+    /// read whose reading does not end within `read_for()` is answered as
+    /// not current, with when the last reading ended, so `sluice host`
+    /// answers from the state it last kept. The look holds the paused clock
+    /// while it runs; the test moves the clock past the bound.
+    #[tokio::test(start_paused = true)]
+    async fn a_read_past_its_bound_answers_from_the_held_state() {
+        let repo = PathBuf::from("/host/slow-reading.git");
+        let held = Arc::new((Mutex::new(false), std::sync::Condvar::new()));
+        let gate = held.clone();
+        let look: InPlay = Arc::new(move |_: &Path, _: bool| {
+            let (blocked, ended) = &*gate;
+            let mut b = locked(blocked);
+            while *b {
+                b = ended.wait(b).unwrap_or_else(|e| e.into_inner());
+            }
+            Looked::default()
+        });
+        let tasks = Tasks::new(Fakes::default().bind(), look).passes_when_asked();
+        let tick = super::super::READ_TICK;
+        let first = tasks
+            .read(&repo, tick, super::super::read_for(), false)
+            .await;
+        assert!(first.current, "{first:?}");
+        assert!(first.ended.is_some(), "{first:?}");
+
+        tokio::time::advance(tick + Duration::from_secs(1)).await;
+        *locked(&held.0) = true;
+        let asked = {
+            let tasks = tasks.clone();
+            let repo = repo.clone();
+            tokio::spawn(async move {
+                tasks
+                    .read(&repo, tick, super::super::read_for(), false)
+                    .await
+            })
+        };
+        settle().await;
+        assert!(reading(&tasks, &repo), "a reading is in flight");
+        tokio::time::advance(super::super::read_for() + Duration::from_secs(1)).await;
+        let answered = asked.await.unwrap();
+        assert!(!answered.current, "{answered:?}");
+        assert_eq!(answered.ended, first.ended, "the state last kept");
+        *locked(&held.0) = false;
+        held.1.notify_all();
+    }
+
     /// reader-tick, "A remote's records are asked for once a minute where
     /// nothing is in play" (129 as amended 2026-11-19): the look at an
     /// idle repository asks its remote, and is not taken again until a
@@ -2401,6 +2637,7 @@ mod tests {
                 Looked {
                     in_play: true,
                     refused: None,
+                    ..Looked::default()
                 }
             }),
         );

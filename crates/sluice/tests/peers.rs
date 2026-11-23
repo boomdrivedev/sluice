@@ -750,10 +750,27 @@ fn a_one_shot_overview_beside_a_current_reading_asks_origin_nothing() {
     assert!(out.status.success(), "{}", text(&out));
 
     let before = host.git.count();
-    let out = host.sluice(&["overview", "--json"]);
+    let child = host
+        .command(host.repo.dir())
+        .args(["overview", "--json"])
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    let pid = child.id();
+    let out = child.wait_with_output().unwrap();
     assert!(out.status.success(), "{}", text(&out));
     let calls = remote_calls(&host.git.starts()[before..]);
     assert!(calls.is_empty(), "{calls:?}");
+    // The command read no record: `sluice host` answered it, and the one
+    // git it ran is the branch protection's look at its hook (the change
+    // `sluice-host-answers-every-read`, design D2).
+    let own: Vec<String> = host.git.parented()[before..]
+        .iter()
+        .filter(|(p, a)| *p == pid && !a.contains(" rev-parse ") && !a.contains(" worktree list"))
+        .map(|(_, a)| a.clone())
+        .collect();
+    assert!(own.is_empty(), "the overview ran git: {own:?}");
     let v: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
     let main = v["branches"]
         .as_array()
@@ -823,11 +840,12 @@ fn a_signed_record_is_verified_once() {
         support::env_of(&host.command(host.repo.dir())),
     )
     .unwrap();
+    let _ = repository;
     let _kept = client
-        .follow(
-            Path::new(&repository),
-            sluice::host_process::protocol::FollowKind::Wait,
-        )
+        .subscribe(vec![sluice::host_process::protocol::Added {
+            folder: host.repo.dir().to_path_buf(),
+            kind: sluice::host_process::protocol::FollowKind::Wait,
+        }])
         .unwrap();
 
     let out = host.sluice(&["run", "--rounds", "10"]);

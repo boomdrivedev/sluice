@@ -5,7 +5,6 @@ use std::rc::Rc;
 use std::time::{Duration, Instant};
 
 use clap::Parser;
-use sluice::exec::Host;
 use sluice::hand_over::HandOver;
 use sluice::host_settings::{HostSettings, Look};
 use sluice::instance::{Instance, AFRESH};
@@ -13,7 +12,7 @@ use sluice::profiles::Bound;
 use sluice::retry::Policy;
 use sluice::telemetry::{Caller, Settings, Telemetry};
 use sluice::{run, Cli, Command, Driven, Following, Pause, Skipped, Sleep};
-use sluice_core::{Clock, Sluice, SystemClock};
+use sluice_core::{Clock, SystemClock};
 
 fn main() {
     // 135: what a `sluice run` this process started afresh from handed it,
@@ -153,6 +152,23 @@ fn main() {
             }
         }
     }
+    // A read is answered by sluice's host process: the command sends its
+    // folder and prints the answer, and binds no repository (the change
+    // `sluice-host-answers-every-read`, design D1, D2).
+    if let Some(code) = read(&cli) {
+        std::process::exit(code);
+    }
+    // A watch follows sluice's host process on a subscription, and binds
+    // no repository either (design D7).
+    if let Some(code) = watch(&cli) {
+        std::process::exit(code);
+    }
+    // A wait follows sluice's host process, which takes each of its steps,
+    // and binds no repository; one that follows a pull request goes on
+    // below, as before (design D8).
+    if let Some(code) = wait(&cli) {
+        std::process::exit(code);
+    }
     let retry = Rc::new(retry(&cli));
     // The forge check reads the host's config itself, and says what in it
     // is wrong rather than failing on it.
@@ -252,6 +268,14 @@ fn main() {
     } else {
         None
     };
+    // A kept `sluice run` follows sluice's host process on a subscription,
+    // and binds no repository (the change `sluice-host-answers-every-read`,
+    // design D8).
+    if let (Some(Command::Run { rounds }), Some(settings)) = (&cli.command, held) {
+        let code = keep(&cli, *rounds, settings, started, handed, telemetry.as_ref());
+        finish(telemetry);
+        std::process::exit(code);
+    }
     let opened = repository_dir(&cli).and_then(|dir| {
         let program = std::env::current_exe()?;
         let bound = Bound::open_with(&dir, program.clone(), instance, retry.clone())?;
@@ -277,17 +301,10 @@ fn main() {
             }
             _ => bound,
         };
-        let kept = held.map(|settings| Kept {
-            dir,
-            program,
-            settings,
-            retry: retry.clone(),
-            started,
-            handed,
-        });
-        Ok((bound, kept))
+        let _ = (dir, program);
+        Ok(bound)
     });
-    let (bound, kept) = match opened {
+    let bound = match opened {
         Ok(opened) => opened,
         Err(e) => {
             eprintln!("sluice: {e:#}");
@@ -319,33 +336,16 @@ fn main() {
         Ok("record") => (&skipped, &skipped),
         _ => (&SystemClock, &Sleep(every)),
     };
-    let ran = match (kept, &cli.command) {
-        // 153 (design D2): a kept `sluice run`, which goes through no
-        // `run`, is one span in its caller's trace all the same.
-        (Some(kept), Some(Command::Run { rounds })) => {
-            sluice::telemetry::command(cli.caller.as_ref(), &cli.words(), || {
-                keep_running(
-                    kept,
-                    bound,
-                    *rounds,
-                    telemetry.as_ref(),
-                    clock,
-                    pause,
-                    &mut out,
-                )
-            })
-        }
-        _ => run(
-            cli,
-            bound.seams(),
-            &bound,
-            &bound.branch,
-            &*bound.pulls,
-            clock,
-            pause,
-            &mut out,
-        ),
-    };
+    let ran = run(
+        cli,
+        bound.seams(),
+        &bound,
+        &bound.branch,
+        &*bound.pulls,
+        clock,
+        pause,
+        &mut out,
+    );
     let code = match ran {
         Ok(code) => code,
         Err(e) => {
@@ -356,6 +356,226 @@ fn main() {
     };
     finish(telemetry);
     std::process::exit(code);
+}
+
+/// `path` from `folder`, with no `.` in it: the path a read sends.
+fn from_folder(folder: &Path, path: &str) -> PathBuf {
+    folder
+        .join(path)
+        .components()
+        .filter(|c| !matches!(c, std::path::Component::CurDir))
+        .collect()
+}
+
+/// The request a read command sends to sluice's host process; `None` for a
+/// command that is no read, or a read that the command refuses as it is.
+fn read_request(cli: &Cli, folder: &Path) -> Option<sluice::host_process::protocol::Request> {
+    use sluice::host_process::protocol::Request;
+    let folder_of = |path: &str| from_folder(folder, path);
+    Some(match &cli.command {
+        None => Request::Home {
+            folder: folder.to_path_buf(),
+            caller: sluice::caller::here(),
+            worktree: folder_of(&cli.worktree),
+            json: cli.json,
+        },
+        Some(Command::Status {
+            target,
+            all,
+            json,
+            branch,
+        }) => Request::Status {
+            folder: folder.to_path_buf(),
+            caller: sluice::caller::here(),
+            target: target.clone(),
+            all: *all,
+            json: *json,
+            branch: branch.clone(),
+        },
+        Some(Command::Overview {
+            json, watch: false, ..
+        }) => Request::Overview {
+            folder: folder.to_path_buf(),
+            caller: sluice::caller::here(),
+            json: *json,
+        },
+        Some(Command::Submit {
+            branch,
+            after,
+            check: true,
+            head,
+            worktree,
+            json,
+            ..
+        }) if worktree.len() <= 1 => Request::Forecast {
+            folder: folder.to_path_buf(),
+            caller: sluice::caller::here(),
+            branch: branch.clone(),
+            worktree: folder_of(worktree.first().map_or(".", String::as_str)),
+            head: head.clone(),
+            after: after.clone(),
+            json: *json,
+        },
+        Some(Command::Inbox {
+            worktree,
+            json,
+            confirm,
+            new,
+        }) => Request::Inbox {
+            folder: folder.to_path_buf(),
+            caller: sluice::caller::here(),
+            worktree: folder_of(worktree),
+            json: *json,
+            confirm: *confirm,
+            new: *new,
+        },
+        _ => return None,
+    })
+}
+
+/// A read, asked of sluice's host process, started where none answers: its
+/// output printed, and its exit code; `None` for a command that is no read.
+/// Where no host process answers, the command says so and exits 3, and
+/// reads nothing itself (the change `sluice-host-answers-every-read`,
+/// design D1, D2, D4).
+fn read(cli: &Cli) -> Option<i32> {
+    let folder = match std::env::current_dir() {
+        Ok(f) => f,
+        Err(e) => {
+            let e = anyhow::Error::from(e);
+            eprintln!("sluice: {e:#}");
+            tell_json(cli.json(), &e);
+            return Some(3);
+        }
+    };
+    let request = read_request(cli, &folder)?;
+    // 124: a command still reads the host's settings in full, and refuses
+    // a field it does not know, naming the file and the field.
+    if let Err(e) = Instance::read() {
+        eprintln!("sluice: {e:#}");
+        tell_json(cli.json(), &e);
+        return Some(3);
+    }
+    let asked = sluice::host_process::client::Client::host().and_then(|c| c.output(&request));
+    match asked {
+        Ok(output) => {
+            let mut out = std::io::stdout();
+            let _ = out.write_all(output.stdout.as_bytes());
+            let _ = out.flush();
+            for line in &output.stderr {
+                eprintln!("{line}");
+            }
+            Some(output.code)
+        }
+        Err(e) => {
+            let e = e.context("sluice's host process did not answer");
+            eprintln!("sluice: {e:#}");
+            tell_json(cli.json(), &e);
+            Some(3)
+        }
+    }
+}
+
+/// `sluice overview --json --watch`, with `--stdin` or without, as a
+/// client of a subscription to sluice's host process: its exit; `None` for
+/// any other command (the change `sluice-host-answers-every-read`, design
+/// D7).
+fn watch(cli: &Cli) -> Option<i32> {
+    let Some(Command::Overview {
+        watch: true, stdin, ..
+    }) = &cli.command
+    else {
+        return None;
+    };
+    let mut out = std::io::stdout();
+    let every = sluice::tick(cli.command.as_ref());
+    let skipped = Skipped::new(every);
+    let (clock, pause): (&dyn Clock, &dyn Pause) = match std::env::var(ROUND_SLEEP_VAR).as_deref() {
+        Ok("record") => (&skipped, &skipped),
+        _ => (&SystemClock, &Sleep(every)),
+    };
+    let watched = sluice::stop_on_interrupt()
+        .and_then(|()| Ok(std::env::current_dir()?))
+        .and_then(|folder| match stdin {
+            true => sluice::subscriber::watch_input(&folder, &mut out),
+            false => sluice::subscriber::watch(
+                &sluice::host_process::Socketed::default(),
+                None,
+                folder,
+                clock,
+                pause,
+                &mut out,
+            ),
+        });
+    Some(match watched {
+        Ok(code) => code,
+        Err(e) => {
+            sluice::telemetry::error(&format!("sluice: {e:#}"));
+            tell_json(true, &e);
+            3
+        }
+    })
+}
+
+/// `sluice wait` as a client of sluice's host process: its exit; `None` for
+/// any other command, and for a wait that follows a pull request (the
+/// change `sluice-host-answers-every-read`, design D8).
+fn wait(cli: &Cli) -> Option<i32> {
+    let Some(Command::Wait {
+        target,
+        timeout,
+        worktree,
+        json,
+        confirm,
+        confirm_landing,
+        branch,
+        pull_request,
+    }) = &cli.command
+    else {
+        return None;
+    };
+    // 124: a command still reads the host's settings in full.
+    if let Err(e) = Instance::read() {
+        eprintln!("sluice: {e:#}");
+        tell_json(*json, &e);
+        return Some(3);
+    }
+    let every = sluice::tick(cli.command.as_ref());
+    let skipped = Skipped::new(every);
+    let (clock, pause): (&dyn Clock, &dyn Pause) = match std::env::var(ROUND_SLEEP_VAR).as_deref() {
+        Ok("record") => (&skipped, &skipped),
+        _ => (&SystemClock, &Sleep(every)),
+    };
+    let deadline = timeout
+        .map(|t| clock.now() + chrono::Duration::from_std(t).unwrap_or(chrono::Duration::MAX));
+    let mut out = std::io::stdout();
+    let process = sluice::host_process::Socketed::default();
+    let followed = sluice::stop_on_interrupt()
+        .and_then(|()| Ok(std::env::current_dir()?))
+        .and_then(|folder| {
+            let ask = sluice::host_process::protocol::WaitAsk {
+                target: target.clone(),
+                branch: branch.clone(),
+                pull_request: *pull_request,
+                worktree: Some(from_folder(&folder, worktree).display().to_string()),
+                json: *json,
+                confirm: *confirm,
+                confirm_landing: *confirm_landing,
+                ..Default::default()
+            };
+            sluice::follow_wait(
+                &process, None, folder, ask, None, deadline, clock, pause, &mut out,
+            )
+        });
+    match followed {
+        Ok(Some(code)) => Some(code),
+        Ok(None) => None,
+        Err(e) => {
+            sluice::telemetry::error(&format!("sluice: {e:#}"));
+            tell_json(*json, &e);
+            Some(3)
+        }
+    }
 }
 
 /// Raise this process's soft limit on open files to its hard limit, as
@@ -387,11 +607,49 @@ fn finish(telemetry: Option<Telemetry>) {
 /// afresh itself (135; record 0107; design D3, D4).
 struct Kept {
     dir: PathBuf,
-    program: PathBuf,
     settings: HostSettings,
-    retry: Rc<Policy>,
     started: Started,
     handed: Option<HandOver>,
+}
+
+/// A kept `sluice run` of the folder it runs in: its exit. 153 (design
+/// D2): it goes through no `run`, and is one span in its caller's trace
+/// all the same.
+fn keep(
+    cli: &Cli,
+    rounds: Option<usize>,
+    settings: HostSettings,
+    started: Started,
+    handed: Option<HandOver>,
+    telemetry: Option<&Telemetry>,
+) -> i32 {
+    let every = sluice::tick(cli.command.as_ref());
+    let skipped = Skipped::new(every);
+    let (clock, pause): (&dyn Clock, &dyn Pause) = match std::env::var(ROUND_SLEEP_VAR).as_deref() {
+        Ok("record") => (&skipped, &skipped),
+        _ => (&SystemClock, &Sleep(every)),
+    };
+    let mut out = std::io::stdout();
+    let ran = sluice::stop_on_interrupt()
+        .and_then(|()| Ok(std::env::current_dir()?))
+        .and_then(|dir| {
+            let kept = Kept {
+                dir,
+                settings,
+                started,
+                handed,
+            };
+            sluice::telemetry::command(cli.caller.as_ref(), &cli.words(), || {
+                keep_running(kept, rounds, telemetry, clock, pause, &mut out)
+            })
+        });
+    match ran {
+        Ok(code) => code,
+        Err(e) => {
+            sluice::telemetry::error(&format!("sluice: {e:#}"));
+            3
+        }
+    }
 }
 
 /// The run as it started, which it starts afresh as (design D3): its
@@ -414,7 +672,6 @@ struct Started {
 /// said once.
 fn keep_running(
     mut kept: Kept,
-    bound: Bound,
     rounds: Option<usize>,
     telemetry: Option<&Telemetry>,
     clock: &dyn Clock,
@@ -426,7 +683,6 @@ fn keep_running(
         .path()
         .map(|p| p.display().to_string())
         .unwrap_or_default();
-    let s = Sluice::new(bound.seams(), clock).as_peer(bound.peer());
     let mut following = match kept.handed.take() {
         Some(doc) => {
             eprintln!(
@@ -438,22 +694,17 @@ fn keep_running(
         }
         None => {
             let mut following = Following::new(rounds);
-            following.start(&s)?;
+            following.start()?;
             following
         }
     };
-    let here = sluice::host_process::Here {
-        s: &s,
-        host: &bound,
-        pulls: &*bound.pulls,
-        clock,
-    };
-    let mut follower = sluice::host_process::ask::Follower::new(
-        &here,
-        sluice::host_process::protocol::FollowKind::Run,
-    );
+    // Design D8 of `sluice-host-answers-every-read`: a subscription of its
+    // folder as `run`, on the host process's socket, with no binding.
+    let process = sluice::host_process::Socketed::default();
+    let mut runner =
+        sluice::subscriber::Runner::new(&process, None, kept.dir.clone(), following.tick());
     loop {
-        if let Driven::Ended(code) = following.next(&here, &mut follower, pause, out)? {
+        if let Driven::Ended(code) = following.next(&mut runner, clock, pause, out)? {
             return Ok(code);
         }
         let refused = |why: &str| {
@@ -463,8 +714,8 @@ fn keep_running(
             ))
         };
         // A change it takes up only by starting afresh that it could not
-        // start afresh for, because its settings do not bind or the start
-        // failed, said once with the tables (rule core.54; design D5).
+        // start afresh for said once with the tables (rule core.54; design
+        // D5).
         let not_afresh = |tables: &[&str], cause: &str, why: &str| {
             sluice::telemetry::warn(&format!(
                 "sluice: warning: {file} changed {}, which this sluice run takes up only by \
@@ -483,30 +734,12 @@ fn keep_running(
                     kept.settings.accept(instance);
                     continue;
                 }
-                let rebound = Bound::open_with(
-                    &kept.dir,
-                    kept.program.clone(),
-                    instance.clone(),
-                    kept.retry.clone(),
-                )
-                .and_then(|b| {
-                    Sluice::new(b.seams(), clock)
-                        .as_peer(b.peer())
-                        .check_host_systems()?;
-                    Ok(b)
-                });
-                match rebound {
-                    Ok(b) => {
-                        drop(b);
-                        if let Some(t) = telemetry {
-                            t.flush();
-                        }
-                        let _ = out.flush();
-                        let why = start_afresh(&kept.started, &following, &tables, text);
-                        not_afresh(&tables, "it could not start afresh", &format!("{why:#}"));
-                    }
-                    Err(e) => not_afresh(&tables, "its settings do not bind", &format!("{e:#}")),
+                if let Some(t) = telemetry {
+                    t.flush();
                 }
+                let _ = out.flush();
+                let why = start_afresh(&kept.started, &following, &tables, text);
+                not_afresh(&tables, "it could not start afresh", &format!("{why:#}"));
             }
         }
     }

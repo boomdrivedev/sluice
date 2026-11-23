@@ -55,11 +55,15 @@ pub mod clock;
 pub mod environment;
 pub mod folder;
 pub mod index;
+pub mod joined;
 pub mod pass;
 pub mod protocol;
+pub mod reads;
 pub mod results;
 pub mod room;
+pub mod subscription;
 pub mod tasks;
+pub mod version;
 pub mod watch;
 
 use std::ffi::OsString;
@@ -83,9 +87,9 @@ use crate::exec::Host;
 use crate::host_settings::{HostSettings, Look};
 use crate::instance::Instance;
 use crate::profiles::places::{repository_key, user_scratch, USER_SCRATCH_VAR};
-pub use ask::{Following, Here, Holding, Holds, HostProcess, Socketed};
+pub use ask::{Here, Holding, Holds, HostProcess, Socketed, Subscription};
 use folder::{Folder, How};
-use protocol::{Answer, Hello, Named, Request, RoomView, Started};
+use protocol::{Answer, FollowKind, Hello, Named, Request, RoomView, Started};
 use room::{Asked, Asker, Room, Shared};
 
 /// Set to `record` in tests: the host process takes no pass of its own,
@@ -274,6 +278,9 @@ pub(crate) struct Hosting {
     /// no git call or API call of its gets a repository's token while one
     /// it holds lasts (record 0108 as amended 2026-11-19).
     pub tokens: crate::profiles::Tokens,
+    /// The reads joined: a folder's repository, and each read of a
+    /// repository (the change `sluice-host-answers-every-read`, design D5).
+    pub reads: reads::Reads,
 }
 
 /// What a connection asks of the host process itself.
@@ -816,6 +823,7 @@ fn run_holding(runtime: &tokio::runtime::Runtime, holder: Holder) -> Result<i32>
                     tasks::Looked {
                         in_play: true,
                         refused: None,
+                        ..Default::default()
                     },
                 )
             }),
@@ -828,7 +836,9 @@ fn run_holding(runtime: &tokio::runtime::Runtime, holder: Holder) -> Result<i32>
         let told = tasks.clone();
         room.on_free(move |r| told.owed(r));
         let (control, controls) = mpsc::unbounded_channel();
+        let connected = TaskTracker::new();
         let hosting = Arc::new(Hosting {
+            reads: reads::Reads::new(connected.clone()),
             tasks,
             paths,
             named,
@@ -837,11 +847,23 @@ fn run_holding(runtime: &tokio::runtime::Runtime, holder: Holder) -> Result<i32>
             nudge: Notify::new(),
             stop: CancellationToken::new(),
             control,
-            connected: TaskTracker::new(),
+            connected,
             folder,
             settings,
             tokens,
         });
+        // Design D6: each repository's document is the one-shot overview's
+        // read, joined with it.
+        let documenting = Arc::downgrade(&hosting);
+        hosting
+            .tasks
+            .documenting(Arc::new(move |repository, after| {
+                let hosting = documenting.clone();
+                Box::pin(async move {
+                    let hosting = hosting.upgrade()?;
+                    reads::document(&hosting, repository, after).await
+                })
+            }));
         log(&format!(
             "sluice {} {} started{}, pid {}{}",
             if daemon { "daemon" } else { "host" },
@@ -1799,16 +1821,39 @@ async fn answer(hosting: &Arc<Hosting>, stream: UnixStream) -> Result<()> {
     let request: Request = match serde_json::from_str(line.trim_end()) {
         Ok(r) => r,
         Err(_) => {
+            // The change `sluice-host-answers-every-read`, design D9: it
+            // answers only the requests of its own release, and names the
+            // sluice to run.
             let words = format!(
-                "sluice {} asked what this host process, sluice {}, does not know: {}",
+                "sluice {} asked what this host process, sluice {}, does not know: {}. Run sluice {}.",
                 hello.hello,
                 hosting.named.version,
-                line.trim_end()
+                line.trim_end(),
+                hosting.named.version
             );
             return send(&mut writer, &Answer::Error(words)).await;
         }
     };
+    if reads::is_read(&request) {
+        let output = reads::answer(hosting, request).await;
+        return send(&mut writer, &Answer::Output(output)).await;
+    }
     match request {
+        // Answered above.
+        Request::Status { .. }
+        | Request::Overview { .. }
+        | Request::Home { .. }
+        | Request::Forecast { .. }
+        | Request::Inbox { .. } => Ok(()),
+        Request::Wait {
+            folder,
+            caller,
+            wait,
+        } => {
+            let answer = reads::wait(hosting, folder, caller, wait).await;
+            send(&mut writer, &answer).await
+        }
+        Request::Subscribe { folders } => subscribe(hosting, folders, lines, writer).await,
         Request::Serve { repository } => {
             note(hosting, &repository);
             // D16: no reading begun before the change is current.
@@ -1822,6 +1867,12 @@ async fn answer(hosting: &Arc<Hosting>, stream: UnixStream) -> Result<()> {
             send(&mut writer, &Answer::Ok).await
         }
         Request::Pass { repository, at } => {
+            // A follower names its folder or its repository (the change
+            // `sluice-host-answers-every-read`, design D8).
+            let repository = match reads::resolved(hosting, &repository).await {
+                Ok(r) => r,
+                Err(words) => return send(&mut writer, &Answer::Error(words)).await,
+            };
             note(hosting, &repository);
             let at = at.and_then(|at| at.parse::<chrono::DateTime<chrono::Utc>>().ok());
             let answer = match hosting.tasks.handle(&repository).pass(at).await {
@@ -1838,27 +1889,6 @@ async fn answer(hosting: &Arc<Hosting>, stream: UnixStream) -> Result<()> {
             };
             send(&mut writer, &answer).await
         }
-        Request::Follow { repository, kind } => {
-            note(hosting, &repository);
-            let task = hosting.tasks.handle(&repository);
-            let mut follower = task.follow(kind);
-            let mut gone = Box::pin(closed(&mut lines));
-            loop {
-                tokio::select! {
-                    report = follower.next() => match report {
-                        Some(r) => {
-                            if send(&mut writer, &Answer::Pass(r)).await.is_err() {
-                                return Ok(());
-                            }
-                        }
-                        // The task ended under it: one is held again.
-                        None => return Ok(()),
-                    },
-                    () = &mut gone => return Ok(()),
-                    () = hosting.stop.cancelled() => return Ok(()),
-                }
-            }
-        }
         Request::Hold {
             kind,
             repository,
@@ -1874,14 +1904,6 @@ async fn answer(hosting: &Arc<Hosting>, stream: UnixStream) -> Result<()> {
                 &mut lines,
             )
             .await
-        }
-        Request::Read { repository, afresh } => {
-            note(hosting, &repository);
-            let reading = hosting
-                .tasks
-                .read(&repository, READ_TICK, read_for(), afresh)
-                .await;
-            send(&mut writer, &Answer::Read(reading)).await
         }
         Request::Results {
             repository,
@@ -1900,13 +1922,6 @@ async fn answer(hosting: &Arc<Hosting>, stream: UnixStream) -> Result<()> {
             };
             send(&mut writer, &answer).await
         }
-        Request::Room => {
-            let held = hosting.clone();
-            let view = tokio::task::spawn_blocking(move || view(&held))
-                .await
-                .context("reading the room")??;
-            send(&mut writer, &Answer::Room(view)).await
-        }
         // D3 of `sluice-runs-as-a-daemon` and of
         // `sluice-host-owns-its-workers`: the host process starts afresh in
         // place, or ends where the asker takes its place.
@@ -1919,6 +1934,93 @@ async fn answer(hosting: &Arc<Hosting>, stream: UnixStream) -> Result<()> {
             send(&mut writer, &Answer::Ok).await
         }
     }
+}
+
+/// sluice's part in a subscription (the change
+/// `sluice-host-answers-every-read`, design D6): a folder resolves to its
+/// repository's document channel, a follower of the kind its `add` line
+/// names, and, for `sluice run`, the follower's reports.
+struct Subscribed(Arc<Hosting>);
+
+impl subscription::Serves for Subscribed {
+    type Kind = FollowKind;
+    type Document = serde_json::Value;
+    type Report = pass::Report;
+    type Guard = tasks::Follower;
+
+    async fn serve(
+        &self,
+        folder: PathBuf,
+        kind: FollowKind,
+    ) -> Result<
+        subscription::Served<serde_json::Value, pass::Report, tasks::Follower>,
+        serde_json::Value,
+    > {
+        let hosting = &self.0;
+        let resolved = reads::resolved(hosting, &folder).await;
+        let gone = |words: &str| {
+            let mut doc = crate::told::document(crate::told::Kind::Internal, words, &[]);
+            doc["gone"] = true.into();
+            doc
+        };
+        let repository = resolved.map_err(|words| gone(&words))?;
+        note(hosting, &repository);
+        // The channel first, so the first reading's document has a
+        // receiver to go to.
+        let documents = hosting
+            .tasks
+            .documents(&repository)
+            .ok_or_else(|| gone("sluice's host process stops"))?;
+        // `sluice run` and a wait take each pass's report; a watch takes
+        // none.
+        let reports_kept = kind != FollowKind::Watch;
+        let mut follower = hosting
+            .tasks
+            .handle(&repository)
+            .following(kind, reports_kept);
+        let reports = reports_kept.then(|| follower.reports());
+        // Where passes are taken only when asked, the follower's first
+        // document is of a reading afresh, which its coming asks for: the
+        // repository is read before its first document is sent (D14).
+        if asked_only() && kind != FollowKind::Run {
+            let tasks = hosting.tasks.clone();
+            let read = repository.clone();
+            hosting.connected.spawn(async move {
+                tasks.read(&read, READ_TICK, read_for(), true).await;
+            });
+        }
+        Ok(subscription::Served {
+            documents,
+            reports,
+            guard: follower,
+        })
+    }
+
+    fn ends(&self, document: &serde_json::Value) -> bool {
+        crate::overview::no_sluice(document) || document["gone"] == true
+    }
+}
+
+/// Serve a subscription on the connection (design D6), until the client
+/// closes it or the host process stops.
+async fn subscribe(
+    hosting: &Arc<Hosting>,
+    folders: Vec<protocol::Added>,
+    lines: Lines,
+    writer: tokio::net::unix::OwnedWriteHalf,
+) -> Result<()> {
+    let sink =
+        tokio_util::codec::FramedWrite::new(writer, LinesCodec::new_with_max_length(LINE_MAX));
+    let folders = folders.into_iter().map(|a| (a.folder, a.kind)).collect();
+    subscription::serve(
+        &Subscribed(hosting.clone()),
+        folders,
+        lines,
+        sink,
+        hosting.stop.child_token(),
+    )
+    .await
+    .map_err(|e| anyhow::anyhow!("{e}"))
 }
 
 /// The results `ask` names of `repository`, as `branch`'s gate reads them,
@@ -1946,7 +2048,7 @@ fn results_of(
 }
 
 /// Note `repository` in the index (design D4).
-fn note(hosting: &Hosting, repository: &Path) {
+pub(crate) fn note(hosting: &Hosting, repository: &Path) {
     // The edge watches it at once, where it does not yet: a change made
     // before the index's own event would come is read all the same.
     let _ = hosting
@@ -1958,11 +2060,6 @@ fn note(hosting: &Hosting, repository: &Path) {
             repository.display()
         ));
     }
-}
-
-/// The room as a person reads it (150).
-fn view(hosting: &Hosting) -> Result<RoomView> {
-    view_of(&hosting.room)
 }
 
 /// `room` as a person reads it (150).

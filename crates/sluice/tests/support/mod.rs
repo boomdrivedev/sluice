@@ -584,9 +584,6 @@ impl Repo {
 }
 
 thread_local! {
-    /// This thread's readers directory, made on first use, or the one
-    /// [`share_readers`] gave it.
-    static READERS: RefCell<Option<(PathBuf, Option<Scratch>)>> = const { RefCell::new(None) };
     /// The version of sluice this thread's fakes' host is (129).
     static VERSION: Cell<&'static str> = const { Cell::new(sluice::VERSION) };
 }
@@ -601,25 +598,6 @@ pub fn version() -> &'static str {
 /// process of a newer or older sluice than a reader the test holds.
 pub fn set_version(version: &'static str) {
     VERSION.with(|v| v.set(version));
-}
-
-/// The fakes' host's readers directory (129), the test's own: each test
-/// runs on a thread of its own, and so finds no reader but its own.
-pub fn readers() -> PathBuf {
-    READERS.with(|r| {
-        let mut r = r.borrow_mut();
-        let (dir, _) = r.get_or_insert_with(|| {
-            let own = Scratch::new("readers");
-            (own.path().to_path_buf(), Some(own))
-        });
-        dir.clone()
-    })
-}
-
-/// Give this thread the readers directory `dir`: a thread of the test's
-/// that is another process on the same host.
-pub fn share_readers(dir: PathBuf) {
-    READERS.with(|r| *r.borrow_mut() = Some((dir, None)));
 }
 
 /// The host over the fakes: session runs counted by the fake check seam,
@@ -645,6 +623,16 @@ impl FakeHost {
 }
 
 thread_local! {
+    /// A document the fakes' host process on this thread sends its
+    /// subscribers in place of its own reading's, as a test sets it (the
+    /// change `sluice-host-answers-every-read`, design D6).
+    static SENDS: RefCell<Option<serde_json::Value>> = const { RefCell::new(None) };
+    /// The last document the fakes' host process on this thread sent.
+    static SENT: RefCell<Option<serde_json::Value>> = const { RefCell::new(None) };
+    /// How many passes the fakes' host process on this thread made: its
+    /// document is read again after each, as `sluice host` reads it after
+    /// each reading (design D6).
+    static PASSES: Cell<u64> = const { Cell::new(0) };
     /// Whether the fakes' host process on this thread is to end at its
     /// next ask, as one killed does.
     static ENDS: Cell<bool> = const { Cell::new(false) };
@@ -679,6 +667,33 @@ pub fn kill_host_process(c: &mut Command) {
             "the host process lives on"
         );
         std::thread::sleep(std::time::Duration::from_millis(50));
+    }
+}
+
+/// The fakes' host process on this thread sends `doc` to its subscribers,
+/// whatever the records hold, until the guard is dropped (design D6).
+pub fn host_sends(doc: &serde_json::Value) -> Sends {
+    host_sends_on(doc);
+    Sends
+}
+
+/// The fakes' host process on this thread sends `doc` from now on.
+pub fn host_sends_on(doc: &serde_json::Value) {
+    SENDS.with(|s| *s.borrow_mut() = Some(doc.clone()));
+}
+
+/// The document the fakes' host process on this thread last sent a
+/// subscriber; `None` before the first.
+pub fn sent() -> Option<serde_json::Value> {
+    SENT.with(|s| s.borrow().clone())
+}
+
+/// While it lives, the fakes' host process sends the document a test set.
+pub struct Sends;
+
+impl Drop for Sends {
+    fn drop(&mut self) {
+        SENDS.with(|s| *s.borrow_mut() = None);
     }
 }
 
@@ -720,8 +735,6 @@ pub struct FakeProcess {
     /// The policies its passes read, kept across them as the host
     /// process's task keeps them (129).
     policies: sluice_core::Policies,
-    reader: RefCell<Option<sluice::reader::Reader>>,
-    driver: RefCell<Option<sluice::reader::Driver>>,
 }
 
 impl FakeProcess {
@@ -786,13 +799,11 @@ impl sluice::host_process::HostProcess for FakeProcess {
         &self,
         here: &sluice::host_process::Here<'_, '_>,
     ) -> anyhow::Result<sluice::host_process::pass::Report> {
-        use sluice::reader::{Driver, Drives, Reader};
         if ENDS.with(|e| e.replace(false)) {
-            *self.reader.borrow_mut() = None;
-            *self.driver.borrow_mut() = None;
             *self.kept.borrow_mut() = Default::default();
             anyhow::bail!("sluice's host process ended");
         }
+        PASSES.with(|p| p.set(p.get() + 1));
         let roomed = self.roomed(here)?;
         let seams = sluice_core::Seams {
             tests: &roomed,
@@ -801,45 +812,11 @@ impl sluice::host_process::HostProcess for FakeProcess {
         let s = sluice_core::Sluice::new(seams, here.clock)
             .as_peer(here.host.peer())
             .keeping(&self.policies);
-        let (readers, repository) = (here.host.readers()?, here.host.repository()?);
-        let mut driver = self.driver.borrow_mut();
-        if driver.is_none() {
-            *driver = Driver::try_take(&readers, &repository)?;
-        }
-        // Design D7: an older `sluice run` drives the repository.
-        if driver.is_none() {
-            return Ok(sluice::host_process::pass::Report {
-                in_play: true,
-                ..Default::default()
-            });
-        }
-        let mut reader = self.reader.borrow_mut();
-        match &mut *reader {
-            Some(r) => {
-                let _ = r.step(true, Drives::Nobody);
-            }
-            None => {
-                let mut r =
-                    Reader::take_given(&readers, &repository, here.host.version(), Drives::Nobody)?;
-                // An older reader's lease, taken at once.
-                let _ = r.step(true, Drives::Nobody);
-                *reader = Some(r);
-            }
-        }
-        // Design D7: an older reader reads until it lets go.
-        let Some(Reader::Lead(lead)) = &mut *reader else {
-            return Ok(sluice::host_process::pass::Report {
-                in_play: true,
-                ..Default::default()
-            });
-        };
         sluice::host_process::pass::pass(
             &s,
             here.host,
             here.pulls,
             here.clock,
-            Some(lead),
-            sluice::tick(None),
             true,
             &mut self.kept.borrow_mut(),
         )
@@ -861,15 +838,8 @@ impl sluice::host_process::HostProcess for FakeProcess {
             ),
             refused: None,
             looked: false,
+            stale: Default::default(),
         })
-    }
-
-    fn follow<'a>(
-        &'a self,
-        _: &sluice::host_process::Here<'a, '_>,
-        _: sluice::host_process::protocol::FollowKind,
-    ) -> anyhow::Result<Box<dyn sluice::host_process::Following + 'a>> {
-        Ok(Box::new(NoReports))
     }
 
     fn hold<'a>(
@@ -921,18 +891,162 @@ impl sluice::host_process::HostProcess for FakeProcess {
         };
         Ok(Some((named, view)))
     }
+
+    fn subscribe<'a>(
+        &'a self,
+        here: Option<&'a sluice::host_process::Here<'a, 'a>>,
+        folders: Vec<sluice::host_process::protocol::Added>,
+    ) -> anyhow::Result<Box<dyn sluice::host_process::Subscription + 'a>> {
+        if ENDS.with(|e| e.replace(false)) {
+            anyhow::bail!("sluice's host process ended");
+        }
+        let here = here.ok_or_else(|| anyhow::anyhow!("the fakes' host reads in a binding"))?;
+        let documents = folders
+            .iter()
+            .any(|f| f.kind != sluice::host_process::protocol::FollowKind::Run);
+        Ok(Box::new(FakeSubscription {
+            here,
+            last: None,
+            documents,
+            read_at: None,
+        }))
+    }
+
+    fn wait(
+        &self,
+        here: Option<&sluice::host_process::Here<'_, '_>>,
+        _: &std::path::Path,
+        ask: &sluice::host_process::protocol::WaitAsk,
+    ) -> anyhow::Result<sluice::host_process::protocol::WaitStep> {
+        use sluice::host_process::protocol::{Output, WaitStep};
+        let here = here.ok_or_else(|| anyhow::anyhow!("the fakes' host reads in a binding"))?;
+        let mut out = Vec::new();
+        Ok(
+            match sluice::wait_step(here.s, here.host, here.pulls, here.clock, ask, &mut out)? {
+                sluice::WaitStepped::Ended(code) => WaitStep::Ended(Output {
+                    stdout: String::from_utf8_lossy(&out).into_owned(),
+                    stderr: Vec::new(),
+                    code,
+                }),
+                sluice::WaitStepped::Follow(own, follows) => WaitStep::Follow {
+                    own,
+                    follows,
+                    said: String::from_utf8_lossy(&out).into_owned(),
+                },
+                sluice::WaitStepped::PullRequest => WaitStep::PullRequest,
+            },
+        )
+    }
+
+    fn pass_of(
+        &self,
+        here: Option<&sluice::host_process::Here<'_, '_>>,
+        _: &std::path::Path,
+        _: &dyn sluice_core::Clock,
+    ) -> anyhow::Result<sluice::host_process::pass::Report> {
+        let here = here.ok_or_else(|| anyhow::anyhow!("the fakes' host reads in a binding"))?;
+        sluice::host_process::HostProcess::pass(self, here)
+    }
 }
 
-/// A follow of the fakes' host process, which reports nothing of its own:
-/// its follower asks a pass at each tick.
-struct NoReports;
+/// A subscription of the fakes' host process (the change
+/// `sluice-host-answers-every-read`, design D6): the overview of the
+/// repository that the command binds, sent where it changed in a part
+/// other than its time, as `sluice host` sends it.
+struct FakeSubscription<'a> {
+    here: &'a sluice::host_process::Here<'a, 'a>,
+    last: Option<serde_json::Value>,
+    /// Whether it serves documents: `sluice run`'s takes none.
+    documents: bool,
+    /// The passes made when it last read the document.
+    read_at: Option<u64>,
+}
 
-impl sluice::host_process::Following for NoReports {
+impl sluice::host_process::Subscription for FakeSubscription<'_> {
+    fn asked_only(&self) -> bool {
+        true
+    }
+
+    fn say(&mut self, _: &sluice::host_process::protocol::SubscriptionAsk) -> anyhow::Result<()> {
+        Ok(())
+    }
+
     fn next(
         &mut self,
         _: std::time::Duration,
-    ) -> anyhow::Result<Option<sluice::host_process::pass::Report>> {
-        Ok(None)
+    ) -> anyhow::Result<Option<sluice::host_process::protocol::SubscriptionLine>> {
+        if ENDS.with(|e| e.replace(false)) {
+            anyhow::bail!("sluice's host process ended");
+        }
+        if !self.documents {
+            return Ok(None);
+        }
+        let h = self.here;
+        // A repository gone: the document that says so, in the words its
+        // read failed with (design D6).
+        let repository = h.host.repository()?;
+        if h.host.repository_gone(&repository) {
+            let mut doc = sluice::overview::subscribed(
+                h.s,
+                h.host,
+                h.clock,
+                h.pulls,
+                std::time::Duration::from_secs(1),
+            );
+            if doc.get("error").is_none() {
+                let words = format!("the repository at {repository} is gone");
+                doc = sluice::told::document(sluice::told::Kind::Internal, &words, &[]);
+            }
+            doc["gone"] = true.into();
+            if self.last.as_ref() == Some(&doc) {
+                return Ok(None);
+            }
+            self.last = Some(doc.clone());
+            return Ok(Some(
+                sluice::host_process::protocol::SubscriptionLine::Document(
+                    sluice::host_process::subscription::Document {
+                        folder: std::path::PathBuf::from("."),
+                        overview: doc,
+                    },
+                ),
+            ));
+        }
+        let passes = PASSES.with(Cell::get);
+        let sent = SENDS.with(|s| s.borrow().clone());
+        if sent.is_none() && self.read_at == Some(passes) {
+            return Ok(None);
+        }
+        self.read_at = Some(passes);
+        let doc = sent.unwrap_or_else(|| {
+            sluice::overview::subscribed(
+                h.s,
+                h.host,
+                h.clock,
+                h.pulls,
+                std::time::Duration::from_secs(1),
+            )
+        });
+        // A document not yet made: the first reading's follows.
+        if doc.is_null() {
+            return Ok(None);
+        }
+        SENT.with(|s| *s.borrow_mut() = Some(doc.clone()));
+        let mut untimed = doc.clone();
+        if let Some(o) = untimed.as_object_mut() {
+            o.remove("at");
+        }
+        if self.last.as_ref() == Some(&untimed) {
+            return Ok(None);
+        }
+        self.last = Some(untimed);
+        Ok(Some(
+            sluice::host_process::protocol::SubscriptionLine::Document(
+                sluice::host_process::subscription::Document {
+                    folder: std::path::PathBuf::from("."),
+                    overview: doc,
+                },
+            ),
+        ))
     }
 }
 
@@ -1050,10 +1164,6 @@ impl sluice::exec::Host for FakeHost {
     /// The fakes hold every tip [`FakeHost::tips`] reads.
     fn holds_policy(&self, _tips: &[sluice_seams::Rev]) -> anyhow::Result<bool> {
         self.world.holds_path(sluice_core::policy::POLICY_PATH)
-    }
-
-    fn readers(&self) -> anyhow::Result<PathBuf> {
-        Ok(readers())
     }
 
     fn version(&self) -> &str {

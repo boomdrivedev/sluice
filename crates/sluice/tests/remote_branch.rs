@@ -1864,10 +1864,11 @@ fn remote_calls(trace: &Path) -> Vec<String> {
         .collect()
 }
 
-/// 64, 129: beside a live reader keeping its tick, whose last read holds
-/// `main`, with `#1` queued on it, and `bolt/y`, both on a remote, a
-/// forecast of `bolt/y` onto `main` takes both from that read and asks
-/// the remote nothing: it forecasts as the read says with the remote gone.
+/// 64, 129 (the change `sluice-host-answers-every-read`, design D3): with
+/// `main`, `#1` queued on it, and `bolt/y` both on a remote, and the
+/// remote gone, a forecast of `bolt/y` onto `main` is formed by `sluice
+/// host` on both as it holds them, and the command asks the remote
+/// nothing.
 #[test]
 fn a_forecast_beside_a_current_reader_asks_the_remote_nothing() {
     let s = Setup::new("forecast-reader", "origin");
@@ -1894,8 +1895,7 @@ fn a_forecast_beside_a_current_reader_asks_the_remote_nothing() {
 
     let out = s.sluice(&["overview", "--json"]);
     assert!(out.status.success(), "{}", text(&out));
-    let mut doc: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
-    doc["tick"] = 3600.into();
+    let doc: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
     let part = |name: &str| {
         doc["branches"]
             .as_array()
@@ -1910,17 +1910,10 @@ fn a_forecast_beside_a_current_reader_asks_the_remote_nothing() {
         main["revision"].is_string() && bolt["revision"].is_string(),
         "{doc}"
     );
-    let repository = doc["repository"].as_str().unwrap().to_string();
-    // D7: the host process the steps reached drives the repository and
-    // keeps its reader's place; ended, the test's own reader takes it.
+    // The host process that the steps reached ends: the forecast starts
+    // one, whose first reading cannot ask origin, and forms on what the
+    // host holds.
     support::kill_host_process(&mut s.command(s.repo.dir()));
-    let readers = s.state.path().join("sluice/readers");
-    let mut reader =
-        match sluice::reader::Reader::take(&readers, &repository, sluice::VERSION).unwrap() {
-            sluice::reader::Reader::Lead(lead) => lead,
-            sluice::reader::Reader::Follow(_) => panic!("a reader of {repository} already"),
-        };
-    reader.write(&doc).unwrap();
     let aside = s.origin.path().with_extension("aside");
     std::fs::rename(s.origin.path(), &aside).unwrap();
 
@@ -2045,6 +2038,68 @@ fn a_forecast_with_no_reader_has_the_host_process_fetch_another_hosts_work() {
         serde_json::json!(["shared.txt"]),
         "{v}"
     );
+    assert_eq!(remote_calls(&trace), Vec::<String>::new());
+}
+
+/// forecast, "A reader whose read lacks the branch" (the change
+/// `sluice-host-answers-every-read`, design D3): `sluice host` keeps its
+/// tick, and its last reading names no revision of `bolt/late`, which
+/// another host pushed to origin since: a forecast onto `bolt/late` forms
+/// on it as `sluice host` holds it after its next reading, which fetched
+/// it, and the command fetches nothing.
+#[test]
+fn a_forecast_whose_reading_lacks_the_branch_forms_after_the_next_reading() {
+    let s = Setup::signed("forecast-lacks-branch");
+    let out = s.sluice(&["status", "main"]);
+    assert!(out.status.success(), "{}", text(&out));
+    let other = Repo::clone_of(s.origin.path(), "forecast-lacks-branch-b");
+    other.git(&["checkout", "-q", "-b", "bolt/late", "origin/main"]);
+    other.write("late.txt", "late\n");
+    other.git(&["add", "-A"]);
+    other.git(&["commit", "-q", "-m", "late"]);
+    other.git(&["push", "-q", "origin", "HEAD:refs/heads/bolt/late"]);
+    let late = other.rev("HEAD");
+    let mine = worktree(&s, "a", "main", &[("mine.txt", "mine\n")]);
+    let trace = s.seen.path().join("trace");
+    let out = s
+        .command(&mine)
+        .args(["submit", "bolt/late", "--check", "--json"])
+        .env("GIT_TRACE", &trace)
+        .output()
+        .unwrap();
+    assert_eq!(out.status.code(), Some(sluice::LANDED), "{}", text(&out));
+    let v: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert_eq!(v["onto"], late.as_str(), "{v}");
+    assert_eq!(remote_calls(&trace), Vec::<String>::new());
+}
+
+/// forecast, "The reader could not reach the remote" (design D3): the
+/// reading of `sluice host`, within its tick, could not ask `main`'s
+/// remote: a forecast of `main` forms on what that reading holds, and the
+/// command fetches nothing. The records keep the remote's refusal on the
+/// branch (rule core.28), so the reading names no words of its own.
+#[test]
+fn a_forecast_beside_a_reading_that_could_not_ask_the_remote_says_so() {
+    let s = Setup::signed("forecast-unasked");
+    let out = s.submit_files("one", "main", "main", &[("one.txt", "one\n")]);
+    assert!(out.status.success(), "{}", text(&out));
+    let aside = s.origin.path().with_extension("aside");
+    std::fs::rename(s.origin.path(), &aside).unwrap();
+    std::thread::sleep(sluice::host_process::READ_TICK + Duration::from_millis(500));
+    // A reading now, with work in play, asks origin, which is gone.
+    let _ = s.sluice(&["status", "main"]);
+    let mine = worktree(&s, "a", "main", &[("mine.txt", "mine\n")]);
+    let trace = s.seen.path().join("trace");
+    let out = s
+        .command(&mine)
+        .args(["submit", "main", "--check", "--json"])
+        .env("GIT_TRACE", &trace)
+        .output()
+        .unwrap();
+    std::fs::rename(&aside, s.origin.path()).unwrap();
+    assert_eq!(out.status.code(), Some(sluice::LANDED), "{}", text(&out));
+    let v: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert_eq!(v["onto"], s.repo.rev("origin/main").as_str(), "{v}");
     assert_eq!(remote_calls(&trace), Vec::<String>::new());
 }
 

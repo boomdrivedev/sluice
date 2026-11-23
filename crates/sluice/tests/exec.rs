@@ -1904,3 +1904,86 @@ fn exec_looks_for_the_engine_at_a_tcp_address() {
     assert!(said.contains(&refusal(&at(closed))), "{said}");
     assert!(!s.worktree.join("reached").exists(), "nothing runs");
 }
+
+/// host-process, "Results with no host process that answers" (the change
+/// `sluice-host-answers-every-read`, design D4): a `sluice exec` that needs
+/// the results of its keys, where the process on the host's socket answers
+/// `hello` and closes the connection at `results`, says that sluice's host
+/// process did not answer, reads no line of the results log itself, and
+/// exits 3.
+#[test]
+fn results_with_no_host_process_that_answers_exit_3() {
+    use std::io::Write;
+    let s = moon_at_branch("exec-no-results", "true\n");
+    s.commit(&[("a/lib", "2"), ("b/lib", "2")]);
+    let out = s.sluice(&["exec", "bolt/x"]);
+    assert!(out.status.success(), "{}", text(&out));
+    support::guard::stop_host_processes(s.state.path());
+    let client = sluice::host_process::client::Client::new(
+        Path::new(env!("CARGO_BIN_EXE_sluice")),
+        support::env_of(&s.command(&[])),
+    )
+    .unwrap();
+    let socket = client.paths().socket.clone();
+    let _ = std::fs::remove_file(&socket);
+    let listener = std::os::unix::net::UnixListener::bind(&socket).unwrap();
+    listener.set_nonblocking(true).unwrap();
+    let done = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let asked = std::sync::Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
+    let fake = {
+        let (done, asked) = (done.clone(), asked.clone());
+        std::thread::spawn(move || {
+            let named = serde_json::json!({
+                "version": sluice::VERSION,
+                "pid": std::process::id(),
+                "since": "2026-11-22T00:00:00.000Z",
+            });
+            let mut held = Vec::new();
+            while !done.load(std::sync::atomic::Ordering::SeqCst) {
+                let Ok((stream, _)) = listener.accept() else {
+                    std::thread::sleep(Duration::from_millis(10));
+                    continue;
+                };
+                stream.set_nonblocking(false).unwrap();
+                let mut reader = std::io::BufReader::new(stream.try_clone().unwrap());
+                let mut writer = stream;
+                let mut line = String::new();
+                let _ = reader.read_line(&mut line);
+                let _ = writeln!(writer, "{named}");
+                line.clear();
+                let _ = reader.read_line(&mut line);
+                let request: serde_json::Value = serde_json::from_str(&line).unwrap_or_default();
+                let ask = request["ask"].as_str().unwrap_or_default().to_string();
+                asked.lock().unwrap().push(ask.clone());
+                match ask.as_str() {
+                    // The room is the asker's, the connection kept.
+                    "hold" => {
+                        let _ = writeln!(writer, "\"held\"");
+                        held.push(writer);
+                    }
+                    "results" => drop(writer),
+                    _ => {
+                        let _ = writeln!(writer, "\"ok\"");
+                    }
+                }
+            }
+        })
+    };
+    let results = s.results();
+    let out = s.sluice(&["exec", "bolt/x"]);
+    done.store(true, std::sync::atomic::Ordering::SeqCst);
+    let _ = fake.join();
+    assert!(
+        asked.lock().unwrap().iter().any(|a| a == "results"),
+        "{:?}",
+        asked.lock().unwrap()
+    );
+    assert_eq!(out.status.code(), Some(3), "{}", text(&out));
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        err.contains("sluice's host process did not answer"),
+        "{err}"
+    );
+    assert!(!err.contains("reads them itself"), "{err}");
+    assert_eq!(s.results(), results);
+}

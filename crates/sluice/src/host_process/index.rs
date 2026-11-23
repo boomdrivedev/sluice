@@ -209,6 +209,7 @@ pub fn in_play(
     Ok(super::tasks::Looked {
         in_play: super::pass::in_play(&s),
         refused,
+        stale: bound.state.stale_all(),
     })
 }
 

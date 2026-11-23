@@ -2,12 +2,12 @@
 //! `sluice run` ran each tick, moved whole into the host process. The
 //! remote's one ask, the abandoned checkouts and unusable previews
 //! released, the intake, a round of each branch in play, each branch it
-//! could not read passed by with its words, and the reader's document. A
+//! could not read passed by with its words, and whether the repository
+//! has sluice. A
 //! step's round and a pass's are one round (rule core.14).
 
 use std::collections::BTreeMap;
 use std::sync::atomic::Ordering;
-use std::time::Duration;
 
 use anyhow::Result;
 use serde::{Deserialize, Serialize};
@@ -15,8 +15,6 @@ use sluice_core::{Clock, Sluice, Step};
 use sluice_seams::Rev;
 
 use crate::overview::{self, Follows};
-use crate::reader::{no_sluice, Lead};
-use crate::told::{self, Kind};
 use crate::{exec, preview, telemetry, PullRequests, INTERRUPTED};
 
 /// What a repository's passes keep from one to the next: what was last
@@ -81,10 +79,14 @@ pub struct Report {
     /// ask with, where one did.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub refused: Option<String>,
+    /// The branches its binding reads as last fetched, each with the
+    /// remote's refusal (the change `sluice-host-answers-every-read`,
+    /// design D3). It stays in the host process.
+    #[serde(skip)]
+    pub stale: BTreeMap<String, sluice_seams::ReadRefused>,
 }
 
-/// One pass of the repository `s` and `host` bind, writing `reader`'s
-/// document where it reads for the host, naming `tick` (64, 129). It asks
+/// One pass of the repository `s` and `host` bind (64, 129). It asks
 /// each remote that keeps branches' records where `asks`, and otherwise
 /// reads them as the binding's last ask fetched them, which a binding that
 /// has asked nothing must not do (129 as amended 2026-11-19). A branch
@@ -96,8 +98,6 @@ pub fn pass(
     host: &dyn exec::Host,
     pulls: &dyn PullRequests,
     clock: &dyn Clock,
-    reader: Option<&mut Lead>,
-    tick: Duration,
     asks: bool,
     kept: &mut Kept,
 ) -> Result<Report> {
@@ -107,11 +107,6 @@ pub fn pass(
     // is forgotten.
     s.next_pass();
     host.next_pass();
-    // A read whose start it could not mark leaves a forecast reading past
-    // this reader, which decides nothing (64).
-    if let Some(lead) = &reader {
-        let _ = lead.begin();
-    }
     let seams = s.seams();
     // 129: each remote that keeps branches' records asked once, first,
     // where the pass asks; a refusal is its branches' alone, read as last
@@ -132,13 +127,7 @@ pub fn pass(
     // refused with, read again at its next pass.
     let mut branches = match seams.state.branches() {
         Ok(b) => b,
-        Err(e) => {
-            if let Some(lead) = reader {
-                let doc = told::document(Kind::Internal, &format!("{e:#}"), &[]);
-                if !INTERRUPTED.load(Ordering::SeqCst) {
-                    let _ = lead.write(&overview::ticked(doc, tick));
-                }
-            }
+        Err(_) => {
             report.lines = lines_of(&out);
             report.freed = lines_of(&freed);
             report.in_play = true;
@@ -206,24 +195,12 @@ pub fn pass(
             }
         }
     }
-    // 129: the reader's document every watch and wait on the host follows,
-    // each pass, queue or none, read as the pass's own ask left the
-    // records and naming its tick (64); a read it could not make is its
-    // document, in the words it was refused with (133), and the pass goes
-    // on. Ctrl-C reaching the git a read runs is no failure of the queues'.
-    if let Some(lead) = reader {
-        // 137 (design D16, D25): the pass reads each request this host
-        // follows into a branch it does not keep, as it falls due at the
-        // host's one bound.
-        let doc = overview::read_held(s, host, clock, Follows::Asked(pulls), &mut kept.asked)
-            .unwrap_or_else(|e| told::document(Kind::Internal, &format!("{e:#}"), &[]));
-        report.no_sluice = no_sluice(&doc);
-        let doc = overview::ticked(doc, tick);
-        if !INTERRUPTED.load(Ordering::SeqCst) {
-            // The last document stands for a write that failed until one
-            // succeeds.
-            let _ = lead.write(&doc);
-        }
+    // 129: whether the repository has sluice, read as a one-shot overview
+    // reads it; 137 (design D16, D25): the pass reads each request this
+    // host follows into a branch it does not keep, as it falls due at the
+    // host's one bound. A read it could not make says nothing of it.
+    if let Ok(doc) = overview::read_held(s, host, clock, Follows::Asked(pulls), &mut kept.asked) {
+        report.no_sluice = overview::no_sluice(&doc);
     }
     // What is left in play once the pass ended keeps its repository held
     // (135; design D6): a branch that cannot be read counts as in play, and
