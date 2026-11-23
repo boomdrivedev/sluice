@@ -27,4 +27,4 @@ Each check runs through sluice, one suite at a time: `sluice exec main -- cargo 
 - [x] 3.1 Amend record 0093 with this change's decisions, each with Before and Now in plain words. Check: `sluice exec main -- moon run root:changes`.
 - [x] 3.2 Rewrite the rule on a check's process group, with Before and Now: no session's run starts in a session of its own. Check: `sluice exec main -- moon run root:changes`.
 - [x] 3.3 Say in the README, the site's page on the host process and the using-sluice skill that a session's checks, a preview's command and the equip steps run in `sluice host`, and end with their client. No gate task reads a page's words, by the rule that no task reads Markdown, so the review of the diff checks it. Check: `sluice exec main -- moon run plugin-sluice:validate`.
-- [ ] 3.4 Run the gate. Check: `sluice exec main`, then `devenv shell -- moon run cli:sandbox` outside the gate's sandbox, one suite at a time.
+- [x] 3.4 Run the gate. Check: `sluice exec main`, then `devenv shell -- moon run cli:sandbox` outside the gate's sandbox, one suite at a time.
