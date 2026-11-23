@@ -24,10 +24,13 @@ Claims that this change makes hold:
 - The plugin's processes on a host are the watcher, its tick's sleep, the source's command and its reader: four, whatever the number of repositories.
 - The board keeps its one subscription. A new requirement says that it holds at most one `sluice overview --json --watch` over the session's life, and a test proves it.
 
+The user approved these changes on 2026-11-23 (commit `2f2197b6e`).
+
 This change breaks a `sources.toml` that names `each_repository`. By `never-break-an-existing-client@b539ef8e2413`, a change may break a client before the first public release of sluice. The plugin assumes the sluice of its own release (`plugins-come-from-the-tools-flake@78305fd0bae0`), and has no code for an older sluice.
 
 Out of scope:
 
+- A board that follows a session that moves to another repository. Decided by the user on 2026-11-23: the board follows the folder that the session started in.
 - The one-shot reads `sluice submit --check` and `sluice inbox`, and the board's `sluice status` when a person opens a blamed row. Each is a read that `sluice host` answers, and none starts while the plugin is idle.
 - The `pass` that `sluice overview --json --watch --stdin` asks on a second connection where `sluice host` passes only when asked. That is a client of `sluice host` with no plugin in it, and no subscription.
 

@@ -13,6 +13,8 @@ The plugins do not use it yet:
 
 So the board holds one subscription, and the herdr watcher holds one for each repository that it shows.
 
+The user approved this design on 2026-11-23, as the proposal's What Changes says (commit `2f2197b6e`).
+
 ## Goals / Non-Goals
 
 **Goals:**
@@ -25,7 +27,7 @@ So the board holds one subscription, and the herdr watcher holds one for each re
 
 - A change of the protocol of `sluice host`. The client of D7 of `sluice-host-answers-every-read` is enough.
 - A change of `sluice submit --check`, `sluice inbox`, or the board's `sluice status` when a person opens a blamed row. None starts while a plugin is idle.
-- A board that follows the session into another folder. The board follows the folder that the session started in, as today.
+- A board that follows a session that moves to another repository. Decided by the user on 2026-11-23: the board follows the folder that the session started in, as today.
 - Code for a sluice older than the plugin. The plugin comes from sluice's flake at sluice's version. (`plugins-come-from-the-tools-flake@78305fd0bae0`)
 
 ## Decisions
