@@ -3128,6 +3128,45 @@ mod edge {
         Tasks::new(bind, look)
     }
 
+    /// A gate that holds each look until it opens.
+    #[derive(Clone, Default)]
+    pub struct Gate(Arc<(Mutex<bool>, std::sync::Condvar)>);
+
+    impl Gate {
+        pub fn open(&self) {
+            *self.0 .0.lock().unwrap() = true;
+            self.0 .1.notify_all();
+        }
+
+        fn wait(&self) {
+            let mut open = self.0 .0.lock().unwrap();
+            while !*open {
+                open = self.0 .1.wait(open).unwrap();
+            }
+        }
+    }
+
+    /// Tasks as [`tasks`] with passes that take no time, whose looks each
+    /// are seen as they begin and then wait until `gate` opens.
+    pub fn tasks_held(seen: &Seen, gate: &Gate) -> Tasks {
+        let bound = seen.clone();
+        let bind: Bind = Arc::new(move |r: &Path| {
+            Ok(Box::new(Fake {
+                repository: r.to_path_buf(),
+                seen: bound.clone(),
+                takes: Duration::ZERO,
+            }) as Box<dyn Worker>)
+        });
+        let looked = seen.clone();
+        let gate = gate.clone();
+        let look: InPlay = Arc::new(move |r: &Path, _: bool| {
+            looked.looks.lock().unwrap().push(r.to_path_buf());
+            gate.wait();
+            Looked::default()
+        });
+        Tasks::new(bind, look)
+    }
+
     /// Let every task run that can, and every blocking call end, the
     /// paused clock not moved.
     pub async fn settle() {
@@ -3261,33 +3300,52 @@ async fn five_serves_during_a_reading_make_one_more() {
     assert_eq!(seen.passes(&repo), before + 2, "no third pass");
 }
 
-/// host-events, "A burst of ref changes": twenty refs of a repository
-/// moved within a moment are one burst of the watch, and one reading.
+/// host-events, "A burst of ref changes" (`one-read-in-flight@e99acda774d0`):
+/// twenty refs of a repository moved while a reading of it is in flight
+/// make one more reading after it, and no third, however many bursts of
+/// the watch their events come in.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_burst_of_ref_moves_makes_one_reading() {
     let repo = support::Repo::new("host-burst");
     let common = std::fs::canonicalize(repo.dir().join(".git")).unwrap();
+    let heads = common.join("refs").join("heads");
     let seen = edge::Seen::default();
-    let tasks = edge::tasks(&seen, Duration::ZERO);
+    let gate = edge::Gate::default();
+    let tasks = edge::tasks_held(&seen, &gate);
     let (mut watch, mut bursts) = sluice::host_process::watch::Watch::new().unwrap();
     watch.repositories(std::slice::from_ref(&common));
     let watched = tasks.clone();
+    // The refs of the burst whose move the watch gave to the tasks.
+    let moved = std::sync::Arc::new(std::sync::Mutex::new(BTreeSet::new()));
+    let given = moved.clone();
     let read = tokio::spawn(async move {
         while let Some(Ok(events)) = bursts.next().await {
-            let seen = watch.seen(
-                events
-                    .iter()
-                    .flat_map(|e| e.paths.iter().map(|p| p.as_path())),
-            );
+            let paths: Vec<&Path> = events
+                .iter()
+                .flat_map(|e| e.paths.iter().map(|p| p.as_path()))
+                .collect();
+            let seen = watch.seen(paths.iter().copied());
             for r in &seen.repositories {
                 watched.event(r);
+            }
+            let mut given = given.lock().unwrap();
+            for p in &paths {
+                if let Ok(name) = p.strip_prefix(&heads) {
+                    let name = name.to_string_lossy();
+                    if name.starts_with("burst-") && !name.ends_with(".lock") {
+                        given.insert(name.into_owned());
+                    }
+                }
             }
         }
     });
     // The watch is in place before the burst.
     tokio::time::sleep(Duration::from_millis(500)).await;
-    // One script moves twenty refs within a moment: one git process, each
-    // ref its own file, so a loaded host spreads no burst out.
+    // A reading in flight: the first look holds until the gate opens.
+    tasks.event(&common);
+    edge::soon("the reading in flight", || seen.looks(&common) == 1).await;
+    // One script moves twenty refs, and each move's event reaches the
+    // tasks while the reading is in flight.
     let head = repo.rev("HEAD");
     let script: String = (0..20)
         .map(|n| format!("update refs/heads/burst-{n} {head}\n"))
@@ -3302,9 +3360,12 @@ async fn a_burst_of_ref_moves_makes_one_reading() {
     std::io::Write::write_all(moving.stdin.as_mut().unwrap(), script.as_bytes()).unwrap();
     drop(moving.stdin.take());
     assert!(moving.wait().unwrap().success());
-    edge::soon("the burst's reading", || seen.looks(&common) >= 1).await;
+    edge::soon("each move's event", || moved.lock().unwrap().len() == 20).await;
+    assert_eq!(seen.looks(&common), 1, "the reading is still in flight");
+    gate.open();
+    edge::soon("one more reading", || seen.looks(&common) >= 2).await;
     tokio::time::sleep(Duration::from_secs(2)).await;
-    assert_eq!(seen.looks(&common), 1, "one reading for the burst");
+    assert_eq!(seen.looks(&common), 2, "one more reading for the burst");
     read.abort();
 }
 
