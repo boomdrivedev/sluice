@@ -424,3 +424,79 @@ impl HostProcess for Inside {
         ))
     }
 }
+
+/// No host process, for a worktree's `sluice release` where none answers:
+/// it frees what it reads of the records in its own process and asks
+/// nothing, so it starts none (record 0120 as amended 2026-11-17; rule
+/// core.10).
+pub struct Unasked;
+
+impl HostProcess for Unasked {
+    fn asked_only(&self) -> bool {
+        super::asked_only()
+    }
+
+    fn note(&self, _: &Here<'_, '_>) -> Result<()> {
+        Ok(())
+    }
+
+    fn serve(&self, _: &Here<'_, '_>) -> Result<()> {
+        Ok(())
+    }
+
+    fn reach(&self, _: &Here<'_, '_>) -> Result<()> {
+        Ok(())
+    }
+
+    fn step(&self, _: &Here<'_, '_>, _: &str) -> Result<serde_json::Value> {
+        Err(anyhow!("no host process is asked"))
+    }
+
+    fn pass(&self, _: &Here<'_, '_>) -> Result<Report> {
+        Err(anyhow!("no host process is asked"))
+    }
+
+    fn read(&self, _: &Here<'_, '_>, _: bool) -> Result<Reading> {
+        Err(anyhow!("no host process is asked"))
+    }
+
+    fn hold<'a>(
+        &'a self,
+        _: &Here<'a, '_>,
+        _: RunKind,
+        _: &str,
+        _: &str,
+    ) -> Result<Box<dyn Holding + 'a>> {
+        Err(anyhow!("no host process is asked"))
+    }
+
+    fn room(&self, _: &Here<'_, '_>) -> Result<Option<(Named, RoomView)>> {
+        Ok(None)
+    }
+
+    fn subscribe<'a>(
+        &'a self,
+        _: Option<&'a Here<'a, 'a>>,
+        _: Vec<Added>,
+    ) -> Result<Box<dyn Subscription + 'a>> {
+        Err(anyhow!("no host process is asked"))
+    }
+
+    fn pass_of(
+        &self,
+        _: Option<&Here<'_, '_>>,
+        _: &Path,
+        _: &dyn sluice_core::Clock,
+    ) -> Result<Report> {
+        Err(anyhow!("no host process is asked"))
+    }
+
+    fn wait(
+        &self,
+        _: Option<&Here<'_, '_>>,
+        _: &Path,
+        _: &super::protocol::WaitAsk,
+    ) -> Result<super::protocol::WaitStep> {
+        Err(anyhow!("no host process is asked"))
+    }
+}

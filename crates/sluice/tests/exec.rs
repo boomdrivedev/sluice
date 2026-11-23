@@ -743,17 +743,13 @@ fn an_exec_hands_its_checks_its_own_span_in_the_caller_s_trace() {
     let (trace, parent) = ("4142434445464748494a4b4c4d4e4f50", "6162636465666768");
     let traceparent = format!("00-{trace}-{parent}-01");
     // None of the host's `OTEL_*`, which a suite run under `sluice exec`
-    // is handed, a signal its table turns off among them. The exec's span
-    // is `sluice host`'s, which runs it (the change
-    // `sluice-host-runs-a-sessions-checks`, design D1): the exec starts
-    // it, and its `SLUICE_OTEL` has it send.
-    let mut c = s.command(&["exec", "bolt/x", "--", "sh", "-c", "env > seen"]);
+    // is handed, a signal its table turns off among them.
+    let mut c = s.command(&["exec", "--otel", "bolt/x", "--", "sh", "-c", "env > seen"]);
     for (k, _) in std::env::vars().filter(|(k, _)| k.starts_with("OTEL_")) {
         c.env_remove(k);
     }
     let out = c
         .env("TRACEPARENT", &traceparent)
-        .env("SLUICE_OTEL", "1")
         .env("OTEL_EXPORTER_OTLP_ENDPOINT", collector.url())
         .env("OTEL_METRICS_EXPORTER", "none")
         .env("OTEL_LOGS_EXPORTER", "none")
@@ -770,8 +766,6 @@ fn an_exec_hands_its_checks_its_own_span_in_the_caller_s_trace() {
     assert_eq!(fields[1], trace, "{handed}");
     assert_ne!(fields[2], parent, "{handed}");
 
-    // `sluice host` sends what it holds as it ends.
-    support::guard::stop_host_processes(s.state.path());
     let sent: Vec<String> = collector
         .requests()
         .into_iter()
@@ -1453,22 +1447,29 @@ fn kept(dir: &Path) -> Vec<String> {
 
 /// Session-runs-1 clause 95, rule core.10, record 0120 as amended
 /// 2026-11-17: `sluice release` in a worktree sluice holds nothing for,
-/// under a policy that names no release command, says `nothing to
-/// release`, exits 0, and makes nothing in the repository: no record, lock
-/// or folder under its `sluice/`, and no place's scratch. The release runs
-/// in `sluice host` (the change `sluice-host-runs-a-sessions-checks`,
-/// design D1), so the host process's own state is its.
+/// under a policy that names no release command, reads only: it says
+/// `nothing to release`, exits 0, and makes nothing, neither the user's
+/// scratch directory nor a record, a lock or a folder under the
+/// repository's `sluice/`, so a caller whose sandbox lets it write only
+/// its place, that place's scratch and its caches is not refused (deneb,
+/// 2026-11-17: flume's s107 teardown answered `creating
+/// /private/tmp/sluice-501/<key>: Operation not permitted`).
 #[test]
 fn an_unheld_release_with_nothing_to_free_makes_nothing() {
     let s = Setup::new("exec-unheld-nothing");
+    let user = Scratch::new("exec-unheld-nothing-user");
+    let scratch = user.path().join("sluice-user");
     let sluice = s.repo.dir().join(".git/sluice");
     let before = kept(&sluice);
+    let state_before = kept(s.state.path());
 
-    let out = s.sluice(&["release"]);
+    let out = s.sluice_with(&[("SLUICE_USER_SCRATCH", &scratch)], &["release"]);
     assert_eq!(out.status.code(), Some(0), "{}", text(&out));
     assert_eq!(String::from_utf8_lossy(&out.stdout), "nothing to release\n");
+    assert!(!scratch.exists(), "{:?}", kept(&scratch));
     assert_eq!(kept(&sluice), before);
-    support::guard::stop_host_processes(s.state.path());
+    // No host process was told, so none was started (135; D10).
+    assert_eq!(kept(s.state.path()), state_before);
 }
 
 /// Session-runs-1 clauses 92, 97, rule core.18: each run leaves on the

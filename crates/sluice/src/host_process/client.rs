@@ -85,6 +85,23 @@ impl Client {
         })
     }
 
+    /// This sluice's way to its user's host process where one has run,
+    /// making nothing: `None` where none has (record 0120 as amended
+    /// 2026-11-17).
+    pub fn found() -> Result<Option<Client>> {
+        let env: Vec<(OsString, OsString)> = std::env::vars_os().collect();
+        let var = |k: &str| env.iter().find(|(n, _)| n == k).map(|(_, v)| v.clone());
+        let Some(paths) = Paths::found_from_env(var)? else {
+            return Ok(None);
+        };
+        Ok(Some(Client {
+            program: std::env::current_exe()?,
+            paths,
+            version: crate::VERSION.to_string(),
+            env,
+        }))
+    }
+
     /// This sluice's way to its user's host process.
     pub fn host() -> Result<Client> {
         Client::new(&std::env::current_exe()?, std::env::vars_os().collect())
@@ -388,8 +405,25 @@ impl Client {
     /// printed (design D4). A host process that ends before the command's
     /// `output`, or answers with an error, is an error, in its words.
     pub fn command(&self, request: &Request) -> Result<i32> {
+        let c = self.reach()?;
+        Client::command_on(c, request)
+    }
+
+    /// [`Client::command`] where a host process answers now, starting none:
+    /// `None` where none answers, or its socket cannot be reached (record
+    /// 0120 as amended 2026-11-17: a worktree's release with nothing to free
+    /// starts no host process).
+    pub fn command_if_answering(&self, request: &Request) -> Result<Option<i32>> {
+        let Ok(Some(c)) = self.answering() else {
+            return Ok(None);
+        };
+        Client::command_on(c, request).map(Some)
+    }
+
+    /// `request` asked on `c`, its lines printed as they come (design D1,
+    /// D4).
+    fn command_on(mut c: Connection, request: &Request) -> Result<i32> {
         use std::io::Write as _;
-        let mut c = self.reach()?;
         let named = c.named.clone();
         send(&mut c.writer, request)?;
         let closing = c.writer.try_clone()?;

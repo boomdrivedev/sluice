@@ -181,6 +181,36 @@ impl Paths {
         })
     }
 
+    /// As [`Paths::from_env`] finds them, where a host process has had
+    /// them, making nothing: `None` where the state folder's `host/` or the
+    /// user's directory is not there (record 0120 as amended 2026-11-17).
+    pub fn found_from_env(
+        var: impl Fn(&str) -> Option<std::ffi::OsString>,
+    ) -> Result<Option<Paths>> {
+        let state = match var("XDG_STATE_HOME").filter(|d| !d.is_empty()) {
+            Some(d) => PathBuf::from(d),
+            None => PathBuf::from(var("HOME").context("HOME is not set")?)
+                .join(".local")
+                .join("state"),
+        }
+        .join("sluice");
+        let user = match var(USER_SCRATCH_VAR).filter(|d| !d.is_empty()) {
+            Some(d) => PathBuf::from(d),
+            None => user_scratch()?,
+        };
+        let dir = state.join("host");
+        if !dir.is_dir() || !user.is_dir() {
+            return Ok(None);
+        }
+        let real = std::fs::canonicalize(&state)
+            .with_context(|| format!("resolving {}", state.display()))?;
+        Ok(Some(Paths {
+            state,
+            dir,
+            socket: user.join(format!("host-{}.sock", repository_key(&real))),
+        }))
+    }
+
     /// As a process whose environment `var` reads finds them: its state
     /// folder `$XDG_STATE_HOME/sluice`, and the user's own short directory
     /// (record 0063), or the one the tests name in its stead.

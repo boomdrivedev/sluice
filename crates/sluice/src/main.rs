@@ -293,6 +293,15 @@ fn main() {
                 .reading_results(sluice::profiles::records::ResultsFrom::Asked),
             ..bound
         };
+        // Record 0120 as amended 2026-11-17 (rule core.10): a worktree's
+        // release that no host process answered asks none.
+        let bound = match &cli.command {
+            Some(Command::Release { name: None, .. }) => sluice::profiles::Bound {
+                host_process: Box::new(sluice::host_process::ask::Unasked),
+                ..bound
+            },
+            _ => bound,
+        };
         // Record 0119 (design D11; rule core.49): a pool's job is its
         // runner's one work, and holds its run's room in its own process,
         // of no host's bound.
@@ -490,6 +499,7 @@ fn session_request(cli: &Cli, folder: &Path) -> Option<sluice::host_process::pro
     use sluice::host_process::protocol::Request;
     let caller = sluice::caller::here();
     let run_env = sluice::profiles::checks::run_env_here();
+    let otel = cli.choices();
     let folder_of = |path: &str| from_folder(folder, path);
     Some(match &cli.command {
         Some(Command::Exec {
@@ -502,6 +512,7 @@ fn session_request(cli: &Cli, folder: &Path) -> Option<sluice::host_process::pro
             folder: folder.to_path_buf(),
             caller,
             run_env,
+            otel: otel.clone(),
             branch: branch.clone(),
             command: command.clone(),
             worktree: folder_of(worktree),
@@ -517,6 +528,7 @@ fn session_request(cli: &Cli, folder: &Path) -> Option<sluice::host_process::pro
             folder: folder.to_path_buf(),
             caller,
             run_env,
+            otel: otel.clone(),
             branch: branch.clone(),
             revision: revision.clone(),
             wait: *wait,
@@ -526,6 +538,7 @@ fn session_request(cli: &Cli, folder: &Path) -> Option<sluice::host_process::pro
             folder: folder.to_path_buf(),
             caller,
             run_env,
+            otel: otel.clone(),
             branch: branch.clone(),
             at: at.clone(),
             json: *json,
@@ -539,6 +552,7 @@ fn session_request(cli: &Cli, folder: &Path) -> Option<sluice::host_process::pro
             folder: folder.to_path_buf(),
             caller,
             run_env,
+            otel: otel.clone(),
             worktree: folder_of(worktree),
             accept_failure: *accept_failure,
             json: *json,
@@ -570,9 +584,31 @@ fn session(cli: &Cli) -> Option<i32> {
         tell_json(cli.json(), &e);
         return Some(3);
     }
-    let ran = sluice::stop_on_interrupt()
-        .and_then(|()| sluice::host_process::client::Client::host())
-        .and_then(|c| c.command(&request));
+    // Record 0120 as amended 2026-11-17 (rule core.10): a worktree's
+    // release asks sluice's host process only where one answers; where
+    // none does, it frees what it reads of the records itself, below, and
+    // starts none.
+    let release = matches!(
+        request,
+        sluice::host_process::protocol::Request::Release { .. }
+    );
+    if let Err(e) = sluice::stop_on_interrupt() {
+        eprintln!("sluice: {e:#}");
+        tell_json(cli.json(), &e);
+        return Some(3);
+    }
+    let ran = match release {
+        // Where no host process has run, or none answers, the release goes
+        // on below, making nothing to find one.
+        true => match sluice::host_process::client::Client::found() {
+            Ok(Some(c)) => match c.command_if_answering(&request) {
+                Ok(None) => return None,
+                ran => ran.map(|code| code.unwrap_or(0)),
+            },
+            Ok(None) | Err(_) => return None,
+        },
+        false => sluice::host_process::client::Client::host().and_then(|c| c.command(&request)),
+    };
     Some(match ran {
         Ok(code) => code,
         Err(e) => {

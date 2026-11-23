@@ -73,7 +73,9 @@ static TRACER: OnceLock<SdkTracer> = OnceLock::new();
 
 /// How much of a failed check's output is sent (ADR 0022): the flag and
 /// the host's `[telemetry] logs` read one set of words (design D1).
-#[derive(Clone, Copy, Debug, PartialEq, Eq, clap::ValueEnum, serde::Deserialize)]
+#[derive(
+    Clone, Copy, Debug, PartialEq, Eq, clap::ValueEnum, serde::Serialize, serde::Deserialize,
+)]
 #[serde(rename_all = "lowercase")]
 pub enum Logs {
     /// No logs at all.
@@ -139,16 +141,32 @@ pub const TAIL: usize = 8192;
 /// What a command was given of telemetry: its own flag, else its
 /// `SLUICE_OTEL*` variable, each `None` where it was given neither, so
 /// the host's `[telemetry]` holds (151; design D2).
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
+///
+/// A session's command sends them with its request, and `sluice host`
+/// chooses that command's telemetry by them (the change
+/// `sluice-host-runs-a-sessions-checks`; rule core.53).
+#[derive(Clone, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct Choices {
     /// `--otel`, `SLUICE_OTEL`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub otel: Option<bool>,
     /// `--otel-service-name`, `SLUICE_OTEL_SERVICE_NAME`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub service: Option<String>,
     /// `--otel-logs`, `SLUICE_OTEL_LOGS`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub logs: Option<Logs>,
     /// `--otel-logs-limit`, `SLUICE_OTEL_LOGS_LIMIT`, in bytes.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub logs_limit: Option<usize>,
+}
+
+impl Choices {
+    /// Whether the command chose nothing, so the host's `[telemetry]`
+    /// holds.
+    pub fn is_empty(&self) -> bool {
+        *self == Choices::default()
+    }
 }
 
 /// The telemetry a command sends, chosen once as it starts (151; record
@@ -414,9 +432,10 @@ pub struct Check {
 /// go, or where `parent` is no span of a trace.
 pub fn checks(parent: &tracing::Span, checks: &[Check]) {
     use opentelemetry::trace::{Span as _, Tracer as _};
-    let (Some(tracer), Some(settings)) = (TRACER.get(), SENT.get()) else {
+    let (Some(tracer), Some(settings)) = (tracer(), sent()) else {
         return;
     };
+    let tracer = &tracer;
     let cx = parent.context();
     if !cx.span().span_context().is_valid() {
         return;
@@ -909,21 +928,150 @@ impl LogProcessor for Scrub {
 
 use crate::scrub::end;
 
-/// Whether this process exports.
+/// Whether this process exports: on this thread, as a command's own
+/// telemetry has it where `sluice host` runs the command under it.
 pub fn on() -> bool {
-    ON.load(Ordering::SeqCst)
+    match SCOPED.with(|s| s.borrow().as_ref().map(|s| s.settings.is_some())) {
+        Some(on) => on,
+        None => ON.load(Ordering::SeqCst),
+    }
+}
+
+/// A command's own telemetry, on the thread that `sluice host` runs the
+/// command on (the change `sluice-host-runs-a-sessions-checks`; rule
+/// core.53): its settings, `None` where it sends nothing, and its tracer
+/// while traces go.
+struct Scoped {
+    settings: Option<Settings>,
+    tracer: Option<SdkTracer>,
+}
+
+thread_local! {
+    static SCOPED: std::cell::RefCell<Option<Scoped>> = const { std::cell::RefCell::new(None) };
+}
+
+/// The settings telemetry sends under on this thread.
+fn sent() -> Option<Settings> {
+    match SCOPED.with(|s| s.borrow().as_ref().map(|s| s.settings.clone())) {
+        Some(settings) => settings,
+        None => SENT.get().filter(|_| on()).cloned(),
+    }
+}
+
+/// The tracer that traces are built with on this thread.
+fn tracer() -> Option<SdkTracer> {
+    match SCOPED.with(|s| s.borrow().as_ref().map(|s| s.tracer.clone())) {
+        Some(tracer) => tracer,
+        None => TRACER.get().cloned(),
+    }
+}
+
+/// Run `f`, a command that `sluice host` runs, under the telemetry that
+/// `settings` give it alone, on this thread (rule core.53: a command's own
+/// flag chooses for that command alone): its spans and logs sent where the
+/// settings say and nothing else of the host process's, or nothing at all
+/// where they send nothing. What it holds is sent as `f` returns. The
+/// host's metrics stay the host process's own.
+pub fn scoped<T>(settings: &Settings, f: impl FnOnce() -> T) -> T {
+    let run = |scoped: Scoped, f: Box<dyn FnOnce() -> T + '_>| {
+        let before = SCOPED.with(|s| s.borrow_mut().replace(scoped));
+        let ran = f();
+        SCOPED.with(|s| *s.borrow_mut() = before);
+        ran
+    };
+    let off = Scoped {
+        settings: None,
+        tracer: None,
+    };
+    let on = settings.signals;
+    if !settings.send || !(on.traces || on.logs) {
+        let none = tracing::subscriber::NoSubscriber::default();
+        return tracing::subscriber::with_default(none, || run(off, Box::new(f)));
+    }
+    let named = settings.resource();
+    let resource = match named.reads_environment {
+        true => Resource::builder(),
+        false => Resource::builder_empty(),
+    }
+    .with_attributes(
+        named
+            .pairs
+            .into_iter()
+            .map(|(k, v)| opentelemetry::KeyValue::new(k, v)),
+    )
+    .build();
+    let traces = on
+        .traces
+        .then(|| {
+            settings
+                .to(SpanExporter::builder().with_http(), "traces")
+                .build()
+                .ok()
+        })
+        .flatten()
+        .map(|spans| {
+            SdkTracerProvider::builder()
+                .with_batch_exporter(spans)
+                .with_resource(resource.clone())
+                .build()
+        });
+    let logs = on
+        .logs
+        .then(|| {
+            settings
+                .to(LogExporter::builder().with_http(), "logs")
+                .build()
+                .ok()
+        })
+        .flatten()
+        .map(|e| {
+            SdkLoggerProvider::builder()
+                .with_log_processor(Scrub::new(
+                    settings.logs,
+                    settings.limit,
+                    settings.env.iter().cloned(),
+                ))
+                .with_batch_exporter(e)
+                .with_resource(resource)
+                .build()
+        });
+    let bridge = logs.as_ref().map(|l| {
+        OpenTelemetryTracingBridge::new(l).with_filter(filter_fn(|m| {
+            m.is_event() && (m.target() == OUTPUT || *m.level() <= tracing::Level::WARN)
+        }))
+    });
+    let tracer = traces.as_ref().map(|t| t.tracer("sluice"));
+    let subscriber = tracing_subscriber::registry()
+        .with(
+            tracer
+                .clone()
+                .map(|t| tracing_opentelemetry::layer().with_tracer(t)),
+        )
+        .with(bridge);
+    let scoped = Scoped {
+        settings: Some(settings.clone()),
+        tracer,
+    };
+    let ran = tracing::subscriber::with_default(subscriber, || run(scoped, Box::new(f)));
+    if let Some(t) = traces {
+        let _ = t.shutdown();
+    }
+    if let Some(l) = logs {
+        let _ = l.shutdown();
+    }
+    ran
 }
 
 /// What a run's environment takes of telemetry: nothing when it is off;
 /// otherwise what sluice sends, built from the settings it started under,
 /// never from this process's environment as it is now (design D6).
 pub fn run_env(attributes: &[(&str, &str)]) -> BTreeMap<String, String> {
-    let Some(settings) = SENT.get().filter(|_| on()) else {
+    let Some(settings) = sent() else {
         return BTreeMap::new();
     };
     let cx = tracing::Span::current().context();
     let span = cx.span();
-    variables(settings, span.span_context(), attributes)
+    variables(&settings, span.span_context(), attributes)
 }
 
 /// A run's telemetry under `settings`, started under the span `ids`, with

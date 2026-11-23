@@ -74,6 +74,8 @@ struct Call {
     folder: PathBuf,
     caller: BTreeMap<String, String>,
     run_env: BTreeMap<String, String>,
+    /// The command's own telemetry choices (rule core.53).
+    otel: crate::telemetry::Choices,
     json: bool,
     /// `sluice equip` equips the worktree that holds its folder, so its
     /// binding is opened from the worktree's top (147).
@@ -85,11 +87,12 @@ struct Call {
 /// session's command.
 fn call_of(request: Request) -> Option<Call> {
     let path = |p: PathBuf| p.to_string_lossy().into_owned();
-    let (folder, caller, run_env, json, equip, command) = match request {
+    let (folder, caller, run_env, otel, json, equip, command) = match request {
         Request::Exec {
             folder,
             caller,
             run_env,
+            otel,
             branch,
             command,
             worktree,
@@ -99,6 +102,7 @@ fn call_of(request: Request) -> Option<Call> {
             folder,
             caller,
             run_env,
+            otel,
             json,
             false,
             Command::Exec {
@@ -113,6 +117,7 @@ fn call_of(request: Request) -> Option<Call> {
             folder,
             caller,
             run_env,
+            otel,
             branch,
             revision,
             wait,
@@ -121,6 +126,7 @@ fn call_of(request: Request) -> Option<Call> {
             folder,
             caller,
             run_env,
+            otel,
             json,
             false,
             Command::Preview {
@@ -134,6 +140,7 @@ fn call_of(request: Request) -> Option<Call> {
             folder,
             caller,
             run_env,
+            otel,
             branch,
             at,
             json,
@@ -141,6 +148,7 @@ fn call_of(request: Request) -> Option<Call> {
             folder,
             caller,
             run_env,
+            otel,
             json,
             true,
             Command::Equip { branch, at, json },
@@ -149,6 +157,7 @@ fn call_of(request: Request) -> Option<Call> {
             folder,
             caller,
             run_env,
+            otel,
             worktree,
             accept_failure,
             json,
@@ -156,6 +165,7 @@ fn call_of(request: Request) -> Option<Call> {
             folder,
             caller,
             run_env,
+            otel,
             json,
             false,
             Command::Release {
@@ -173,6 +183,7 @@ fn call_of(request: Request) -> Option<Call> {
         folder,
         caller,
         run_env,
+        otel,
         json,
         equip,
         cli: Cli {
@@ -289,6 +300,7 @@ fn run(
         folder,
         caller,
         run_env,
+        otel,
         json,
         cli,
         ..
@@ -301,26 +313,47 @@ fn run(
         sender,
         held: Vec::new(),
     };
+    // Rule core.53: a command's own telemetry choices choose for it
+    // alone; where it chose nothing, the host's telemetry holds.
+    let telemetry = (!otel.is_empty()).then(|| {
+        let settings =
+            crate::instance::Instance::read().unwrap_or_else(|_| hosting.settings.instance());
+        crate::telemetry::Settings::choose(
+            otel,
+            settings.telemetry.as_ref(),
+            &crate::profiles::checks::hostname(),
+            std::env::vars(),
+        )
+    });
+    let traced = |f: &mut dyn FnMut() -> Result<i32>| match &telemetry {
+        Some(settings) => crate::telemetry::scoped(settings, f),
+        None => f(),
+    };
+    let mut call = Some((caller, run_env, cli, runtime, stopped));
     let ran = crate::telemetry::streaming(say, || {
-        crate::caller::as_caller(caller, || {
-            crate::caller::in_folder(&folder, || {
-                crate::profiles::checks::with_run_env(run_env, || -> Result<i32> {
-                    let bound = bind(hosting, repository, dir, runtime, stopped.clone())?;
-                    let every = match &cli.command {
-                        Some(Command::Exec { .. }) => STREAM,
-                        command => crate::tick(command.as_ref()),
-                    };
-                    let pause = Stopping { stopped, every };
-                    crate::run(
-                        cli,
-                        bound.seams(),
-                        &bound,
-                        &bound.branch,
-                        &*bound.pulls,
-                        &sluice_core::SystemClock,
-                        &pause,
-                        &mut out,
-                    )
+        traced(&mut || {
+            let (caller, run_env, cli, runtime, stopped) =
+                call.take().expect("the command runs once");
+            crate::caller::as_caller(caller, || {
+                crate::caller::in_folder(&folder, || {
+                    crate::profiles::checks::with_run_env(run_env, || -> Result<i32> {
+                        let bound = bind(hosting, repository, dir, runtime, stopped.clone())?;
+                        let every = match &cli.command {
+                            Some(Command::Exec { .. }) => STREAM,
+                            command => crate::tick(command.as_ref()),
+                        };
+                        let pause = Stopping { stopped, every };
+                        crate::run(
+                            cli,
+                            bound.seams(),
+                            &bound,
+                            &bound.branch,
+                            &*bound.pulls,
+                            &sluice_core::SystemClock,
+                            &pause,
+                            &mut out,
+                        )
+                    })
                 })
             })
         })

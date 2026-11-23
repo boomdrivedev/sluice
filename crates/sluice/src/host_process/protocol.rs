@@ -238,6 +238,10 @@ pub enum Request {
         /// (design D2).
         #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
         run_env: BTreeMap<String, String>,
+        /// The command's own telemetry choices, `--otel` among them, which
+        /// choose its telemetry alone (rule core.53).
+        #[serde(default, skip_serializing_if = "crate::telemetry::Choices::is_empty")]
+        otel: crate::telemetry::Choices,
         branch: String,
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
         command: Vec<String>,
@@ -256,6 +260,10 @@ pub enum Request {
         caller: BTreeMap<String, String>,
         #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
         run_env: BTreeMap<String, String>,
+        /// The command's own telemetry choices, `--otel` among them, which
+        /// choose its telemetry alone (rule core.53).
+        #[serde(default, skip_serializing_if = "crate::telemetry::Choices::is_empty")]
+        otel: crate::telemetry::Choices,
         branch: String,
         revision: String,
         #[serde(default, skip_serializing_if = "std::ops::Not::not")]
@@ -271,6 +279,10 @@ pub enum Request {
         caller: BTreeMap<String, String>,
         #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
         run_env: BTreeMap<String, String>,
+        /// The command's own telemetry choices, `--otel` among them, which
+        /// choose its telemetry alone (rule core.53).
+        #[serde(default, skip_serializing_if = "crate::telemetry::Choices::is_empty")]
+        otel: crate::telemetry::Choices,
         branch: String,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         at: Option<String>,
@@ -285,6 +297,10 @@ pub enum Request {
         caller: BTreeMap<String, String>,
         #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
         run_env: BTreeMap<String, String>,
+        /// The command's own telemetry choices, `--otel` among them, which
+        /// choose its telemetry alone (rule core.53).
+        #[serde(default, skip_serializing_if = "crate::telemetry::Choices::is_empty")]
+        otel: crate::telemetry::Choices,
         worktree: PathBuf,
         #[serde(default, skip_serializing_if = "std::ops::Not::not")]
         accept_failure: bool,
@@ -658,6 +674,7 @@ mod tests {
                 folder: "/w/feat".into(),
                 caller: caller.clone(),
                 run_env: run_env.clone(),
+                otel: Default::default(),
                 branch: "main".into(),
                 command: vec!["sh".into(), "-c".into(), "echo one".into()],
                 worktree: "/w/feat".into(),
@@ -668,6 +685,7 @@ mod tests {
                 folder: "/w/feat".into(),
                 caller: caller.clone(),
                 run_env: run_env.clone(),
+                otel: Default::default(),
                 branch: "main".into(),
                 revision: "2eb676c".into(),
                 wait: true,
@@ -677,6 +695,7 @@ mod tests {
                 folder: "/w/feat/src".into(),
                 caller: caller.clone(),
                 run_env: run_env.clone(),
+                otel: Default::default(),
                 branch: "main".into(),
                 at: Some("2eb676c".into()),
                 json: false,
@@ -685,6 +704,10 @@ mod tests {
                 folder: "/w/feat".into(),
                 caller,
                 run_env,
+                otel: crate::telemetry::Choices {
+                    otel: Some(true),
+                    ..Default::default()
+                },
                 worktree: "/w/feat".into(),
                 accept_failure: true,
                 json: true,
@@ -702,6 +725,7 @@ mod tests {
                 folder: "/w/feat".into(),
                 caller: BTreeMap::new(),
                 run_env: BTreeMap::new(),
+                otel: Default::default(),
                 branch: "main".into(),
                 command: vec![],
                 worktree: "/w/feat".into(),
