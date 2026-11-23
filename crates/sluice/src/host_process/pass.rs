@@ -27,6 +27,9 @@ pub struct Kept {
     pub(crate) said: BTreeMap<String, Option<(Rev, Rev)>>,
     /// 26, 121: the words each branch passed by was last said with.
     pub(crate) passed: BTreeMap<String, String>,
+    /// 152, record 0124 as amended 2026-11-23 (design D3): when each
+    /// branch whose one work is a held landing last had its round.
+    pub(crate) held: BTreeMap<String, chrono::DateTime<chrono::Utc>>,
 }
 
 impl Kept {
@@ -40,6 +43,7 @@ impl Kept {
             asked: None,
             said,
             passed,
+            held: BTreeMap::new(),
         }
     }
 
@@ -73,6 +77,11 @@ pub struct Report {
     /// submission queued or under test, a checkout to release, or a
     /// preview to drop.
     pub in_play: bool,
+    /// 152, record 0124 as amended 2026-11-23 (design D3): a branch holds
+    /// a landing the forge refused, which keeps the host process while its
+    /// rounds push it again once a minute.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub held: bool,
     /// 129: the reader found the repository has no sluice.
     pub no_sluice: bool,
     /// 129, 133 (design D16): the words a remote refused the pass's one
@@ -151,7 +160,23 @@ pub fn pass(
         // 26, rule core.14: a branch whose records' read or round fails is
         // that branch's alone; the pass goes on to every other branch. 129:
         // one with nothing in play costs the pass its records' read alone.
+        // 152, record 0124 as amended 2026-11-23 (the change
+        // `sluice-host-makes-each-change`, design D3): one whose one work
+        // is a held landing has its round, which pushes it again, once a
+        // minute at most, as a branch with nothing in play has its remote
+        // asked.
+        let every = chrono::TimeDelta::from_std(HELD_EVERY).unwrap_or_default();
+        let held_due = s.holds_refused_landing(branch).unwrap_or(false)
+            && kept
+                .held
+                .get(branch)
+                .is_none_or(|at| clock.now() - *at >= every);
+        let held_due = |_: &str| held_due;
         let ran = s.in_play(branch).and_then(|in_play| match in_play {
+            false if held_due(branch) => {
+                kept.held.insert(branch.clone(), clock.now());
+                s.round(branch).map(Some)
+            }
             false => Ok(None),
             true => s.round(branch).map(Some),
         });
@@ -209,6 +234,7 @@ pub fn pass(
         .iter()
         .any(|b| report.failed.contains_key(b) || s.in_play(b).unwrap_or(true))
         || s.previews_in_play().unwrap_or(true);
+    report.held = held(s);
     report.lines = lines_of(&out);
     report.freed = lines_of(&freed);
     Ok(report)
@@ -234,6 +260,37 @@ pub fn in_play(s: &Sluice<'_>) -> bool {
         Err(_) => true,
     };
     branches || s.previews_in_play().unwrap_or(true)
+}
+
+/// How often a branch whose one work is a held landing has its round: a
+/// minute, the pace of a repository with nothing in play (152, record 0124
+/// as amended 2026-11-23; design D3).
+pub const HELD_EVERY: std::time::Duration = super::IDLE_ASK;
+
+/// Whether any branch of the repository holds a landing the forge refused
+/// (152; design D3), read from the records alone.
+pub fn held(s: &Sluice<'_>) -> bool {
+    s.seams().state.branches().is_ok_and(|b| {
+        b.iter()
+            .any(|b| s.holds_refused_landing(b).unwrap_or(false))
+    })
+}
+
+/// Each round of the branches of the repository `s` binds that hold a
+/// landing the forge refused, as a look of a repository with nothing else
+/// in play takes them, once a minute (152, record 0124 as amended
+/// 2026-11-23; design D3). A round that fails is the branch's alone.
+pub fn push_held(s: &Sluice<'_>) {
+    let Ok(branches) = s.seams().state.branches() else {
+        return;
+    };
+    for branch in branches {
+        if s.holds_refused_landing(&branch).unwrap_or(false) {
+            if let Err(e) = s.round(&branch) {
+                telemetry::warn(&format!("sluice: warning: {branch}: {e:#}"));
+            }
+        }
+    }
 }
 
 /// `sluice step`'s round of `branch`, as the host process runs it between

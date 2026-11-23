@@ -11520,3 +11520,152 @@ fn the_home_view_beside_a_reader_counts_from_its_document() {
     assert_eq!(v["branches"], serde_json::json!([]), "{v}");
     drop(doc);
 }
+
+/// Each git that the process `pid` started after `before` that is no part
+/// of the branch protection's upkeep of its hook, `protect.rs`'s `git`.
+fn own_git(d: &support::OnDisk, pid: u32, before: usize) -> Vec<String> {
+    d.git.parented()[before..]
+        .iter()
+        .filter(|(p, args)| {
+            *p == pid
+                && !args.contains(" rev-parse --path-format=absolute ")
+                && !args.contains(" worktree list --porcelain")
+        })
+        .map(|(_, a)| a.clone())
+        .collect()
+}
+
+/// `sluice <args>` in `dir` through the binary, as a child: its output,
+/// and the git it ran that is no part of the hook's upkeep.
+fn run_on_disk(
+    d: &support::OnDisk,
+    dir: &std::path::Path,
+    args: &[&str],
+) -> (std::process::Output, Vec<String>) {
+    let before = d.git.count();
+    let child = d
+        .command(dir)
+        .env("SLUICE_ROUND_SLEEP", "record")
+        .args(args)
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .unwrap();
+    let pid = child.id();
+    let out = child.wait_with_output().unwrap();
+    (out, own_git(d, pid, before))
+}
+
+const ON_DISK: &str =
+    "[tests]\nrunner = \"command\"\ncommand = \"true\"\n\n[branches.main]\ntimeout = \"1m\"\n\n[branches.\"bolt/*\"]\ntimeout = \"1m\"\n";
+
+/// resident-changes, "A group's wait" (the change
+/// `sluice-host-makes-each-change`, design D2): two worktrees submitted as
+/// one act print each outcome in their order, as the act printed them,
+/// exit with the first that did not land, and the command ran no git but
+/// the upkeep of the branch protection's hook.
+#[test]
+fn a_groups_wait_runs_no_git() {
+    let d = support::OnDisk::new("cli-group-no-git", ON_DISK);
+    let a = d.session("a");
+    let b = d.session("b");
+    let (out, own) = run_on_disk(
+        &d,
+        d.repo.dir(),
+        &[
+            "submit",
+            "main",
+            "--worktree",
+            a.to_str().unwrap(),
+            "--worktree",
+            b.to_str().unwrap(),
+        ],
+    );
+    let said = String::from_utf8_lossy(&out.stdout).into_owned();
+    assert_eq!(
+        out.status.code(),
+        Some(LANDED),
+        "{said}{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let first = said
+        .find(&format!("submission 1 from {}:", a.display()))
+        .unwrap_or_else(|| panic!("{said}"));
+    let second = said
+        .find(&format!("submission 2 from {}:", b.display()))
+        .unwrap_or_else(|| panic!("{said}"));
+    assert!(first < second, "{said}");
+    assert_eq!(said.matches("passed · landed as").count(), 2, "{said}");
+    assert!(own.is_empty(), "the submit ran git: {own:?}");
+}
+
+/// resident-changes, "A change command runs no git and reads no forge"
+/// (design D1, D5): each change command of this change and each read,
+/// run through the binary with `sluice host` running, runs no git but the
+/// upkeep of the branch protection's hook, whatever it answers, and none
+/// says that sluice itself failed.
+#[test]
+fn a_change_command_binds_no_repository() {
+    let d = support::OnDisk::new("cli-binds-nothing", ON_DISK);
+    let a = d.session("a");
+    let out = d
+        .command(&a)
+        .env("SLUICE_ROUND_SLEEP", "record")
+        .args(["submit", "main", "--no-wait", "--json"])
+        .output()
+        .unwrap();
+    assert!(out.status.success(), "{out:?}");
+    let b = d.session("b");
+    let commands: [(&std::path::Path, &[&str]); 16] = [
+        (&b, &["submit", "main", "--no-wait"]),
+        (&b, &["submit", "main", "--status"]),
+        (&b, &["submit", "main", "--check"]),
+        (d.repo.dir(), &["amend", "2", "--priority", "3"]),
+        (d.repo.dir(), &["withdraw", "2"]),
+        (&a, &["confirm", "1:landed"]),
+        (d.repo.dir(), &["release", "sluice/try/main/99"]),
+        (d.repo.dir(), &["release", "0000000"]),
+        (
+            d.repo.dir(),
+            &["branch", "create", "bolt/x", "--from", "main"],
+        ),
+        (
+            d.repo.dir(),
+            &["branch", "delete", "bolt/x", "--into", "main"],
+        ),
+        (d.repo.dir(), &["protect", "--json"]),
+        (d.repo.dir(), &["previews", "--json"]),
+        (d.repo.dir(), &["step", "main"]),
+        (d.repo.dir(), &["status", "main"]),
+        (d.repo.dir(), &["overview", "--json"]),
+        (&a, &["inbox"]),
+    ];
+    for (dir, args) in commands {
+        let (out, own) = run_on_disk(&d, dir, args);
+        assert_ne!(
+            out.status.code(),
+            Some(sluice::INTERNAL),
+            "{args:?}: {}{}",
+            String::from_utf8_lossy(&out.stdout),
+            String::from_utf8_lossy(&out.stderr)
+        );
+        assert!(own.is_empty(), "{args:?} ran git: {own:?}");
+    }
+}
+
+/// refused-landing, "sluice push is no command" (the change
+/// `sluice-host-makes-each-change`, design D3): sluice says that `push`
+/// is no command it knows, exits as for any such command, and pushes
+/// nothing.
+#[test]
+fn push_is_no_command() {
+    let d = support::OnDisk::new("cli-no-push", ON_DISK);
+    let before = d.git.count();
+    let out = d.sluice(&["push", "main"]);
+    assert_eq!(out.status.code(), Some(sluice::USAGE), "{out:?}");
+    assert!(
+        String::from_utf8_lossy(&out.stderr).contains("unrecognized subcommand 'push'"),
+        "{out:?}"
+    );
+    assert_eq!(d.git.count(), before, "nothing run");
+}

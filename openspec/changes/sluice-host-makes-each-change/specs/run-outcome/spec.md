@@ -17,7 +17,7 @@ Before: the operator set a recorded result aside, and no branch read it after th
 #### Scenario: set-aside is no command
 
 - **WHEN** a person runs `sluice set-aside cli:tools --at 2026-10-17T13:05:32Z --reason x`
-- **THEN** sluice says that `set-aside` is no command, exits 2, and writes nothing
+- **THEN** sluice says that `set-aside` is no command, exits 64, as for any command that sluice does not know, and writes nothing
 
 #### Scenario: A set-aside that an earlier release wrote
 

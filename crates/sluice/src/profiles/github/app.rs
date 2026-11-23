@@ -1147,10 +1147,13 @@ impl App {
     fn limited(&self, until: DateTime<Utc>, words: &str) -> Failed<anyhow::Error> {
         if self.policy.waits() && self.told.get() != Some(until) {
             self.told.set(Some(until));
-            eprintln!(
+            // Said to the caller, whose call `sluice host` makes keeps
+            // what it says on stderr (the change
+            // `sluice-host-makes-each-change`, design D1).
+            crate::telemetry::say(&format!(
                 "sluice: GitHub's allowance of calls is spent until {}; waiting: {words}",
                 crate::retry::clock(until)
-            );
+            ));
         }
         let e = Limited {
             app: self.id,

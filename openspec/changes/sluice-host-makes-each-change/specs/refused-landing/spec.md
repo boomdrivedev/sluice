@@ -38,7 +38,7 @@ Before: only `sluice push` pushed it again. Now: each round pushes it.
 #### Scenario: sluice push is no command
 
 - **WHEN** a person runs `sluice push bolt/x`
-- **THEN** sluice says that `push` is no command, exits 2, and pushes nothing
+- **THEN** sluice says that `push` is no command, exits 64, as for any command that sluice does not know, and pushes nothing
 
 ### Requirement: A held landing's refusal is logged once for each of the forge's words
 

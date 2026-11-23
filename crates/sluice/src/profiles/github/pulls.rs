@@ -343,8 +343,37 @@ struct KeptAcross {
     across: Option<Across>,
 }
 
+/// What a binding of the pull request driver remembers of the requests it
+/// follows: what GitHub last said of each and when, and what each state
+/// reads as last shown. `sluice host` keeps it for each repository from
+/// one wait's step to the next, so a wait asks GitHub of its request once
+/// in a quarter of the interval, as one process's follow did (136; the
+/// change `sluice-host-makes-each-change`, design D2).
+#[derive(Clone, Debug, Default)]
+pub struct Remembered {
+    seen: BTreeMap<u64, Seen>,
+    shown: BTreeMap<u64, Shown>,
+}
+
+impl Pulls {
+    /// What this binding remembers of the requests it follows.
+    pub fn remembered(&self) -> Remembered {
+        Remembered {
+            seen: self.seen.borrow().clone(),
+            shown: self.shown.borrow().clone(),
+        }
+    }
+
+    /// Follow on from what an earlier binding remembered.
+    pub fn remember(&self, remembered: Remembered) {
+        *self.seen.borrow_mut() = remembered.seen;
+        *self.shown.borrow_mut() = remembered.shown;
+    }
+}
+
 /// A pull request as a wait last read it from GitHub, and its timeline
 /// once read.
+#[derive(Clone, Debug)]
 struct Seen {
     at: DateTime<Utc>,
     pull: Option<Pull>,

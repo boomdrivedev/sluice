@@ -1530,8 +1530,9 @@ impl Sluice<'_> {
     pub fn in_play(&self, branch: &str) -> Result<bool> {
         let line = Line::load(branch, self.seams.state.read_held(branch)?)?;
         // 152, record 0124 (design D10): a landing the forge refused holds
-        // the branch until a submitter or the operator acts: nothing of it
-        // is in play but its places to release.
+        // the branch: nothing of it is in play but its places to release,
+        // and its rounds, which push it again, come at the pace of a
+        // branch with nothing in play ([`Sluice::holds_refused_landing`]).
         if line
             .doc
             .landing
@@ -1543,6 +1544,20 @@ impl Sluice<'_> {
         Ok(line.subs.values().any(|s| !s.state.is_out())
             || line.doc.candidates.iter().any(|c| c.state.under_test())
             || !line.doc.release.is_empty())
+    }
+
+    /// 152, record 0124 as amended 2026-11-23 (the change
+    /// `sluice-host-makes-each-change`, design D3): whether `branch` holds
+    /// a landing the forge refused, read from the records alone, as
+    /// [`Sluice::in_play`] reads them: work whose rounds push it again
+    /// once a minute at most, the pace of a branch with nothing in play.
+    pub fn holds_refused_landing(&self, branch: &str) -> Result<bool> {
+        let line = Line::load(branch, self.seams.state.read_held(branch)?)?;
+        Ok(line
+            .doc
+            .landing
+            .as_ref()
+            .is_some_and(|l| l.refused.is_some()))
     }
 
     /// 26: a branch's queue as last written, at the revision its records

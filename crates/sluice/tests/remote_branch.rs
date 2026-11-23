@@ -496,12 +496,12 @@ fn landed_is_written_only_once_the_remote_holds_the_landing() {
     assert_eq!(s.repo.rev("main"), landed, "the copy is levelled to it");
 }
 
-/// 22, 122, 124, 152, I4; rule core.5; record 0124: a push the forge
-/// refuses by a rule of its own, with `main` where the landing expected it,
-/// lands nothing and is pushed once: the landing is held with the forge's
-/// words, and a wait on its submission ends at once with exit 6 and them,
-/// its document the submission's record. Neither the remote nor the host's
-/// copy moves.
+/// 22, 122, 124, 152, I4; rule core.5; record 0124 as amended 2026-11-23:
+/// a push the forge refuses by a rule of its own, with `main` where the
+/// landing expected it, lands nothing: the landing is held with the
+/// forge's words, pushed again at each round and logged once, and a wait
+/// on its submission ends at once with exit 6 and them, its document the
+/// submission's record. Neither the remote nor the host's copy moves.
 #[test]
 fn a_wait_on_a_landing_the_forge_refused_exits_6() {
     use std::os::unix::fs::PermissionsExt;
@@ -533,10 +533,14 @@ fn a_wait_on_a_landing_the_forge_refused_exits_6() {
         assert!(out.status.success(), "{}", text(&out));
     }
     let pushed = std::fs::read_to_string(&pushes).unwrap_or_default();
-    assert_eq!(pushed.lines().count(), 1, "the landing is pushed once");
+    assert_eq!(pushed.lines().count(), 4, "pushed again at each round");
     assert!(s.status()["submissions"][0]["landed_as"].is_null());
     assert!(!s.logged("\"event\":\"landed\""));
-    assert!(s.logged("\"event\":\"forge_refused\""));
+    assert_eq!(
+        logged_count(&s, "\"event\":\"forge_refused\""),
+        1,
+        "logged once for the forge's words"
+    );
     assert_eq!(s.remote_main(), before);
     assert_eq!(
         s.repo.rev("main"),
@@ -597,55 +601,66 @@ fn step_until_refused(s: &Setup) {
     }
 }
 
-/// 152, 24, rule core.5; record 0124: `sluice push main` pushes a held
-/// landing again once the forge takes it, and its submission lands as the
+/// The lines of `main`'s log on `s`'s host that hold `what`.
+fn logged_count(s: &Setup, what: &str) -> usize {
+    let dir = s.repo.dir().join(".git/sluice/main");
+    std::fs::read_dir(&dir)
+        .unwrap()
+        .filter_map(|e| std::fs::read_to_string(e.unwrap().path()).ok())
+        .map(|t| t.lines().filter(|l| l.contains(what)).count())
+        .sum()
+}
+
+/// 152, 24, rule core.5; record 0124 as amended 2026-11-23 (the change
+/// `sluice-host-makes-each-change`, design D3): once the forge takes it,
+/// the next round pushes the held landing, and its submission lands as the
 /// same landing, with no new run.
 #[test]
-fn push_lands_a_held_landing_once_the_forge_takes_it() {
-    let s = Setup::new("push-taken", "origin");
+fn a_held_landing_lands_at_the_next_round_once_the_forge_takes_it() {
+    let s = Setup::new("held-taken", "origin");
     refusing(&s, "main takes no push but the queue's identity");
     let before = s.remote_main();
     s.submit("a");
     step_until_refused(&s);
     std::fs::remove_file(s.origin.path().join("hooks/pre-receive")).unwrap();
-    let out = s.sluice(&["push", "main"]);
+    let out = s.sluice(&["step", "main"]);
     assert!(out.status.success(), "{}", text(&out));
-    assert!(text(&out).contains("landed on main"), "{}", text(&out));
     assert_eq!(s.states(), ["landed"]);
     assert_eq!(s.runs(), 1, "no new run");
     let landed = s.remote_main();
     assert_eq!(s.repo.rev(&format!("{landed}^1")), before);
-    let out = s.sluice(&["push", "main"]);
-    assert!(out.status.success(), "{}", text(&out));
-    assert!(
-        text(&out).contains("holds no landing the forge refused"),
-        "{}",
-        text(&out)
-    );
-    assert_eq!(s.remote_main(), landed, "nothing pushed");
 }
 
-/// 152, rule core.5; record 0124: `sluice push main` refused again leaves
-/// the landing held with the forge's new words, and exits non-zero with
-/// them.
+/// 152, rule core.5; record 0124 as amended 2026-11-23 (design D3): a
+/// round's push refused again with other words leaves the landing held
+/// with them, logged once more, and a status shows them.
 #[test]
-fn push_refused_again_leaves_the_landing_held() {
-    let s = Setup::new("push-refused", "origin");
+fn a_held_landing_refused_with_other_words_is_held_with_them() {
+    let s = Setup::new("held-refused-again", "origin");
     let pushes = refusing(&s, "main takes no push but the queue's identity");
     let before = s.remote_main();
     s.submit("a");
     step_until_refused(&s);
     let again = "push declined due to repository rule violations";
     refusing(&s, again);
-    let out = s.sluice(&["push", "main"]);
-    assert_eq!(out.status.code(), Some(6), "{}", text(&out));
-    assert!(text(&out).contains(again), "{}", text(&out));
+    let out = s.sluice(&["step", "main"]);
+    assert!(out.status.success(), "{}", text(&out));
     assert_eq!(s.states(), ["refused"]);
     assert_eq!(s.remote_main(), before);
     let pushed = std::fs::read_to_string(&pushes).unwrap_or_default();
     assert_eq!(pushed.lines().count(), 2, "pushed once more");
+    assert_eq!(logged_count(&s, "\"event\":\"forge_refused\""), 2);
     let status = s.sluice(&["status", "main"]);
     assert!(text(&status).contains(again), "{}", text(&status));
+}
+
+/// 152; the change `sluice-host-makes-each-change`: `sluice push` is no
+/// command.
+#[test]
+fn push_is_no_command_on_a_remote_branch() {
+    let s = Setup::new("push-gone", "origin");
+    let out = s.sluice(&["push", "main"]);
+    assert_eq!(out.status.code(), Some(sluice::USAGE), "{}", text(&out));
 }
 
 /// 124, 6, rule core.6: after a landing, this host's copy of `main`
@@ -2353,4 +2368,42 @@ fn a_branch_moved_on_its_remote_is_shown_as_last_fetched_until_a_round() {
         &pushed[..7]
     );
     assert_eq!(s.states(), ["landed", "landed"]);
+}
+
+/// resident-changes, "A branch made on its remote" (the change
+/// `sluice-host-makes-each-change`, design D1): with `sluice host`
+/// running, `sluice branch create bolt/x --from main`, where the policy
+/// names `origin` for `bolt/x`, exits 0 and `origin` holds `bolt/x` at
+/// `main`'s revision; the command ran no git but the upkeep of the branch
+/// protection's hook.
+#[test]
+fn a_branch_made_on_its_remote_runs_no_git() {
+    let s = Setup::new("remote-branch-no-git", "origin");
+    // `sluice host`, started by a read.
+    let out = s.sluice(&["status", "main"]);
+    assert!(out.status.success(), "{}", text(&out));
+    let before = s.git.parented().len();
+    let child = s
+        .command(s.repo.dir())
+        .args(["branch", "create", "bolt/x", "--from", "main", "--json"])
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    let pid = child.id();
+    let out = child.wait_with_output().unwrap();
+    assert!(out.status.success(), "{}", text(&out));
+    let made: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert_eq!(made["created"], s.remote_main());
+    assert_eq!(remote_rev(&s, "refs/heads/bolt/x"), s.remote_main());
+    let own: Vec<String> = s.git.parented()[before..]
+        .iter()
+        .filter(|(p, args)| {
+            *p == pid
+                && !args.contains(" rev-parse --path-format=absolute ")
+                && !args.contains(" worktree list --porcelain")
+        })
+        .map(|(_, a)| a.clone())
+        .collect();
+    assert!(own.is_empty(), "the command ran git: {own:?}");
 }

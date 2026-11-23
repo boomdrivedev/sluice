@@ -30,7 +30,7 @@ pub struct Ask<'a> {
 /// Write human text: to stderr when stdout is the JSON document's.
 fn say(out: &mut dyn Write, json: bool, text: &str) -> Result<()> {
     if json {
-        writeln!(std::io::stderr(), "{text}")?;
+        crate::telemetry::say(text);
     } else {
         writeln!(out, "{text}")?;
     }
@@ -400,7 +400,7 @@ pub fn release(
     };
     if json {
         if failed.is_some() {
-            writeln!(std::io::stderr(), "{text}")?;
+            crate::telemetry::say(&text);
         }
         let mut doc = serde_json::json!({ "preview": name, "released": released });
         if accept {
