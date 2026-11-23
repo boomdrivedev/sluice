@@ -19,11 +19,12 @@
 //! that repository.
 //!
 //! The run folders are watched by a debouncer of their own, as they change
-//! with each run's start and end. On macOS a debouncer's paths are one
-//! FSEvents stream, which each change of its paths starts afresh: what a
-//! stream that started afresh watches is read as if an event came for it,
-//! since no stream saw the time between the two; and a stream the system
-//! would not start is started again a second later, then read so too.
+//! with each run's start and end, and on macOS each repository by one of
+//! its own. On macOS a debouncer's paths are one FSEvents stream, which
+//! each change of its paths starts afresh: what a stream that started
+//! afresh watches is read as if an event came for it, since no stream saw
+//! the time between the two; and a stream the system would not start is
+//! started again a second later, then read so too.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
@@ -302,13 +303,18 @@ impl Stream {
     }
 }
 
-/// The host process's watch of its files, in two streams: the run
-/// folders, which change as runs begin and end, apart from the rest, so a
-/// run's start or end never starts afresh the stream that watches the
-/// state folder, the settings and the repositories.
+/// The host process's watch of its files, in streams kept apart so a
+/// change of one's paths starts none of the others afresh: the state
+/// folder and the settings in one; the run folders, which change as runs
+/// begin and end, in another; and on macOS each repository in one of its
+/// own, so a repository a command names, or a branch's folder made, starts
+/// afresh no stream of another repository.
 pub struct Watch {
+    seen: mpsc::UnboundedSender<DebounceEventResult>,
     steady: Stream,
     runs_stream: Stream,
+    /// Each repository's own stream, on macOS.
+    repository_streams: BTreeMap<PathBuf, Stream>,
     /// Each repository watched, and the paths it is watched by.
     repositories: BTreeMap<PathBuf, Vec<PathBuf>>,
     /// Each repository's names, its own and its real path.
@@ -329,11 +335,12 @@ pub struct Watch {
     refused: BTreeSet<PathBuf>,
 }
 
-/// Which of [`Watch`]'s two streams.
+/// Which of [`Watch`]'s streams.
 #[derive(Clone, Copy)]
-enum Which {
+enum Which<'a> {
     Steady,
     Runs,
+    Repository(&'a Path),
 }
 
 impl Watch {
@@ -347,7 +354,9 @@ impl Watch {
         Ok((
             Watch {
                 steady: Stream::new(seen.clone())?,
-                runs_stream: Stream::new(seen)?,
+                runs_stream: Stream::new(seen.clone())?,
+                repository_streams: BTreeMap::new(),
+                seen,
                 repositories: BTreeMap::new(),
                 names: BTreeMap::new(),
                 runs: BTreeSet::new(),
@@ -363,11 +372,37 @@ impl Watch {
         ))
     }
 
+    /// The stream of `which`, a repository's made on macOS where it has
+    /// none. A repository whose stream could not be made is watched in the
+    /// steady stream.
     fn stream(&mut self, which: Which) -> &mut Stream {
         match which {
             Which::Steady => &mut self.steady,
             Which::Runs => &mut self.runs_stream,
+            Which::Repository(r) => {
+                if RESTARTS && !self.repository_streams.contains_key(r) {
+                    match Stream::new(self.seen.clone()) {
+                        Ok(s) => {
+                            self.repository_streams.insert(r.to_path_buf(), s);
+                        }
+                        Err(e) => log(&format!(
+                            "sluice host: watching {} apart: {e:#}; it is watched with the state folder",
+                            r.display()
+                        )),
+                    }
+                }
+                match self.repository_streams.get_mut(r) {
+                    Some(s) => s,
+                    None => &mut self.steady,
+                }
+            }
         }
+    }
+
+    fn streams(&mut self) -> impl Iterator<Item = &mut Stream> {
+        [&mut self.steady, &mut self.runs_stream]
+            .into_iter()
+            .chain(self.repository_streams.values_mut())
     }
 
     fn add(&mut self, which: Which, path: &Path, mode: RecursiveMode) -> bool {
@@ -395,12 +430,14 @@ impl Watch {
     /// Whether the system would not start a stream of the watch, which
     /// [`Watch::revive`] starts again after [`STALLED_FOR`].
     pub fn stalled(&self) -> bool {
-        self.steady.stalled || self.runs_stream.stalled
+        self.steady.stalled
+            || self.runs_stream.stalled
+            || self.repository_streams.values().any(|s| s.stalled)
     }
 
     /// Start again each stream the system would not start.
     pub fn revive(&mut self) {
-        for s in [&mut self.steady, &mut self.runs_stream] {
+        for s in self.streams() {
             if s.stalled {
                 s.revive();
             }
@@ -416,10 +453,20 @@ impl Watch {
         if std::mem::take(&mut self.steady.restarted) {
             seen.state = !self.state.is_empty();
             seen.settings = self.settings.is_some();
-            seen.repositories = self.repositories.keys().cloned().collect();
+            seen.repositories = self
+                .repositories
+                .keys()
+                .filter(|r| !self.repository_streams.contains_key(*r))
+                .cloned()
+                .collect();
         }
         if std::mem::take(&mut self.runs_stream.restarted) {
             seen.runs = true;
+        }
+        for (r, s) in &mut self.repository_streams {
+            if std::mem::take(&mut s.restarted) {
+                seen.repositories.insert(r.clone());
+            }
         }
         seen
     }
@@ -481,8 +528,11 @@ impl Watch {
             .collect();
         for r in gone {
             for p in self.repositories.remove(&r).unwrap_or_default() {
-                self.remove(Which::Steady, &p);
+                if !self.repository_streams.contains_key(&r) {
+                    self.remove(Which::Steady, &p);
+                }
             }
+            self.repository_streams.remove(&r);
             self.names.remove(&r);
         }
         for r in repositories {
@@ -501,12 +551,19 @@ impl Watch {
             return false;
         }
         for p in had.iter().filter(|p| !wanted_paths.contains(p)) {
-            self.remove(Which::Steady, p);
+            self.remove(Which::Repository(common), p);
         }
         let mut watched = Vec::new();
         for (p, mode) in wanted {
-            if had.contains(&p) || self.add(Which::Steady, &p, mode) {
+            if had.contains(&p) || self.add(Which::Repository(common), &p, mode) {
                 watched.push(p);
+            }
+        }
+        // A repository watched afresh is read by whatever named it: its own
+        // stream's starts missed nothing of it.
+        if new {
+            if let Some(s) = self.repository_streams.get_mut(common) {
+                s.restarted = false;
             }
         }
         self.repositories.insert(common.to_path_buf(), watched);
@@ -595,9 +652,9 @@ mod tests {
     }
 
     /// A stream started afresh sees no event of the time between the two
-    /// streams: what it watches is read as missed on macOS, once. A run's
-    /// folder watched starts only the runs' stream afresh, so it misses
-    /// nothing of the state folder, the settings or the repositories.
+    /// streams: what it watches is read as missed on macOS, once. A
+    /// repository watched again starts only its own stream afresh, and a
+    /// run's folder watched only the runs' stream.
     #[test]
     fn a_streams_start_afresh_is_read_as_missed() {
         // A stream the system would not start, under load, is started
@@ -623,9 +680,18 @@ mod tests {
         running(&mut watch);
         let missed = watch.missed();
         assert_eq!(missed.state, RESTARTS);
-        assert_eq!(missed.repositories.contains(&common), RESTARTS);
         assert!(!missed.runs);
         assert!(watch.missed().is_empty(), "read as missed once");
+
+        // A branch's folder made: the repository is watched again, by its
+        // own stream on macOS, which misses nothing of the state folder.
+        std::fs::create_dir_all(common.join("sluice/main")).unwrap();
+        std::fs::write(common.join("sluice/main/branch.json"), "{}").unwrap();
+        assert!(!watch.repository(&common), "watched already");
+        running(&mut watch);
+        let missed = watch.missed();
+        assert_eq!(missed.repositories.contains(&common), RESTARTS);
+        assert!(!missed.state && !missed.settings && !missed.runs);
 
         watch.runs(&registry, &BTreeSet::from([run]));
         running(&mut watch);
