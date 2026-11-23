@@ -182,39 +182,39 @@ fn a_policy_naming_ready_is_tested_once_and_lands() {
     assert_eq!(h.w().started().len(), 1, "no start was refused");
 }
 
-/// satisfies: could-not-run-1 116, S44, 19, 69; rule core.7
+/// satisfies: 19, 69; rule core.7; run-outcome, "A set-aside that an
+/// earlier release wrote" (the change `sluice-host-makes-each-change`,
+/// design D4): a key that holds a fail an earlier release set aside and a
+/// pass reads flaky, as one no set-aside ever named does: the same head
+/// fails as flaky, naming the fail its pass contradicts, and the fail's
+/// line stays. The seams read no set-aside at all.
 #[test]
-fn s44_a_fail_set_aside_is_read_by_no_gate_and_its_line_stays() {
+fn an_earlier_releases_set_aside_is_read_by_nothing() {
     let h = Harness::bolt();
     h.w().flaky("a:test", &[Outcome::Fail, Outcome::Pass]);
     h.work("unit/a", "agent-a", &[("a/lib", Some("a2"))]);
     let one = h.submit("unit/a");
     h.settle();
     assert_eq!(h.sub(one).state, State::Failed);
-    let two = h.submit("unit/a");
-    h.settle();
-    assert_eq!(h.sub(two).state, State::Failed, "the key reads flaky");
-    assert!(h.sub(two).failed.iter().any(|f| f.flaky.is_some()));
-
     let fail = results(&h)
         .into_iter()
         .find(|r| r.task == "a:test" && r.outcome == Outcome::Fail)
         .unwrap();
-    let s = h.sluice();
-    assert!(s
-        .set_aside("a:test", &fail.at, None, " ", "op@host")
-        .is_err());
-    let aside = s
-        .set_aside("a:test", &fail.at, None, "the engine was down", "op@host")
-        .unwrap();
-    assert_eq!(aside.hash, fail.hash);
-    assert_eq!(aside.reason, "the engine was down");
-    let again = s.set_aside("a:test", &fail.at, None, "twice", "op@host");
-    assert!(again.is_err(), "a result is set aside once");
-
-    let three = h.submit("unit/a");
+    let two = h.submit("unit/a");
     h.settle();
-    assert_eq!(h.sub(three).state, State::Landed);
+    let sub = h.sub(two);
+    assert_eq!(sub.state, State::Failed, "the key reads flaky");
+    let flaky = sub
+        .failed
+        .iter()
+        .find_map(|f| f.flaky.as_ref())
+        .expect("read flaky");
+    assert_eq!(flaky.here, Outcome::Pass, "{flaky:?}");
+    assert_eq!(
+        (flaky.other.outcome, flaky.other.at.as_str()),
+        (Outcome::Fail, fail.at.as_str()),
+        "the fail it contradicts: {flaky:?}"
+    );
     assert!(results(&h).contains(&fail), "the fail's line stays");
 }
 

@@ -1,8 +1,6 @@
 #!/usr/bin/env bash
 # PreToolUse on Bash: refuse a push, merge or ref update onto a branch
-# sluice protects, naming `sluice submit` instead (rule core.4); and
-# `sluice set-aside`, which is the operator's, never a session's
-# (could-not-run-1 116). sluice's
+# sluice protects, naming `sluice submit` instead (rule core.4). sluice's
 # own git hook refuses local updates already; this says why before git
 # does, and covers a push to the remote and `gh pr merge`, which the local
 # hook never sees. Anything it cannot read is let through: the git hook
@@ -21,7 +19,7 @@ dir=$(printf '%s' "$input" | jq -r '.cwd // empty' 2>/dev/null)
 [ -n "$dir" ] || dir=$PWD
 
 # One pattern match on every other command, and out.
-printf '%s' "$cmd" | grep -Eq '(^|[^[:alnum:]_-])(git[[:space:]].*(push|merge|update-ref)|gh[[:space:]]+pr[[:space:]]+merge|sluice[[:space:]].*set-aside)' || exit 0
+printf '%s' "$cmd" | grep -Eq '(^|[^[:alnum:]_-])(git[[:space:]].*(push|merge|update-ref)|gh[[:space:]]+pr[[:space:]]+merge)' || exit 0
 
 # shellcheck disable=SC1091 # beside this script
 . "$(dirname "$0")/protected.sh"
@@ -29,13 +27,6 @@ printf '%s' "$cmd" | grep -Eq '(^|[^[:alnum:]_-])(git[[:space:]].*(push|merge|up
 deny() {
   local reason
   reason="sluice protects $1: only sluice lands work on it. Submit instead, from your worktree with everything committed: \`sluice submit $1\` (or \`wt submit $1\` under worktrunk). See the using-sluice skill."
-  jq -n --arg r "$reason" '{hookSpecificOutput: {hookEventName: "PreToolUse", permissionDecision: "deny", permissionDecisionReason: $r}}'
-  exit 0
-}
-
-deny_set_aside() {
-  local reason
-  reason="Setting aside a result is the operator's ruling, never a session's: one that set aside its own fails could land past any test. Tell the user what you found on the host and the command to run. See the using-sluice skill."
   jq -n --arg r "$reason" '{hookSpecificOutput: {hookEventName: "PreToolUse", permissionDecision: "deny", permissionDecisionReason: $r}}'
   exit 0
 }
@@ -92,12 +83,6 @@ while IFS= read -r seg; do
   here=$dir
 
   case $prog in
-  sluice)
-    for a in "${w[@]:i}"; do
-      [ "$(unquote "$a")" = set-aside ] && deny_set_aside
-    done
-    continue
-    ;;
   cd)
     [ $i -lt "$n" ] || continue
     to=$(unquote "${w[$i]}")

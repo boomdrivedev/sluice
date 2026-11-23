@@ -4147,7 +4147,6 @@ mod tests {
             flaky: None,
             not_run: None,
             failed_by: Vec::new(),
-            set_aside: None,
             log: None,
         }
     }

@@ -51,7 +51,7 @@ use sluice_core::{
     Lookup, Owed, Requester, Seams, Several, Sluice, Status, SubmitHead, SubmitRefusal,
     SubmitRequest, Unread, WithdrawRefusal, Withdrew,
 };
-use sluice_seams::{Decided, Outcome, Rev, SessionPlace, Submitter};
+use sluice_seams::{Decided, Rev, SessionPlace, Submitter};
 use told::Kind;
 
 /// Exits of a waiting submit and `sluice wait` (walkthrough section 5;
@@ -489,29 +489,6 @@ pub enum Command {
         /// branch holds it.
         #[arg(long)]
         branch: Option<String>,
-    },
-    /// Set aside a recorded result its host caused, not its test: no gate
-    /// reads it again, and its line stays. The operator's to do, never a
-    /// session's.
-    #[command(
-        name = "set-aside",
-        after_help = "Example:\n  $ sluice set-aside cli:tools --at 2026-10-17T13:05:32Z \\\n      --reason \"OrbStack was down\""
-    )]
-    SetAside {
-        /// The test, as its result names it.
-        task: String,
-        /// When the result was recorded, as `sluice status` gives it.
-        #[arg(long)]
-        at: String,
-        /// The start of the result's key, when two were recorded at once.
-        #[arg(long)]
-        hash: Option<String>,
-        /// Why the result says nothing of the test.
-        #[arg(long)]
-        reason: String,
-        /// One JSON document on stdout; the rest on stderr.
-        #[arg(long)]
-        json: bool,
     },
     /// Run the checks this worktree's head affects against a branch, or a
     /// command after `--`, under the host's bound, the worktree's ports
@@ -1701,7 +1678,6 @@ impl Cli {
                 Command::Overview { .. } => "overview",
                 Command::Amend { .. } => "amend",
                 Command::Withdraw { .. } => "withdraw",
-                Command::SetAside { .. } => "set-aside",
                 Command::Exec { .. } => "exec",
                 Command::Equip { .. } => "equip",
                 Command::Preview { .. } => "preview",
@@ -1759,7 +1735,6 @@ impl Cli {
                 | Command::Step { json, .. }
                 | Command::Amend { json, .. }
                 | Command::Withdraw { json, .. }
-                | Command::SetAside { json, .. }
                 | Command::Release { json, .. }
                 | Command::Protect { json, .. }
                 | Command::Forge {
@@ -2609,53 +2584,6 @@ fn dispatch(
                 Ok(2)
             }
         },
-        Command::SetAside {
-            task,
-            at,
-            hash,
-            reason,
-            json,
-        } => {
-            let by = format!(
-                "{}@{}",
-                std::env::var("USER").unwrap_or_else(|_| "someone".into()),
-                profiles::checks::hostname()
-            );
-            match s.set_aside(&task, &at, hash.as_deref(), &reason, &by) {
-                Ok(aside) => {
-                    serve();
-                    if json {
-                        writeln!(out, "{}", serde_json::to_string(&aside)?)?;
-                    } else {
-                        writeln!(
-                            out,
-                            "set aside {} {} recorded at {} on {} {}: {}",
-                            aside.task,
-                            &aside.hash[..aside.hash.len().min(12)],
-                            aside.run_at,
-                            aside.branch,
-                            aside.combination.short(),
-                            aside.reason
-                        )?;
-                        writeln!(
-                            out,
-                            "no gate reads it from now; its line stays in the results"
-                        )?;
-                    }
-                    Ok(0)
-                }
-                Err(e) => {
-                    told::tell(
-                        out,
-                        json,
-                        Kind::Refused,
-                        &format!("refused: {e:#}"),
-                        &["sluice status --all".to_string()],
-                    )?;
-                    Ok(2)
-                }
-            }
-        }
         Command::Exec {
             branch,
             command,
@@ -5199,11 +5127,6 @@ fn report(
                 if let Some(at) = &k.other.log {
                     writeln!(out, "  log of the run that {}: {at}", word(k.other.outcome))?;
                 }
-                // Could-not-run-1 116: a fail the host caused is the
-                // operator's to set aside.
-                if k.other.outcome == Outcome::Fail {
-                    writeln!(out, "  {}", words::set_aside_hint(&f.task, &k.other.at))?;
-                }
             }
             if !flaky.is_empty() {
                 writeln!(
@@ -5475,12 +5398,7 @@ fn ways_on(s: &Sluice<'_>, sub: &Submission, branch: &str) -> Result<Vec<String>
                 ways.push(words::fix_way_on(mover));
             }
             if !f.flaky.is_empty() {
-                let other_failed = f
-                    .ran
-                    .iter()
-                    .filter_map(|f| f.flaky.as_ref())
-                    .all(|k| k.other.outcome == Outcome::Fail);
-                ways.push(words::flaky_way_on(&f.flaky, other_failed));
+                ways.push(words::flaky_way_on(&f.flaky));
             }
         }
         State::Conflict => {

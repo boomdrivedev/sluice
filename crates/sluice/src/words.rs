@@ -35,27 +35,14 @@ pub fn flaky(task: &str, k: &FlakyKey) -> String {
     )
 }
 
-/// Could-not-run-1 116: the operator's way to set aside a fail the host
-/// caused, or a time limit did before sluice told those apart
-/// (time-limit-1 66).
-pub fn set_aside_hint(task: &str, at: &str) -> String {
+/// 19: how a head whose key reads flaky lands: once a real fix changes
+/// what the test reads, never a change to what it reads only to have it
+/// tested again, and no step of the operator's. A fail the host caused is
+/// a fault of sluice, which sluice fixes so such a run records no outcome
+/// (the change `sluice-host-makes-each-change`, design D4).
+pub fn flaky_way_on(tasks: &[&str]) -> String {
     format!(
-        "if the host or a time limit caused that fail, the operator can set it aside: \
-         sluice set-aside {task} --at {at} --reason \"…\""
-    )
-}
-
-/// 19, could-not-run-1 116: how a head whose key reads flaky lands. Never
-/// a change to what the test reads only to have it tested again.
-pub fn flaky_way_on(tasks: &[&str], other_failed: bool) -> String {
-    let which = if other_failed {
-        "the other result"
-    } else {
-        "this run's fail"
-    };
-    format!(
-        "the same head lands once the operator sets {which} aside, or once a real fix \
-         changes what {} {}",
+        "the same head lands once a real fix changes what {} {}; a fail the host caused, not the test, is a fault of sluice",
         tasks.join(", "),
         if tasks.len() == 1 { "reads" } else { "read" }
     )

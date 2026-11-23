@@ -473,15 +473,11 @@ fn a_flaky_failure_says_so() {
             format!("  log of this run: {this_log}"),
             format!("  log of the run that failed: {failed_log}"),
             format!(
-                "  if the host or a time limit caused that fail, the operator can set it aside: \
-                 sluice set-aside tests:t-batch-cards --at {at} --reason \"…\""
-            ),
-            format!(
                 "  {BRANCH} reads a test that passed and failed on the same inputs as failed \
                  (flaky = \"fail\")"
             ),
-            "the same head lands once the operator sets the other result aside, or once a \
-             real fix changes what tests:t-batch-cards reads"
+            "the same head lands once a real fix changes what tests:t-batch-cards reads; a \
+             fail the host caused, not the test, is a fault of sluice"
                 .to_string(),
         ],
         "{out}"
@@ -587,10 +583,15 @@ fn a_timed_out_submission_names_the_test_the_limit_ended() {
     assert!(!out.contains("flaky"), "{out}");
 }
 
-/// Could-not-run-1 116: the operator sets aside the fail a host caused;
-/// the same head then lands, and asking again for it is refused.
+/// run-outcome, "A flaky failure" (the change
+/// `sluice-host-makes-each-change`, design D4): a submission failed on a
+/// test read flaky against an earlier fail names that fail and when it was
+/// recorded, says that the same head lands once a real fix changes what
+/// the test reads and that a fail the host caused is a fault of sluice,
+/// and names no command that sets a result aside and no step of the
+/// operator's.
 #[test]
-fn a_fail_set_aside_lets_the_same_head_land() {
+fn a_flaky_failure_names_no_operators_step() {
     let f = setup();
     f.world
         .flaky("tests:t-batch-cards", &[Outcome::Fail, Outcome::Pass]);
@@ -602,41 +603,57 @@ fn a_fail_set_aside_lets_the_same_head_land() {
     );
     let submit = ["submit", BRANCH, "--worktree", "unit/batch-review"];
     assert_eq!(sluice(&f, &submit).0, FAILED);
-    assert_eq!(sluice(&f, &submit).0, FAILED, "the key reads flaky");
+    let (code, out) = sluice(&f, &submit);
+    assert_eq!(code, FAILED, "the key reads flaky: {out}");
     let (_, json) = sluice(&f, &["status", "2", "--json"]);
     let v: serde_json::Value = serde_json::from_str(&json).unwrap();
-    let at = v["failed"][0]["flaky"]["other"]["at"]
-        .as_str()
-        .unwrap()
-        .to_string();
-
-    let aside = [
+    let at = v["failed"][0]["flaky"]["other"]["at"].as_str().unwrap();
+    assert!(
+        out.contains(&format!(
+            "tests:t-batch-cards passed in this run and failed on the same inputs at {at}"
+        )),
+        "{out}"
+    );
+    assert!(
+        out.contains("the same head lands once a real fix changes what tests:t-batch-cards reads"),
+        "{out}"
+    );
+    assert!(
+        out.contains("a fail the host caused, not the test, is a fault of sluice"),
+        "{out}"
+    );
+    for word in [
         "set-aside",
-        "tests:t-batch-cards",
-        "--at",
-        &at,
-        "--reason",
-        "the engine was down",
-    ];
-    let (code, out) = sluice(&f, &aside);
-    assert_eq!(code, 0, "{out}");
-    assert!(out.starts_with("set aside tests:t-batch-cards "), "{out}");
-    assert!(
-        out.contains(&format!("recorded at {at} on {BRANCH} ")),
-        "{out}"
-    );
-    assert!(
-        out.ends_with(
-            ": the engine was down\nno gate reads it from now; its line stays in the results\n"
-        ),
-        "{out}"
-    );
-    let (code, out) = sluice(&f, &aside);
-    assert_eq!(code, 2, "{out}");
-    assert!(out.contains("already set aside"), "{out}");
+        "set it aside",
+        "sets the other result aside",
+        "operator",
+    ] {
+        assert!(!out.contains(word), "{word}: {out}");
+    }
+}
 
-    let (code, out) = sluice(&f, &submit);
-    assert_eq!(code, LANDED, "{out}");
+/// run-outcome, "set-aside is no command" (design D4): sluice says that
+/// `set-aside` is no command it knows, exits as for any such command, and
+/// writes nothing.
+#[test]
+fn set_aside_is_no_command() {
+    let d = support::OnDisk::new("cli-no-set-aside", ON_DISK);
+    let before = d.git.count();
+    let out = d.sluice(&[
+        "set-aside",
+        "cli:tools",
+        "--at",
+        "2026-10-17T13:05:32Z",
+        "--reason",
+        "x",
+    ]);
+    assert_eq!(out.status.code(), Some(sluice::USAGE), "{out:?}");
+    assert!(
+        String::from_utf8_lossy(&out.stderr).contains("unrecognized subcommand 'set-aside'"),
+        "{out:?}"
+    );
+    assert_eq!(d.git.count(), before, "nothing run");
+    assert!(!d.repo.dir().join(".git/sluice/set-aside.jsonl").exists());
 }
 
 #[test]
@@ -5436,11 +5453,48 @@ fn a_report_waited_on_elsewhere_names_the_agent_in_the_worktree_it_came_from() {
     sluice(&f, &submit);
     let (code, out) = sluice(&f, &["wait", "2", "--worktree", "unit/b"]);
     assert_eq!(code, FAILED, "{out}");
+    for word in ["your worktree", "inside", "set-aside", "operator"] {
+        assert!(!out.contains(word), "{word}: {out}");
+    }
+}
+
+/// submit-hints, "The operator's step" (the change
+/// `sluice-host-makes-each-change`, design D4): a blamed submission's way
+/// on, its check read flaky against a fail recorded earlier, names that
+/// fail and when it was recorded, and no step of the operator's and no
+/// command that sets a result aside.
+#[test]
+fn a_flaky_reports_way_on_names_no_operators_step() {
+    let f = setup();
+    f.world
+        .flaky("tests:t-batch-cards", &[Outcome::Fail, Outcome::Pass]);
+    work(
+        &f,
+        "unit/a",
+        "agent-a",
+        &[("tests/t_cards.py", Some("flaky"))],
+    );
+    let submit = ["submit", BRANCH, "--worktree", "unit/a", "--no-wait"];
+    sluice(&f, &submit);
+    assert_eq!(sluice(&f, &["wait", "1"]).0, FAILED);
+    sluice(&f, &submit);
+    let (code, out) = sluice(&f, &["wait", "2"]);
+    assert_eq!(code, FAILED, "{out}");
+    let (_, json) = sluice(&f, &["status", "2", "--json"]);
+    let v: serde_json::Value = serde_json::from_str(&json).unwrap();
+    let at = v["failed"][0]["flaky"]["other"]["at"].as_str().unwrap();
     assert!(
-        out.contains("the operator can set it aside: sluice set-aside tests:t-batch-cards --at "),
+        out.contains(&format!("failed on the same inputs at {at}")),
         "{out}"
     );
-    for word in ["your worktree", "inside"] {
+    let way_on = out.lines().last().unwrap_or_default();
+    assert_eq!(
+        way_on,
+        "the same head lands once a real fix changes what tests:t-batch-cards reads; a fail \
+         the host caused, not the test, is a fault of sluice",
+        "{out}"
+    );
+    for word in ["set-aside", "set it aside", "operator"] {
         assert!(!out.contains(word), "{word}: {out}");
     }
 }
