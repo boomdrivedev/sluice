@@ -5395,6 +5395,10 @@ fn passes_between_discoveries_start_no_git_and_ask_github_nothing() {
     g.on_main();
     let git = support::CountingGit::new();
     let run = |rounds: &str| -> (Vec<String>, Vec<(String, String)>) {
+        // Each run follows a host process of its own, which gets its token
+        // as it starts: whether the last one lived on between two runs is a
+        // matter of time, and its token no pass's ask.
+        support::kill_host_process(&mut g.command(env!("CARGO_BIN_EXE_sluice"), g.repo.dir()));
         g.discovery_passes();
         let (starts, calls) = (git.count(), g.gh.fake.requests().len());
         let child = git
