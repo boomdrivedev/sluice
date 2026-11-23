@@ -46,14 +46,21 @@ When the source ends, the watcher SHALL start it again within one tick. The watc
 - **WHEN** the watcher is killed with `SIGKILL` while its source serves a repository, and a pane event starts a new watcher
 - **THEN** within two ticks the killed watcher's source has ended, and one source runs
 
-### Requirement: Each document names its folder
+### Requirement: The reader takes a submission's folder and tests from the document
 
-The reader of the source SHALL keep each document under its own `host` and `repository`. To learn a submission's worktree or its blamed tests, the reader SHALL run `sluice status` in the `folder` that the document's line names.
+The reader of the source SHALL run no `sluice` command. It SHALL take a submission's folder from the document's `recent_paths` or `submissions[].from.path`. It SHALL take a blamed submission's failed tests from the document's `recent_failed`. (`reads-go-through-the-resident@69134e5825d7`)
 
-#### Scenario: A blame in the second repository
+#### Scenario: A blame that the watcher did not see queued
 
-- **WHEN** the source serves two repositories, and a line with `folder` set to the second repository's worktree shows `#9` blamed
-- **THEN** the reader runs `sluice status 9 --branch <branch> --json` in that worktree
+- **WHEN** the watcher starts, and the first document of a repository holds a new `blamed` line for `#9`, with `recent_paths` `{"9": "/w/sluice/unit-sidebar"}` and `recent_failed` `{"9": ["cli:test"]}`
+- **THEN** the toast says `sluice: #9 blamed on main` with `cli:test failed.`
+- **AND** the jump goes to the pane in `/w/sluice/unit-sidebar`
+- **AND** the reader ran no `sluice status`
+
+#### Scenario: A conflict in the second repository
+
+- **WHEN** the source serves two repositories, and a line with `folder` set to the second repository's worktree holds a new `conflict` line for `#4`, whose folder `recent_paths` gives
+- **THEN** the toast names `#4`, and the reader ran no `sluice status`
 
 ### Requirement: The watcher reads a repository's records only from its subscription
 
@@ -88,15 +95,6 @@ A document that holds no branch and no session SHALL mark its repository as havi
 - **WHEN** a repository with sluice and no records is on the subscription, and a submission is then queued there
 - **THEN** the next document of the repository is kept, and the popup shows the submission queued, with no wait of five minutes
 
-### Requirement: A sluice with no --stdin is named
-
-The watcher SHALL keep the source's standard error. When the source ends with `unexpected argument '--stdin'` or `unrecognized subcommand` in its standard error, the popup SHALL show one line: `<sluice> cannot serve the plugin's folders on one subscription: the plugin needs sluice <version>`. `<sluice>` SHALL be the first line of `sluice --version`. `<version>` SHALL be the version in `herdr-plugin.toml`. The next document that a source prints SHALL clear the line.
-
-#### Scenario: An older sluice on the host
-
-- **WHEN** the source exits 2 and writes `error: unexpected argument '--stdin' found` to its standard error, `sluice --version` prints `sluice 0.97.5`, and `herdr-plugin.toml` names `0.98.0`
-- **THEN** the popup shows `sluice 0.97.5 cannot serve the plugin's folders on one subscription: the plugin needs sluice 0.98.0`
-
 ### Requirement: A source with folders = true gets the folders on its input
 
 A source in `sources.toml` with `folders = true` SHALL run one time, and SHALL get the `add` and `remove` lines on its input. A source without `folders = true` SHALL run one time with its input closed.
@@ -113,13 +111,13 @@ A source in `sources.toml` with `folders = true` SHALL run one time, and SHALL g
 
 ### Requirement: The former key each_repository is refused
 
-A `sources.toml` that names `each_repository` SHALL be refused. The plugin's log SHALL name the line, and SHALL say that `folders = true` replaces it. The default source SHALL run. (`never-break-an-existing-client@b539ef8e2413`)
+A `sources.toml` that names `each_repository` SHALL be refused. The watcher SHALL run no source from that file. It SHALL NOT run the default source in its place. The plugin's log and the popup SHALL show the error `sources.toml line <n>: each_repository is not a key: use folders = true`. (`never-break-an-existing-client@b539ef8e2413`)
 
 #### Scenario: The former key
 
-- **WHEN** `sources.toml` names a source with `each_repository = true`
-- **THEN** the plugin's log names that line and says that `folders = true` replaces it
-- **AND** the default source runs
+- **WHEN** line 4 of `sources.toml` is `each_repository = true`
+- **THEN** the popup and the plugin's log show `sources.toml line 4: each_repository is not a key: use folders = true`
+- **AND** no source runs
 
 ## MODIFIED Requirements
 
@@ -167,3 +165,14 @@ The watcher SHALL run as one process beside its tick's sleep. Each source SHALL 
 
 - **WHEN** one herdr server has panes in ten repositories with sluice's records, there is no `sources.toml`, and the source has run for a tick
 - **THEN** the plugin's processes on the host are four
+
+### Requirement: The watcher only reads
+
+The watcher SHALL learn the queue only from its sources and from `sluice submit <branch> --check --json`. It SHALL NOT submit, withdraw, land or release anything.
+
+Before: the watcher also ran `sluice status <id> --json` for a blame or a conflict. Now: the document carries what it read there.
+
+#### Scenario: A blame
+
+- **WHEN** a document shows `#9` blamed
+- **THEN** the only sluice commands that the watcher runs are its source and forecasts
