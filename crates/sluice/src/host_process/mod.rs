@@ -1304,6 +1304,13 @@ async fn serve(
     }
     // When a stream the system would not start is started again.
     let mut revive_at: Option<Instant> = None;
+    // 135 (design D6): the folder held tells of its own removal or move.
+    let mut moves = hosting.folder.moves().unwrap_or_else(|e| {
+        log(&format!(
+            "sluice host: watching its folder: {e}; its file events and the minute's backstop read it"
+        ));
+        None
+    });
     let mut signalled = Box::pin(signalled_to_stop());
     let mut activity = hosting.tasks.activity();
     let mut room = hosting.room.subscribe();
@@ -1443,6 +1450,18 @@ async fn serve(
                     hosting, &mut listener, &mut take_up, lock, successor, telemetry, bound,
                 ).await {
                     return Ok(ending);
+                }
+            }
+            Some(()) = async {
+                match moves.as_mut() {
+                    Some(m) => m.recv().await,
+                    None => std::future::pending().await,
+                }
+            } => {
+                count(&EDGE.events);
+                if hosting.folder_gone() {
+                    log("sluice host: its state folder is gone; it ends");
+                    return end(hosting).await;
                 }
             }
             () = tokio::time::sleep_until(revive_at.unwrap_or(far)), if revive_at.is_some() => {
