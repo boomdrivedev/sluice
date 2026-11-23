@@ -1,3 +1,16 @@
+## ADDED Requirements
+
+### Requirement: A newer host process names the sluice to run for an older command's request
+
+A host process SHALL answer only the requests of its own release. It SHALL answer a request of an older command that it does not know with an error. The error SHALL name both versions and the sluice to run. (`never-break-an-existing-client@b539ef8e2413`)
+
+Before: a newer host process answered each request that an older command sends. Now: it answers only the requests of its own release, and names the sluice to run for any other.
+
+#### Scenario: An older command asks what a newer host process does not know
+
+- **WHEN** a command of sluice 0.71.0 sends a request that a host process of sluice 9.0.0 does not know
+- **THEN** the command gets an error that names both versions and tells it to run sluice 9.0.0
+
 ## MODIFIED Requirements
 
 ### Requirement: The host process reads each result once and answers by key
@@ -31,18 +44,18 @@ Before: a command that could not ask the host process read the results itself. N
 
 ### Requirement: A newer sluice's command has an older host process hand over
 
-A newer command that reaches an older host process SHALL have it hand its repositories over and end. It finishes each task's round, starts none, and lets its locks go. The command SHALL wait for it as long as it gives its tasks, then start its own. An older daemon starts afresh in place. An older command's request that the newer process does not know SHALL get an error naming the sluice to run.
+A newer sluice's command SHALL have an older host process hand over. The older process SHALL finish each task's round and let its locks and socket go. It SHALL then start the newer sluice in its place, with the same pid and its workers. Where the older process ends instead, the command SHALL start its own.
 
-Before: an older command used a newer host process. Now: it gets that error.
+Before: the successor was detached, and the runs lost their owner. Now: the successor starts in place and owns the runs. (`sluices-runs-end-with-its-host-process@e814b716f3b1`)
 
 #### Scenario: The host's sluice is upgraded
 
 - **WHEN** a host process of sluice 0.71.0 runs, and a submit of sluice 0.72.0 runs on the host
-- **THEN** the 0.71.0 process ends, a 0.72.0 host process runs, and the submission lands
+- **THEN** a 0.72.0 host process answers with the pid of the 0.71.0 process, and the submission lands
 
 #### Scenario: A round that outlasts a start's wait
 
-- **WHEN** a 0.72.0 command asks a 0.71.0 host process to hand over, and one of its tasks takes twelve seconds to finish its round
+- **WHEN** a 0.72.0 command asks a 0.71.0 host process to hand over, and the process ends after one of its tasks takes twelve seconds to finish its round
 - **THEN** the command waits for the 0.71.0 process to end, and then reaches a 0.72.0 host process of its own start
 
 ## REMOVED Requirements

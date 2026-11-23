@@ -34,91 +34,64 @@ take effect only with `services.sluice.enable` (record 0093 as amended
 
 ### Requirement: On nix-darwin the daemon is a launchd agent of the primary user
 
-With the daemon on, the nix-darwin module SHALL declare
-`launchd.user.agents.sluice`, which runs `sluice daemon` once the Nix
-store is mounted, at load and kept alive, its restarts no more than
-twice a minute, with the primary user's `HOME` and the profiles' `PATH`,
-a stop ending the daemon alone, and what it says before it holds the
-host in `~/Library/Logs/sluice-daemon.log`, as Boomdrive's runner's
-agent is kept.
+With the daemon on, the nix-darwin module SHALL declare `launchd.user.agents.sluice`. It SHALL run `sluice daemon` once the Nix store is mounted, at load and kept alive, with the user's `HOME` and the profiles' `PATH`. launchd SHALL end the job's process group when the job ends.
+
+Before: a stop of the agent ended the daemon alone. Now: it ends the job's process group. (`sluices-runs-end-with-its-host-process@e814b716f3b1`)
 
 #### Scenario: The agent
 
-- **WHEN** the nix-darwin system of "The nix-darwin module" enables the
-  module and sets `services.sluice.daemon.enable = true`
-- **THEN** `launchd.user.agents.sluice.serviceConfig` runs `/bin/sh -c
-  "/bin/wait4path /nix/store && exec <package>/bin/sluice daemon"`, with
-  `RunAtLoad`, `KeepAlive` and `AbandonProcessGroup` true,
-  `ThrottleInterval` 30, `HOME` `/Users/alice`, and a `PATH` that begins
-  `/etc/profiles/per-user/alice/bin` ("The daemon on nix-darwin" in
-  `nix/tests/darwin.nix`)
+- **WHEN** the nix-darwin system enables the module and sets `services.sluice.daemon.enable = true`
+- **THEN** `launchd.user.agents.sluice.serviceConfig` runs `/bin/sh -c "/bin/wait4path /nix/store && exec <program> daemon"`, with `RunAtLoad` and `KeepAlive` true, `AbandonProcessGroup` false, `ThrottleInterval` 30, `HOME` `/Users/alice`, and a `PATH` that begins `/etc/profiles/per-user/alice/bin`
 
 ### Requirement: On NixOS the daemon is a systemd user unit of the user who runs sluice
 
-With the daemon on, the NixOS module SHALL declare
-`systemd.user.services.sluice` for `services.sluice.user` alone, wanted
-by the user's default target, and SHALL make that user linger, so the
-daemon runs from boot with no one logged in. The unit SHALL run `sluice
-daemon` with the profiles' `PATH`, restarted always and never given up
-on, its stop ending the daemon alone, as Boomdrive's runner's unit is
-kept.
+With the daemon on, the NixOS module SHALL declare `systemd.user.services.sluice` for `services.sluice.user`, wanted by the default target, and SHALL make that user linger. The unit SHALL run `sluice daemon`, restarted always. Its stop SHALL end every process of the unit.
+
+Before: the unit's stop ended the daemon alone. Now: it ends each process of the unit. (`sluices-runs-end-with-its-host-process@e814b716f3b1`)
 
 #### Scenario: The unit
 
-- **WHEN** the NixOS system of "The NixOS module" enables the module and
-  sets `services.sluice.daemon.enable = true`
-- **THEN** `systemd.user.services.sluice` runs `<package>/bin/sluice
-  daemon` with `Restart` `always`, `KillMode` `process`,
-  `ConditionUser` alice and no start limit, it is wanted by
-  `default.target`, and `users.users.alice.linger` is true ("The daemon
-  on NixOS" in `nix/tests/nixos.nix`)
+- **WHEN** the NixOS system enables the module and sets `services.sluice.daemon.enable = true`
+- **THEN** `systemd.user.services.sluice` runs `<program> daemon` with `Restart` `always`, `KillMode` `control-group`, `ConditionUser` alice and no start limit, it is wanted by `default.target`, and `users.users.alice.linger` is true
 
 ### Requirement: On NixOS the user's activation restarts a changed daemon
 
-Since NixOS restarts no changed user unit, the activation of the user
-who runs sluice SHALL start the daemon's unit where it is not running,
-restart it where the running daemon's command line is not the unit's,
-and do nothing where they are one, waiting for no job and saying a line
-only where it started or restarted it. Any other user's activation SHALL
-do nothing.
+The activation of the user who runs sluice SHALL start the service where it does not run. Where the running host process runs another program than the profile's, the activation SHALL ask it to hand over and SHALL NOT restart the unit. It SHALL say a line only where it acted. Another user's activation SHALL do nothing.
+
+Before: the activation restarted the unit, and the runs lost their owner. Now: it asks a hand-over. (`sluices-runs-end-with-its-host-process@e814b716f3b1`)
 
 #### Scenario: Not running
 
-- **WHEN** `activate.sh keep alice <program> daemon` runs as alice, and
-  the unit has no main process
-- **THEN** it starts `sluice.service` without waiting, and says it
-  started it ("keep: not running" in `nix/tests/activate.sh`)
+- **WHEN** the activation runs as alice, and the unit has no main process
+- **THEN** it starts `sluice.service` without waiting, and says that it started it
 
 #### Scenario: Running another command line
 
-- **WHEN** it runs as alice, and the unit's main process runs another
-  sluice's `daemon`
-- **THEN** it restarts `sluice.service` without waiting, naming the
-  command line that ran ("keep: another command line" in
-  `nix/tests/activate.sh`)
+- **WHEN** it runs as alice, and the unit's main process runs another sluice's program
+- **THEN** it asks that host process to hand over to the profile's program, restarts nothing, and names the program that ran
 
 #### Scenario: Running the unit's command line
 
-- **WHEN** it runs as alice, and the unit's main process runs
-  `<program> daemon`
-- **THEN** it starts and restarts nothing and says nothing ("keep: the
-  unit's command line" in `nix/tests/activate.sh`)
+- **WHEN** it runs as alice, and the unit's main process runs the profile's program
+- **THEN** it asks nothing and says nothing
 
 #### Scenario: Another user
 
 - **WHEN** it runs as bob
-- **THEN** it asks the service manager nothing and says nothing ("keep:
-  another user" in `nix/tests/activate.sh`)
+- **THEN** it asks nothing and says nothing
 
 ### Requirement: The daemon's service runs the module's sluice
 
-The daemon's service SHALL run `services.sluice.package`'s sluice, so a
-new package changes its command line and restarts it. Where the package
-is null, it SHALL run the `sluice` the service's `PATH` finds.
+The service SHALL run the system profile's `bin/sluice`, so a new package changes no service. The user's activation SHALL run its `sluice hand-over`, which has a host process of another sluice start afresh as it. With no package, the service SHALL run the `sluice` that its `PATH` finds.
+
+Before: a new package restarted the daemon, and its runs lost their owner. Now: it is a hand-over, and the runs pass on. (`sluices-runs-end-with-its-host-process@e814b716f3b1`)
+
+#### Scenario: A new package
+
+- **WHEN** a host process of the module's former package runs a combination's checks, and the system is switched to a new package
+- **THEN** the service is not restarted, the host process answers with the new version and the same pid, and the checks continue
 
 #### Scenario: No package
 
-- **WHEN** the nix-darwin system sets `services.sluice.package = null`
-  and `services.sluice.daemon.enable = true`
-- **THEN** the agent's line runs `exec sluice daemon` ("The daemon with
-  no package" in `nix/tests/darwin.nix`)
+- **WHEN** the nix-darwin system sets `services.sluice.package = null` and `services.sluice.daemon.enable = true`
+- **THEN** the agent's line runs `exec sluice daemon`
