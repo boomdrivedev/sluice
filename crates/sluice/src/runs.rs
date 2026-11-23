@@ -28,7 +28,9 @@
 //!   pgid           the command's process group, once it is spawned
 //!   out.log        the command's stdout and stderr
 //!   out.times      when out.log grew: `<length> <time>` a line (ADR 0042)
-//!   result.json    how it ended; written last, by rename
+//!   result.json    how it ended; written last while `lock` is held, by
+//!                  rename
+//!   unlocked       written once the supervisor let go of `lock`
 //!   release.log    the release command's stdout and stderr
 //!   released       the release command finished; written last
 //!   watch.out      the watch's stdout, where the request names a watch
@@ -752,6 +754,18 @@ pub fn supervise(dir: &Path) -> Result<()> {
         .open(dir.join("lock"))?;
     lock.lock()?;
     std::fs::write(dir.join("lock"), format!("{}\n", std::process::id()))?;
+    let ran = run_held(dir, started);
+    // The run counts while `lock` is held, and letting it go is no event
+    // of the file system: `unlocked`, written once it is let go, is the
+    // event that tells a watch of the run folder the run no longer counts,
+    // which `result.json`, written while it is held, cannot.
+    drop(lock);
+    let _ = write_atomic(&dir.join("unlocked"), now().as_bytes());
+    ran
+}
+
+/// The run in `dir`, its supervisor holding its lock, to its end.
+fn run_held(dir: &Path, started: String) -> Result<()> {
     if read_ended(dir)?.is_some() {
         return Ok(());
     }
