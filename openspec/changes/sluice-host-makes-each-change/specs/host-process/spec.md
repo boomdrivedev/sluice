@@ -19,5 +19,6 @@ Before: the submit wrote its submission itself. Now: `sluice host` writes it.
 
 #### Scenario: A submit with no git
 
-- **WHEN** `sluice host` runs, and `sluice submit main --no-wait` runs in a worktree with no git on its `PATH`
+- **WHEN** `sluice host` runs, and `sluice submit main --no-wait` runs in a worktree
 - **THEN** it exits 0 with the submission's number, and the submission names the worktree's head
+- **AND** the submit ran no git but the upkeep of the branch protection's hook

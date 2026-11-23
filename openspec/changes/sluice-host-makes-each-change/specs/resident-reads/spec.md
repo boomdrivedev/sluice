@@ -18,5 +18,6 @@ Before: `sluice previews` read the previews' records in its own process. Now: `s
 
 #### Scenario: The previews
 
-- **WHEN** a preview of `main` is up, and `sluice previews --json` runs with no git on its `PATH`
+- **WHEN** a preview of `main` is up, and `sluice previews --json` runs
 - **THEN** it prints the preview as `sluice previews --json` printed it before this change, and exits 0
+- **AND** the command ran no git but the upkeep of the branch protection's hook
