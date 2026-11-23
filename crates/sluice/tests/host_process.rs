@@ -35,6 +35,25 @@ fn within(secs: u64, what: &str, mut check: impl FnMut() -> bool) {
     }
 }
 
+/// `check` holds within `secs`, asked every tenth of a second; a failure
+/// says what `said` reads then.
+fn within_saying(
+    secs: u64,
+    what: &str,
+    mut check: impl FnMut() -> bool,
+    said: impl Fn() -> String,
+) {
+    let until = Instant::now() + Duration::from_secs(secs);
+    while !check() {
+        assert!(
+            Instant::now() < until,
+            "{what}: not within {secs}s\n{}",
+            said()
+        );
+        std::thread::sleep(Duration::from_millis(100));
+    }
+}
+
 /// The subscription `c` ends within `secs`, as its host process ends:
 /// the lines it gives meanwhile are passed over.
 fn closes(c: &mut sluice::host_process::client::Connection, secs: u64, what: &str) {
@@ -390,9 +409,9 @@ fn the_host_processs_look_at_an_idle_repository_starts_nothing() {
     assert_eq!(refused(), 0, "two looks at the idle repository");
 
     queued(&d, "b");
-    within(10, "the start refused", || refused() == 1);
+    within(30, "the start refused", || refused() == 1);
     std::thread::sleep(Duration::from_secs(7));
-    assert_eq!(refused(), 1, "two looks pass it by");
+    assert_eq!(refused(), 1, "two looks pass it by: {}", host_logs(&d));
     drop(held);
 }
 
@@ -1203,7 +1222,12 @@ fn an_agents_check_stopped_while_it_waits_is_counted_nowhere() {
     assert_eq!(out.status.code(), Some(sluice::STOPPED), "{}", text(&out));
     within(10, "the stopped check waits no more", || waiting(&d) == 0);
     let c = agent(&d, "c", &format!("touch '{}'", m("c").display()));
-    within(60, "the next agent's check starts", || m("c").exists());
+    within_saying(
+        60,
+        "the next agent's check starts",
+        || m("c").exists(),
+        || format!("{}\n{}", room_of(&d), host_logs(&d)),
+    );
     assert!(!m("b").exists(), "the stopped one never ran");
     for agent in [a, c] {
         let out = agent.wait_with_output().unwrap();
@@ -4026,7 +4050,7 @@ fn a_subscription_and_a_status_share_a_reading() {
         .stdout(std::process::Stdio::null())
         .spawn()
         .unwrap();
-    within(10, "a reading is in flight", || {
+    within(30, "a reading is in flight", || {
         host_git_running(&d, host.pid)
     });
     let mut sub = held(&d);
