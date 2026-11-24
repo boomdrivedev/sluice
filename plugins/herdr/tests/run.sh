@@ -159,7 +159,7 @@ reap() {
   for l in "$scratch"/t*/state/watch.lease "$scratch"/t*/state/*/*/watch.lease; do
     [ -f "$l" ] || continue
     p=$(holder_of "$l")
-    [ -n "$p" ] && [ "$p" != $$ ] && kill "$p" 2>/dev/null && rp_pids="$rp_pids $p"
+    [ -n "$p" ] && [ "$p" != $$ ] && kill "$p" 2>/dev/null && rp_pids="$rp_pids $p" && rp_all="$rp_all $p"
   done
   rp_n=100
   for p in $rp_pids; do
@@ -169,7 +169,28 @@ reap() {
     done
   done
 }
-trap 'reap; rm -rf "$scratch"' EXIT
+# At the end, a watcher the last test started may take its lease after a
+# first look: reap until half a second has passed with none found, then
+# wait up to twenty seconds for every watcher ended to be gone.
+rp_all=
+reap_all() {
+  ra_still=0
+  ra_n=100
+  while [ "$ra_still" -lt 5 ] && [ "$ra_n" -gt 0 ]; do
+    reap
+    if [ -z "$rp_pids" ]; then ra_still=$((ra_still + 1)); else ra_still=0; fi
+    sleep 0.1
+    ra_n=$((ra_n - 1))
+  done
+  ra_n=200
+  for p in $rp_all; do
+    while kill -0 "$p" 2>/dev/null && [ "$ra_n" -gt 0 ]; do
+      sleep 0.1
+      ra_n=$((ra_n - 1))
+    done
+  done
+}
+trap 'reap_all; rm -rf "$scratch"' EXIT
 woken=0
 trap 'woken=$((woken + 1))' USR1
 scratch=$(cd "$scratch" && pwd -P)
