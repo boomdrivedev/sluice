@@ -275,7 +275,9 @@ pub fn not_borne_out(task: &str, why: &str) -> String {
 pub fn key_held(branch: &str, hold: &sluice_core::records::KeyHold) -> String {
     let ids: Vec<String> = hold.ids.iter().map(|id| format!("#{id}")).collect();
     format!(
-        "held: {check}'s key names {file}, which the tree of {branch} does not hold,          so nobody is blamed and {ids} wait; they are tested again once a revision of          {branch} changes {check}'s inputs ({why})",
+        "held: {check}'s key names {file}, which the tree of {branch} does not hold, \
+         so nobody is blamed and {ids} wait; they are tested again once a revision of \
+         {branch} changes {check}'s inputs ({why})",
         check = hold.check,
         file = hold.file,
         ids = and_list(&ids),
