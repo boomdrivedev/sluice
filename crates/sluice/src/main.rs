@@ -154,10 +154,16 @@ fn main() {
                 1
             }
             ("reference-transaction", _, _) => 0,
-            (other, _, _) => {
-                eprintln!("sluice runs no {other} hook");
-                sluice::USAGE
+            // A hook sluice runs none of passes, said once, as a
+            // transaction the protection cannot read does (124).
+            (other, "prepared", _) => {
+                eprintln!(
+                    "{}",
+                    sluice::protect::unread(&anyhow::anyhow!("sluice runs no {other} hook"))
+                );
+                0
             }
+            (_, _, _) => 0,
         };
         std::process::exit(code);
     }
