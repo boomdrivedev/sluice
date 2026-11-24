@@ -112,6 +112,18 @@ cargo's locks and its record of use kept declares the folder one of its
   first ends. Each agent's check now holds until the test lets it end,
   once the overview shows the combination and the third agent waiting
   for room.
-- `host_process a_newer_client_has_an_older_host_process_hand_over`
-  and `an_upgrade_keeps_its_runs_as_children` read the host process's
-  pid after a hand-over.
+  It passes 12 times in 12 under three suites at once.
+- `host_process a_records_write_reaches_a_watch_by_its_file_event` held
+  the document to two seconds after the file events' debounce, and took
+  2.5 seconds under three suites at once. The bound is a bound on
+  speed: it moves to `a_records_write_reaches_a_watch_by_its_file_event_at_speed`,
+  which `cli:speed` runs on a quiet host and no gate does. The test that
+  stays holds that a file event, not the minute's reading, brings the
+  document.
+- `host_process an_upgrade_keeps_its_runs_as_children` and
+  `a_newer_client_has_an_older_host_process_hand_over` read the host
+  process's pid after a hand-over. The second failed once in three
+  suites at once, its host process another pid after the hand-over;
+  neither failed in 12 runs of each under the same load. Its assertion
+  now prints the host process's log, as the first's does, so the next
+  fail says why.

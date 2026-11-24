@@ -45,8 +45,10 @@ load.
 - **The held-landing tests step until a round runs.** A step that
   finds the host process's own round holding the branch's lock runs
   no round. The test asked once and read the state too early.
-- **The host process tests that hold a time under load** are found and
-  fixed, or leave the functional suite for `cli:speed` (design D5).
+- **s75 waits on events, and a bound on speed leaves the gate.** s75's
+  agents hold their checks until the test lets them end. The bound on
+  how soon a records write reaches a watch moves to a test that only
+  `cli:speed` runs (design D5).
 
 ## Capabilities
 
@@ -60,6 +62,8 @@ None.
   fail, and names what was refused.
 - `host-caches`: a sandboxed moon run writes its task archives.
 - `moon-runner`: a run held from the network is told it is offline.
+- `host-events`: the bound on how soon a records write reaches a watch
+  is held on a quiet host, by `cli:speed`.
 
 ## Out of scope
 

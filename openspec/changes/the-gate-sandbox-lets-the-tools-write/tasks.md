@@ -25,4 +25,5 @@ id.
 
 - [x] 3.1 The held-landing tests step until a step runs a round (design D5). True when `sluice exec main -- cargo nextest run -p sluice --features tools --test remote_branch -E 'test(a_held_landing)'` passes.
 - [x] 3.2 `s75_a_combination_starts_before_a_third_agents_check` holds each agent's check until the overview shows what waits for room. True when `sluice exec main -- cargo nextest run -p sluice --test host_process -E 'test(s75)'` passes.
-- [ ] 3.3 The hand-over tests read the host process's pid as it is after a hand-over under load (design D5). True when `sluice exec main -- cargo nextest run -p sluice --test host_process -E 'test(hand_over) or test(an_upgrade)'` passes.
+- [x] 3.3 The bound on how soon a records write reaches a watch moves to its `_at_speed` test, and the test that stays waits up to 30 seconds (design D5). True when `sluice exec main -- cargo nextest run -p sluice --test host_process -E 'test(a_records_write_reaches_a_watch_by_its_file_event)'` passes.
+- [x] 3.4 The hand-over test's pid assertion prints the host process's log (design D5). True when `sluice exec main -- cargo nextest run -p sluice --test host_process -E 'test(hand_over) or test(an_upgrade)'` passes.
