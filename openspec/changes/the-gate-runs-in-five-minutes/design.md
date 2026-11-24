@@ -240,15 +240,19 @@ fetches `refs/sluice/state/<branch>` every time it is called, and a
 round reads the branch's state about thirty times. `read_held`, which
 reads the state as last fetched with no fetch, exists beside it.
 
-The cut: a round fetches a branch's state once, at its start, and reads
-it as fetched from then on; a write stays a leased push with the
+The cut, built: while a binding holds a branch's lock, which a round
+takes once, it fetches the branch's state from each remote once and
+reads what it fetched or wrote from then on (`remote_refs.rs`,
+`Rounds`, shared with the router in `records.rs`, which takes the
+locks); a write stays a leased push with the
 expected old commit (rule core.5), and only a push the remote refused
 fetches again. A host on GitHub saves the same calls over the network,
 each slower than a local fetch, and from the app's allowance (rule
-core.29). Expected: a step's fetches from about 33 to 2 or 3, its
-`git` calls about halved, an idle step from about 4.4 s unwrapped to
-about 2 s, and the `pull_requests` tests, 69% of `cli:tools`, about
-half as long.
+core.29). Measured after it, the same test: fetches of the state ref
+147 to 68, a step that runs no check 5.3 to 6.3 s to 2.5 s, the five
+steps 31.6 s to 17.6 s, the test 28 s to 24 s alone. The fetches left
+are reads outside a round, a status's and intake's, which fetch as
+they should.
 
 ### D7. Where the pull request scenarios run
 

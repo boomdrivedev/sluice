@@ -32,6 +32,8 @@ and written into design.md's table of expected gate time.
 - [x] 4.2 `s56_a_refused_request_waits_for_its_submitter` is three tests, one for each scenario. True when `sluice exec main -- cargo nextest run -p sluice --features tools --test pull_requests -E 'test(s56)'` passes.
 - [x] 4.3 Count the processes one `sluice step` of the `pull_requests` fixture starts, the `git` calls among them, and where its time goes, and write it into design D6. True when design D6 gives them, measured.
 
+- [x] 4.4 A round fetches its branch's state once from each remote, reading what it fetched or wrote from then on, and fetches again after a refused write (design D6). True when `sluice exec main -- cargo nextest run -p sluice --features tools --test remote_refs -E 'test(a_round_fetches_the_state_once)'` passes.
+
 ## 5. moon's results are kept for a replay
 
 - [x] 5.1 Find whether a combination's run can write moon's shared store under the sandbox (design D9). True when design D9 records it.

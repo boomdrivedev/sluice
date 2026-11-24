@@ -40,6 +40,10 @@ pub struct Records {
     common: PathBuf,
     signing: Option<instance::Signing>,
     remotes: RefCell<BTreeMap<String, Rc<RemoteRefs>>>,
+    /// The branches whose locks this binding holds, shared with each
+    /// remote's profile, which fetches a branch's state once a round (the
+    /// change `the-gate-runs-in-five-minutes`, design D6).
+    rounds: super::remote_refs::Rounds,
     /// Record 0122 (design D2): where each branch was last routed within
     /// this pass, read again at every lock, read and write and forgotten
     /// at the next pass.
@@ -194,6 +198,7 @@ impl Records {
             common: common.to_path_buf(),
             signing,
             remotes: RefCell::default(),
+            rounds: Rc::default(),
             routes: RefCell::default(),
             seeded: BTreeMap::new(),
             read_from: RefCell::default(),
@@ -515,7 +520,8 @@ impl Records {
         };
         let r = Rc::new(
             RemoteRefs::new(&self.common, self.branches.pushed_refs(remote)?, signing)
-                .sharing_locks(self.locks.clone()),
+                .sharing_locks(self.locks.clone())
+                .sharing_rounds(self.rounds.clone()),
         );
         if self.held.get() {
             r.hold();
@@ -706,20 +712,22 @@ impl State for Records {
         let Some(remote) = self.locks.lock(branch)? else {
             return Ok(None);
         };
-        Ok(Some(Box::new(BothLocks {
+        let both = Box::new(BothLocks {
             _own: own,
             _remote: remote,
-        })))
+        });
+        Ok(Some(super::remote_refs::round(&self.rounds, branch, both)))
     }
 
     fn wait_lock<'a>(&'a self, branch: &str) -> Result<Box<dyn Guard + 'a>> {
         self.route(branch)?;
         let own = self.local.wait_lock(branch)?;
         let remote = self.locks.wait_lock(branch)?;
-        Ok(Box::new(BothLocks {
+        let both = Box::new(BothLocks {
             _own: own,
             _remote: remote,
-        }))
+        });
+        Ok(super::remote_refs::round(&self.rounds, branch, both))
     }
 
     fn publish_head(&self, branch: &str, head: &Rev) -> Result<()> {
