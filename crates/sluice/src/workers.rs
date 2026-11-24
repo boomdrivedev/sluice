@@ -168,6 +168,18 @@ pub fn take(command: &mut Command, what: &str) {
     let Some(owner) = owner() else {
         return;
     };
+    // The change `the-git-hook-asks-sluice-host`, design D3: a git command
+    // of `sluice host` carries its name, so the hook lets its transaction
+    // go with no ask; no other worker does, a check, a session's command,
+    // a preview's command, a release command or an equip step among them,
+    // so a write of theirs to a protected branch is judged.
+    match what {
+        "git" => command.env(
+            crate::protect::HOST_VAR,
+            crate::protect::host_name(owner.pid, owner.start),
+        ),
+        _ => command.env_remove(crate::protect::HOST_VAR),
+    };
     let held = Held {
         owner: owner.pid,
         owner_start: owner.start,

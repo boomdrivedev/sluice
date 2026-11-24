@@ -166,9 +166,11 @@ details.
 ## 4. Branch protection
 
 Every branch with a `[branches]` section is protected: only sluice moves
-it. `sluice protect` (and every `submit`, `step` and `run`) installs a
-git `reference-transaction` hook that refuses any other update and logs
-the attempt:
+it. `sluice protect` (and every `submit`, `wait`, `step` and `run`)
+installs a git `reference-transaction` hook. The hook reads nothing
+itself: it sends each update git makes to sluice's host process,
+starting it where none runs, and the host process refuses any update
+to a protected branch that sluice did not make, and logs the attempt:
 
 ```console
 $ git merge touches        # on feature/concurrent-units
@@ -176,7 +178,19 @@ error: feature/concurrent-units is protected by sluice; submit the change to slu
 ```
 
 The hook calls the installed `sluice`, never one built from a submission,
-so no submission changes the guard that judges it.
+so no submission changes the guard that judges it. The host process
+puts the hook back for its own `sluice` as it answers each command in
+the repository, so an upgraded sluice guards the branch from its next
+command. sluice's own git commands carry the host process's name, so
+the hook lets them through without asking.
+
+Where the host process does not answer within ten seconds, the hook
+refuses the update rather than let it through unjudged:
+
+```console
+error: sluice's host process did not answer within 10 seconds, so sluice's branch protection refuses this write
+  `sluice protect --remove` takes sluice's branch protection out of this repository
+```
 
 On a forge, the same is the forge's branch protection, with sluice's
 identity the only one allowed to push.

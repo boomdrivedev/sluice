@@ -9,7 +9,11 @@ mod support;
 
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output, Stdio};
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
+
+use sluice::host_process::client::{Client, Connection};
+use sluice::host_process::protocol::{Added, FollowKind};
 
 use sluice::profiles::local_refs::LocalRefs;
 use sluice_seams::{Branch, Moved, Rev};
@@ -812,15 +816,17 @@ fn sl_ended(repo: &Repo, args: &[&str]) -> Output {
     child.wait_with_output().unwrap()
 }
 
-/// S64, record 0110: a round's fetch of a branch kept on its remote, with
-/// enough refs in loose files that git's maintenance after the fetch packs
-/// them, runs the hook on the pruning of `bolt/x`'s loose file while
-/// sluice's fetch holds the repository's fetch lock. The packing passes
-/// with no record read, and the round ends (deneb, 2026-11-10: a submit's
-/// fetch of #235 and the hook it ran waited on each other for forty
-/// minutes).
+/// S64, record 0110, design D3 of the change
+/// `the-git-hook-asks-sluice-host`: a round's fetch of a branch kept on its
+/// remote, with enough refs in loose files that git's maintenance after the
+/// fetch packs them, runs the hook on the pruning of `bolt/x`'s loose file.
+/// The fetch's git carries the name of `sluice host`, so the hook lets it
+/// go asking nothing: the round ends, `bolt/x` is packed at the revision it
+/// held, and `sluice host`'s log names no request of the hook (deneb,
+/// 2026-11-10: a submit's fetch of #235 and the hook it ran waited on each
+/// other for forty minutes).
 #[test]
-fn a_fetch_whose_packing_runs_the_hook_ends() {
+fn a_fetch_whose_packing_runs_the_hook_asks_nothing() {
     let (_bare, repo) = kept_on_origin("protect-fetch-packs");
     // The tests' git configuration turns git's maintenance off; this test
     // is of a fetch whose maintenance packs, so the repository turns it on.
@@ -831,6 +837,8 @@ fn a_fetch_whose_packing_runs_the_hook_ends() {
         repo.git(&["branch", &format!("loose/{i}"), "main"]);
     }
     assert!(repo.dir().join(".git/refs/heads/bolt/x").exists());
+    let _kept = kept(&repo);
+    let before = host_log(&repo).len();
 
     let out = sl_ended(&repo, &["step", "bolt/x"]);
     assert!(out.status.success(), "{}", text(&out));
@@ -839,59 +847,106 @@ fn a_fetch_whose_packing_runs_the_hook_ends() {
         "the fetch's maintenance packed nothing, so ran no hook on bolt/x"
     );
     assert_eq!(repo.rev("bolt/x"), tip);
+    let log = host_log(&repo);
+    let since = &log[before.min(log.len())..];
+    assert!(!since.contains("reference transaction"), "{since}");
 }
 
-/// Record 0110: a hook run under a fetch of sluice's own takes no fetch
-/// lock and fetches nothing, though it records a refusal in records kept
-/// on the remote. Here a hook sluice's chains hands the hook a move of
-/// `bolt/y`, whose lock the round on `bolt/x` does not hold, in each
-/// transaction the round's git makes. The hook refuses it under the
-/// round's fetch, told the lock its ancestor holds, and ends; so does the
-/// round.
+/// Design D3 of the change `the-git-hook-asks-sluice-host`: a write whose
+/// git carries in `SLUICE_HOST_PROCESS` the pid and start time of a process
+/// that has ended, or of a running process at another start time, names
+/// no live `sluice host`: the hook asks `sluice host`, and the write is
+/// refused. The name of a process that runs, as it started, is let go with
+/// no ask.
 #[test]
-fn a_hook_under_sluices_own_fetch_fetches_nothing() {
-    let (_bare, repo) = kept_on_origin("protect-fetch-hook");
-    repo.git(&["branch", "bolt/y", "main"]);
-    repo.git(&["push", "-q", "origin", "bolt/y"]);
-    let tip = repo.rev("bolt/y");
-    let other = repo.branch("unit/a", "main", &[("a.txt", Some("a\n"))]);
-    let judged = repo.dir().join(".git/judged");
-    let chained = repo
-        .dir()
-        .join(".git/hooks/reference-transaction.pre-sluice");
-    // Run once per transaction of the round's, never again for the
-    // transactions the hook's own recording makes.
-    std::fs::write(
-        &chained,
-        format!(
-            "#!/bin/sh\n[ \"$1\" = prepared ] && [ -z \"$PROTECT_TEST_HOOK\" ] || exit 0\n\
-             export PROTECT_TEST_HOOK=1\ncat >/dev/null\n\
-             printf '%s %s refs/heads/bolt/y\\n' {tip} {other} | '{sluice}' hook \
-             reference-transaction prepared 2>/dev/null\n\
-             echo \"judged $? under ${{SLUICE_FETCH_HELD:-no fetch}}\" >> '{judged}'\nexit 0\n",
-            sluice = sluice(),
-            judged = judged.display(),
-        ),
-    )
-    .unwrap();
-    std::fs::set_permissions(
-        &chained,
-        std::os::unix::fs::PermissionsExt::from_mode(0o755),
-    )
-    .unwrap();
-
-    let out = sl_ended(&repo, &["step", "bolt/x"]);
+fn a_name_that_an_ended_sluice_host_gave_is_asked() {
+    let (repo, _) = protected("protect-ended-name");
+    let _kept = kept(&repo);
+    let tip = repo.rev("bolt/x");
+    let head = repo.rev("unit/a");
+    let named = |value: &str| {
+        support::git_command()
+            .current_dir(repo.dir())
+            .args(["update-ref", "refs/heads/bolt/x", &head])
+            .env(sluice::protect::HOST_VAR, value)
+            .env("XDG_CONFIG_HOME", repo.dir().join(".git/no-config"))
+            .env("XDG_STATE_HOME", state_of(&repo))
+            .env_remove("GIT_DIR")
+            .env_remove("GIT_WORK_TREE")
+            .stdin(Stdio::null())
+            .output()
+            .unwrap()
+    };
+    let mut ended = Command::new("true").spawn().unwrap();
+    let gone = ended.id();
+    ended.wait().unwrap();
+    let me = std::process::id();
+    let started = sluice::workers::started(me as i32).expect("this process's start");
+    for value in [
+        sluice::protect::host_name(gone, started),
+        sluice::protect::host_name(me, started + 1),
+        "not a name".to_string(),
+    ] {
+        let out = named(&value);
+        let t = text(&out);
+        assert_eq!(out.status.code(), Some(128), "{value}: {t}");
+        assert!(t.contains("bolt/x is protected by sluice"), "{value}: {t}");
+        assert_eq!(repo.rev("bolt/x"), tip);
+    }
+    let before = host_log(&repo).len();
+    let out = named(&sluice::protect::host_name(me, started));
     assert!(out.status.success(), "{}", text(&out));
-    let lock = std::fs::canonicalize(repo.dir().join(".git"))
-        .unwrap()
-        .join("sluice-fetch.lock");
-    let said = std::fs::read_to_string(&judged).unwrap_or_default();
+    assert_eq!(repo.rev("bolt/x"), head);
+    let log = host_log(&repo);
     assert!(
-        said.lines()
-            .any(|l| l == format!("judged 1 under {}", lock.display())),
-        "{said}"
+        !log[before.min(log.len())..].contains("reference transaction"),
+        "{log}"
     );
-    assert_eq!(repo.rev("bolt/y"), tip);
+}
+
+/// Design D3 of the change `the-git-hook-asks-sluice-host`: a command a
+/// session runs through `sluice exec` carries no name of `sluice host`, so
+/// a write of its git to a protected branch is judged and refused.
+#[test]
+fn a_check_that_writes_main_is_refused() {
+    let (repo, _) = protected("protect-check-writes");
+    let tip = repo.rev("bolt/x");
+    let head = repo.rev("unit/a");
+    // The check's git finds `sluice host` from the home a run keeps: one
+    // under the test's folders.
+    let home = repo.dir().join(".git/home");
+    std::fs::create_dir_all(&home).unwrap();
+    let out = support::isolated(&mut Command::new(sluice()))
+        .current_dir(repo.dir())
+        .args([
+            "exec",
+            "bolt/x",
+            "--",
+            "git",
+            "update-ref",
+            "refs/heads/bolt/x",
+            &head,
+        ])
+        .env("HOME", &home)
+        .env("XDG_CONFIG_HOME", repo.dir().join(".git/no-config"))
+        .env("XDG_STATE_HOME", state_of(&repo))
+        .stdin(Stdio::null())
+        .output()
+        .unwrap();
+    let t = text(&out);
+    assert!(!out.status.success(), "{t}");
+    // Judged by a `sluice host` the check's git reaches, or refused where
+    // the run's executor keeps it from reaching one (design D2).
+    assert!(
+        t.contains("bolt/x is protected by sluice")
+            || t.contains("sluice's branch protection refuses this write"),
+        "{t}"
+    );
+    assert!(
+        t.contains("update aborted by the reference-transaction hook"),
+        "{t}"
+    );
+    assert_eq!(repo.rev("bolt/x"), tip);
 }
 
 /// 1, 124: a refusal tells whoever ran it, before git's own error, that
@@ -972,7 +1027,8 @@ fn a_local_branchs_refusals_say_the_command() {
 }
 
 /// git in `dir` naming the repository `git_dir`, as a fetch into a bare
-/// repository run from elsewhere does.
+/// repository run from elsewhere does; its hook asks the `sluice host` of
+/// the repository's own state folder, which `sluice protect` started.
 fn git_named(git_dir: &Path, dir: &Path, args: &[&str]) -> Output {
     support::git_command()
         .current_dir(dir)
@@ -981,6 +1037,8 @@ fn git_named(git_dir: &Path, dir: &Path, args: &[&str]) -> Output {
         .args(args)
         .env_remove("GIT_DIR")
         .env_remove("GIT_WORK_TREE")
+        .env("XDG_CONFIG_HOME", git_dir.join("no-config"))
+        .env("XDG_STATE_HOME", git_dir.join("no-state"))
         .stdin(Stdio::null())
         .output()
         .unwrap()
@@ -1100,6 +1158,8 @@ fn a_transaction_the_protection_cannot_read_passes_said_once() {
         .current_dir(repo.dir())
         .args(["update-ref", "--stdin"])
         .env_remove("GIT_DIR")
+        .env("XDG_CONFIG_HOME", repo.dir().join(".git/no-config"))
+        .env("XDG_STATE_HOME", state_of(&repo))
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -1135,6 +1195,9 @@ fn a_transaction_the_protection_cannot_read_passes_said_once() {
 #[test]
 fn settings_the_hook_does_not_know_change_nothing_it_guards() {
     let (repo, held) = protected("protect-later-settings");
+    // `sluice host` keeps the settings it started with, and judges by the
+    // settings as the hook reads them, passing over what it does not know.
+    let _kept = kept(&repo);
     host_settings(&repo, "[runs]\ncores = 12\n\n[later]\nx = 1\n");
     let tip = repo.rev("bolt/x");
     let head = repo.rev("unit/a");
@@ -1201,6 +1264,9 @@ fn a_policy_field_the_hook_does_not_know_changes_nothing_it_guards() {
 fn a_copy_is_judged_under_fields_the_hook_does_not_know() {
     let (_bare, repo, _held, copy, remote) =
         copy_apart_with("protect-later-copy", "later = true\n");
+    // `sluice host` keeps the settings it started with, and judges by the
+    // settings as the hook reads them, passing over what it does not know.
+    let _kept = kept(&repo);
     host_settings(&repo, "[later]\nx = 1\n");
     let out = repo.git_raw(&["update-ref", "refs/heads/bolt/x", &remote]);
     let t = text(&out);
@@ -1236,6 +1302,9 @@ fn settings_or_a_policy_the_hook_cannot_read_pass_said_once() {
     };
 
     let (repo, _) = protected("protect-unread-settings");
+    // `sluice host` keeps the settings it started with, and reads them
+    // afresh for the hook (design D2).
+    let _kept = kept(&repo);
     let path = host_settings(&repo, "[runs\nnot toml");
     unread(&repo, &[&path.display().to_string()]);
 
@@ -1249,12 +1318,13 @@ fn settings_or_a_policy_the_hook_cannot_read_pass_said_once() {
     );
 }
 
-/// 124: the next command a newer sluice runs in the repository puts the
-/// hook back for itself, the hook it chains unchanged and nothing said of
-/// it; a hook `sluice protect --remove` took out stays out.
-#[test]
-fn a_newer_sluices_next_command_reinstalls_the_hook() {
-    let repo = Repo::new("protect-reinstall");
+/// A repository whose policy protects `bolt/*`, with `bolt/x`, its hooks
+/// folder holding a hook of someone else's, and sluice's hook installed
+/// beside it by a copy of sluice at another path, whose `sluice host` has
+/// ended: the repository, the hook, the hook it chains, theirs, and the
+/// copy's path and this sluice's, each resolved.
+fn protected_by_a_copy(name: &str) -> (Repo, PathBuf, PathBuf, &'static str, String, String) {
+    let repo = Repo::new(name);
     repo.write(".config/sluice.toml", POLICY);
     repo.git(&["add", "-A"]);
     repo.git(&["commit", "-q", "-m", "policy"]);
@@ -1275,7 +1345,7 @@ fn a_newer_sluices_next_command_reinstalls_the_hook() {
             .current_dir(repo.dir())
             .arg("protect")
             .env("XDG_CONFIG_HOME", repo.dir().join(".git/no-config"))
-            .env("XDG_STATE_HOME", repo.dir().join(".git/no-state"))
+            .env("XDG_STATE_HOME", state_of(&repo))
             .stdin(Stdio::null())
             .output()
     });
@@ -1288,6 +1358,20 @@ fn a_newer_sluices_next_command_reinstalls_the_hook() {
         .display()
         .to_string();
     assert!(std::fs::read_to_string(&hook).unwrap().contains(&older));
+    // The copy's `sluice host` ends once idle, so the next command starts
+    // this sluice's.
+    no_host(&repo);
+    (repo, hook, chained, theirs, older, ours)
+}
+
+/// 124, design D4 of the change `the-git-hook-asks-sluice-host`: where the
+/// hook names a sluice at one path and a sluice at another path runs
+/// `sluice status`, the `sluice host` that answers puts the hook back by
+/// its own path, the hook it chains unchanged and nothing said of it; a
+/// hook `sluice protect --remove` took out stays out.
+#[test]
+fn a_newer_sluices_next_command_puts_back_the_hook() {
+    let (repo, hook, chained, theirs, older, ours) = protected_by_a_copy("protect-reinstall");
 
     let out = sl(&repo, &["status", "bolt/x"]);
     assert!(out.status.success(), "{}", text(&out));
@@ -1302,6 +1386,50 @@ fn a_newer_sluices_next_command_reinstalls_the_hook() {
     assert!(out.status.success(), "{}", text(&out));
     assert_eq!(std::fs::read_to_string(&hook).unwrap(), theirs);
     assert!(!chained.exists());
+}
+
+/// Design D4 of the change `the-git-hook-asks-sluice-host`: with `sluice
+/// host` running and the hook naming another sluice's path, `sluice
+/// status` run with no git on its path has `sluice host` put the hook back
+/// by its own path, and prints what it printed before, with no warning of
+/// the hook.
+#[test]
+fn a_command_with_no_git_has_sluice_host_put_back_the_hook() {
+    let (repo, hook, chained, theirs, older, ours) = protected_by_a_copy("protect-no-git");
+    let _kept = kept(&repo);
+    let empty = Scratch::new("protect-no-git-path");
+    let out = support::isolated(&mut Command::new(sluice()))
+        .current_dir(repo.dir())
+        .args(["status", "bolt/x"])
+        .env("PATH", empty.path())
+        .env("XDG_CONFIG_HOME", repo.dir().join(".git/no-config"))
+        .env("XDG_STATE_HOME", state_of(&repo))
+        .stdin(Stdio::null())
+        .output()
+        .unwrap();
+    assert!(out.status.success(), "{}", text(&out));
+    assert!(!text(&out).contains("protection"), "{}", text(&out));
+    assert!(!text(&out).contains("hook"), "{}", text(&out));
+    let now = std::fs::read_to_string(&hook).unwrap();
+    assert!(now.contains(&ours) && !now.contains(&older), "{now}");
+    assert_eq!(std::fs::read_to_string(&chained).unwrap(), theirs);
+}
+
+/// 124: a hook `sluice protect --remove` took out is not put back by a
+/// command that reads.
+#[test]
+fn a_removed_hook_is_not_put_back_by_a_reading_command() {
+    let (repo, _) = protected("protect-removed");
+    let hook = repo.dir().join(".git/hooks/reference-transaction");
+    assert!(hook.exists());
+    let out = sl(&repo, &["protect", "--remove"]);
+    assert!(out.status.success(), "{}", text(&out));
+    assert!(!hook.exists());
+    for args in [&["status", "bolt/x"][..], &["overview"], &["inbox"]] {
+        let out = sl(&repo, args);
+        assert!(out.status.success(), "{args:?}: {}", text(&out));
+        assert!(!hook.exists(), "{args:?} put the hook back");
+    }
 }
 
 /// 1, 124: the hook runs the sluice that installed it, by its path: a
@@ -1386,4 +1514,419 @@ fn the_hook_reads_its_whole_transaction_before_it_leaves() {
         assert!(wrote.is_ok(), "{state}: {wrote:?}: {}", text(&out));
         assert_eq!(out.status.code(), Some(0), "{state}: {}", text(&out));
     }
+}
+
+/// The environment `sl` runs sluice under in `repo`.
+fn sl_env(repo: &Repo) -> Vec<(std::ffi::OsString, std::ffi::OsString)> {
+    let mut c = Command::new(sluice());
+    support::isolated(&mut c)
+        .env("XDG_CONFIG_HOME", repo.dir().join(".git/no-config"))
+        .env("XDG_STATE_HOME", state_of(repo));
+    support::env_of(&c)
+}
+
+/// The way to the `sluice host` of `repo`'s own state folder, as `sl`
+/// reaches it.
+fn client(repo: &Repo) -> Client {
+    Client::new(Path::new(sluice()), sl_env(repo)).expect("its paths")
+}
+
+/// `repo`'s `sluice host`, started where none answers, kept from ending
+/// while the connection is held: a watch of the repository.
+fn kept(repo: &Repo) -> Connection {
+    client(repo)
+        .subscribe(vec![Added {
+            folder: repo.dir().to_path_buf(),
+            kind: FollowKind::Watch,
+        }])
+        .expect("sluice host")
+}
+
+/// Once each `sluice host` of `repo`'s state folder that its logs say
+/// started has exited, asking none of them anything: a connection would
+/// keep one from ending for being idle, and one that ends takes its
+/// socket's path with it as it exits.
+fn no_host(repo: &Repo) {
+    let until = Instant::now() + Duration::from_secs(30);
+    let alive = |pid: &String| {
+        pid.parse::<i32>().is_ok_and(|p| {
+            !matches!(
+                nix::sys::signal::kill(nix::unistd::Pid::from_raw(p), None),
+                Err(nix::errno::Errno::ESRCH)
+            )
+        })
+    };
+    while host_starts(repo).iter().any(alive) {
+        assert!(
+            Instant::now() < until,
+            "sluice host still runs after 30 seconds: {}",
+            host_log(repo)
+        );
+        std::thread::sleep(Duration::from_millis(200));
+    }
+}
+
+/// The pids of each `sluice host` of `repo`'s state folder that its logs
+/// say started.
+fn host_starts(repo: &Repo) -> Vec<String> {
+    let host = state_of(repo).join("sluice/host");
+    ["log.1", "log"]
+        .iter()
+        .flat_map(|f| {
+            std::fs::read_to_string(host.join(f))
+                .unwrap_or_default()
+                .lines()
+                .filter_map(|l| l.split_once(" started, pid ").map(|(_, p)| p.to_string()))
+                .collect::<Vec<_>>()
+        })
+        .map(|p| {
+            p.split(|c: char| !c.is_ascii_digit())
+                .next()
+                .unwrap_or("")
+                .to_string()
+        })
+        .collect()
+}
+
+/// What `repo`'s `sluice host` has said in its log.
+fn host_log(repo: &Repo) -> String {
+    std::fs::read_to_string(state_of(repo).join("sluice/host/log")).unwrap_or_default()
+}
+
+/// A process that holds the socket of `sluice host` for the state folder
+/// `state`, answers `hello` as `sluice host` of this version, and answers
+/// each request with `answer`, or holds it unanswered: the requests it was
+/// sent, one line each.
+fn fake_host(state: &Path, answer: Option<String>) -> Arc<Mutex<Vec<String>>> {
+    let mut c = Command::new(sluice());
+    support::isolated(&mut c).env("XDG_STATE_HOME", state);
+    let client = Client::new(Path::new(sluice()), support::env_of(&c)).expect("its paths");
+    let socket = client.paths().socket.clone();
+    let _ = std::fs::remove_file(&socket);
+    let listener = std::os::unix::net::UnixListener::bind(&socket).unwrap();
+    let asked = Arc::new(Mutex::new(Vec::new()));
+    let kept = asked.clone();
+    std::thread::spawn(move || {
+        for stream in listener.incoming() {
+            let Ok(stream) = stream else { return };
+            let kept = kept.clone();
+            let answer = answer.clone();
+            std::thread::spawn(move || {
+                use std::io::{BufRead as _, Write as _};
+                let mut writer = stream.try_clone().unwrap();
+                let mut reader = std::io::BufReader::new(stream);
+                let mut line = String::new();
+                if reader.read_line(&mut line).unwrap_or(0) == 0 {
+                    return;
+                }
+                let named = serde_json::json!({
+                    "version": sluice::VERSION,
+                    "pid": std::process::id(),
+                    "since": "2026-11-24T00:00:00.000Z",
+                });
+                let _ = writeln!(writer, "{named}");
+                line.clear();
+                if reader.read_line(&mut line).unwrap_or(0) == 0 {
+                    return;
+                }
+                kept.lock().unwrap().push(line.trim_end().to_string());
+                match answer {
+                    Some(a) => {
+                        let _ = writeln!(writer, "{a}");
+                    }
+                    None => std::thread::sleep(Duration::from_secs(30)),
+                }
+            });
+        }
+    });
+    asked
+}
+
+/// Design D1 of the change `the-git-hook-asks-sluice-host`: the hook sends
+/// the transaction, its folder, `GIT_DIR` and git's command line to `sluice
+/// host`, says what it answers and exits with its code, reading no file of
+/// the repository: here a `sluice host` that refuses a creation no policy
+/// protects, in a folder that holds no repository at all.
+#[test]
+fn the_hook_says_what_sluice_host_answers() {
+    let scratch = Scratch::new("protect-hook-asks");
+    let state = scratch.path().join("state");
+    let answer = serde_json::json!({
+        "output": {"stdout": "", "stderr": ["error: refused by the host"], "code": 1}
+    });
+    let asked = fake_host(&state, Some(answer.to_string()));
+    let zero = "0".repeat(40);
+    let one = "1".repeat(40);
+    let lines = format!("{zero} {one} refs/heads/feature/y\n");
+    let mut child = support::isolated(&mut Command::new(sluice()))
+        .current_dir(scratch.path())
+        .args(["hook", "reference-transaction", "prepared"])
+        .env("GIT_DIR", "absent.git")
+        .env("XDG_CONFIG_HOME", scratch.path().join("no-config"))
+        .env("XDG_STATE_HOME", &state)
+        .env_remove(sluice::protect::HOST_VAR)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    {
+        use std::io::Write as _;
+        child
+            .stdin
+            .take()
+            .unwrap()
+            .write_all(lines.as_bytes())
+            .unwrap();
+    }
+    let out = child.wait_with_output().unwrap();
+    assert_eq!(out.status.code(), Some(1), "{}", text(&out));
+    assert_eq!(text(&out).trim(), "error: refused by the host");
+    let asked = asked.lock().unwrap().clone();
+    assert_eq!(asked.len(), 1, "{asked:?}");
+    let request: serde_json::Value = serde_json::from_str(&asked[0]).unwrap();
+    assert_eq!(request["ask"], "reference-transaction", "{request}");
+    assert_eq!(
+        request["folder"],
+        scratch.path().display().to_string(),
+        "{request}"
+    );
+    assert_eq!(request["git_dir"], "absent.git", "{request}");
+    assert_eq!(request["lines"], lines.as_str(), "{request}");
+    assert!(request["by"].is_string(), "{request}");
+}
+
+/// Design D1 of the change `the-git-hook-asks-sluice-host`: with `sluice
+/// host` running, a person's `git update-ref refs/heads/bolt/x <new> <old>`
+/// fails with the refusal's words as the hook gave them before, `bolt/x`
+/// where it was, and `sluice host`'s log names the transaction it refused.
+#[test]
+fn a_persons_write_is_judged_by_sluice_host() {
+    let (repo, _) = protected("protect-judged-by-host");
+    let _kept = kept(&repo);
+    let tip = repo.rev("bolt/x");
+    let head = repo.rev("unit/a");
+    let out = repo.git_raw(&["update-ref", "refs/heads/bolt/x", &head, &tip]);
+    let t = text(&out);
+    assert_eq!(out.status.code(), Some(128), "{t}");
+    assert!(
+        t.contains("error: bolt/x is protected by sluice; submit the change to sluice instead")
+            && t.contains(&format!(
+                "update-ref refs/heads/bolt/x {head} {tip}` would move it from {} to {}",
+                &tip[..7],
+                &head[..7]
+            ))
+            && t.contains("the worktree may hold the attempted change"),
+        "{t}"
+    );
+    assert_eq!(repo.rev("bolt/x"), tip);
+    let log = host_log(&repo);
+    assert!(
+        log.lines().any(|l| l.contains("reference transaction")
+            && l.contains("update-ref refs/heads/bolt/x")
+            && l.contains(": refused in ")),
+        "{log}"
+    );
+}
+
+/// Design D1 of the change `the-git-hook-asks-sluice-host`, 148: the
+/// refused write is written in `bolt/x`'s log by `sluice host`, one
+/// `protected` line naming the `git update-ref` command.
+#[test]
+fn the_refused_write_is_logged_by_sluice_host() {
+    let (repo, _) = protected("protect-logged-by-host");
+    let _kept = kept(&repo);
+    let head = repo.rev("unit/a");
+    let out = repo.git_raw(&["update-ref", "refs/heads/bolt/x", &head]);
+    assert_eq!(out.status.code(), Some(128), "{}", text(&out));
+    let lines = protected_events(&repo);
+    assert_eq!(lines.len(), 1, "{lines:?}");
+    assert!(
+        lines[0]["by"]
+            .as_str()
+            .unwrap()
+            .contains(&format!("update-ref refs/heads/bolt/x {head}")),
+        "{lines:?}"
+    );
+    assert_eq!(
+        lines[0]["host"],
+        sluice::profiles::checks::hostname(),
+        "{lines:?}"
+    );
+}
+
+/// Design D1 and D2 of the change `the-git-hook-asks-sluice-host`: where
+/// no sluice process runs for the state folder, a person's write to a
+/// protected branch starts a `sluice host`, and is refused as one with a
+/// `sluice host` running.
+#[test]
+fn a_hook_with_no_sluice_host_running_starts_it() {
+    let (repo, _) = protected("protect-starts-host");
+    no_host(&repo);
+    let started = host_starts(&repo);
+    let tip = repo.rev("bolt/x");
+    let head = repo.rev("unit/a");
+    let out = repo.git_raw(&["update-ref", "refs/heads/bolt/x", &head, &tip]);
+    let t = text(&out);
+    assert_eq!(out.status.code(), Some(128), "{t}");
+    assert!(t.contains("bolt/x is protected by sluice"), "{t}");
+    assert_eq!(repo.rev("bolt/x"), tip);
+    // The hook started a `sluice host`, which judged the write; it ends
+    // once idle.
+    let log = host_log(&repo);
+    let now = host_starts(&repo);
+    assert!(now.iter().any(|p| !started.contains(p)), "{log}");
+    assert!(
+        log.lines()
+            .any(|l| l.contains("update-ref refs/heads/bolt/x") && l.contains(": refused in ")),
+        "{log}"
+    );
+}
+
+/// Design D2 of the change `the-git-hook-asks-sluice-host`: where a process
+/// holds the socket of `sluice host`, answers `hello` and does not answer
+/// the hook's request, a person's `git update-ref refs/heads/feature/y
+/// <revision>` fails after ten seconds, saying that sluice's host process
+/// did not answer and naming `sluice protect --remove`.
+#[test]
+fn a_hook_whose_sluice_host_does_not_answer_refuses() {
+    let (repo, _) = protected("protect-no-answer");
+    no_host(&repo);
+    let asked = fake_host(&state_of(&repo), None);
+    let head = repo.rev("unit/a");
+    let began = Instant::now();
+    let out = repo.git_raw(&["update-ref", "refs/heads/feature/y", &head]);
+    let took = began.elapsed();
+    let t = text(&out);
+    assert_eq!(out.status.code(), Some(128), "{t}");
+    assert!(took >= sluice::protect::ASK_FOR, "refused in {took:?}");
+    assert!(took < Duration::from_secs(20), "refused in {took:?}");
+    assert!(
+        t.contains("sluice's host process did not answer within 10 seconds"),
+        "{t}"
+    );
+    assert!(t.contains("sluice protect --remove"), "{t}");
+    assert!(!repo
+        .git_raw(&["rev-parse", "--verify", "-q", "refs/heads/feature/y"])
+        .status
+        .success());
+    assert_eq!(asked.lock().unwrap().len(), 1);
+}
+
+/// Design D1 of the change `the-git-hook-asks-sluice-host`: while `sluice
+/// host` holds a round of `bolt/x` whose git waits a minute, an agent's
+/// commit on its own branch, which the hook sends to `sluice host`, ends at
+/// once: the connection's task judges it from the state the host keeps,
+/// running no git and waiting for no round.
+#[test]
+fn a_commit_during_a_long_round_ends_at_once() {
+    let repo = Repo::new("protect-long-round");
+    repo.write(".config/sluice.toml", POLICY);
+    repo.git(&["add", "-A"]);
+    repo.git(&["commit", "-q", "-m", "policy"]);
+    repo.git(&["branch", "bolt/x", "main"]);
+    // `sluice host`'s git, which waits while the flag names its parent.
+    let bin = Scratch::new("protect-long-round-git");
+    let flag = bin.path().join("flag");
+    let waited = bin.path().join("waited");
+    let real = std::env::split_paths(&std::env::var_os("PATH").unwrap_or_default())
+        .map(|p| p.join("git"))
+        .find(|p| p.is_file())
+        .expect("git on the path");
+    let script = bin.path().join("git");
+    std::fs::write(
+        &script,
+        format!(
+            "#!/bin/sh\nif [ -f '{flag}' ] && [ \"$PPID\" = \"$(cat '{flag}')\" ]; then \
+             echo \"$*\" >> '{waited}'; i=0; \
+             while [ -f '{flag}' ] && [ $i -lt 600 ]; do sleep 0.1; i=$((i+1)); done; fi\n\
+             exec '{real}' \"$@\"\n",
+            flag = flag.display(),
+            waited = waited.display(),
+            real = real.display()
+        ),
+    )
+    .unwrap();
+    std::fs::set_permissions(&script, std::os::unix::fs::PermissionsExt::from_mode(0o755)).unwrap();
+    let mut env = sl_env(&repo);
+    let mut slowed = false;
+    for (k, v) in env.iter_mut() {
+        if k == "PATH" {
+            let mut path = vec![bin.path().to_path_buf()];
+            path.extend(std::env::split_paths(v));
+            *v = std::env::join_paths(path).unwrap();
+            slowed = true;
+        }
+    }
+    assert!(slowed, "a PATH to slow");
+    env.push(("SLUICE_ROUND_SLEEP".into(), "record".into()));
+    let host = Client::new(Path::new(sluice()), env).expect("its paths");
+    let held = host
+        .subscribe(vec![Added {
+            folder: repo.dir().to_path_buf(),
+            kind: FollowKind::Wait,
+        }])
+        .expect("sluice host");
+    let pid = held.named.pid;
+    let out = sl(&repo, &["protect"]);
+    assert!(out.status.success(), "{} {}", text(&out), host_log(&repo));
+    let session = repo.dir().with_extension("session");
+    let _ = std::fs::remove_dir_all(&session);
+    repo.git(&[
+        "worktree",
+        "add",
+        "-q",
+        "-b",
+        "unit/s",
+        session.to_str().unwrap(),
+        "bolt/x",
+    ]);
+    std::fs::write(session.join("s.txt"), "s\n").unwrap();
+    git_in(&repo, &session, &["add", "-A"]);
+    git_in(&repo, &session, &["commit", "-q", "-m", "s"]);
+    let out = support::isolated(&mut Command::new(sluice()))
+        .current_dir(&session)
+        .args(["submit", "bolt/x", "--no-wait"])
+        .env("SLUICE_ROUND_SLEEP", "record")
+        .env("XDG_CONFIG_HOME", repo.dir().join(".git/no-config"))
+        .env("XDG_STATE_HOME", state_of(&repo))
+        .stdin(Stdio::null())
+        .output()
+        .unwrap();
+    assert!(out.status.success(), "{}", text(&out));
+
+    // From now on, each git `sluice host` starts waits: its round of
+    // `bolt/x` holds.
+    std::fs::write(&flag, pid.to_string()).unwrap();
+    let (asking, repository) = (host.clone(), repo.dir().to_path_buf());
+    let round = std::thread::spawn(move || {
+        let _ = asking.pass(&repository, None);
+    });
+    let until = Instant::now() + Duration::from_secs(30);
+    while std::fs::read_to_string(&waited)
+        .unwrap_or_default()
+        .is_empty()
+    {
+        assert!(Instant::now() < until, "the round started no git");
+        std::thread::sleep(Duration::from_millis(50));
+    }
+
+    std::fs::write(session.join("t.txt"), "t\n").unwrap();
+    git_in(&repo, &session, &["add", "-A"]);
+    let began = Instant::now();
+    let out = git_in(&repo, &session, &["commit", "-q", "-m", "t"]);
+    let took = began.elapsed();
+    assert!(out.status.success(), "{}", text(&out));
+    assert!(took < Duration::from_secs(5), "the commit took {took:?}");
+    let log = host_log(&repo);
+    assert!(
+        log.lines()
+            .any(|l| l.contains("reference transaction") && l.contains("commit -q -m t")),
+        "{log}"
+    );
+
+    // The round goes on, and ends.
+    let _ = std::fs::remove_file(&flag);
+    round.join().unwrap();
+    drop(held);
 }

@@ -41,3 +41,16 @@ Option 1. The environment names the lock only for the git of a try that holds it
 - A deletion of a protected branch is judged from the branch's state as this host last fetched it. Another host's submission made since the last fetch here does not hold a deletion of this host's copy. The remote's branch is not this host's to delete, and the next round fetches it.
 - A refusal the hook records under sluice's own fetch is written from the branch's state as last fetched. Where the remote moved since, the leased write is refused and the hook reports it, as any refusal it could not record is reported.
 - Rule core.29 names the case in its details.
+
+## Amendment, 2026-11-24: sluice host's git carries its name, and the hook asks sluice host
+
+Status: accepted. The user approved the change `the-git-hook-asks-sluice-host` on 2026-11-23.
+
+Deciders: the user, on 2026-11-23.
+
+Sources: `residents-do-the-network-and-git-work@a2d68cf95ffe`, `reads-go-through-the-resident@69134e5825d7`; record 0093 as amended 2026-11-24; the change `the-git-hook-asks-sluice-host`, design D1 and D3.
+
+### Decisions
+
+1. **A transaction of sluice host's own git passes by its name.** Before: a fetch of sluice's own whose packing ran the hook passed because the hook read the refs as that fetch left them, with no lock and nothing fetched. Now: each git command of `sluice host` carries `SLUICE_HOST_PROCESS`, the pid of `sluice host` and its start time, and the hook lets its transaction go with no ask where that pid runs and started at that time. So a fetch of `sluice host` whose packing runs the hook waits on nothing, and the hook asks `sluice host` nothing about a write that `sluice host` decided. A value whose pid does not run, or started at another time, names no `sluice host`, and the hook asks.
+2. **sluice host judges every other transaction with nothing fetched.** Before: the hook judged in its own process. Now: `sluice host` judges what the hook sends, as option 1 judged it: git's packing is let through before any record is read, and what still needs a branch is read from its state as this host last fetched it. It writes each refusal under the branch's lock.

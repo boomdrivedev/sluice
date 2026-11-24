@@ -61,12 +61,14 @@ pub mod folder;
 pub mod index;
 pub mod joined;
 pub mod pass;
+pub mod protection;
 pub mod protocol;
 pub mod reads;
 pub mod results;
 pub mod room;
 pub mod subscription;
 pub mod tasks;
+pub mod transaction;
 pub mod version;
 pub mod watch;
 
@@ -412,6 +414,10 @@ pub(crate) struct Hosting {
     pub followed: std::sync::Mutex<
         std::collections::BTreeMap<PathBuf, crate::profiles::github::pulls::Remembered>,
     >,
+    /// The hooks folder of each folder a request named, which branch
+    /// protection's hook is put back in (the change
+    /// `the-git-hook-asks-sluice-host`, design D4).
+    pub hooks: protection::Hooks,
 }
 
 impl Hosting {
@@ -1017,6 +1023,7 @@ fn run_holding(runtime: &tokio::runtime::Runtime, holder: Holder) -> Result<i32>
         let hosting = Arc::new(Hosting {
             reads: reads::Reads::new(connected.clone()),
             followed: Default::default(),
+            hooks: Default::default(),
             tasks,
             paths,
             named,
@@ -2069,6 +2076,22 @@ async fn answer(hosting: &Arc<Hosting>, stream: UnixStream) -> Result<()> {
             return send(&mut writer, &Answer::Error(words)).await;
         }
     };
+    // The change `the-git-hook-asks-sluice-host`, design D1: the hook's
+    // transaction is judged before any read or change, from the state the
+    // host keeps, with no wait for a round or a reading.
+    if let Request::ReferenceTransaction {
+        folder,
+        git_dir,
+        by,
+        lines,
+    } = request
+    {
+        let output = transaction::answer(hosting, folder, git_dir, by, lines).await;
+        return send(&mut writer, &Answer::Output(output)).await;
+    }
+    // Design D4: `sluice host` puts back the hook in each repository it
+    // binds for a request, by its own path.
+    protection::put(hosting, &request).await;
     if reads::is_read(&request) {
         let output = reads::answer(hosting, request).await;
         return send(&mut writer, &Answer::Output(output)).await;
@@ -2102,7 +2125,8 @@ async fn answer(hosting: &Arc<Hosting>, stream: UnixStream) -> Result<()> {
         | Request::Confirm { .. }
         | Request::Release { .. }
         | Request::Branch { .. }
-        | Request::Protect { .. } => Ok(()),
+        | Request::Protect { .. }
+        | Request::ReferenceTransaction { .. } => Ok(()),
         Request::Wait {
             folder,
             caller,

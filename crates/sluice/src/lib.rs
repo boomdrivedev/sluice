@@ -2013,11 +2013,6 @@ fn dispatch(
         command => Cli { command, ..cli },
     };
     let s = Sluice::new(seams, clock).as_peer(host.peer());
-    // 124: the hook reads the policy only as far as guarding needs.
-    let s = match &cli.command {
-        Some(Command::Hook { .. }) => s.guarding(),
-        _ => s,
-    };
     // 129 (design D16): a one-shot read, a status in each form, a one-shot
     // overview, the home view and a forecast, asks sluice's host process
     // for a reading of the repository current within its tick, starting it
@@ -2781,10 +2776,9 @@ fn dispatch(
             identity::helper(&operation, &mut std::io::stdin().lock(), out)?;
             Ok(0)
         }
-        Command::Hook { name, state } => match name.as_str() {
-            "reference-transaction" => protect::hook(&s, host, &state, &mut std::io::stdin()),
-            other => anyhow::bail!("sluice runs no {other} hook"),
-        },
+        // The hook binds no repository: it asks `sluice host` (the change
+        // `the-git-hook-asks-sluice-host`, design D1).
+        Command::Hook { name, .. } => anyhow::bail!("sluice's {name} hook binds no repository"),
     }
 }
 

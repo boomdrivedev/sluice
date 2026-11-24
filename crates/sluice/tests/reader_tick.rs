@@ -35,15 +35,26 @@ fn a_counting_git_counts_what_status_starts() {
 }
 
 /// reader-tick, "sluice run in a set-up repository with nothing
-/// queued": its passes after the first start no git (129).
+/// queued": its passes after the first start no git (129). One `sluice
+/// host`, kept by a watch, answers both runs, so its first reading and the
+/// hooks folder it put the hook back in come before the second (the
+/// change `the-git-hook-asks-sluice-host`, design D4), whose six passes
+/// start none.
 #[test]
 fn sluice_run_with_nothing_queued_starts_git_at_its_first_pass_alone() {
     let d = OnDisk::new("idle-run", POLICY);
     d.land("a");
-    let one = starts(&d, &["run", "--rounds", "1"]);
+    let _kept = d
+        .client(d.repo.dir())
+        .subscribe(vec![sluice::host_process::protocol::Added {
+            folder: d.repo.dir().to_path_buf(),
+            kind: sluice::host_process::protocol::FollowKind::Watch,
+        }])
+        .expect("sluice host");
+    starts(&d, &["run", "--rounds", "1"]);
     let before = d.git.starts().len();
     let six = starts(&d, &["run", "--rounds", "6"]);
-    assert_eq!(six, one, "{:?}", &d.git.starts()[before..]);
+    assert_eq!(six, 0, "{:?}", &d.git.starts()[before..]);
 }
 
 /// refused-landing, "Refused every round" and design D3 of the change

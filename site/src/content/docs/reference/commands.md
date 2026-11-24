@@ -1932,8 +1932,12 @@ branch and opens, updates and marks the pull request ready. A waiting
 submit, and a wait on a pull request or on worktrees submitted as one
 act, follow the host process, which reads GitHub for each step.
 
-Every command, these among them, puts the branch protection's hook
-back in place. `sluice exec`, `sluice preview`, `sluice equip` and `sluice release` in
+The host process puts the branch protection's hook back in place, for
+its own `sluice`, in each repository a command names, and installs it
+for a submit, a wait, a step and `sluice run`; no command does it in
+its own process. The hook sends each update git makes to the host
+process, which judges it, and refuses the update where the host process
+does not answer within ten seconds. `sluice exec`, `sluice preview`, `sluice equip` and `sluice release` in
 a worktree run in the command itself, as do `sluice forge check`,
 `sluice pool check`, `sluice init` and `sluice credential`, which call
 GitHub or AWS.

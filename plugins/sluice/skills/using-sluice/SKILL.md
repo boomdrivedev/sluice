@@ -13,8 +13,10 @@ everything queued ahead of it and lands it only if that combination passes.
 ## The rules
 
 - **Never** `git merge`, `git push`, `git update-ref` or `gh pr merge` onto a
-  branch sluice manages. Local updates are refused by sluice's git hook;
-  pushes are refused by the forge's ruleset. Submit instead.
+  branch sluice manages. Local updates are refused by sluice's git hook,
+  which asks sluice's host process and refuses the update where it does
+  not answer within ten seconds; pushes are refused by the forge's
+  ruleset. Submit instead.
 - Commit everything first. A worktree holding modified, staged or untracked
   files is refused (exit 2), naming each path.
 - Submit from your own worktree, on your own branch. A detached HEAD is

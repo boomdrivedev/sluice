@@ -86,10 +86,14 @@ pub fn test_git_config() -> PathBuf {
 }
 
 /// git, [`isolated`], with every credential helper cleared before any a
-/// test gives.
+/// test gives. A `sluice host` its hook starts passes only when asked, as
+/// the ones the tests' commands start do, so a git command of a test moves
+/// no queue (the change `the-git-hook-asks-sluice-host`, design D1).
 pub fn git_command() -> Command {
     let mut c = Command::new("git");
-    isolated(&mut c).args(["-c", "credential.helper="]);
+    isolated(&mut c)
+        .args(["-c", "credential.helper="])
+        .env("SLUICE_ROUND_SLEEP", "record");
     c
 }
 
@@ -295,11 +299,14 @@ impl OnDisk {
         repo.write(".config/sluice.toml", policy);
         repo.git(&["add", "-A"]);
         repo.git(&["commit", "-q", "-m", "sluice's policy"]);
+        let config = Scratch::new(&format!("{name}-config"));
+        let state = Scratch::new(&format!("{name}-state"));
+        repo.with_host(config.path(), state.path());
         OnDisk {
             repo,
             git: CountingGit::new(),
-            config: Scratch::new(&format!("{name}-config")),
-            state: Scratch::new(&format!("{name}-state")),
+            config,
+            state,
             sessions: Scratch::new(&format!("{name}-sessions")),
         }
     }
@@ -417,6 +424,7 @@ impl OnDisk {
     /// driven with this setup's config and state.
     pub fn another(&self, name: &str, policy: &str) -> Repo {
         let repo = Repo::new(name);
+        repo.with_host(self.config.path(), self.state.path());
         repo.write(".config/sluice.toml", policy);
         repo.git(&["add", "-A"]);
         repo.git(&["commit", "-q", "-m", "sluice's policy"]);
@@ -444,6 +452,11 @@ impl OnDisk {
 /// A repository with one worktree, built with the git command.
 pub struct Repo {
     pub scratch: Scratch,
+    /// The settings and state folders its git's hook reaches `sluice host`
+    /// with, where a setup names them: the hook asks the setup's own
+    /// `sluice host` (the change `the-git-hook-asks-sluice-host`, design
+    /// D1).
+    host: std::sync::Mutex<Option<(PathBuf, PathBuf)>>,
 }
 
 /// What a place sluice made in the repository keeps outside it, its
@@ -466,6 +479,7 @@ impl Repo {
     pub fn new(name: &str) -> Repo {
         let repo = Repo {
             scratch: Scratch::new(name),
+            host: Default::default(),
         };
         repo.git(&["init", "-q", "-b", "main"]);
         no_credentials(&repo.dir().join(".git"));
@@ -477,6 +491,12 @@ impl Repo {
 
     pub fn dir(&self) -> &Path {
         self.scratch.path()
+    }
+
+    /// From now on, the hook of its git reaches the `sluice host` of the
+    /// settings folder `config` and the state folder `state`.
+    pub fn with_host(&self, config: &Path, state: &Path) {
+        *self.host.lock().unwrap() = Some((config.to_path_buf(), state.to_path_buf()));
     }
 
     /// A bare clone of this repository, added as its remote `origin`: a
@@ -495,6 +515,7 @@ impl Repo {
     pub fn clone_of(remote: &Path, name: &str) -> Repo {
         let repo = Repo {
             scratch: Scratch::new(name),
+            host: Default::default(),
         };
         repo.git(&["clone", "-q", remote.to_str().unwrap(), "."]);
         no_credentials(&repo.dir().join(".git"));
@@ -523,14 +544,26 @@ impl Repo {
         String::from_utf8_lossy(&out.stdout).trim().to_string()
     }
 
+    /// git in the worktree, as a session runs it. Where the repository has
+    /// sluice's hook, the hook asks the `sluice host` of the setup's
+    /// settings and state where [`Repo::with_host`] named them, and else
+    /// of the test's own folders in the repository, which the test's guard
+    /// stops (the change `the-git-hook-asks-sluice-host`, design D1).
     pub fn git_raw(&self, args: &[&str]) -> std::process::Output {
+        let (config, state) = self.host.lock().unwrap().clone().unwrap_or_else(|| {
+            (
+                self.dir().join(".git/no-config"),
+                self.dir().join(".git/no-state"),
+            )
+        });
         git_command()
             .current_dir(self.dir())
             .args(args)
             .env_remove("GIT_DIR")
             .env_remove("GIT_WORK_TREE")
             .env_remove("GIT_INDEX_FILE")
-            .env("XDG_CONFIG_HOME", self.dir().join(".git/no-config"))
+            .env("XDG_CONFIG_HOME", config)
+            .env("XDG_STATE_HOME", state)
             .env("GIT_AUTHOR_NAME", "test")
             .env("GIT_AUTHOR_EMAIL", "test@localhost")
             .env("GIT_COMMITTER_NAME", "test")

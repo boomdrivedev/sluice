@@ -601,6 +601,19 @@ pub enum Request {
         branch: String,
         wants: sluice_seams::ResultAsk,
     },
+    /// Whether to let the git transaction `lines`, in git's `prepared`
+    /// state, go: what branch protection's hook sends, answered with
+    /// `output`, its refusal on standard error and its exit (the change
+    /// `the-git-hook-asks-sluice-host`, design D1). `folder` is where git
+    /// ran the hook, `git_dir` git's `GIT_DIR` there where it set one,
+    /// and `by` the command line of the git that ran it.
+    ReferenceTransaction {
+        folder: PathBuf,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        git_dir: Option<PathBuf>,
+        by: String,
+        lines: String,
+    },
     /// Hand over, for a newer sluice (D8). `program` is the asker's
     /// executable, resolved through every link, which the host process
     /// starts afresh in place as; an older command sends none, and the host
@@ -850,6 +863,37 @@ mod tests {
             r#"{"output":{"stdout":"{}\n","stderr":["sluice: warning: late"],"code":0}}"#
         );
         assert_eq!(serde_json::from_str::<Answer>(&line).unwrap(), output);
+    }
+
+    /// The change `the-git-hook-asks-sluice-host`, design D1: the hook's
+    /// request names the transaction, the folder, `GIT_DIR` and git's
+    /// command line, and reads back as it was sent.
+    #[test]
+    fn a_reference_transaction_reads_back() {
+        let asked = Request::ReferenceTransaction {
+            folder: "/w/feat".into(),
+            git_dir: Some(".git".into()),
+            by: "git update-ref refs/heads/main b a".into(),
+            lines: "a b refs/heads/main\n".into(),
+        };
+        let mut line = Vec::new();
+        send(&mut line, &asked).unwrap();
+        assert_eq!(
+            String::from_utf8_lossy(&line).trim_end(),
+            r#"{"ask":"reference-transaction","folder":"/w/feat","git_dir":".git","by":"git update-ref refs/heads/main b a","lines":"a b refs/heads/main\n"}"#
+        );
+        assert_eq!(receive::<Request>(&mut line.as_slice()).unwrap(), asked);
+        let bare =
+            br#"{"ask":"reference-transaction","folder":"/r.git","by":"git fetch","lines":""}"#;
+        assert_eq!(
+            serde_json::from_slice::<Request>(bare).unwrap(),
+            Request::ReferenceTransaction {
+                folder: "/r.git".into(),
+                git_dir: None,
+                by: "git fetch".into(),
+                lines: String::new(),
+            }
+        );
     }
 
     /// The change `sluice-host-makes-each-change`, design D1, D2, D5: each
