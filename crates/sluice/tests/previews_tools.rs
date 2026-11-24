@@ -93,10 +93,14 @@ impl Setup {
         }
     }
 
+    /// The binary in the repository, this setup's host. The host process
+    /// its commands start passes only when asked, so a listing frees what
+    /// it finds gone with no pass of the host's beside it (design D14).
     fn sluice(&self, args: &[&str]) -> Output {
         support::isolated(&mut Command::new(env!("CARGO_BIN_EXE_sluice")))
             .args(args)
             .current_dir(self.repo.dir())
+            .env("SLUICE_ROUND_SLEEP", "record")
             .env("XDG_CONFIG_HOME", self.config.path())
             .env("XDG_STATE_HOME", self.state.path())
             .env(sluice::profiles::checks::ENGINE_SOCKETS_VAR, &self.sockets)
@@ -470,4 +474,29 @@ fn a_gone_previews_refused_container_is_tried_again_by_the_next_listing() {
     assert_eq!(s.engine.removed(), ["publishes", "mounts"]);
     assert!(s.held().is_empty());
     assert_eq!(std::fs::read_to_string(&s.log).unwrap(), "tried\n");
+}
+
+/// resident-reads, "The previews" (the change
+/// `sluice-host-makes-each-change`, design D1): with a preview of `bolt/x`
+/// up, `sluice previews --json` prints the preview as `sluice host`
+/// answers it, which its log names, and exits 0.
+#[test]
+fn the_previews_are_answered_by_sluice_host() {
+    let s = Setup::new("preview-by-host", 42090, "true");
+    let doc = s.preview();
+    let name = doc["name"].as_str().unwrap().to_string();
+    let out = s.sluice(&["previews", "--json"]);
+    assert_eq!(out.status.code(), Some(0), "{}", text(&out));
+    let listed: serde_json::Value =
+        serde_json::from_slice(&out.stdout).unwrap_or_else(|_| panic!("{}", text(&out)));
+    assert_eq!(listed[0]["name"], name.as_str(), "{listed}");
+    // `sluice host` answered it, which its log names.
+    let log = std::fs::read_to_string(s.state.path().join("sluice/host/log")).unwrap_or_default();
+    assert!(
+        log.lines()
+            .any(|l| l.contains(": change {") && l.contains("\"ask\":\"previews\"")),
+        "{log}"
+    );
+    let out = s.sluice(&["release", &name]);
+    assert!(out.status.success(), "{}", text(&out));
 }

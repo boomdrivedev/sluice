@@ -10,7 +10,7 @@ use sluice_seams::{Outcome, Rev};
 use crate::line::Line;
 use crate::records::{
     parse_lines, ConflictRecord, Event, FailedTask, LogLine, Recorded, ResultKind, ResultLine,
-    SetAside, State, Submission,
+    State, Submission,
 };
 
 fn contradicted(r: &Recorded) -> Contradicted {
@@ -56,8 +56,7 @@ impl Sluice<'_> {
             true => Vec::new(),
             false => parse_lines(&self.seams.state.results_for(branch, &ask)?)?,
         };
-        let asides: Vec<SetAside> = parse_lines(&self.seams.state.set_asides()?)?;
-        let mut view = verdict_view(&sub, &ahead, &results, &asides, &log);
+        let mut view = verdict_view(&sub, &ahead, &results, &log);
         if view.standing == Standing::Testing {
             let candidate = line
                 .doc
@@ -103,12 +102,12 @@ impl Sluice<'_> {
 }
 
 /// The report of `sub`, behind the live submissions `ahead`, from the
-/// results log, the set-asides and its branch's log.
+/// results log and its branch's log. Every recorded result is read: none
+/// is set aside (the change `sluice-host-makes-each-change`, design D4).
 pub fn verdict_view(
     sub: &Submission,
     ahead: &[u64],
     results: &[ResultLine],
-    asides: &[SetAside],
     log: &[LogLine],
 ) -> VerdictView {
     let mut view = VerdictView {
@@ -139,7 +138,7 @@ pub fn verdict_view(
     view.on = Some(t.on.clone());
     view.submissions = t.submissions.clone();
     view.runs = runs(log, &t.combination);
-    view.rows = rows(sub, &t.combination, results, asides);
+    view.rows = rows(sub, &t.combination, results);
     view
 }
 
@@ -229,12 +228,7 @@ fn runs(log: &[LogLine], combination: &Rev) -> Vec<RunShown> {
     out
 }
 
-fn rows(
-    sub: &Submission,
-    combination: &Rev,
-    results: &[ResultLine],
-    asides: &[SetAside],
-) -> Vec<Row> {
+fn rows(sub: &Submission, combination: &Rev, results: &[ResultLine]) -> Vec<Row> {
     // The latest result of each check on each system recorded for this
     // combination of this branch (16, 69).
     let mut lines: Vec<&ResultLine> = Vec::new();
@@ -254,13 +248,11 @@ fn rows(
     let mut rows: Vec<Row> = lines
         .iter()
         .map(|r| {
-            let aside = asides.iter().find(|a| r.set_aside_by(a));
             let failed = failed_for(&r.task, &r.system);
-            let result = match (aside, failed, r.outcome) {
-                (Some(_), _, _) => RowResult::SetAside,
-                (None, Some(f), _) if f.flaky.is_some() => RowResult::Flaky,
-                (None, _, Outcome::Fail) => RowResult::Failed,
-                (None, _, Outcome::Pass) => RowResult::Passed,
+            let result = match (failed, r.outcome) {
+                (Some(f), _) if f.flaky.is_some() => RowResult::Flaky,
+                (_, Outcome::Fail) => RowResult::Failed,
+                (_, Outcome::Pass) => RowResult::Passed,
             };
             Row {
                 task: r.task.clone(),
@@ -278,7 +270,6 @@ fn rows(
                     .map(|k| contradicted(&k.other)),
                 not_run: None,
                 failed_by: Vec::new(),
-                set_aside: aside.map(|a| a.reason.clone()),
                 log: failed.and_then(|f| f.log.clone()),
             }
         })
@@ -318,7 +309,6 @@ fn rows(
             flaky: f.flaky.as_ref().map(|k| contradicted(&k.other)),
             not_run: f.not_run.clone(),
             failed_by: f.failed_by.clone(),
-            set_aside: None,
             log: f.log.clone(),
         });
     }
@@ -370,7 +360,6 @@ mod tests {
                 line("core:test", None, "replayed", "pass"),
             ],
             &[],
-            &[],
         );
         assert_eq!(v.standing, Standing::Passed);
         assert_eq!(v.submissions, vec![10, 12]);
@@ -403,7 +392,6 @@ mod tests {
                 line("cli:build", Some("macos-arm64"), "ran", "fail"),
             ],
             &[],
-            &[],
         );
         let shown: Vec<(&str, Option<&str>, RowResult)> = v
             .rows
@@ -420,26 +408,22 @@ mod tests {
         assert_eq!(v.rows[1].signer.as_deref(), Some("box"));
     }
 
-    /// Could not run, flaky and set aside, each saying why.
+    /// Could not run and flaky, each saying why; a result an earlier
+    /// release set aside is read as any other (the change
+    /// `sluice-host-makes-each-change`, design D4).
     #[test]
-    fn could_not_run_flaky_and_set_aside() {
+    fn could_not_run_and_flaky() {
         let s = sub(serde_json::json!({"failed": [
             {"task": "site:check", "not_run": "exited 77, which [tests] not_run names: it could not run here, in 3 runs"},
             {"task": "app:e2e", "hash": "app:e2e-k", "flaky": {"here": "fail", "other":
                 {"outcome": "pass", "at": "t-1", "branch": "main", "combination": "c0"}}}
         ]}));
-        let mut aside = line("app:lint", None, "ran", "fail");
-        aside.at = "t9".into();
-        let asides: Vec<SetAside> = vec![serde_json::from_value(serde_json::json!({
-            "schema": "sluice/set-aside@1", "at": "t10", "task": "app:lint", "hash": "app:lint-k",
-            "run_at": "t9", "branch": "main", "combination": "c1", "reason": "host overloaded", "by": "op@h"
-        }))
-        .unwrap()];
+        let mut once_aside = line("app:lint", None, "ran", "fail");
+        once_aside.at = "t9".into();
         let v = verdict_view(
             &s,
             &[],
-            &[line("app:e2e", None, "ran", "fail"), aside],
-            &asides,
+            &[line("app:e2e", None, "ran", "fail"), once_aside],
             &[],
         );
         let by = |t: &str| v.rows.iter().find(|r| r.task == t).unwrap();
@@ -451,8 +435,7 @@ mod tests {
             .as_deref()
             .unwrap()
             .contains("3 runs"));
-        assert_eq!(by("app:lint").result, RowResult::SetAside);
-        assert_eq!(by("app:lint").set_aside.as_deref(), Some("host overloaded"));
+        assert_eq!(by("app:lint").result, RowResult::Failed);
     }
 
     /// 149: a check failed by a task it depends on is failed, with no key
@@ -468,7 +451,6 @@ mod tests {
             &s,
             &[],
             &[line("api:integration", None, "ran", "fail")],
-            &[],
             &[],
         );
         let by = |t: &str| v.rows.iter().find(|r| r.task == t).unwrap();
@@ -493,13 +475,7 @@ mod tests {
             {"at": "t1", "event": "testing", "combination": "c1", "submissions": [10, 12], "place": "p"},
             {"at": "t2", "event": "blamed", "id": 10, "combination": "c0"}
         ]));
-        let v = verdict_view(
-            &s,
-            &[10],
-            &[line("app:test", None, "ran", "fail")],
-            &[],
-            &events,
-        );
+        let v = verdict_view(&s, &[10], &[line("app:test", None, "ran", "fail")], &events);
         assert_eq!(v.standing, Standing::FormedAgain);
         assert!(v.rows.is_empty() && v.combination.is_none() && v.submissions.is_empty());
         let json = serde_json::to_string(&v).unwrap();
@@ -510,7 +486,7 @@ mod tests {
     #[test]
     fn queued() {
         let s = sub(serde_json::json!({"state": "queued", "tested": null, "failed": []}));
-        let v = verdict_view(&s, &[10, 11], &[], &[], &[]);
+        let v = verdict_view(&s, &[10, 11], &[], &[]);
         assert_eq!(
             v.standing,
             Standing::Queued {
@@ -529,7 +505,7 @@ mod tests {
              "detail": {"took_ms": 4000, "estimate_ms": 9000}},
             {"at": "t1", "event": "detail", "combination": "c9", "detail": {"took_ms": 1}}
         ]));
-        let v = verdict_view(&s, &[], &[], &[], &events);
+        let v = verdict_view(&s, &[], &[], &events);
         assert_eq!(v.runs.len(), 1);
         assert_eq!(v.runs[0].detail.saved_ms(), Some(5000));
     }

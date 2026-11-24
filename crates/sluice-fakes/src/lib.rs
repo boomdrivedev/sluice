@@ -449,7 +449,6 @@ struct Inner {
     /// its signer and path.
     signed_adds: Vec<(String, String, Vec<u8>)>,
     results: Vec<u8>,
-    set_asides: Vec<u8>,
     next_id: u64,
     crash_writes: usize,
     interfere: usize,
@@ -4353,15 +4352,6 @@ impl State for FakeState {
             inner.crash = None;
             return Err(Stopped("crashed after recording results".into()).into());
         }
-        Ok(())
-    }
-
-    fn set_asides(&self) -> Result<Vec<u8>> {
-        Ok(self.0 .0.borrow().set_asides.clone())
-    }
-
-    fn set_aside(&self, line: &[u8]) -> Result<()> {
-        self.0 .0.borrow_mut().set_asides.extend(line);
         Ok(())
     }
 

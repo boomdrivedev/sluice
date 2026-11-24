@@ -177,13 +177,15 @@ impl HostProcess for Socketed {
         self.client()?.reach().map(drop)
     }
 
-    fn step(&self, here: &Here<'_, '_>, branch: &str) -> Result<serde_json::Value> {
-        self.client()?.step(&here.repository()?, branch)
+    /// `sluice step` names its folder, which `sluice host` resolves (the
+    /// change `sluice-host-makes-each-change`, design D5).
+    fn step(&self, _: &Here<'_, '_>, branch: &str) -> Result<serde_json::Value> {
+        self.client()?.step(&crate::caller::folder()?, branch)
     }
 
     fn pass(&self, here: &Here<'_, '_>) -> Result<Report> {
         self.client()?
-            .pass(&here.repository()?, Some(here.clock.now()))
+            .pass(&crate::caller::folder()?, Some(here.clock.now()))
     }
 
     /// A command reads through `sluice host`'s reads, never a reading of

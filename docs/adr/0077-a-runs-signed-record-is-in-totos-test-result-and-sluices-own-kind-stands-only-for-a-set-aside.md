@@ -54,3 +54,13 @@ A verifier reads a check's outcome from the lists and the claims from the execut
 - The code moves in a later change: `crates/sluice/src/signing/statement.rs` writes a Test Result in place of `RUN_PREDICATE`'s predicate, and a verifier reads both. A signer's ref is only added to (109), so the statements signed under `run/v1` stay there and are read as before; none is written after the change. The subjects do not change, so a key is looked up as before.
 - Today a set-aside on a remote is an unsigned file under `refs/sluice/set-aside` (`remote_refs.rs`, `set_aside`), and no signer signs one. This record names the kind a signed set-aside takes and changes nothing of how set-asides are kept now.
 - A verifier that reads in-toto's Test Results reads sluice's runs with no predicate of sluice's to learn.
+
+## Amendment, 2026-11-23: sluice defines no signed kind
+
+Decider: the user, on 2026-11-23, who decided that no result is set aside.
+
+Sources: the statement's clauses 116 and 141 and C.6 (as amended 2026-11-23, boomdrivedev/blueprints 9de7d63); rule core.40; the change `sluice-host-makes-each-change`, design D4.
+
+**Before:** sluice's own kind stood for a set-aside: where a signer signed one, its predicate type was `https://agentplot.github.io/sluice/set-aside/v1`. **Now:** no result is set aside (116), so no record says that a recorded run did not judge its check. Each record a signer signs is of a kind in in-toto's catalogue, a run's a Test Result, and sluice defines none of its own. A later record takes a catalogued kind first, as 141 says.
+
+No signer ever signed a set-aside: an earlier release kept each one unsigned, under `refs/sluice/set-aside` on a remote and in `set-aside.jsonl` on a host. Those files stay where they are, and nothing reads them. The rest of this record, a run's Test Result and where each part of it goes, stands.

@@ -43,3 +43,13 @@ Option 2 asks the runner only when each test ended, which moon writes in a test'
 - The CLI names the tests the limit ended and says nothing was recorded for them. A flaky failure says the same head lands once the operator sets the fail aside, or once a real fix changes what the test reads, and never tells the submitter to change what the test reads.
 - Results recorded before this change can still hold a time limit's fail. The set-aside hint names a time limit beside the host for them.
 - The fake runner names a hung test missing, as the moon runner does, so the conformance suite holds the core to it.
+
+## Amendment, 2026-11-23: a flaky failure names no step of the operator's
+
+Decider: the user, on 2026-11-23, who decided that no result is set aside.
+
+Sources: the statement's clauses 19, 116 and S44 (as amended 2026-11-23, boomdrivedev/blueprints 9de7d63); record 0031 as amended 2026-11-23; the change `sluice-host-makes-each-change`, design D4.
+
+**Before:** a flaky failure said that the same head lands once the operator sets the fail aside, or once a real fix changes what the test reads. For a fail recorded before this record, the set-aside hint named a time limit beside the host.
+
+**Now:** a flaky failure names the result it contradicts and when it was recorded. It says that the same head lands once a real fix changes what the test reads, and that a fail the host caused, not the test, is a fault of sluice. It names no step of the operator's and no command that sets a result aside, and it still never tells the submitter to change what the test reads. A time limit's fail recorded before this record stays under its key, and with a pass reads flaky until a real fix changes what the test reads.

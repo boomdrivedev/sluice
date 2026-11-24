@@ -31,9 +31,6 @@ const VERSION: &str = "version";
 const LOCK: &str = "lock";
 const PENDING: &str = ".pending.json";
 const RESULTS: &str = "results.jsonl";
-/// Could-not-run-1 116: beside the results log, never in it, so a reader
-/// of the results log alone reads what it always did.
-const SET_ASIDE: &str = "set-aside.jsonl";
 const PROGRESS: &str = ".progress";
 /// 133: this host's refusals of its branches' remotes, beside the records
 /// and never in them; the dot keeps them out of [`State::branches`].
@@ -754,40 +751,6 @@ impl State for LocalFiles {
             .open(self.root.join(RESULTS))
             .context("opening the results log")?;
         f.write_all(&add)?;
-        f.sync_all()?;
-        Ok(())
-    }
-
-    fn set_asides(&self) -> Result<Vec<u8>> {
-        match std::fs::read(self.root.join(SET_ASIDE)) {
-            Ok(b) => Ok(b),
-            Err(e) if e.kind() == ErrorKind::NotFound => Ok(Vec::new()),
-            Err(e) => Err(e).context("reading the results set aside"),
-        }
-    }
-
-    fn set_aside(&self, line: &[u8]) -> Result<()> {
-        let lock = open_lock(&self.root.join(".lock"))?;
-        lock.lock().context("locking the repository's records")?;
-        // A line a crash cut short is no record, as in the results log.
-        let have = self.set_asides()?;
-        if !have.is_empty() && !have.ends_with(b"\n") {
-            let end = have.iter().rposition(|b| *b == b'\n').map_or(0, |i| i + 1);
-            OpenOptions::new()
-                .write(true)
-                .open(self.root.join(SET_ASIDE))?
-                .set_len(end as u64)?;
-        }
-        let mut line = line.to_vec();
-        if !line.ends_with(b"\n") {
-            line.push(b'\n');
-        }
-        let mut f = OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open(self.root.join(SET_ASIDE))
-            .context("opening the results set aside")?;
-        f.write_all(&line)?;
         f.sync_all()?;
         Ok(())
     }

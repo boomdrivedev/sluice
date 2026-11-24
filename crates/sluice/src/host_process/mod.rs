@@ -50,6 +50,7 @@
 //! (design D1 to D7 of `sluice-runs-as-a-daemon`).
 
 pub mod ask;
+pub mod changes;
 pub mod client;
 pub mod clock;
 pub mod environment;
@@ -281,6 +282,37 @@ pub(crate) struct Hosting {
     /// The reads joined: a folder's repository, and each read of a
     /// repository (the change `sluice-host-answers-every-read`, design D5).
     pub reads: reads::Reads,
+    /// What the pull request driver remembers of the requests each
+    /// repository's waits follow, from one step to the next (136; the
+    /// change `sluice-host-makes-each-change`, design D2).
+    pub followed: std::sync::Mutex<
+        std::collections::BTreeMap<PathBuf, crate::profiles::github::pulls::Remembered>,
+    >,
+}
+
+impl Hosting {
+    /// What the waits on `repository` last remembered of the requests they
+    /// follow.
+    pub(crate) fn followed(&self, repository: &Path) -> crate::profiles::github::pulls::Remembered {
+        self.followed
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .get(repository)
+            .cloned()
+            .unwrap_or_default()
+    }
+
+    /// Keep what a wait on `repository` remembers for its next step.
+    pub(crate) fn keep_followed(
+        &self,
+        repository: &Path,
+        remembered: crate::profiles::github::pulls::Remembered,
+    ) {
+        self.followed
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .insert(repository.to_path_buf(), remembered);
+    }
 }
 
 /// What a connection asks of the host process itself.
@@ -839,6 +871,7 @@ fn run_holding(runtime: &tokio::runtime::Runtime, holder: Holder) -> Result<i32>
         let connected = TaskTracker::new();
         let hosting = Arc::new(Hosting {
             reads: reads::Reads::new(connected.clone()),
+            followed: Default::default(),
             tasks,
             paths,
             named,
@@ -1895,13 +1928,27 @@ async fn answer(hosting: &Arc<Hosting>, stream: UnixStream) -> Result<()> {
         let output = reads::answer(hosting, request).await;
         return send(&mut writer, &Answer::Output(output)).await;
     }
+    // The change `sluice-host-makes-each-change`, design D1: `sluice host`
+    // makes each change.
+    if changes::is_change(&request) {
+        let answer = changes::answer(hosting, request).await;
+        return send(&mut writer, &answer).await;
+    }
     match request {
         // Answered above.
         Request::Status { .. }
         | Request::Overview { .. }
         | Request::Home { .. }
         | Request::Forecast { .. }
-        | Request::Inbox { .. } => Ok(()),
+        | Request::Inbox { .. }
+        | Request::Previews { .. }
+        | Request::Submit { .. }
+        | Request::Amend { .. }
+        | Request::Withdraw { .. }
+        | Request::Confirm { .. }
+        | Request::Release { .. }
+        | Request::Branch { .. }
+        | Request::Protect { .. } => Ok(()),
         Request::Wait {
             folder,
             caller,
@@ -1923,10 +1970,10 @@ async fn answer(hosting: &Arc<Hosting>, stream: UnixStream) -> Result<()> {
             }
             send(&mut writer, &Answer::Ok).await
         }
-        Request::Pass { repository, at } => {
-            // A follower names its folder or its repository (the change
-            // `sluice-host-answers-every-read`, design D8).
-            let repository = match reads::resolved(hosting, &repository).await {
+        Request::Pass { folder, at } => {
+            // A follower names its folder (the change
+            // `sluice-host-makes-each-change`, design D5).
+            let repository = match reads::resolved(hosting, &folder).await {
                 Ok(r) => r,
                 Err(words) => return send(&mut writer, &Answer::Error(words)).await,
             };
@@ -1938,7 +1985,12 @@ async fn answer(hosting: &Arc<Hosting>, stream: UnixStream) -> Result<()> {
             };
             send(&mut writer, &answer).await
         }
-        Request::Step { repository, branch } => {
+        Request::Step { folder, branch } => {
+            // `sluice step` names its folder (design D5).
+            let repository = match reads::resolved(hosting, &folder).await {
+                Ok(r) => r,
+                Err(words) => return send(&mut writer, &Answer::Error(words)).await,
+            };
             note(hosting, &repository);
             let answer = match hosting.tasks.handle(&repository).step(&branch).await {
                 Ok(doc) => Answer::Step(doc),
