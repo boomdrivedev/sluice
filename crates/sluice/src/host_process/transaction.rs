@@ -49,6 +49,7 @@ pub(crate) async fn answer(
     lines: String,
 ) -> Output {
     let dir = named(&folder, git_dir.as_deref());
+    let began = std::time::Instant::now();
     let output = match names_a_branch(&lines) {
         false => Output::default(),
         true => {
@@ -67,12 +68,13 @@ pub(crate) async fn answer(
         }
     };
     super::log(&format!(
-        "sluice host: {}: reference transaction of `{by}`: {}",
+        "sluice host: {}: reference transaction of `{by}`: {} in {} ms",
         dir.display(),
         match output.code {
             0 => "let go",
             _ => "refused",
-        }
+        },
+        began.elapsed().as_millis()
     ));
     output
 }

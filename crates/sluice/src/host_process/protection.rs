@@ -35,8 +35,10 @@ enum Put {
 /// The folders `request` names and what it has done with their hooks: a
 /// submit, a wait, a step and `sluice run` install it; every other request
 /// that names a folder puts it back. `sluice protect` does its own, the
-/// hook's own request puts back nothing, and a worktree's release writes
-/// nothing (record 0120 as amended 2026-11-17).
+/// hook's own request puts back nothing, a worktree's release writes
+/// nothing (record 0120 as amended 2026-11-17), and a pass, which only a
+/// follower whose subscription put the hook back asks, waits on nothing
+/// for it.
 fn asked(request: &Request) -> Vec<(PathBuf, Put)> {
     match request {
         Request::Submit { folder, .. }
@@ -55,8 +57,7 @@ fn asked(request: &Request) -> Vec<(PathBuf, Put)> {
         | Request::Withdraw { folder, .. }
         | Request::Confirm { folder, .. }
         | Request::Release { folder, .. }
-        | Request::Branch { folder, .. }
-        | Request::Pass { folder, .. } => vec![(folder.clone(), Put::Back)],
+        | Request::Branch { folder, .. } => vec![(folder.clone(), Put::Back)],
         Request::Subscribe { folders } => folders
             .iter()
             .map(|added| {
@@ -69,6 +70,7 @@ fn asked(request: &Request) -> Vec<(PathBuf, Put)> {
             .collect(),
         Request::Protect { .. }
         | Request::ReferenceTransaction { .. }
+        | Request::Pass { .. }
         | Request::ReleaseWorktree { .. }
         | Request::Serve { .. }
         | Request::Results { .. }

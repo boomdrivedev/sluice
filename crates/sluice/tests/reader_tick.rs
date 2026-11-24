@@ -35,7 +35,10 @@ fn a_counting_git_counts_what_status_starts() {
 }
 
 /// reader-tick, "sluice run in a set-up repository with nothing
-/// queued": its passes after the first start no git (129).
+/// queued": its passes after the first start no git (129). A `sluice
+/// host` that answered the first finds the hooks folder it put the hook
+/// back in kept, and starts none for it (the change
+/// `the-git-hook-asks-sluice-host`, design D4).
 #[test]
 fn sluice_run_with_nothing_queued_starts_git_at_its_first_pass_alone() {
     let d = OnDisk::new("idle-run", POLICY);
@@ -43,7 +46,7 @@ fn sluice_run_with_nothing_queued_starts_git_at_its_first_pass_alone() {
     let one = starts(&d, &["run", "--rounds", "1"]);
     let before = d.git.starts().len();
     let six = starts(&d, &["run", "--rounds", "6"]);
-    assert_eq!(six, one, "{:?}", &d.git.starts()[before..]);
+    assert!(six <= one, "{six} > {one}: {:?}", &d.git.starts()[before..]);
 }
 
 /// refused-landing, "Refused every round" and design D3 of the change

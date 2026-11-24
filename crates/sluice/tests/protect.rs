@@ -1691,7 +1691,7 @@ fn a_persons_write_is_judged_by_sluice_host() {
     assert!(
         log.lines().any(|l| l.contains("reference transaction")
             && l.contains("update-ref refs/heads/bolt/x")
-            && l.ends_with("refused")),
+            && l.contains(": refused in ")),
         "{log}"
     );
 }
