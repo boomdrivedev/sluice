@@ -581,7 +581,7 @@ fn a_newer_client_has_an_older_host_process_hand_over() {
     let older = follow.named.clone();
     let newer = client.clone().with_version("0.72.0");
     let reached = newer.reach().expect("the newer command's own");
-    assert_eq!(reached.named.pid, older.pid);
+    assert_eq!(reached.named.pid, older.pid, "{}", host_logs(&d));
     assert_ne!(reached.named.since, older.since);
     // What followed the older one is closed, and reaches the new one.
     assert!(follow.next(Some(Duration::from_secs(5))).is_err());
@@ -1105,10 +1105,29 @@ fn a_profile_beside_the_host_process_holds_no_part() {
     }
 }
 
+/// The runs waiting for room in the host's room, as the overview shows
+/// them: a combination's and an agent's (150).
+fn room_waiting(d: &OnDisk) -> (u64, u64) {
+    let out = d
+        .command(d.repo.dir())
+        .args(["overview", "--json"])
+        .output()
+        .unwrap();
+    let doc: serde_json::Value =
+        serde_json::from_slice(&out.stdout).unwrap_or_else(|_| panic!("{}", text(&out)));
+    let waiting = &doc["room"]["waiting"];
+    (
+        waiting["queue"].as_u64().unwrap_or(0),
+        waiting["sessions"].as_u64().unwrap_or(0),
+    )
+}
+
 /// run-bound, "Turns on a bound of two" (150, S75; rule core.49; record
 /// 0087): two agents' checks hold both runs, a third waits and a
 /// combination falls due; the combination takes the first run to end, and
-/// the third agent the second, while the combination's run goes on.
+/// the third agent the second, while the combination's run goes on. Each
+/// agent's check ends when the test lets it, once the overview shows what
+/// waits, so no step of it races the host's load.
 #[test]
 fn s75_a_combination_starts_before_a_third_agents_check() {
     let marks = support::Scratch::new("host-s75-marks");
@@ -1133,15 +1152,30 @@ fn s75_a_combination_starts_before_a_third_agents_check() {
     // The third agent's session and the combination's are made first: their
     // git, and the hook it runs, take no part of the first agent's time.
     let (third, combined) = (d.session("c"), d.session("q"));
-    let a = agent(&d, "a", &format!("touch '{}'; sleep 3", m("a").display()));
-    let b = agent(&d, "b", &format!("touch '{}'; sleep 9", m("b").display()));
+    // Each holds its run until the test writes its `go` file.
+    let held = |name: &str| {
+        format!(
+            "touch '{}'; while [ ! -e '{}' ]; do sleep 0.1; done",
+            m(name).display(),
+            m(&format!("go-{name}")).display()
+        )
+    };
+    let a = agent(&d, "a", &held("a"));
+    let b = agent(&d, "b", &held("b"));
     within(30, "two agents' checks hold both runs", || {
         m("a").exists() && m("b").exists()
     });
     let c = agent_in(&d, &third, &format!("touch '{}'", m("c").display()));
     let id = queued_live(&d, &combined);
+    within(
+        60,
+        "the combination and the third agent wait for room",
+        || room_waiting(&d) == (1, 1),
+    );
+    std::fs::write(m("go-a"), "").unwrap();
     within(60, "the combination's run starts", || m("q").exists());
     assert!(!m("c").exists(), "the third agent's check still waits");
+    std::fs::write(m("go-b"), "").unwrap();
     within(60, "the third agent's check starts", || m("c").exists());
     assert_eq!(
         state(&d, d.repo.dir(), id),
@@ -3560,10 +3594,32 @@ fn a_daemon_started_afresh_answers_on_its_socket() {
 /// following a host process and nothing in play, no document comes while
 /// nothing changes; a submission another process writes to `main`'s
 /// records, with no command telling this host process, is read once the
-/// file events stop, and the watch gets the document that holds it.
+/// file events stop, and the watch gets the document that holds it, well
+/// within the minute after which an idle repository is read again.
 #[test]
 fn a_records_write_reaches_a_watch_by_its_file_event() {
-    let d = OnDisk::new("host-records-event", POLICY);
+    records_write_reaches_a_watch("host-records-event", Duration::from_secs(30));
+}
+
+/// host-events, "Another process writes the records", its bound on speed:
+/// the document comes within two seconds of the file events' debounce. A
+/// host running other work cannot hold it (#160's gate, 2026-11-24: 2.5
+/// seconds under three suites at once): `cli:speed` runs it on a quiet
+/// host, and no gate does.
+#[test]
+fn a_records_write_reaches_a_watch_by_its_file_event_at_speed() {
+    let took = records_write_reaches_a_watch("host-records-speed", Duration::from_secs(5));
+    assert!(
+        took < sluice::host_process::watch::DEBOUNCE + Duration::from_secs(2),
+        "{took:?}"
+    );
+}
+
+/// The watch and the write of [`a_records_write_reaches_a_watch_by_its_file_event`]
+/// in a repository named `name`, the document waited for up to `wait`:
+/// how long after the write it came.
+fn records_write_reaches_a_watch(name: &str, wait: Duration) -> Duration {
+    let d = OnDisk::new(name, POLICY);
     d.land("a");
     let dir = d.session("b");
     let repository = d.repository(d.repo.dir());
@@ -3605,7 +3661,7 @@ fn a_records_write_reaches_a_watch_by_its_file_event() {
         .unwrap();
     assert!(out.status.success(), "{}", text(&out));
     let written = Instant::now();
-    let told = watch.line(Some(Duration::from_secs(5))).unwrap();
+    let told = watch.line(Some(wait)).unwrap();
     let Some(SubscriptionLine::Document(told)) = told else {
         panic!("no document after the write: {told:?}\n{}", host_logs(&d));
     };
@@ -3614,11 +3670,7 @@ fn a_records_write_reaches_a_watch_by_its_file_event() {
         "{}",
         told.overview
     );
-    assert!(
-        written.elapsed() < sluice::host_process::watch::DEBOUNCE + Duration::from_secs(2),
-        "{:?}",
-        written.elapsed()
-    );
+    let took = written.elapsed();
     drop(watch);
     let state = other.path().join("sluice").join("host").join("version");
     if let Ok(bytes) = std::fs::read(state) {
@@ -3626,6 +3678,7 @@ fn a_records_write_reaches_a_watch_by_its_file_event() {
             stop(n.pid);
         }
     }
+    took
 }
 
 /// The host's room, as `sluice host` renders it with a one-shot overview

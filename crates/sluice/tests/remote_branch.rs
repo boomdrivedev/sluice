@@ -601,6 +601,22 @@ fn step_until_refused(s: &Setup) {
     }
 }
 
+/// One round of `main`: a step that finds another round holding the
+/// branch's lock, the host process's own after the submit, runs none and
+/// says it is busy, so it is asked again until one runs.
+fn one_round(s: &Setup) {
+    let deadline = Instant::now() + Duration::from_secs(60);
+    loop {
+        let out = s.sluice(&["step", "main"]);
+        assert!(out.status.success(), "{}", text(&out));
+        if !text(&out).contains("busy: another round holds the lock") {
+            return;
+        }
+        assert!(Instant::now() < deadline, "{}", s.status());
+        std::thread::sleep(Duration::from_millis(50));
+    }
+}
+
 /// The lines of `main`'s log on `s`'s host that hold `what`.
 fn logged_count(s: &Setup, what: &str) -> usize {
     let dir = s.repo.dir().join(".git/sluice/main");
@@ -623,8 +639,7 @@ fn a_held_landing_lands_at_the_next_round_once_the_forge_takes_it() {
     s.submit("a");
     step_until_refused(&s);
     std::fs::remove_file(s.origin.path().join("hooks/pre-receive")).unwrap();
-    let out = s.sluice(&["step", "main"]);
-    assert!(out.status.success(), "{}", text(&out));
+    one_round(&s);
     assert_eq!(s.states(), ["landed"]);
     assert_eq!(s.runs(), 1, "no new run");
     let landed = s.remote_main();
@@ -643,8 +658,7 @@ fn a_held_landing_refused_with_other_words_is_held_with_them() {
     step_until_refused(&s);
     let again = "push declined due to repository rule violations";
     refusing(&s, again);
-    let out = s.sluice(&["step", "main"]);
-    assert!(out.status.success(), "{}", text(&out));
+    one_round(&s);
     assert_eq!(s.states(), ["refused"]);
     assert_eq!(s.remote_main(), before);
     let pushed = std::fs::read_to_string(&pushes).unwrap_or_default();
