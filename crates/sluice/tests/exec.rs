@@ -359,12 +359,25 @@ fn a_worktree_at_its_branchs_revision_runs_no_check() {
     assert!(checks_of(&out).is_empty(), "{}", text(&out));
 }
 
-/// The exec-checks spec's "Its own moon.yml" (36, 70): a worktree's own
-/// change to moon's configuration runs every required check.
+/// The exec-checks spec's "Its own moon.yml" (36): a worktree's own
+/// change to a project's `moon.yml` runs that project's checks alone
+/// (the change `the-gate-runs-in-five-minutes`, design D1).
 #[test]
-fn a_worktrees_own_moon_yml_runs_every_check() {
+fn a_worktrees_own_moon_yml_runs_its_project() {
     let s = moon_at_branch("exec-own-moon-yml", "true\n");
     s.commit(&[("b/moon.yml", &moon_yml("true # its own"))]);
+    let out = s.sluice(&["exec", "bolt/x", "--json"]);
+    assert!(out.status.success(), "{}", text(&out));
+    assert_eq!(checks_of(&out), ["b:test"], "{}", text(&out));
+}
+
+/// The exec-checks spec's "The toolchain" (36, 140): a worktree's own
+/// change to a file the toolchain is set up from runs every required
+/// check.
+#[test]
+fn a_worktrees_toolchain_runs_every_check() {
+    let s = moon_at_branch("exec-own-toolchain", "true\n");
+    s.commit(&[("devenv.nix", "{ }\n")]);
     let out = s.sluice(&["exec", "bolt/x", "--json"]);
     assert!(out.status.success(), "{}", text(&out));
     assert_eq!(checks_of(&out), ["a:test", "b:test"], "{}", text(&out));

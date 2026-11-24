@@ -190,6 +190,119 @@ fn the_tasks_a_range_affects() {
     assert_eq!(names(&r), ["alpha:test", "beta:test"]);
 }
 
+/// Design D1 of `the-gate-runs-in-five-minutes`; moon-runner's "A
+/// project's moon.yml": a project's own `moon.yml` affects every task of
+/// that project and what depends on them, and no other task. `beta:test`
+/// depends on `alpha:test`; `gamma:test` stands alone.
+#[test]
+fn a_projects_moon_yml_runs_its_project_and_its_dependents() {
+    let repo = workspace("moon-project-settings");
+    let c = checks(&repo);
+    let every = ["#check-fast", "#check-tools"];
+    let yml = |p: &str| std::fs::read_to_string(repo.dir().join(p)).unwrap();
+
+    let base = repo.rev("HEAD");
+    change(
+        &repo,
+        &[(
+            "alpha/moon.yml",
+            &format!("{}# changed\n", yml("alpha/moon.yml")),
+        )],
+    );
+    let r = finish(&c, &request(&repo, "p1", &every, Some(&base)));
+    assert_eq!(names(&r), ["alpha:test", "beta:test"]);
+
+    let base = repo.rev("HEAD");
+    change(
+        &repo,
+        &[(
+            "gamma/moon.yml",
+            &format!("{}# changed\n", yml("gamma/moon.yml")),
+        )],
+    );
+    let r = finish(&c, &request(&repo, "p2", &every, Some(&base)));
+    assert_eq!(names(&r), ["gamma:test"]);
+}
+
+/// Design D1 of `the-gate-runs-in-five-minutes`; moon-runner's "The
+/// workspace's settings" and "The branch's policy": a setting every
+/// check reads runs every required check.
+#[test]
+fn the_workspaces_settings_and_the_policy_run_every_check() {
+    let repo = workspace("moon-every-setting");
+    let c = checks(&repo);
+    let every = ["#check-fast", "#check-tools"];
+    let ws = std::fs::read_to_string(repo.dir().join(".moon/workspace.yml")).unwrap();
+    let base = repo.rev("HEAD");
+    change(
+        &repo,
+        &[(".moon/workspace.yml", &format!("{ws}# changed\n"))],
+    );
+    let r = finish(&c, &request(&repo, "p1", &every, Some(&base)));
+    assert_eq!(names(&r), ["alpha:test", "beta:test", "gamma:test"]);
+
+    let base = repo.rev("HEAD");
+    change(
+        &repo,
+        &[(".config/sluice.toml", "[tests]\nrunner = \"moon\"\n")],
+    );
+    let r = finish(&c, &request(&repo, "p2", &every, Some(&base)));
+    assert_eq!(names(&r), ["alpha:test", "beta:test", "gamma:test"]);
+}
+
+/// Design D1 of `the-gate-runs-in-five-minutes`; moon-runner's "Work
+/// beside the chain" (140): a project's `moon.yml` reads only that
+/// project's checks and what depends on them, so the `moon.yml` of a
+/// project no required check names or depends on reads none.
+#[test]
+fn a_moon_yml_no_check_reads_lands_beside() {
+    let repo = workspace("moon-reads-project-settings");
+    let ws = std::fs::read_to_string(repo.dir().join(".moon/workspace.yml")).unwrap();
+    change(
+        &repo,
+        &[
+            (
+                ".moon/workspace.yml",
+                &ws.replace("gamma: 'gamma'\n", "gamma: 'gamma'\n  docs: 'docs'\n"),
+            ),
+            ("docs/moon.yml", "tasks:\n  build:\n    command: 'true'\n"),
+        ],
+    );
+    let c = checks(&repo);
+    let base = Rev::new(repo.rev("HEAD"));
+    let docs = Rev::new(change(
+        &repo,
+        &[(
+            "docs/moon.yml",
+            "tasks:\n  build:\n    command: 'true' # moved\n",
+        )],
+    ));
+    let alpha = Rev::new(change(
+        &repo,
+        &[(
+            "alpha/moon.yml",
+            &format!(
+                "{}# changed\n",
+                std::fs::read_to_string(repo.dir().join("alpha/moon.yml")).unwrap()
+            ),
+        )],
+    ));
+    let reads = c
+        .reads(&Reading {
+            required: vec!["#check-fast".into()],
+            tests: moon(),
+            pairs: vec![(base, docs.clone()), (docs, alpha)],
+        })
+        .unwrap();
+    assert_eq!(
+        reads,
+        [
+            Reads::Checks(Vec::new()),
+            Reads::Checks(vec!["alpha:test".into(), "beta:test".into()]),
+        ]
+    );
+}
+
 /// 36; design D2: the paths a worktree holds beyond its revision count
 /// among what it changed, so an unstaged edit affects what reads it.
 #[test]
