@@ -33,12 +33,8 @@ Four causes:
    scenarios in a row and takes 182 seconds on a loaded host. Ten
    tests take more than 80 seconds. The task cannot end before its
    longest test.
-4. **No result is replayed.** Under the sandbox, moon cannot write its
-   task archives or the blobs of its shared store. It says `Failed to
-   package task outputs into archive` and `Failed to store blobs`.
-   The last five landings replayed 0 or 1 task each. A combination
-   tested again after a culprit leaves runs every affected check
-   again.
+4. **Almost nothing is replayed.** The last five landings replayed 0
+   or 1 task each.
 
 ## What Changes
 
@@ -56,16 +52,12 @@ Four causes:
 - **The herdr plugin's tests stay under both shells.** With the waits
   on events and in groups, each suite takes about a minute and a half. moon runs the two tasks
   at once, so the second shell adds no wall time.
-- **No test of `cli:tools` is a chain of scenarios.** A test that runs
-  scenarios one after another is split into one test for each
-  scenario. A wait for a state polls at 50 milliseconds, not 200.
-  `pull_requests run_again_marks_a_draft_ready`, which failed under
-  load on 2026-11-23, waits on the state it needs.
-- **moon's results are kept, so a run replays what passed.** The
-  sandbox lets a run write moon's archives and shared store, which
-  rules core.9 and core.35 already ask. A replay still counts only
-  through a pass the branch counts (108).
-
+- **A tools test steps without waiting on the clock.** A wait for a
+  state polls at 50 milliseconds, not 200. `s56`, three scenarios in
+  one test, becomes three tests.
+- **Why replays are few is written down.** A combination's run keeps
+  moon's manifests in the shared store; its archives are out of its
+  reach. No estimate counts on a replay.
 - **A round in a test starts fewer processes.** The tools tests'
   time is process starts, git and the file system, shared with the
   host's other work; more threads made them slower. One `sluice step`

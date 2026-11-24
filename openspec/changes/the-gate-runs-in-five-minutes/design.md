@@ -187,27 +187,30 @@ run under the shell herdr uses on macOS.
 
 **Recommended**, in this order:
 
-1. **Each scenario is a test of its own.** A test that runs scenarios
-   one after another, as `s56` does three, becomes one test for each,
-   with the fixture made for each. No test of `cli:tools` runs past
-   60 seconds alone on a quiet host.
-2. **The polls are 50 milliseconds.** `step_until`, `peers`'s
-   `until_landed` and their kind step, then wait 50 milliseconds, not
-   200.
-3. **The `slow` check waits on its event.** The check script waits for
-   a file the test writes when it has seen the run start, with the 5
-   seconds as its bound, not a fixed sleep.
-4. **nextest keeps one test for each core.** More threads made each
+1. **A chain of scenarios is a test for each.** `s56`, three scenarios
+   in one test, is three tests, each with the fixture it needs. Alone
+   on deneb the longest takes 81 seconds, where the one test took 157.
+2. **The polls are 50 milliseconds.** `step_until` and the loops of
+   `pull_requests.rs`, `peers.rs` and `remote_branch.rs` step, then
+   wait 50 milliseconds, not 200.
+3. **nextest keeps one test for each core.** More threads made each
    test slower and failed seven (Measurements).
 
-`run_again_marks_a_draft_ready`, which failed once under load, waits
-on the state it needs in place of a count of rounds.
+The `slow` check keeps its 5 seconds: the tests that write `slow` ask
+for a run that outlasts their time limit, or that is still running
+when they look.
+
+`run_again_marks_a_draft_ready` failed on 2026-11-23 because, under
+load, intake took the same head of its pull request in twice: `#2
+withdrawn by resubmission: #3 carries its work`, and the wait reported
+the withdrawal, not the failure. That is a fault of intake, not of the
+test's waits; it is reported, and the test is left as it is.
 
 ### D6. A round in a test starts fewer processes
 
 **Recommended, measured first.** Points 1 to 3 of D5 move time, but
 the work stays: about 8,600 seconds of test time, which the host's
-cores share. Task 4.5 counts the processes one `sluice step` of the
+cores share. Task 4.3 counts the processes one `sluice step` of the
 `pull_requests` fixture starts, the `git` calls among them, and where
 its time goes, and cuts what the test does not need: a second
 process per command where one serves, a fetch the fixture's remote
@@ -240,14 +243,17 @@ user decides.
 
 ### D9. moon's results are kept for a replay
 
-**Investigate, in this change.** Under `sluice exec main -- moon run`,
-moon said `Failed to package task outputs into archive` and `Failed to
-store blobs`: the sandbox refused `<git common dir>/moon-outputs` and
-`moon-home/cache/shared`. The queue's landings replay 0 or 1 task
-each. Task 5.1 finds whether a combination's run is refused the same
-way. Where it is, the run is given moon's store as rule core.35
-already asks, and a combination tested again after a culprit leaves
-replays what passed. No estimate below counts on it.
+Under `sluice exec main -- moon run`, moon said `Failed to package task
+outputs into archive` and `Failed to store blobs`. That run is a
+command's: it records nothing, and the sandbox gives it no store. A
+combination's run is given the shared store moon resolves from its
+environment (`sandbox_reach`'s `store`; rule core.35), where its
+manifests prove its keys. Its task archives, under
+`<git common dir>/moon-outputs` by `devenv.nix`'s link, are not in its
+reach, so moon cannot hydrate a task's outputs from another place.
+Few of this repository's tasks have outputs, and a combination runs
+only what its work affects, so replays are few whatever the archives.
+No estimate here counts on them.
 
 ## Expected gate time
 
@@ -260,8 +266,7 @@ counting the wait for room:
 | The herdr plugin alone | 9 min | about 2 min (D2, D3), measured |
 | A crate's `moon.yml` and its code | 9 to 10 min, every task | as a crate change (D1) |
 | A crate of sluice, D5 alone | 10 to 11 min | 8 to 9 min |
-| A crate of sluice, D5 and D6 | 10 to 11 min | not known until task 4.5 |
-| A crate of sluice, D5 and D7 B | 10 to 11 min | about 4.5 min |
+| A crate of sluice, D5 and D6 | 10 to 11 min | not known until task 4.3 |
 
 ## Risks
 

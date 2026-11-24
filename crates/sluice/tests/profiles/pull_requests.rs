@@ -453,7 +453,7 @@ impl OnGitHub {
         while !done(self) {
             assert!(Instant::now() < until, "never {what}: {:?}", self.subs());
             self.step();
-            std::thread::sleep(Duration::from_millis(200));
+            std::thread::sleep(Duration::from_millis(50));
         }
     }
 
@@ -587,7 +587,7 @@ impl OnGitHub {
             assert!(Instant::now() < until, "never landed on bolt/x");
             let out = self.sluice(&["step", "bolt/x"]);
             assert!(out.status.success(), "{}", text(&out));
-            std::thread::sleep(Duration::from_millis(200));
+            std::thread::sleep(Duration::from_millis(50));
         }
         self.bolt_on_github()
     }
@@ -1632,7 +1632,7 @@ fn a_failed_list_ends_intake_and_the_queue_still_lands() {
             break;
         }
         assert!(Instant::now() < until, "never landed: {subs:?}");
-        std::thread::sleep(Duration::from_millis(200));
+        std::thread::sleep(Duration::from_millis(50));
     }
     let landed = g.main_on_github();
     assert_eq!(
@@ -1971,7 +1971,7 @@ fn a_requests_post_confirms_its_outcome_on_receipt() {
         assert!(Instant::now() < until, "never failed: {:?}", g.subs());
         g.discovery_passes();
         g.sluice(&["step", "main"]);
-        std::thread::sleep(Duration::from_millis(200));
+        std::thread::sleep(Duration::from_millis(50));
     }
     for _ in 0..2 {
         g.sluice(&["step", "main"]);
@@ -3688,71 +3688,76 @@ fn submitted_by_the_operators_ops() {
     assert_eq!(landed["head"], fixed.as_str());
 }
 
+/// S56 (120): the request from `unit/first`, made off the `main` a
+/// request made before it is made off, landed, so such a request that
+/// changes `plan.py` too conflicts.
+fn s56_land_first(g: &OnGitHub) {
+    let (first, first_head) = g.by_hand("unit/first", &[("plan.py", Some("first\n"))], false);
+    s56_approve(g, first, &first_head);
+    g.step_until("the first landed", |g| {
+        g.of(first).iter().any(|s| s["state"] == "landed")
+    });
+}
+
+/// S56: a fix of the branch checked out in `dir` onto GitHub's `main`: a
+/// merge keeping the branch's tree, which merges onto `main` without
+/// conflict, pushed to GitHub. Returns the new head.
+fn s56_fix_onto_main(g: &OnGitHub, dir: &Path) -> String {
+    g.repo.git(&["fetch", "-q", "origin", "main"]);
+    let main = g.main_on_github();
+    let at = dir.to_str().unwrap();
+    g.repo.git(&[
+        "-C",
+        at,
+        "merge",
+        "-q",
+        "-s",
+        "ours",
+        &main,
+        "-m",
+        "Fix onto main",
+    ]);
+    let branch = g.repo.git(&["-C", at, "rev-parse", "--abbrev-ref", "HEAD"]);
+    g.repo.git(&[
+        "push",
+        "-q",
+        "origin",
+        &format!("{branch}:refs/heads/{branch}"),
+    ]);
+    g.repo.git(&["-C", at, "rev-parse", "HEAD"])
+}
+
+/// S56: a review that approves pull request `n` at `head`.
+fn s56_approve(g: &OnGitHub, n: u64, head: &str) {
+    g.gh.forge.review(n, "reviewer", "APPROVED", head).unwrap();
+}
+
 /// S56 (120): an agent's pull request, refused for a conflict, waits for
 /// its submitter. A fix pushed to its branch, standing for one another
 /// submission landed there, moves its head; over several rounds it is a
 /// draft, and nothing is submitted or landed in the agent's name, though
 /// its review holds. The agent's next `wt submit` marks it ready at the
-/// new head, and it lands. A pull request opened by hand whose head moves
-/// the same way is submitted again once its review holds. One opened by
-/// hand that the operator withdrew is not submitted again, though its
-/// review holds, until its author pushes a new head.
+/// new head, and it lands.
 #[test]
 fn s56_a_refused_request_waits_for_its_submitter() {
     let g = OnGitHub::new("pr-s56", "reviews = 1");
-    let approve = |n: u64, head: &str| {
-        g.gh.forge.review(n, "reviewer", "APPROVED", head).unwrap();
-    };
-    // Three changes to one file, each off the same `main`: the first
-    // lands, so the agent's and the hand-opened one conflict.
     let w = g.session("s56", &[("plan.py", "agent\n")]);
-    let (hand, hand_head) = g.by_hand("unit/hand", &[("plan.py", Some("hand\n"))], false);
-    let (first, first_head) = g.by_hand("unit/first", &[("plan.py", Some("first\n"))], false);
-    approve(first, &first_head);
-    g.step_until("the first landed", |g| {
-        g.of(first).iter().any(|s| s["state"] == "landed")
-    });
-    // A fix of the agent's branch onto GitHub's `main`: a merge keeping
-    // the branch's tree, which merges onto `main` without conflict.
-    let fix_onto_main = |dir: &Path| {
-        g.repo.git(&["fetch", "-q", "origin", "main"]);
-        let main = g.main_on_github();
-        let at = dir.to_str().unwrap();
-        g.repo.git(&[
-            "-C",
-            at,
-            "merge",
-            "-q",
-            "-s",
-            "ours",
-            &main,
-            "-m",
-            "Fix onto main",
-        ]);
-        let branch = g.repo.git(&["-C", at, "rev-parse", "--abbrev-ref", "HEAD"]);
-        g.repo.git(&[
-            "push",
-            "-q",
-            "origin",
-            &format!("{branch}:refs/heads/{branch}"),
-        ]);
-        g.repo.git(&["-C", at, "rev-parse", "HEAD"])
-    };
+    s56_land_first(&g);
 
     // The agent's pull request, refused for a conflict.
     let out = g.wt_submit(&w, &["--no-wait"]);
     assert_eq!(out.status.code(), Some(0), "{}", text(&out));
     let pull = g.pull_from("unit/s56");
     let n = pull.number;
-    approve(n, &pull.head);
+    s56_approve(&g, n, &pull.head);
     g.step_until("conflict", |g| {
         g.of(n).iter().any(|s| s["state"] == "conflict")
     });
 
     // Its head moves, and its review holds on the new head: still held.
     let main = g.main_on_github();
-    let fixed = fix_onto_main(&w);
-    approve(n, &fixed);
+    let fixed = s56_fix_onto_main(&g, &w);
+    s56_approve(&g, n, &fixed);
     let subs = g.of_after(n, 3);
     assert_eq!(subs.len(), 1, "nothing submitted in its name: {subs:?}");
     assert_eq!(subs[0]["state"], "conflict");
@@ -3773,31 +3778,42 @@ fn s56_a_refused_request_waits_for_its_submitter() {
     assert_eq!(subs[1]["head"], fixed.as_str());
     assert_eq!(subs[1]["state"], "landed");
     assert_eq!(subs[1]["from"]["agent"], "unit/s56");
+}
 
-    // Opened by hand, refused the same way and its head moved the same
-    // way: submitted again once its review holds on the new head.
-    approve(hand, &hand_head);
+/// S56 (120): a pull request opened by hand, refused for a conflict, whose
+/// head moves as an agent's would, is submitted again once its review
+/// holds on the new head.
+#[test]
+fn s56_a_refused_request_opened_by_hand_is_taken_again_once_reviewed() {
+    let g = OnGitHub::new("pr-s56-hand", "reviews = 1");
+    let (hand, hand_head) = g.by_hand("unit/hand", &[("plan.py", Some("hand\n"))], false);
+    s56_land_first(&g);
+    s56_approve(&g, hand, &hand_head);
     g.step_until("the hand-opened conflict", |g| {
         g.of(hand).iter().any(|s| s["state"] == "conflict")
     });
     g.repo.git(&["switch", "-q", "unit/hand"]);
-    let moved = fix_onto_main(g.repo.dir());
+    let moved = s56_fix_onto_main(&g, g.repo.dir());
     g.repo.git(&["switch", "-q", "--detach", "main"]);
     let subs = g.of_after(hand, 2);
     assert_eq!(subs.len(), 1, "waits for its review: {subs:?}");
     assert!(!g.pull_from("unit/hand").draft);
     assert_eq!(g.posted(&moved).unwrap().1, "waiting: needs 1 review");
-    approve(hand, &moved);
+    s56_approve(&g, hand, &moved);
     g.step_until("the hand-opened landed", |g| {
         g.of(hand)
             .iter()
             .any(|s| s["state"] == "landed" && s["head"] == moved.as_str())
     });
+}
 
-    // Opened by hand and withdrawn by the operator: its offer rests, its
-    // review holding, until its author pushes a new head.
+/// S56 (120): a pull request opened by hand and withdrawn by the operator
+/// rests, its review holding, until its author pushes a new head.
+#[test]
+fn s56_a_request_the_operator_withdrew_waits_for_a_new_head() {
+    let g = OnGitHub::new("pr-s56-rest", "reviews = 1");
     let (rest, rest_head) = g.by_hand("unit/rest", &[("slow", Some("x\n"))], false);
-    approve(rest, &rest_head);
+    s56_approve(&g, rest, &rest_head);
     g.step_until("the withdrawn one submitted", |g| !g.of(rest).is_empty());
     let id = g.of(rest)[0]["id"].as_u64().unwrap().to_string();
     let out = g.sluice(&["withdraw", &id, "--as", "operator"]);
@@ -3810,7 +3826,7 @@ fn s56_a_refused_request_waits_for_its_submitter() {
         "waiting: withdrawn by the operator"
     );
     let pushed = g.push_more("unit/rest", "rest.txt");
-    approve(rest, &pushed);
+    s56_approve(&g, rest, &pushed);
     g.step_until("the withdrawn one submitted again", |g| {
         g.of(rest).iter().any(|s| s["head"] == pushed.as_str())
     });
@@ -4837,7 +4853,7 @@ fn ended(mut child: std::process::Child) -> Output {
             let out = child.wait_with_output().unwrap();
             panic!("never ended: {}", text(&out));
         }
-        std::thread::sleep(Duration::from_millis(200));
+        std::thread::sleep(Duration::from_millis(50));
     }
     child.wait_with_output().unwrap()
 }
@@ -5063,7 +5079,7 @@ fn a_request_by_name_is_collected_by_no_worktree() {
         assert!(Instant::now() < until, "never failed: {:?}", g.subs());
         g.discovery_passes();
         g.sluice(&["step", "main"]);
-        std::thread::sleep(Duration::from_millis(200));
+        std::thread::sleep(Duration::from_millis(50));
     }
     let sub = g.of(n).into_iter().find(|s| s["id"] == id).unwrap();
     assert_eq!(sub["state"], "failed", "{sub}");
@@ -6222,7 +6238,7 @@ fn a_refused_main_leaves_a_bolt_landing() {
             break;
         }
         assert!(Instant::now() < until, "never landed: {v}");
-        std::thread::sleep(Duration::from_millis(200));
+        std::thread::sleep(Duration::from_millis(50));
     }
 }
 
@@ -6343,7 +6359,7 @@ fn a_merged_request_leaves_the_follows() {
                 text(&submit.wait_with_output().unwrap())
             );
         }
-        std::thread::sleep(Duration::from_millis(200));
+        std::thread::sleep(Duration::from_millis(50));
     };
     while !b.of(n).first().is_some_and(|s| s["state"] == "landed") {
         assert!(Instant::now() < until, "B never landed it: {:?}", b.of(n));
@@ -6355,7 +6371,7 @@ fn a_merged_request_leaves_the_follows() {
             let _ = submit.kill();
             break;
         }
-        std::thread::sleep(Duration::from_millis(200));
+        std::thread::sleep(Duration::from_millis(50));
     }
     let out = submit.wait_with_output().unwrap();
     assert_eq!(out.status.code(), Some(0), "{}", text(&out));
@@ -6434,7 +6450,7 @@ fn landed_on_another_host() {
                 text(&submit.wait_with_output().unwrap())
             );
         }
-        std::thread::sleep(Duration::from_millis(200));
+        std::thread::sleep(Duration::from_millis(50));
     }
     let n = g.pull_from("unit/landed").number;
     while !b.of(n).first().is_some_and(|s| s["state"] == "landed") {
@@ -6447,7 +6463,7 @@ fn landed_on_another_host() {
             let _ = submit.kill();
             break;
         }
-        std::thread::sleep(Duration::from_millis(200));
+        std::thread::sleep(Duration::from_millis(50));
     }
     let out = submit.wait_with_output().unwrap();
     assert_eq!(out.status.code(), Some(0), "{}", text(&out));
@@ -6858,7 +6874,7 @@ fn a_waits_words_across_hosts() {
                 let _ = wait.kill();
                 panic!("never said {line:?}: {}", shown());
             }
-            std::thread::sleep(Duration::from_millis(200));
+            std::thread::sleep(Duration::from_millis(50));
         }
     };
     let first = format!("#{n} is submission 1406 on b, taken in by b");
@@ -7481,7 +7497,7 @@ fn taken_in_again_while_github_keeps_the_check_failed() {
             b.run("1");
             last = now;
         }
-        std::thread::sleep(Duration::from_millis(200));
+        std::thread::sleep(Duration::from_millis(50));
     }
     let out = wait.wait_with_output().unwrap();
     let said = words();

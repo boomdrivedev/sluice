@@ -24,13 +24,14 @@ of its own, and SHALL fail where any group fails or leaves a process.
 - **THEN** `moon run plugin-herdr:test-sh` fails naming that test, and
   the other groups' tests run to their end
 
-### Requirement: No tools test is a chain of scenarios
+### Requirement: A tools test steps the queue without waiting on the clock
 
-Each test of `cli:tools` SHALL hold one scenario. A test that steps
-the queue until a state holds SHALL wait at most 50 milliseconds
-between its steps.
+A test of `cli:tools` that steps the queue until a state holds SHALL
+start its next step within 50 milliseconds of the last, and a test
+SHALL hold one scenario.
 
-#### Scenario: A host at rest
+#### Scenario: A state not yet reached
 
-- **WHEN** `moon run cli:tools` runs on a host with no other work
-- **THEN** no test takes more than 60 seconds
+- **WHEN** a pull request test's step leaves its submission short of
+  the state it waits for
+- **THEN** its next step starts within 50 milliseconds

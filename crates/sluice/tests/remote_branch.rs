@@ -240,7 +240,7 @@ impl Setup {
                 return;
             }
             assert!(Instant::now() < deadline, "{}", self.status());
-            std::thread::sleep(Duration::from_millis(200));
+            std::thread::sleep(Duration::from_millis(50));
         }
     }
 
@@ -316,7 +316,7 @@ impl Setup {
                 return text(&out);
             }
             assert!(Instant::now() < deadline, "{}", self.status());
-            std::thread::sleep(Duration::from_millis(200));
+            std::thread::sleep(Duration::from_millis(50));
         }
     }
 
@@ -417,7 +417,7 @@ fn a_landing_pushed_but_unrecorded_is_recorded_by_the_next_round() {
             break;
         }
         assert!(Instant::now() < deadline, "{}", s.status());
-        std::thread::sleep(Duration::from_millis(200));
+        std::thread::sleep(Duration::from_millis(50));
     }
     let landed = s.remote_main();
     assert_ne!(s.states(), ["landed"]);
@@ -526,7 +526,7 @@ fn a_wait_on_a_landing_the_forge_refused_exits_6() {
         let out = s.sluice(&["step", "main"]);
         assert!(out.status.success(), "{}", text(&out));
         assert!(Instant::now() < deadline, "{}", s.status());
-        std::thread::sleep(Duration::from_millis(200));
+        std::thread::sleep(Duration::from_millis(50));
     }
     for _ in 0..3 {
         let out = s.sluice(&["step", "main"]);
@@ -593,7 +593,7 @@ fn step_until_refused(s: &Setup) {
         let out = s.sluice(&["step", "main"]);
         assert!(out.status.success(), "{}", text(&out));
         assert!(Instant::now() < deadline, "{}", s.status());
-        std::thread::sleep(Duration::from_millis(200));
+        std::thread::sleep(Duration::from_millis(50));
     }
 }
 
@@ -710,7 +710,7 @@ fn a_failed_fetch_lands_nothing_and_says_so() {
         let out = s.sluice(&["step", "main"]);
         assert!(out.status.success(), "{}", text(&out));
         assert!(Instant::now() < deadline, "{}", s.status());
-        std::thread::sleep(Duration::from_millis(200));
+        std::thread::sleep(Duration::from_millis(50));
     }
     let before = s.remote_main();
     let aside = s.origin.path().with_extension("aside");
@@ -1307,7 +1307,7 @@ fn step_bolt_until_out(s: &Setup) {
             return;
         }
         assert!(Instant::now() < deadline, "{:?}", bolt_states(s));
-        std::thread::sleep(Duration::from_millis(200));
+        std::thread::sleep(Duration::from_millis(50));
     }
 }
 
@@ -1890,7 +1890,7 @@ fn a_forecast_beside_a_current_reader_asks_the_remote_nothing() {
             break;
         }
         assert!(Instant::now() < deadline, "{v}");
-        std::thread::sleep(Duration::from_millis(200));
+        std::thread::sleep(Duration::from_millis(50));
     }
 
     let out = s.sluice(&["overview", "--json"]);

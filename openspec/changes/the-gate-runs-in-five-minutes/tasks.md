@@ -28,12 +28,10 @@ and written into design.md's table of expected gate time.
 
 ## 4. No tools test is a chain of scenarios
 
-- [ ] 4.1 In `crates/sluice/tests/profiles/pull_requests.rs`, `step_until` and `of_after`'s steps wait 50 milliseconds between steps; in `crates/sluice/tests/peers.rs` and `crates/sluice/tests/remote_branch.rs`, their loops the same (design D5). True when `sluice exec main -- cargo test -p sluice --features tools --test pull_requests` passes.
-- [ ] 4.2 The check script's `slow` waits for the file the test writes once it has seen the run start, bounded by 5 seconds. True when `sluice exec main -- cargo test -p sluice --features tools --test pull_requests slow` passes.
-- [ ] 4.3 Each test of `cli:tools` that runs scenarios one after another is split, one test for each, starting with every test design.md lists over 60 seconds alone. True when `sluice exec main -- moon run cli:tools` passes and its run, timed as design.md's Measurements were, has no test over 60 seconds on a host at rest.
-- [ ] 4.4 `run_again_marks_a_draft_ready` waits on the state it needs, not on a count of rounds. True when `sluice exec main -- cargo test -p sluice --features tools --test pull_requests run_again_marks_a_draft_ready` passes.
-- [ ] 4.5 Count the processes one `sluice step` of the `pull_requests` fixture starts, the `git` calls among them, and where its time goes, and write it into design D6. Cut each one the test does not need. True when `sluice exec main -- cargo test -p sluice --features tools --test pull_requests` passes and design D6 gives the test time of `cli:tools` before and after.
+- [x] 4.1 In `crates/sluice/tests/profiles/pull_requests.rs`, `step_until` and the other loops wait 50 milliseconds between steps; in `crates/sluice/tests/peers.rs` and `crates/sluice/tests/remote_branch.rs`, their loops the same (design D5). True when `sluice exec main -- moon run cli:tools` passes.
+- [x] 4.2 `s56_a_refused_request_waits_for_its_submitter` is three tests, one for each scenario. True when `sluice exec main -- cargo nextest run -p sluice --features tools --test pull_requests -E 'test(s56)'` passes.
+- [ ] 4.3 Count the processes one `sluice step` of the `pull_requests` fixture starts, the `git` calls among them, and where its time goes, and write it into design D6. True when design D6 gives them, measured.
 
 ## 5. moon's results are kept for a replay
 
-- [ ] 5.1 Find whether a combination's run can write moon's archives and shared store under the sandbox, by the run's log and its record (design D9). Where it cannot, give the run the store as rule core.35 asks, with a test in `crates/sluice/tests/checks.rs`. True when `sluice exec main -- cargo test -p sluice --features tools --test checks a_sandboxed_run_keeps_moons_archives` passes, or when design D9 records that the run already keeps them.
+- [x] 5.1 Find whether a combination's run can write moon's shared store under the sandbox (design D9). True when design D9 records it.

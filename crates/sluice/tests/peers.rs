@@ -267,7 +267,7 @@ fn a_run_is_claimed_and_run_by_the_other_host() {
             "never landed: {}",
             host_a.state_of(id)
         );
-        std::thread::sleep(Duration::from_millis(200));
+        std::thread::sleep(Duration::from_millis(50));
     }
     assert!(refs_under(&origin, "refs/sluice/runs/").contains("refs/sluice/runs/b"));
     assert!(!refs_under(&origin, "refs/sluice/runs/").contains("refs/sluice/runs/a"));
@@ -297,7 +297,7 @@ fn a_submission_lands_by_another_host() {
             "never landed: {}",
             host_b.state_of(id)
         );
-        std::thread::sleep(Duration::from_millis(200));
+        std::thread::sleep(Duration::from_millis(50));
     }
     assert_eq!(host_a.state_of(id), "landed");
     // The landing is on the remote's branch, made by the other host.
@@ -344,7 +344,7 @@ fn an_outcome_on_the_remote_is_collected_on_another_host() {
         );
         let out = host_a.sluice(&["step", "main"]);
         assert!(out.status.success(), "{}", text(&out));
-        std::thread::sleep(Duration::from_millis(200));
+        std::thread::sleep(Duration::from_millis(50));
     }
 
     let dir = host_b.sessions.path().join("x");
@@ -436,7 +436,7 @@ fn a_host_whose_own_main_is_refused_counts_the_remotes_signers() {
             "never landed: {}",
             host_b.state_of(id)
         );
-        std::thread::sleep(Duration::from_millis(200));
+        std::thread::sleep(Duration::from_millis(50));
     }
     assert_eq!(host_a.state_of(id), "landed");
     assert!(refs_under(&origin, "refs/sluice/runs/").contains("refs/sluice/runs/box"));
@@ -499,7 +499,7 @@ fn land(hosts: &[&Host], id: u64) {
             "never landed: {}",
             hosts[0].state_of(id)
         );
-        std::thread::sleep(Duration::from_millis(200));
+        std::thread::sleep(Duration::from_millis(50));
     }
 }
 
@@ -583,7 +583,7 @@ fn two_branches_landed(name: &str) -> (Scratch, Host) {
             let out = host.sluice(&["step", branch]);
             assert!(out.status.success(), "{}", text(&out));
             assert!(Instant::now() < deadline, "{branch}: {}", host.state_of(id));
-            std::thread::sleep(Duration::from_millis(200));
+            std::thread::sleep(Duration::from_millis(50));
         }
     }
     (origin, host)
@@ -816,7 +816,7 @@ fn a_signed_record_is_verified_once() {
             let out = host.sluice(&["step", "main"]);
             assert!(out.status.success(), "{}", text(&out));
             assert!(Instant::now() < deadline, "#{id}: {}", host.state_of(id));
-            std::thread::sleep(Duration::from_millis(200));
+            std::thread::sleep(Duration::from_millis(50));
         }
         landed.push(id);
     }
@@ -1001,7 +1001,7 @@ fn a_daemon_lands_what_another_host_submits() {
             std::fs::read_to_string(host_b.state.path().join("sluice/host/log"))
                 .unwrap_or_default()
         );
-        std::thread::sleep(Duration::from_millis(200));
+        std::thread::sleep(Duration::from_millis(50));
     }
     assert!(refs_under(&origin, "refs/sluice/runs/").contains("refs/sluice/runs/b"));
 }
