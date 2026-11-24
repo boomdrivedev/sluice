@@ -4,9 +4,7 @@
 
 The herdr plugin's tests SHALL wait for what they check by checking it
 at least ten times a second, within a bound in seconds. A test SHALL
-NOT sleep a fixed time to wait for a watcher, a tick or a process to
-end. A test that counts a watcher's ticks SHALL run it with a tick of
-a fifth of a second.
+NOT sleep a fixed time to wait for a watcher or a process to end.
 
 #### Scenario: A host at rest
 

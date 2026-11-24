@@ -51,11 +51,10 @@ Four causes:
   beside the chain (140).
 - **Each test of the herdr plugin waits on its event.** A wait checks
   every tenth of a second. A test starts once the last test's watchers
-  have ended, with no fixed sleep. A test that counts idle ticks uses
-  ticks of a fifth of a second. The tests run in four groups at once,
-  each group in folders of its own.
+  have ended, with no fixed sleep. The tests run in four groups at
+  once, each group in folders of its own.
 - **The herdr plugin's tests stay under both shells.** With the waits
-  on events, each suite takes about a minute. moon runs the two tasks
+  on events and in groups, each suite takes about a minute and a half. moon runs the two tasks
   at once, so the second shell adds no wall time.
 - **No test of `cli:tools` is a chain of scenarios.** A test that runs
   scenarios one after another is split into one test for each
