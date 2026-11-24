@@ -60,6 +60,26 @@ pub struct Connection {
     pub named: Named,
 }
 
+/// What `log` holds past its first `from` bytes, its lines joined, at
+/// most its last kilobyte.
+fn said_since(log: &Path, from: u64) -> String {
+    let Ok(bytes) = std::fs::read(log) else {
+        return String::new();
+    };
+    let from = usize::try_from(from).unwrap_or(0).min(bytes.len());
+    let text = String::from_utf8_lossy(&bytes[from..]);
+    let said: Vec<&str> = text
+        .lines()
+        .map(str::trim)
+        .filter(|l| !l.is_empty())
+        .collect();
+    let said = said.join(" ");
+    match said.char_indices().rev().nth(1023) {
+        Some((at, _)) => format!("…{}", &said[at..]),
+        None => said,
+    }
+}
+
 /// Whether the process `pid` still runs: one of the user's own, a signal
 /// it could be sent, or one it may not be sent.
 fn alive(pid: u32) -> bool {
@@ -318,8 +338,11 @@ impl Client {
                 Ok(())
             });
         }
+        // What the log holds before it, so what the process says as it
+        // fails at its start is read apart from what came before.
+        let before = std::fs::metadata(&log).map_or(0, |m| m.len());
         let started = command.spawn();
-        let mut child = match started {
+        let child = match started {
             Ok(c) => c,
             Err(e) => {
                 drop(lock);
@@ -330,15 +353,42 @@ impl Client {
                 );
             }
         };
-        // Reaped once it ends, so it never waits on this command.
-        std::thread::spawn(move || child.wait());
         let until = Instant::now() + START_WAIT;
+        let mut child = Some(child);
         loop {
             if let Some(c) = self.answering()? {
+                // Reaped once it ends, so it never waits on this command.
+                if let Some(mut child) = child.take() {
+                    std::thread::spawn(move || child.wait());
+                }
                 return Ok(c);
+            }
+            // A process that failed at its start, refusing the host's
+            // settings among it, is said at once, in its own words, rather
+            // than waited for (the change `the-git-hook-asks-sluice-host`,
+            // design D2: the hook's ten seconds hold no wait for it). One
+            // that ended well found another answering, which the next look
+            // finds.
+            if let Some(ended) = child.as_mut().and_then(|c| c.try_wait().ok().flatten()) {
+                child = None;
+                if !ended.success() {
+                    drop(lock);
+                    let said = said_since(&log, before);
+                    bail!(
+                        "sluice's host process ended at its start ({ended}){}; see {}",
+                        match said.is_empty() {
+                            true => String::new(),
+                            false => format!(": {said}"),
+                        },
+                        log.display()
+                    );
+                }
             }
             if Instant::now() >= until {
                 drop(lock);
+                if let Some(mut child) = child.take() {
+                    std::thread::spawn(move || child.wait());
+                }
                 bail!(
                     "sluice's host process did not answer within {} seconds of its start; see {}",
                     START_WAIT.as_secs(),

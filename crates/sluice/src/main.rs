@@ -2,7 +2,7 @@ use std::ffi::OsString;
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
-use std::time::{Duration, Instant};
+use std::time::Instant;
 
 use clap::Parser;
 use sluice::hand_over::HandOver;
@@ -70,6 +70,11 @@ fn main() {
         // A host process keeps no descriptor that its starter's caller
         // left open (`nothing-detached@f807c7f5fcea`).
         sluice::host_process::close_inherited();
+        // Each git command it runs carries its name, so the hook lets its
+        // transaction go with no ask (the change
+        // `the-git-hook-asks-sluice-host`, design D3). Set before any
+        // thread starts.
+        sluice::protect::name_this_host();
     }
     if let Some(Command::Host) = &cli.command {
         match sluice::host_process::run(cli.choices(), carried) {
@@ -130,27 +135,31 @@ fn main() {
         }
         return;
     }
-    // 1: whatever runs sluice's work keeps its branches protected; 124:
-    // every other command puts back for this sluice a hook installed for
-    // another, and installs none. `protect` installs or removes its own,
-    // and the hook runs on every ref update.
-    match cli.command {
-        Some(
-            Command::Submit { .. }
-            | Command::Wait { .. }
-            | Command::Step { .. }
-            | Command::Run { .. },
-        ) => {
-            if let Err(e) = protection(sluice::protect::install) {
-                eprintln!("sluice: warning: branch protection not installed: {e:#}");
+    // Every ref update in every worktree runs the hook: decide nothing
+    // unless git asks for the decision. Whatever the hook decides, it
+    // reads the whole transaction first: git runs it with SIGPIPE
+    // ignored, so a writer that met the pipe closed, the shim's `printf`
+    // among them, would say so on the caller's terminal (124). It asks
+    // `sluice host`, and binds no repository (the change
+    // `the-git-hook-asks-sluice-host`, design D1). No command puts the
+    // hook back: `sluice host` does, for each request (design D4).
+    if let Some(Command::Hook { name, state }) = &cli.command {
+        let mut lines = String::new();
+        let read = std::io::Read::read_to_string(&mut std::io::stdin().lock(), &mut lines);
+        let _ = std::io::copy(&mut std::io::stdin().lock(), &mut std::io::sink());
+        let code = match (name.as_str(), state.as_str(), read) {
+            ("reference-transaction", "prepared", Ok(_)) => sluice::protect::ask(lines),
+            ("reference-transaction", "prepared", Err(e)) => {
+                eprintln!("{}", sluice::protect::no_answer(Some(&e.into())));
+                1
             }
-        }
-        Some(Command::Protect { .. } | Command::Hook { .. }) => {}
-        _ => {
-            if let Err(e) = protection(sluice::protect::reinstall) {
-                eprintln!("sluice: warning: branch protection not re-installed: {e:#}");
+            ("reference-transaction", _, _) => 0,
+            (other, _, _) => {
+                eprintln!("sluice runs no {other} hook");
+                sluice::USAGE
             }
-        }
+        };
+        std::process::exit(code);
     }
     // A read is answered by sluice's host process: the command sends its
     // folder and prints the answer, and binds no repository (the change
@@ -207,20 +216,6 @@ fn main() {
                 tell_json(*json, &e);
                 3
             });
-        std::process::exit(code);
-    }
-    // Every ref update in every worktree runs the hook: decide nothing
-    // unless git asks for the decision. Whatever the hook decides, it
-    // reads the whole transaction first: git runs it with SIGPIPE
-    // ignored, so a writer that met the pipe closed, the shim's `printf`
-    // among them, would say so on the caller's terminal (124).
-    if let Some(Command::Hook { state, .. }) = &cli.command {
-        let code = if state == "prepared" {
-            hook(cli, retry)
-        } else {
-            0
-        };
-        let _ = std::io::copy(&mut std::io::stdin().lock(), &mut std::io::sink());
         std::process::exit(code);
     }
     // The host's own settings, read once: telemetry starts from them before
@@ -1154,45 +1149,6 @@ fn repository_dir() -> anyhow::Result<PathBuf> {
     Ok(std::env::current_dir()?)
 }
 
-/// 124: the protection hook, judging the repository git names: `GIT_DIR`
-/// when git set it, resolved against the folder the command ran in, and
-/// that folder only when git set none. It reads the host's settings and
-/// the policy only as far as guarding needs. A transaction it cannot read
-/// for a reason of its own passes, said once; it never exits 3.
-fn hook(cli: Cli, retry: Rc<Policy>) -> i32 {
-    let bound = std::env::current_dir()
-        .map(|dir| match std::env::var_os("GIT_DIR") {
-            Some(git_dir) if !git_dir.is_empty() => dir.join(git_dir),
-            _ => dir,
-        })
-        .map_err(anyhow::Error::from)
-        .and_then(|dir| Bound::guarding(&dir, retry));
-    let bound = match bound {
-        Ok(b) => b,
-        Err(e) => {
-            eprintln!("{}", sluice::protect::unread(&e));
-            return 0;
-        }
-    };
-    let mut out = std::io::stdout();
-    match run(
-        cli,
-        bound.seams(),
-        &bound,
-        &bound.branch,
-        &*bound.pulls,
-        &SystemClock,
-        &Sleep(Duration::from_secs(3)),
-        &mut out,
-    ) {
-        Ok(code) => code,
-        Err(e) => {
-            eprintln!("{}", sluice::protect::unread(&e));
-            0
-        }
-    }
-}
-
 /// The retry policy every call to a remote runs under (134): a wait's five
 /// minutes, ending at its `--timeout`, for a waiting submit and `sluice
 /// wait`, and thirty seconds for anything else. A spent allowance is
@@ -1220,14 +1176,6 @@ fn retry(cli: &Cli) -> Policy {
 /// Set to `record` in tests, the pauses between a run's or a wait's rounds
 /// are skipped, and the clock the command reads moved on by each.
 const ROUND_SLEEP_VAR: &str = "SLUICE_ROUND_SLEEP";
-
-/// `put` sluice's hook, for this executable, in the repository holding the
-/// folder the command runs in.
-fn protection(put: fn(&Path, &Path) -> anyhow::Result<bool>) -> anyhow::Result<bool> {
-    let dir = std::env::current_dir()?;
-    let exe = std::fs::canonicalize(std::env::current_exe()?)?;
-    put(&dir, &exe)
-}
 
 /// sluice failing itself (exit 3), told on stdout as well when the reader
 /// asked for JSON and waits for it there.

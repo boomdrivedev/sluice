@@ -523,6 +523,10 @@ impl Repo {
         String::from_utf8_lossy(&out.stdout).trim().to_string()
     }
 
+    /// git in the worktree, as a session runs it. Where the repository has
+    /// sluice's hook, the hook asks the `sluice host` of the test's own
+    /// state folder in the repository, which the test's guard stops (the
+    /// change `the-git-hook-asks-sluice-host`, design D1).
     pub fn git_raw(&self, args: &[&str]) -> std::process::Output {
         git_command()
             .current_dir(self.dir())
@@ -531,6 +535,7 @@ impl Repo {
             .env_remove("GIT_WORK_TREE")
             .env_remove("GIT_INDEX_FILE")
             .env("XDG_CONFIG_HOME", self.dir().join(".git/no-config"))
+            .env("XDG_STATE_HOME", self.dir().join(".git/no-state"))
             .env("GIT_AUTHOR_NAME", "test")
             .env("GIT_AUTHOR_EMAIL", "test@localhost")
             .env("GIT_COMMITTER_NAME", "test")

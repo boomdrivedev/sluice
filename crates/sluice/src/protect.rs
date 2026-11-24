@@ -10,31 +10,37 @@
 //! (148; rule core.47). What the caller is told of each refusal is the
 //! same, the first or the thousandth.
 //!
-//! It judges a write by the value the branch's ref holds on this host,
-//! never by a fetch of its remote: for a branch kept on a remote that ref
-//! is sluice's copy, which only sluice's rounds level (124). Judging
-//! fetches nothing: git's own packing passes before any record is read,
-//! and what still needs a branch is read from its records as last fetched
-//! (S64). Only recording a refusal reaches the remote, and a hook run under
-//! a fetch of sluice's own, as that fetch's packing runs it, fetches
-//! nothing even then, and waits on no lock the fetch holds (record 0110).
-//! It judges the repository git names, wherever the command ran, and lets
-//! through, said once, a transaction it cannot read for a reason of its
-//! own.
+//! The hook asks `sluice host`, which judges each transaction from the
+//! state that it keeps and writes each refusal; the hook reads no file of
+//! the repository, no record and none of the host's settings, starts a
+//! `sluice host` where none answers, and refuses the write where none
+//! answers within ten seconds (the change `the-git-hook-asks-sluice-host`,
+//! design D1, D2). A git command of `sluice host`'s own carries its name,
+//! and the hook lets its transaction go with no ask, so a fetch of
+//! `sluice host` whose packing runs the hook waits on nothing (record
+//! 0110; design D3).
+//!
+//! `sluice host` judges a write by the value the branch's ref holds on
+//! this host, never by a fetch of its remote: for a branch kept on a
+//! remote that ref is sluice's copy, which only sluice's rounds level
+//! (124). Judging fetches nothing: git's own packing passes before any
+//! record is read, and what still needs a branch is read from its records
+//! as last fetched (S64). It judges the repository git names, wherever
+//! the command ran, and lets through, said once, a transaction it cannot
+//! read for a reason of its own.
 //!
 //! It reads of the host's settings and the policy only what guarding
-//! needs, and passes over every other field, known to it or not; it runs
-//! the sluice that installed it, by its path, and every command sluice
-//! runs in the repository puts it back for itself where it stands for
-//! another (124; ADR 0059).
+//! needs, and passes over every other field, known to it or not. The hook
+//! runs the sluice that installed it, by its path, and `sluice host` puts
+//! it back for itself, by its own path, in each repository it binds for a
+//! request, where it stands for another (124; ADR 0059; design D4).
 //!
 //! sluice moves branches through gix, which runs no hooks, so its own
 //! moves never reach the hook. Everything that runs git does. This guards
 //! against sessions running git; it is no security boundary.
 
-use std::io::Read;
 use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
+use std::process::Stdio;
 use std::time::{Duration, Instant};
 
 use anyhow::{bail, Context as _, Result};
@@ -50,7 +56,7 @@ const HOOK: &str = "reference-transaction";
 const CHAINED: &str = "reference-transaction.pre-sluice";
 
 fn git(dir: &Path, args: &[&str]) -> Result<String> {
-    let out = Command::new("git")
+    let out = crate::workers::command("git", "git")
         .arg("-C")
         .arg(dir)
         .args(args)
@@ -133,13 +139,24 @@ fn shim(program: &Path) -> String {
     )
 }
 
+/// The hooks folder of the repository holding `dir`, as git finds it:
+/// an error where it is a tracked one, which sluice will not write, or
+/// where `dir` is in no repository.
+pub fn hooks_of(dir: &Path) -> Result<PathBuf> {
+    hookdir(dir)
+}
+
 /// Install sluice's hook in the repository holding `dir`, for `program`,
 /// keeping any hook already there by running it after sluice's. Writes
 /// nothing when sluice's hook for `program` is already in place, and says
 /// so with `false`.
 pub fn install(dir: &Path, program: &Path) -> Result<bool> {
-    let hooks = hookdir(dir)?;
-    std::fs::create_dir_all(&hooks)?;
+    install_at(&hookdir(dir)?, program)
+}
+
+/// [`install`], in the hooks folder `hooks`.
+pub fn install_at(hooks: &Path, program: &Path) -> Result<bool> {
+    std::fs::create_dir_all(hooks)?;
     let hook = hooks.join(HOOK);
     let want = shim(program);
     match std::fs::read_to_string(&hook) {
@@ -159,16 +176,16 @@ pub fn install(dir: &Path, program: &Path) -> Result<bool> {
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
         Err(e) => return Err(e.into()),
     }
-    write(&hooks, &want)?;
+    write(hooks, &want)?;
     Ok(true)
 }
 
 /// 124: put sluice's hook for `program` where the hook in place is
 /// sluice's for another, keeping the hook it chains, so a host whose
-/// sluice was upgraded is guarded by the newer one from its next command
+/// sluice was upgraded is guarded by the newer one from its next request
 /// in the repository. Writes nothing where there is no hook, where it is
 /// someone else's or already `program`'s, or where the hooks directory is
-/// tracked: a hook is installed only by `sluice protect` and the commands
+/// tracked: a hook is installed only by `sluice protect` and the requests
 /// that run sluice's work (ADR 0059). `true` when it wrote the hook.
 pub fn reinstall(dir: &Path, program: &Path) -> Result<bool> {
     // No repository to find a hook in is the command's to report, and a
@@ -176,11 +193,16 @@ pub fn reinstall(dir: &Path, program: &Path) -> Result<bool> {
     let Ok((hooks, None)) = located(dir) else {
         return Ok(false);
     };
+    reinstall_at(&hooks, program)
+}
+
+/// [`reinstall`], in the hooks folder `hooks`.
+pub fn reinstall_at(hooks: &Path, program: &Path) -> Result<bool> {
     let hook = hooks.join(HOOK);
     let want = shim(program);
     match std::fs::read_to_string(&hook) {
         Ok(have) if have != want && have.lines().nth(1) == Some(MARKER) => {
-            write(&hooks, &want)?;
+            write(hooks, &want)?;
             Ok(true)
         }
         Ok(_) => Ok(false),
@@ -269,7 +291,7 @@ pub fn unread(why: &anyhow::Error) -> String {
 /// The command that ran git: the hook is sluice's parent's child, and git
 /// the shim's parent. Read from the kernel, never by running `ps`, which
 /// a sandbox refuses to start (it is setuid on macOS).
-fn caller() -> String {
+pub fn caller() -> String {
     let shim = nix::unistd::getppid().as_raw();
     parent_of(shim)
         .and_then(command_of)
@@ -389,44 +411,155 @@ fn pruned(common: &Path, branch: &str, cur: &Rev) -> Result<bool> {
         .any(|(id, n)| n == name && id == cur.as_str()))
 }
 
-/// `sluice hook reference-transaction <state>`: refuse, in `prepared`,
-/// any update to a protected branch that is not a creation or leaves its
-/// value on this host as it was (1, 124). Returns the exit: 0 allows, 1
-/// refuses. A transaction it cannot read for a reason of its own passes,
-/// said once. Each refusal is told to the caller, then recorded under the
-/// branch's lock: logged where its cause does not stand, and otherwise
-/// counted with its cause (148). One whose lock does not come within a
-/// second is told and recorded nowhere.
-pub fn hook(s: &Sluice<'_>, host: &dyn Host, state: &str, input: &mut dyn Read) -> Result<i32> {
-    // Symbolic refs are resolved only in `prepared`: in `preparing` a
-    // commit on a checked-out branch arrives as HEAD.
-    if state != "prepared" {
-        return Ok(0);
+/// The variable that names the `sluice host` whose git commands carry it,
+/// `<pid> <start>`: its pid and its start time in seconds (the change
+/// `the-git-hook-asks-sluice-host`, design D3). The hook lets a
+/// transaction whose git carries the name of a live `sluice host` go with
+/// no ask (record 0110).
+pub const HOST_VAR: &str = "SLUICE_HOST_PROCESS";
+
+/// How long the hook waits for `sluice host`'s answer, its start or a
+/// hand-over's wait for the rounds to end among it, before it refuses the
+/// transaction (design D2).
+pub const ASK_FOR: Duration = Duration::from_secs(10);
+
+/// How long `sluice host` waits for a branch's lock to write a refusal of
+/// a write to it, within the hook's [`ASK_FOR`]: a round of the branch
+/// holds its lock while it lands or starts its runs (148).
+pub const RECORD_WAIT: Duration = Duration::from_secs(5);
+
+/// The value of [`HOST_VAR`] for the process `pid` that started at
+/// `start`.
+pub fn host_name(pid: u32, start: u64) -> String {
+    format!("{pid} {start}")
+}
+
+/// Name this process, `sluice host`, in [`HOST_VAR`] in its own
+/// environment, so each git command it starts carries it, whatever starts
+/// it (design D3); where its start time cannot be read, it names none.
+/// Called before any thread starts.
+pub fn name_this_host() {
+    let pid = std::process::id();
+    match crate::workers::started(pid as i32) {
+        Some(start) => std::env::set_var(HOST_VAR, host_name(pid, start)),
+        None => std::env::remove_var(HOST_VAR),
     }
-    let by = caller();
-    let mut text = String::new();
-    let refused = match input
-        .read_to_string(&mut text)
-        .map_err(anyhow::Error::from)
-        .and_then(|_| judge(s, host, &text))
-    {
+}
+
+/// Whether `value`, as [`HOST_VAR`] holds it, names a `sluice host` that
+/// runs: its pid runs and started at the time it names (design D3). A
+/// value an ended `sluice host` gave names none, whatever runs at its pid
+/// now.
+pub fn names_a_live_host(value: &str) -> bool {
+    let mut parts = value.split_whitespace();
+    let (Some(pid), Some(start), None) = (parts.next(), parts.next(), parts.next()) else {
+        return false;
+    };
+    let (Ok(pid), Ok(start)) = (pid.parse::<i32>(), start.parse::<u64>()) else {
+        return false;
+    };
+    pid > 0 && crate::workers::started(pid) == Some(start)
+}
+
+/// What the hook says where `sluice host` did not judge the transaction
+/// in time, or could not be reached: the write is refused (design D2).
+pub fn no_answer(why: Option<&anyhow::Error>) -> String {
+    let mut said = match why {
+        Some(e) => format!(
+            "error: sluice's host process did not answer, so sluice's branch protection refuses this write: {e:#}\n"
+        ),
+        None => format!(
+            "error: sluice's host process did not answer within {} seconds, so sluice's branch protection refuses this write\n",
+            ASK_FOR.as_secs()
+        ),
+    };
+    said.push_str(
+        "  `sluice protect --remove` takes sluice's branch protection out of this repository",
+    );
+    said
+}
+
+/// `sluice hook reference-transaction prepared`, with the transaction
+/// `lines` read whole from its standard input: let a transaction whose git
+/// carries the name of a live `sluice host` go, and otherwise ask `sluice
+/// host` whether it goes, starting one where none answers, and say what it
+/// says (design D1 to D3). Returns the exit: 0 allows, 1 refuses. Where
+/// `sluice host` does not answer within [`ASK_FOR`], the transaction is
+/// refused. It reads no file of the repository, no record and none of the
+/// host's settings.
+pub fn ask(lines: String) -> i32 {
+    if std::env::var(HOST_VAR).is_ok_and(|v| names_a_live_host(&v)) {
+        return 0;
+    }
+    let folder = match std::env::current_dir() {
+        Ok(dir) => dir,
+        Err(e) => {
+            eprintln!("{}", no_answer(Some(&anyhow::Error::from(e))));
+            return 1;
+        }
+    };
+    let git_dir = std::env::var_os("GIT_DIR")
+        .filter(|d| !d.is_empty())
+        .map(PathBuf::from);
+    let request = crate::host_process::protocol::Request::ReferenceTransaction {
+        folder,
+        git_dir,
+        by: caller(),
+        lines,
+    };
+    let (send, answered) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let output = crate::host_process::client::Client::host().and_then(|c| c.output(&request));
+        let _ = send.send(output);
+    });
+    match answered.recv_timeout(ASK_FOR) {
+        Ok(Ok(output)) => {
+            print!("{}", output.stdout);
+            for line in &output.stderr {
+                eprintln!("{line}");
+            }
+            output.code
+        }
+        Ok(Err(e)) => {
+            eprintln!("{}", no_answer(Some(&e)));
+            1
+        }
+        Err(_) => {
+            eprintln!("{}", no_answer(None));
+            1
+        }
+    }
+}
+
+/// Judge the transaction `text`, in git's `prepared` state, that `by` ran:
+/// refuse any update to a protected branch that is not a creation or
+/// leaves its value on this host as it was (1, 124), as `sluice host`
+/// judges what the hook sends (design D1). Returns the exit: 0 allows, 1
+/// refuses. A transaction it cannot read for a reason of its own passes,
+/// said once. Each refusal is said, then recorded under the branch's lock:
+/// logged where its cause does not stand, and otherwise counted with its
+/// cause (148). One whose lock does not come within [`RECORD_WAIT`] is said
+/// and recorded nowhere.
+pub fn judged(s: &Sluice<'_>, host: &dyn Host, text: &str, by: &str) -> i32 {
+    let refused = match judge(s, host, text) {
         Ok(refused) => refused,
         Err(e) => {
-            eprintln!("{}", unread(&e));
-            return Ok(0);
+            crate::telemetry::say(&unread(&e));
+            return 0;
         }
     };
     if refused.is_empty() {
-        return Ok(0);
+        return 0;
     }
     for r in &refused {
-        crate::telemetry::warn(&refusal(r, &by));
+        crate::telemetry::warn(&refusal(r, by));
     }
     let seams = s.seams();
     for r in &refused {
-        // Reported when the branch's lock comes within a second; the
-        // refusal stands either way.
-        let until = Instant::now() + Duration::from_secs(1);
+        // Reported when the branch's lock comes within its wait, which a
+        // round of the branch may hold meanwhile; the refusal stands
+        // either way.
+        let until = Instant::now() + RECORD_WAIT;
         let guard = loop {
             match seams.state.lock(&r.branch) {
                 Ok(Some(g)) => break Some(g),
@@ -435,21 +568,24 @@ pub fn hook(s: &Sluice<'_>, host: &dyn Host, state: &str, input: &mut dyn Read) 
                 }
                 Ok(None) => break None,
                 Err(e) => {
-                    eprintln!("warning: locking {}'s records: {e:#}", r.branch);
+                    crate::telemetry::say(&format!(
+                        "warning: locking {}'s records: {e:#}",
+                        r.branch
+                    ));
                     break None;
                 }
             }
         };
         if guard.is_some() {
-            if let Err(e) = s.record_protected(&r.branch, &r.from, r.to.as_ref(), &by) {
-                eprintln!(
+            if let Err(e) = s.record_protected(&r.branch, &r.from, r.to.as_ref(), by) {
+                crate::telemetry::say(&format!(
                     "warning: reporting the refused update to {}: {e:#}",
                     r.branch
-                );
+                ));
             }
         }
     }
-    Ok(1)
+    1
 }
 
 /// The writes of a transaction the hook refuses, each judged by the

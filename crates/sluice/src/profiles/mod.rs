@@ -131,19 +131,19 @@ impl Bound {
         Bound::bind(dir, program, instance, false, retry, tokens)
     }
 
-    /// 124: bind the repository holding `dir` for branch protection's hook:
-    /// the host's settings and each policy read only as far as guarding
-    /// needs, every other field passed over (ADR 0059), every call to a
-    /// remote under the command's `retry` policy (134).
-    pub fn guarding(dir: &Path, retry: Rc<retry::Policy>) -> Result<Self> {
-        Bound::bind(
-            dir,
-            std::env::current_exe()?,
-            Instance::guarding()?,
-            true,
-            retry,
-            &Tokens::default(),
-        )
+    /// 124: bind the repository holding `dir` for branch protection, as
+    /// `sluice host` judges what the hook sends: the host's settings and
+    /// each policy read only as far as guarding needs, every other field
+    /// passed over (ADR 0059), every call to a remote under `retry` (134),
+    /// its identity holding its tokens in `tokens` (record 0108 as amended
+    /// 2026-11-19).
+    pub fn guarding(
+        dir: &Path,
+        program: PathBuf,
+        retry: Rc<retry::Policy>,
+        tokens: &Tokens,
+    ) -> Result<Self> {
+        Bound::bind(dir, program, Instance::guarding()?, true, retry, tokens)
     }
 
     fn bind(
