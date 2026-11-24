@@ -333,6 +333,11 @@ Pick the form by what you want from the run:
 
 Name targets as `project:task` or a single tag, `#task-tag`.
 
+sluice's host process runs the tests, the command and the equip steps,
+and `sluice exec` prints their output as it comes. Ctrl-C on `sluice
+exec`, or the command killed, ends its run, and the run ends if sluice's
+host process stops; nothing of `sluice exec` runs on without it.
+
 `sluice release` ends what your runs left up and frees the ports; release
 before removing a worktree by hand (`sluice exec <branch> --release` runs
 and releases in one go). See [references/exec.md](references/exec.md).

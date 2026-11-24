@@ -1870,7 +1870,10 @@ fn exec_looks_for_the_engine_at_a_tcp_address() {
     s.repo
         .git(&["-C", tree, "commit", "-q", "-am", "a check that says where"]);
     let at = |port: u16| format!("tcp://127.0.0.1:{port}");
+    // Where the engine is looked for is the host process's own setting:
+    // each exec starts its own host process, with the address it names.
     let exec = |address: &str| {
+        support::guard::stop_host_processes(s.state.path());
         let env = [
             ("DOCKER_HOST", Path::new(address)),
             (ENGINE_SOCKETS, Path::new(address)),
@@ -1905,26 +1908,22 @@ fn exec_looks_for_the_engine_at_a_tcp_address() {
     assert!(!s.worktree.join("reached").exists(), "nothing runs");
 }
 
-/// host-process, "Results with no host process that answers" (the change
-/// `sluice-host-answers-every-read`, design D4): a `sluice exec` that needs
-/// the results of its keys, where the process on the host's socket answers
-/// `hello` and closes the connection at `results`, says that sluice's host
-/// process did not answer, reads no line of the results log itself, and
-/// exits 3.
+/// resident-workers, "sluice host stopped while a session's checks run"
+/// (the change `sluice-host-runs-a-sessions-checks`, design D4): a `sluice
+/// exec` whose host process answers `hello` and closes the connection at
+/// `exec` says that sluice's host process ended, reads and runs nothing
+/// itself, and exits 3.
 #[test]
-fn results_with_no_host_process_that_answers_exit_3() {
+fn a_command_whose_host_process_ends_before_it_answers_exits_3() {
     use std::io::Write;
-    let s = moon_at_branch("exec-no-results", "true\n");
-    s.commit(&[("a/lib", "2"), ("b/lib", "2")]);
-    let out = s.sluice(&["exec", "bolt/x"]);
-    assert!(out.status.success(), "{}", text(&out));
-    support::guard::stop_host_processes(s.state.path());
+    let s = Setup::new("exec-host-ends");
     let client = sluice::host_process::client::Client::new(
         Path::new(env!("CARGO_BIN_EXE_sluice")),
         support::env_of(&s.command(&[])),
     )
     .unwrap();
     let socket = client.paths().socket.clone();
+    std::fs::create_dir_all(socket.parent().unwrap()).unwrap();
     let _ = std::fs::remove_file(&socket);
     let listener = std::os::unix::net::UnixListener::bind(&socket).unwrap();
     listener.set_nonblocking(true).unwrap();
@@ -1938,7 +1937,6 @@ fn results_with_no_host_process_that_answers_exit_3() {
                 "pid": std::process::id(),
                 "since": "2026-11-22T00:00:00.000Z",
             });
-            let mut held = Vec::new();
             while !done.load(std::sync::atomic::Ordering::SeqCst) {
                 let Ok((stream, _)) = listener.accept() else {
                     std::thread::sleep(Duration::from_millis(10));
@@ -1956,12 +1954,11 @@ fn results_with_no_host_process_that_answers_exit_3() {
                 let ask = request["ask"].as_str().unwrap_or_default().to_string();
                 asked.lock().unwrap().push(ask.clone());
                 match ask.as_str() {
-                    // The room is the asker's, the connection kept.
-                    "hold" => {
-                        let _ = writeln!(writer, "\"held\"");
-                        held.push(writer);
+                    // It ends before the command does.
+                    "exec" => {
+                        let _ = writeln!(writer, "{}", serde_json::json!({"stdout": "running\n"}));
+                        drop(writer);
                     }
-                    "results" => drop(writer),
                     _ => {
                         let _ = writeln!(writer, "\"ok\"");
                     }
@@ -1973,17 +1970,426 @@ fn results_with_no_host_process_that_answers_exit_3() {
     let out = s.sluice(&["exec", "bolt/x"]);
     done.store(true, std::sync::atomic::Ordering::SeqCst);
     let _ = fake.join();
-    assert!(
-        asked.lock().unwrap().iter().any(|a| a == "results"),
-        "{:?}",
-        asked.lock().unwrap()
-    );
+    assert_eq!(*asked.lock().unwrap(), ["exec"]);
     assert_eq!(out.status.code(), Some(3), "{}", text(&out));
+    assert_eq!(String::from_utf8_lossy(&out.stdout), "running\n");
     let err = String::from_utf8_lossy(&out.stderr);
     assert!(
-        err.contains("sluice's host process did not answer"),
+        err.contains("sluice's host process") && err.contains("ended before the command did"),
         "{err}"
     );
-    assert!(!err.contains("reads them itself"), "{err}");
     assert_eq!(s.results(), results);
+    let _ = std::fs::remove_file(&socket);
+}
+
+/// What the host process's own branch protection upkeep runs of git in a
+/// client: `protect.rs`'s reads of where the hook goes (124).
+const UPKEEP: [&str; 3] = [
+    "rev-parse --path-format=absolute --git-path hooks",
+    "rev-parse --path-format=absolute --git-common-dir",
+    "worktree list --porcelain",
+];
+
+/// A connection that holds `s`'s host process, started with the test's
+/// own `PATH`, its toolchain and task runner on it, until it is dropped:
+/// a subscription of no folder, which reads nothing.
+fn host_held(s: &Setup) -> sluice::host_process::client::Connection {
+    sluice::host_process::client::Client::new(
+        Path::new(env!("CARGO_BIN_EXE_sluice")),
+        support::env_of(&s.command(&[])),
+    )
+    .unwrap()
+    .subscribe(Vec::new())
+    .expect("the host process starts")
+}
+
+/// `c` with no toolchain and no task runner on its `PATH`: the system's
+/// own folders, behind a `git` that records each call (the change
+/// `sluice-host-runs-a-sessions-checks`, tasks).
+fn without_tools<'a>(git: &support::CountingGit, c: &'a mut Command) -> &'a mut Command {
+    c.env("PATH", "/usr/bin:/bin");
+    git.on(c)
+}
+
+/// Each git the client `pid` ran is the branch protection's upkeep (the
+/// change `sluice-host-runs-a-sessions-checks`, tasks).
+fn ran_only_the_upkeep(git: &support::CountingGit, pid: u32) {
+    for (_, call) in git.parented().into_iter().filter(|(p, _)| *p == pid) {
+        assert!(
+            UPKEEP.iter().any(|u| call.ends_with(u)),
+            "the client ran git {call}"
+        );
+    }
+}
+
+/// `pid` and its parents, nearest first.
+fn ancestors(pid: u32) -> Vec<u32> {
+    let mut chain = Vec::new();
+    let mut at = pid as i32;
+    while at > 1 {
+        chain.push(at as u32);
+        at = sluice::workers::parent(at).unwrap_or(0);
+    }
+    chain
+}
+
+/// The pid of `s`'s host process, as its state names it.
+fn host_pid(s: &Setup) -> u32 {
+    let named = std::fs::read(s.state.path().join("sluice/host/version")).unwrap();
+    let named: serde_json::Value = serde_json::from_slice(&named).unwrap();
+    named["pid"].as_u64().unwrap() as u32
+}
+
+/// Whether `pid` runs, a zombie aside.
+fn runs(pid: u32) -> bool {
+    sluice::workers::started(pid as i32).is_some()
+}
+
+/// The pid a check wrote at `path`, once it did.
+fn written_pid(path: &Path) -> u32 {
+    let mut pid = 0;
+    eventually("the check wrote its pid", || {
+        pid = std::fs::read_to_string(path)
+            .ok()
+            .and_then(|t| t.trim().parse().ok())
+            .unwrap_or(0);
+        pid != 0
+    });
+    pid
+}
+
+/// The runs that the host's room counts for sessions and previews.
+fn sessions_running(s: &Setup) -> u64 {
+    let out = s.sluice(&["overview", "--json"]);
+    let doc: serde_json::Value =
+        serde_json::from_slice(&out.stdout).unwrap_or_else(|_| panic!("{}", text(&out)));
+    doc["room"]["sessions"].as_u64().unwrap_or(0)
+}
+
+/// `sluice exec bolt/x -- sh -c 'echo $$ > <pid>; exec sleep <secs>'` in
+/// `s`'s worktree, started, its output piped: the client, and where its
+/// `sleep` writes its pid.
+fn sleeping(s: &Setup, marks: &Scratch, secs: u32) -> (Child, PathBuf) {
+    let pid = marks.path().join("pid");
+    let script = format!("echo $$ > '{}'; exec sleep {secs}", pid.display());
+    let child = s
+        .command(&["exec", "bolt/x", "--", "sh", "-c", &script])
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    (child, pid)
+}
+
+/// resident-workers, "A session's checks" (the change
+/// `sluice-host-runs-a-sessions-checks`, design D1;
+/// `workers-end-with-their-owner@292e869158d6`): the parent chain of a
+/// session's check reaches `sluice host` and not `sluice exec`, its group
+/// is not the host process's, and the host's state names it.
+#[test]
+fn a_sessions_checks_are_a_worker_of_sluice_host() {
+    let s = Setup::new("exec-worker");
+    let marks = Scratch::new("exec-worker-marks");
+    let (client, pid) = sleeping(&s, &marks, 30);
+    let sleep = written_pid(&pid);
+    let chain = ancestors(sleep);
+    let host = host_pid(&s);
+    assert!(
+        chain.contains(&host),
+        "sluice host {host} is not above the check: {chain:?}"
+    );
+    // The host process is a child of the command that started it: the
+    // check's own chain is what lies below it.
+    let below = &chain[..chain.iter().position(|p| *p == host).unwrap()];
+    assert!(
+        !below.contains(&client.id()),
+        "the check runs under sluice exec: {chain:?}"
+    );
+    let group = nix::unistd::getpgid(Some(nix::unistd::Pid::from_raw(sleep as i32)))
+        .unwrap()
+        .as_raw();
+    let host_group = nix::unistd::getpgid(Some(nix::unistd::Pid::from_raw(host as i32)))
+        .unwrap()
+        .as_raw();
+    assert_ne!(group, host_group, "the check is in the host's own group");
+    let record = s
+        .state
+        .path()
+        .join("sluice/host/workers")
+        .join(group.to_string());
+    assert!(record.exists(), "no record of its group at {record:?}");
+    let _ = nix::sys::signal::kill(
+        nix::unistd::Pid::from_raw(client.id() as i32),
+        nix::sys::signal::Signal::SIGINT,
+    );
+    let _ = client.wait_with_output();
+    support::guard::stop_host_processes(s.state.path());
+}
+
+/// resident-workers, "The output reaches the client as it comes" (the
+/// change `sluice-host-runs-a-sessions-checks`, design D1): with no
+/// toolchain and no task runner on its `PATH`, the client prints `one`
+/// before the check prints `two`, then `two`, and exits 4 as a command that
+/// exits 4 did; it runs no git but the branch protection's upkeep.
+#[test]
+fn the_output_reaches_the_client_as_it_comes() {
+    let s = Setup::new("exec-streams");
+    let marks = Scratch::new("exec-streams-marks");
+    let go = marks.path().join("go");
+    let _held = host_held(&s);
+    let git = support::CountingGit::new();
+    let script = format!(
+        "echo one; while [ ! -e '{}' ]; do sleep 0.05; done; echo two; exit 4",
+        go.display()
+    );
+    let mut client = without_tools(
+        &git,
+        &mut s.command(&["exec", "bolt/x", "--", "sh", "-c", &script]),
+    )
+    .stdout(Stdio::piped())
+    .stderr(Stdio::piped())
+    .spawn()
+    .unwrap();
+    let pid = client.id();
+    let said = lines_of(&mut client);
+    let next = |what: &str| loop {
+        let line = said
+            .recv_timeout(Duration::from_secs(60))
+            .unwrap_or_else(|_| panic!("no {what}"));
+        if line == what {
+            break;
+        }
+    };
+    next("one");
+    assert!(!go.exists());
+    std::fs::write(&go, "").unwrap();
+    next("two");
+    let out = client.wait_with_output().unwrap();
+    assert_eq!(out.status.code(), Some(4), "{}", text(&out));
+    ran_only_the_upkeep(&git, pid);
+}
+
+/// resident-workers, "A session's checks wait for a slot" (the change
+/// `sluice-host-runs-a-sessions-checks`, design D3): with `[runs] max` at
+/// one and a combination's checks running, a session's checks say
+/// `waiting: the host is at its bound`, and start only once the
+/// combination's checks end.
+#[test]
+fn a_sessions_checks_take_a_slot_of_the_bound() {
+    let a = Setup::at("exec-slot-a", "a");
+    let b = Setup::at("exec-slot-b", "b");
+    let marks = Scratch::new("exec-slot-marks");
+    let (started, go, ran) = (
+        marks.path().join("started"),
+        marks.path().join("go"),
+        marks.path().join("ran"),
+    );
+    a.policy(&portless());
+    b.policy(&portless());
+    b.repo.write(
+        "check.sh",
+        &format!(
+            "touch '{}'; while [ ! -e '{}' ]; do sleep 0.05; done\n",
+            started.display(),
+            go.display()
+        ),
+    );
+    b.repo.git(&["commit", "-q", "-am", "a check that holds"]);
+    b.repo.git(&["branch", "-f", "bolt/x", "main"]);
+    host_bound(&a.config, 1);
+    let on_host = |s: &Setup, args: &[&str]| {
+        let out = s.spawn_on(&a, args).wait_with_output().unwrap();
+        assert!(out.status.success(), "{}", text(&out));
+    };
+    on_host(&b, &["submit", "bolt/x", "--no-wait", "--json"]);
+    on_host(&b, &["step", "bolt/x"]);
+    eventually("the combination's checks running", || started.exists());
+
+    let script = format!("touch '{}'", ran.display());
+    let mut waiting = a.spawn_on(&a, &["exec", "bolt/x", "--", "sh", "-c", &script]);
+    let said = lines_of(&mut waiting);
+    loop {
+        let line = said
+            .recv_timeout(Duration::from_secs(60))
+            .expect("exec says it waits");
+        if line == "waiting: the host is at its bound" {
+            break;
+        }
+    }
+    std::thread::sleep(Duration::from_secs(1));
+    assert!(
+        !ran.exists(),
+        "the session's check ran beside the combination"
+    );
+    std::fs::write(&go, "").unwrap();
+    assert!(waiting.wait().unwrap().success());
+    assert!(ran.exists());
+    support::guard::stop_host_processes(a.state.path());
+}
+
+/// resident-workers, "The caller's PATH" (the change
+/// `sluice-host-runs-a-sessions-checks`, design D2): a session's run takes
+/// its caller's `PATH`, not the one `sluice host` started with.
+#[test]
+fn a_session_run_takes_its_callers_path() {
+    let s = Setup::new("exec-callers-path");
+    let marks = Scratch::new("exec-callers-path-marks");
+    let (a, b) = (marks.path().join("a"), marks.path().join("b"));
+    std::fs::create_dir_all(&a).unwrap();
+    std::fs::create_dir_all(&b).unwrap();
+    let with_first = |dir: &Path| {
+        let rest = std::env::var("PATH").unwrap_or_default();
+        format!("{}:{rest}", dir.display())
+    };
+    let started = sluice::host_process::client::Client::new(
+        Path::new(env!("CARGO_BIN_EXE_sluice")),
+        support::env_of(s.command(&[]).env("PATH", with_first(&a))),
+    )
+    .unwrap()
+    .subscribe(Vec::new())
+    .expect("the host process starts");
+    let out = s
+        .command(&["exec", "bolt/x", "--", "sh", "-c", "echo \"$PATH\""])
+        .env("PATH", with_first(&b))
+        .output()
+        .unwrap();
+    assert!(out.status.success(), "{}", text(&out));
+    let printed = String::from_utf8_lossy(&out.stdout);
+    let path = printed
+        .lines()
+        .find(|l| l.contains(&*b.display().to_string()) || l.contains(&*a.display().to_string()))
+        .unwrap_or_else(|| panic!("no PATH printed: {}", text(&out)));
+    assert!(
+        path.starts_with(&*b.display().to_string()),
+        "the run's PATH is not its caller's: {path}"
+    );
+    drop(started);
+    support::guard::stop_host_processes(s.state.path());
+}
+
+/// resident-workers, "Ctrl-C on a session's checks" (the change
+/// `sluice-host-runs-a-sessions-checks`, design D4): within the grace of a
+/// stopped call no `sleep` of the command runs, the run's slot is free,
+/// and the worktree's last result says that the run stopped.
+#[test]
+fn ctrl_c_ends_a_sessions_checks() {
+    let s = Setup::new("exec-ctrl-c");
+    let marks = Scratch::new("exec-ctrl-c-marks");
+    let (client, pid) = sleeping(&s, &marks, 60);
+    let sleep = written_pid(&pid);
+    let _ = nix::sys::signal::kill(
+        nix::unistd::Pid::from_raw(client.id() as i32),
+        nix::sys::signal::Signal::SIGINT,
+    );
+    let out = client.wait_with_output().unwrap();
+    assert_eq!(out.status.code(), Some(sluice::STOPPED), "{}", text(&out));
+    assert!(
+        text(&out).contains("stopped: the run was ended; nothing recorded"),
+        "{}",
+        text(&out)
+    );
+    let until = Instant::now() + sluice::workers::STOP_GRACE;
+    while runs(sleep) {
+        assert!(Instant::now() < until, "the check's sleep still runs");
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    assert_eq!(sessions_running(&s), 0, "the run's slot is held");
+    let out = s.sluice(&["status", "--json"]);
+    let doc: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    let last = &doc["worktrees"][0]["last_result"];
+    assert_eq!(last["outcome"], "stopped", "{doc}");
+    support::guard::stop_host_processes(s.state.path());
+}
+
+/// resident-workers, "A client killed while its checks run" (the change
+/// `sluice-host-runs-a-sessions-checks`, design D4): within the grace of a
+/// stopped call no `sleep` of the command runs, and the run's slot is
+/// free.
+#[test]
+fn a_killed_client_ends_its_checks() {
+    let s = Setup::new("exec-killed-client");
+    let marks = Scratch::new("exec-killed-client-marks");
+    let (mut client, pid) = sleeping(&s, &marks, 60);
+    let sleep = written_pid(&pid);
+    client.kill().unwrap();
+    let _ = client.wait();
+    let until = Instant::now() + sluice::workers::STOP_GRACE;
+    while runs(sleep) {
+        assert!(Instant::now() < until, "the check's sleep still runs");
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    eventually("the run's slot is free", || sessions_running(&s) == 0);
+    support::guard::stop_host_processes(s.state.path());
+}
+
+/// resident-workers, "sluice host stopped while a session's checks run"
+/// (the change `sluice-host-runs-a-sessions-checks`, design D4): when
+/// `sluice host` has exited on `SIGTERM`, no `sleep` of the command runs,
+/// and the client exits 3, saying that sluice's host process ended.
+#[test]
+fn a_stopped_sluice_host_ends_a_sessions_checks() {
+    let s = Setup::new("exec-host-stopped");
+    let marks = Scratch::new("exec-host-stopped-marks");
+    let (client, pid) = sleeping(&s, &marks, 60);
+    let sleep = written_pid(&pid);
+    support::guard::stop_host_processes(s.state.path());
+    assert!(!runs(sleep), "the check's sleep outlived sluice host");
+    let out = client.wait_with_output().unwrap();
+    assert_eq!(out.status.code(), Some(3), "{}", text(&out));
+    assert!(
+        text(&out).contains("sluice's host process"),
+        "{}",
+        text(&out)
+    );
+}
+
+/// resident-workers, "A worktree's release" (the change
+/// `sluice-host-runs-a-sessions-checks`, design D1): a release command
+/// that writes a file runs as a worker of `sluice host`, the file is
+/// written, and the place is released.
+#[test]
+fn a_worktrees_release_runs_in_sluice_host() {
+    let s = Setup::new("exec-release-in-host");
+    let marks = Scratch::new("exec-release-in-host-marks");
+    let parent = marks.path().join("parent");
+    let release = marks.path().join("release.sh");
+    std::fs::write(&release, format!("echo $PPID > '{}'\n", parent.display())).unwrap();
+    s.policy(&POLICY.replace(
+        "[tests]\n",
+        &format!("[tests]\nrelease = \"sh {}\"\n", release.display()),
+    ));
+    let out = s.sluice(&["exec", "bolt/x", "--", "true"]);
+    assert!(out.status.success(), "{}", text(&out));
+    let git = support::CountingGit::new();
+    let _held = host_held(&s);
+    let client = without_tools(&git, &mut s.command(&["release"]))
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    let pid = client.id();
+    let out = client.wait_with_output().unwrap();
+    assert_eq!(out.status.code(), Some(0), "{}", text(&out));
+    assert!(
+        String::from_utf8_lossy(&out.stdout).starts_with("released "),
+        "{}",
+        text(&out)
+    );
+    let parent: u32 = std::fs::read_to_string(&parent)
+        .unwrap()
+        .trim()
+        .parse()
+        .unwrap();
+    let chain = ancestors(parent);
+    let host = host_pid(&s);
+    assert!(
+        chain.contains(&host),
+        "the release command is not under sluice host {host}: {chain:?}"
+    );
+    let below = &chain[..chain.iter().position(|p| *p == host).unwrap()];
+    assert!(
+        !below.contains(&pid),
+        "the release command is under sluice release: {chain:?}"
+    );
+    ran_only_the_upkeep(&git, pid);
 }

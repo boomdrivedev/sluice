@@ -305,11 +305,14 @@ impl Checks {
         self
     }
 
-    /// How its runs hold their parts: the handle it was bound with, else
-    /// the host process's room over its socket, so no process but the host
-    /// process decides a part by itself (design D12; task 4.2).
+    /// How its runs hold their parts: the handle it was bound with. Only
+    /// `sluice host`, and a test that stands for it, binds one, so no other
+    /// process decides a part (design D12; the change
+    /// `sluice-host-runs-a-sessions-checks`, design D3).
     fn room(&self) -> Result<&RoomHandle> {
-        Ok(self.room.get_or_init(|| RoomHandle::Socket(None)))
+        self.room.get().ok_or_else(|| {
+            anyhow!("a run's part of the host's bound is held only in sluice's host process")
+        })
     }
 
     /// The same profile, looking for the container engine at the unix
@@ -392,92 +395,41 @@ impl Checks {
     }
 }
 
-/// How a profile reaches the host's room (design D12): the room itself, in
-/// the process that holds it, and the host process's socket in any other.
+/// How a profile reaches the host's room (design D12): the room itself,
+/// in the process that holds it, `sluice host`, which runs every run of
+/// the host (the change `sluice-host-runs-a-sessions-checks`, design D3).
 #[derive(Clone)]
 pub enum RoomHandle {
     Here(Shared),
-    /// The host process's room, asked over its socket through the client
-    /// given, else the host's own, the process started where none answers
-    /// (task 4.2).
-    Socket(Option<std::sync::Arc<crate::host_process::client::Client>>),
 }
 
 impl RoomHandle {
     /// A part of `kind` for a run of `repository` on `branch`; `None` where
-    /// the room refuses it. Over the socket, the room's first answer decides: held,
-    /// the part is the connection, given back as it closes; waiting, the
-    /// room refuses it now and the ask is let go (71).
+    /// the room refuses it (71).
     fn hold(&self, kind: RunKind, repository: &Path, branch: &str) -> Result<Option<Part>> {
-        use crate::host_process::protocol::Answer;
         match self {
             RoomHandle::Here(shared) => shared.hold(kind, repository, branch),
-            RoomHandle::Socket(client) => {
-                let mut c = match client {
-                    Some(client) => client.hold(kind, repository, "", Some(branch))?,
-                    None => crate::host_process::client::Client::host()?.hold(
-                        kind,
-                        repository,
-                        "",
-                        Some(branch),
-                    )?,
-                };
-                match c.next(Some(crate::host_process::read_for()))? {
-                    Some(Answer::Held) => {
-                        Ok(Some(Part::new(kind, crate::host_process::ask::Lent(c))))
-                    }
-                    Some(Answer::Waiting(_)) | None => Ok(None),
-                    Some(Answer::Error(e)) => Err(anyhow::anyhow!("{e}")),
-                    Some(other) => Err(anyhow::anyhow!(
-                        "sluice's host process answered {other:?} to a hold"
-                    )),
-                }
-            }
         }
     }
 }
 
-/// A part a start takes, as the room it was held of carries it: the room
-/// itself, or the host process's over the connection `sluice exec` or
-/// `sluice preview` held it on (design D12).
-enum Begun {
-    Here(room::Holding),
-    Host(crate::host_process::ask::Lent, Option<(String, PathBuf)>),
-}
+/// A part a start takes, as the room it was held of carries it (design
+/// D12).
+struct Begun(room::Holding);
 
 impl Begun {
     fn of(part: Part) -> Option<Begun> {
-        match part.take::<room::Holding>() {
-            Ok(h) => Some(Begun::Here(h)),
-            Err(part) => part
-                .take::<crate::host_process::ask::Lent>()
-                .ok()
-                .map(|l| Begun::Host(l, None)),
-        }
+        part.take::<room::Holding>().ok().map(Begun)
     }
 
     /// The run begins in `run_dir`, in the place `place`.
     fn begin(&mut self, place: &str, run_dir: &Path) -> Result<()> {
-        match self {
-            Begun::Here(h) => h.begin(place, run_dir),
-            Begun::Host(_, at) => {
-                *at = Some((place.to_string(), run_dir.to_path_buf()));
-                Ok(())
-            }
-        }
+        self.0.begin(place, run_dir)
     }
 
     /// The run's supervisor holds its run directory.
     fn started(self) {
-        match self {
-            Begun::Here(h) => h.started(),
-            Begun::Host(lent, Some((place, run_dir))) => {
-                // A host process that ended meanwhile counts the run by its
-                // supervisor when the next one starts.
-                let _ = lent.started(&place, &run_dir);
-            }
-            Begun::Host(_, None) => {}
-        }
+        self.0.started()
     }
 }
 
@@ -1016,6 +968,61 @@ pub fn run_keeps(name: &str) -> bool {
     KEEP.contains(&name) || name.starts_with("LC_")
 }
 
+/// The variables that a run with the container engine takes of the
+/// environment it is started from, so the engine's client finds the
+/// engine as the user's does (design D5).
+const DOCKER: [&str; 6] = [
+    "DOCKER_HOST",
+    "DOCKER_CONTEXT",
+    "DOCKER_CONFIG",
+    "DOCKER_TLS_VERIFY",
+    "DOCKER_TLS",
+    "DOCKER_CERT_PATH",
+];
+
+thread_local! {
+    /// The caller's run variables while `sluice host` runs a session's
+    /// command on this thread (the change
+    /// `sluice-host-runs-a-sessions-checks`, design D2).
+    static RUN_ENV: std::cell::RefCell<Option<BTreeMap<String, String>>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+/// The variables of this process's environment that a run keeps: what a
+/// session's command sends `sluice host` as its caller's (design D2).
+pub fn run_env_here() -> BTreeMap<String, String> {
+    std::env::vars()
+        .filter(|(k, _)| run_keeps(k) || DOCKER.contains(&k.as_str()))
+        .collect()
+}
+
+/// Run `f` with `env` as the caller's run variables on this thread: a run
+/// started in it takes those of `env` in place of this process's own
+/// (design D2).
+pub fn with_run_env<T>(env: BTreeMap<String, String>, f: impl FnOnce() -> T) -> T {
+    let before = RUN_ENV.with(|c| c.borrow_mut().replace(env));
+    let ran = f();
+    RUN_ENV.with(|c| *c.borrow_mut() = before);
+    ran
+}
+
+/// The run variables a run started on this thread takes: the caller's
+/// where a session's command runs on it, else this process's own (design
+/// D2).
+fn run_vars() -> BTreeMap<String, String> {
+    RUN_ENV
+        .with(|c| c.borrow().clone())
+        .unwrap_or_else(|| std::env::vars().collect())
+}
+
+/// `name` of the run variables, as [`run_vars`] gives them.
+fn run_var(name: &str) -> Option<String> {
+    match RUN_ENV.with(|c| c.borrow().as_ref().map(|env| env.get(name).cloned())) {
+        Some(value) => value,
+        None => std::env::var(name).ok(),
+    }
+}
+
 /// 135 (design D3): what a development shell sets that the host process
 /// keeps none of, by prefix, whatever else would keep it: the shell's own
 /// settings name the shell's working copy, which no repository the host
@@ -1038,7 +1045,8 @@ fn environment(
     jobs: usize,
     caches: &[HostCache],
 ) -> BTreeMap<String, String> {
-    let mut env: BTreeMap<String, String> = std::env::vars()
+    let mut env: BTreeMap<String, String> = run_vars()
+        .into_iter()
         .filter(|(k, _)| KEEP.contains(&k.as_str()) || k.starts_with("LC_"))
         .collect();
     env.insert(
@@ -1060,15 +1068,8 @@ fn environment(
     // The container engine's client finds the engine as the user's does,
     // over TLS where the user's would (design D5).
     if request.limits.docker {
-        for k in [
-            "DOCKER_HOST",
-            "DOCKER_CONTEXT",
-            "DOCKER_CONFIG",
-            "DOCKER_TLS_VERIFY",
-            "DOCKER_TLS",
-            "DOCKER_CERT_PATH",
-        ] {
-            if let Ok(v) = std::env::var(k) {
+        for k in DOCKER {
+            if let Some(v) = run_var(k) {
                 env.insert(k.into(), v);
             }
         }
@@ -1182,14 +1183,11 @@ pub fn engine_endpoints() -> Vec<Endpoint> {
             }
         }
     } else {
-        if let Some(e) = std::env::var("DOCKER_HOST")
-            .ok()
-            .and_then(|h| docker_host(&h, tls))
-        {
+        if let Some(e) = run_var("DOCKER_HOST").and_then(|h| docker_host(&h, tls)) {
             found.push(e);
         }
         found.push(Endpoint::Unix("/var/run/docker.sock".into()));
-        if let Some(home) = std::env::var_os("HOME").map(PathBuf::from) {
+        if let Some(home) = run_var("HOME").map(PathBuf::from) {
             for p in [
                 ".docker/run/docker.sock",
                 ".orbstack/run/docker.sock",
@@ -1238,14 +1236,14 @@ fn listed(v: &str) -> Vec<&str> {
 /// alone, with the files of `DOCKER_CERT_PATH`, else of `~/.docker`; `None`
 /// where neither is set (design D5).
 fn engine_tls() -> Option<EngineTls> {
-    let set = |k: &str| std::env::var_os(k).is_some_and(|v| !v.is_empty());
+    let set = |k: &str| run_var(k).is_some_and(|v| !v.is_empty());
     let verify = set("DOCKER_TLS_VERIFY");
     if !verify && !set("DOCKER_TLS") {
         return None;
     }
-    let certs = match std::env::var_os("DOCKER_CERT_PATH").filter(|v| !v.is_empty()) {
+    let certs = match run_var("DOCKER_CERT_PATH").filter(|v| !v.is_empty()) {
         Some(dir) => PathBuf::from(dir),
-        None => std::env::var_os("HOME")
+        None => run_var("HOME")
             .map(PathBuf::from)
             .unwrap_or_default()
             .join(".docker"),

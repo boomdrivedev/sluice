@@ -115,11 +115,11 @@ fn overview() -> [String; 1] {
     ["sluice overview".to_string()]
 }
 
-/// Write human text: to stderr when stdout is the JSON document's.
+/// Write human text: to stderr when stdout is the JSON document's, as
+/// sluice says a line there, which `sluice host` sends its client.
 fn say(out: &mut dyn Write, json: bool, text: &str) -> Result<()> {
     if json {
-        let mut e = std::io::stderr();
-        writeln!(e, "{text}")?;
+        telemetry::say(text);
     } else {
         writeln!(out, "{text}")?;
     }
@@ -640,17 +640,29 @@ impl Exec<'_> {
         let command = work.command().is_some();
         let log = self.host.run_dir(run).map(|d| d.join("out.log"));
         let mut shown = 0usize;
-        let mut show = |out: &mut dyn Write| -> Result<()> {
-            let Some(bytes) = log.as_ref().and_then(|l| std::fs::read(l).ok()) else {
-                return Ok(());
-            };
-            if bytes.len() > shown {
+        // Under `--json`, the log's lines go to stderr as sluice says a
+        // line there, a line not yet ended held until it is.
+        let mut held = String::new();
+        let mut show = |out: &mut dyn Write, last: bool| -> Result<()> {
+            let bytes = log.as_ref().and_then(|l| std::fs::read(l).ok());
+            if let Some(bytes) = bytes.filter(|b| b.len() > shown) {
                 let text = String::from_utf8_lossy(&bytes[shown..]).into_owned();
                 shown = bytes.len();
-                if json {
-                    std::io::stderr().write_all(text.as_bytes())?;
-                } else {
-                    out.write_all(text.as_bytes())?;
+                match json {
+                    true => held.push_str(&text),
+                    false => {
+                        out.write_all(text.as_bytes())?;
+                        out.flush()?;
+                    }
+                }
+            }
+            if json {
+                while let Some(at) = held.find('\n') {
+                    telemetry::say(&held[..at]);
+                    held.drain(..=at);
+                }
+                if last && !held.is_empty() {
+                    telemetry::say(&std::mem::take(&mut held));
                 }
             }
             Ok(())
@@ -658,8 +670,9 @@ impl Exec<'_> {
         let mut kept: Vec<TaskProgress> = Vec::new();
         let progress = loop {
             let p = seams.tests.progress(run)?;
-            show(out)?;
-            if !matches!(p, Progress::Running) {
+            let ended = !matches!(p, Progress::Running);
+            show(out, ended)?;
+            if ended {
                 break p;
             }
             // ADR 0035: where its tasks have got, kept on its record for a
@@ -1079,7 +1092,9 @@ fn opening(work: &SessionWork, branch: &str, base: &Rev) -> String {
 /// and changes neither the run's exit nor what it printed.
 fn unkept(kept: Result<()>) {
     if let Err(e) = kept {
-        eprintln!("warning: the run's result could not be kept on the worktree: {e:#}");
+        telemetry::say(&format!(
+            "warning: the run's result could not be kept on the worktree: {e:#}"
+        ));
     }
 }
 

@@ -11575,6 +11575,80 @@ fn the_home_view_beside_a_reader_counts_from_its_document() {
     drop(doc);
 }
 
+/// resident-workers, "A client starts no other tool" (the change
+/// `sluice-host-runs-a-sessions-checks`, design D1;
+/// `clients-never-fetch-or-start-a-tool@8aa9c57f19b2`): `sluice exec`,
+/// `sluice equip`, `sluice preview` and a worktree's `sluice release`, each
+/// run with no toolchain and no task runner on its `PATH` and a git that
+/// records each call, once `sluice host` started with them, bind no
+/// repository: each git that the client runs is the branch protection's
+/// upkeep (`protect.rs`).
+#[test]
+fn a_sessions_command_binds_no_repository() {
+    const UPKEEP: [&str; 3] = [
+        "rev-parse --path-format=absolute --git-path hooks",
+        "rev-parse --path-format=absolute --git-common-dir",
+        "worktree list --porcelain",
+    ];
+    let d = support::OnDisk::new(
+        "cli-session-binds-nothing",
+        "[tests]\nrunner = \"command\"\ncommand = \"true\"\n\n\
+         [branches.main]\ntimeout = \"1m\"\n\n\
+         [preview]\ncommand = \"sleep 30\"\n",
+    );
+    let worktree = d.session("a");
+    let held = d
+        .client(&worktree)
+        .subscribe(Vec::new())
+        .expect("the host process starts");
+    let rev = d.repo.rev("main");
+    let mut preview = None;
+    for (dir, args) in [
+        (worktree.as_path(), vec!["exec", "main", "--", "true"]),
+        (worktree.as_path(), vec!["equip", "main"]),
+        (
+            d.repo.dir(),
+            vec!["preview", "main", rev.as_str(), "--json"],
+        ),
+        (worktree.as_path(), vec!["release"]),
+    ] {
+        let mut c = d.command(dir);
+        c.args(&args).env("PATH", "/usr/bin:/bin");
+        d.git.on(&mut c);
+        let client = c
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped())
+            .spawn()
+            .unwrap();
+        let pid = client.id();
+        let out = client.wait_with_output().unwrap();
+        assert!(
+            out.status.success(),
+            "{args:?}: {}{}",
+            String::from_utf8_lossy(&out.stdout),
+            String::from_utf8_lossy(&out.stderr)
+        );
+        if args[0] == "preview" {
+            let doc: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+            preview = doc["name"].as_str().map(str::to_string);
+        }
+        for (_, call) in d.git.parented().into_iter().filter(|(p, _)| *p == pid) {
+            assert!(
+                UPKEEP.iter().any(|u| call.ends_with(u)),
+                "{args:?} ran git {call}"
+            );
+        }
+    }
+    let name = preview.expect("the preview's name");
+    let out = d.sluice(&["release", &name]);
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    drop(held);
+}
+
 /// Each git that the process `pid` started after `before` that is no part
 /// of the branch protection's upkeep of its hook, `protect.rs`'s `git`.
 fn own_git(d: &support::OnDisk, pid: u32, before: usize) -> Vec<String> {

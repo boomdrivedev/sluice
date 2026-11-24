@@ -1649,7 +1649,7 @@ fn a_failed_list_ends_intake_and_the_queue_still_lands() {
 /// 2026-11-19).
 #[test]
 fn the_host_process_buys_a_repositorys_token_once_across_its_looks() {
-    use sluice::host_process::{client::Client, protocol::Answer};
+    use sluice::host_process::client::Client;
     let g = OnGitHub::new("pr-one-token", "");
     g.settle();
     support::kill_host_process(&mut g.command(env!("CARGO_BIN_EXE_sluice"), g.repo.dir()));
@@ -1671,16 +1671,10 @@ fn the_host_process_buys_a_repositorys_token_once_across_its_looks() {
         support::env_of(git.on(&mut g.command(env!("CARGO_BIN_EXE_sluice"), g.repo.dir()))),
     )
     .unwrap();
-    let mut held = client
-        .hold(
-            sluice_seams::RunKind::Session,
-            &repository,
-            "an-agent",
-            None,
-        )
+    // A subscription of no folder holds it open, and reads nothing.
+    let held = client
+        .subscribe(Vec::new())
         .expect("the host process starts");
-    let answer = held.next(Some(Duration::from_secs(10))).unwrap();
-    assert!(matches!(answer, Some(Answer::Held)), "{answer:?}");
     // The host process looks at the repository as it starts, and at each
     // pass asked of it, each reading fetching every
     // branch's records from GitHub as the app once, and main's again.

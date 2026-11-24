@@ -1,7 +1,8 @@
 //! What a command and the host process say to each other on its socket
 //! (design D2): lines of JSON. A command says `hello` with its version, the
 //! process answers with its own, and the command asks one request on the
-//! connection; a follow and a held room keep their connection open.
+//! connection; a subscription and a session's command keep their connection
+//! open, the command's output sent as it comes.
 
 use std::collections::BTreeMap;
 use std::io::{BufRead, Write};
@@ -9,10 +10,9 @@ use std::path::PathBuf;
 
 use anyhow::{bail, Context, Result};
 use serde::{Deserialize, Serialize};
-use sluice_seams::RunKind;
 
 use super::pass::Report;
-use super::room::{Share, Turn, Waiting, Why};
+use super::room::{Share, Turn, Waiting};
 
 /// What a command says first on a connection.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -406,6 +406,88 @@ pub enum Request {
         #[serde(flatten)]
         wait: WaitAsk,
     },
+    /// `sluice exec` from `folder`: a session's checks, or the command
+    /// after `--`, in the worktree `worktree`, which `sluice host` runs as
+    /// its worker, its output sent as it comes (the change
+    /// `sluice-host-runs-a-sessions-checks`, design D1 to D4).
+    Exec {
+        folder: PathBuf,
+        /// The caller's session variables (design D1).
+        #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+        caller: BTreeMap<String, String>,
+        /// The variables of the caller's environment that a run keeps
+        /// (design D2).
+        #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+        run_env: BTreeMap<String, String>,
+        /// The command's own telemetry choices, `--otel` among them, which
+        /// choose its telemetry alone (rule core.53).
+        #[serde(default, skip_serializing_if = "crate::telemetry::Choices::is_empty")]
+        otel: crate::telemetry::Choices,
+        branch: String,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        command: Vec<String>,
+        worktree: PathBuf,
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        json: bool,
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        release: bool,
+    },
+    /// `sluice preview` from `folder`: its command a worker of `sluice
+    /// host`, which stays after the connection closes, until its release
+    /// (design D1).
+    Preview {
+        folder: PathBuf,
+        #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+        caller: BTreeMap<String, String>,
+        #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+        run_env: BTreeMap<String, String>,
+        /// The command's own telemetry choices, `--otel` among them, which
+        /// choose its telemetry alone (rule core.53).
+        #[serde(default, skip_serializing_if = "crate::telemetry::Choices::is_empty")]
+        otel: crate::telemetry::Choices,
+        branch: String,
+        revision: String,
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        wait: bool,
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        json: bool,
+    },
+    /// `sluice equip` from `folder`, its steps workers of `sluice host`,
+    /// the worktree's top found from the folder (design D1).
+    Equip {
+        folder: PathBuf,
+        #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+        caller: BTreeMap<String, String>,
+        #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+        run_env: BTreeMap<String, String>,
+        /// The command's own telemetry choices, `--otel` among them, which
+        /// choose its telemetry alone (rule core.53).
+        #[serde(default, skip_serializing_if = "crate::telemetry::Choices::is_empty")]
+        otel: crate::telemetry::Choices,
+        branch: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        at: Option<String>,
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        json: bool,
+    },
+    /// `sluice release` of the worktree `worktree`, its release command a
+    /// worker of `sluice host` (design D1).
+    ReleaseWorktree {
+        folder: PathBuf,
+        #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+        caller: BTreeMap<String, String>,
+        #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+        run_env: BTreeMap<String, String>,
+        /// The command's own telemetry choices, `--otel` among them, which
+        /// choose its telemetry alone (rule core.53).
+        #[serde(default, skip_serializing_if = "crate::telemetry::Choices::is_empty")]
+        otel: crate::telemetry::Choices,
+        worktree: PathBuf,
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        accept_failure: bool,
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        json: bool,
+    },
     /// `sluice previews`.
     Previews {
         folder: PathBuf,
@@ -519,18 +601,6 @@ pub enum Request {
         branch: String,
         wants: sluice_seams::ResultAsk,
     },
-    /// A session's or a preview's room, the connection kept while it
-    /// waits and while it is held (D12).
-    Hold {
-        kind: RunKind,
-        repository: PathBuf,
-        place: String,
-        /// 154: the branch its run is held to; `None` from an older sluice,
-        /// whose run counts toward the bound under no branch (design D6 of
-        /// `each-submission-shows-its-wait-and-its-test`).
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        branch: Option<String>,
-    },
     /// Hand over, for a newer sluice (D8). `program` is the asker's
     /// executable, resolved through every link, which the host process
     /// starts afresh in place as; an older command sends none, and the host
@@ -571,13 +641,6 @@ pub struct Reading {
     pub stale: std::collections::BTreeMap<String, sluice_seams::ReadRefused>,
 }
 
-/// What a held room's command says once its run has begun.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub struct Started {
-    pub place: String,
-    pub run_dir: PathBuf,
-}
-
 /// The room as the process holds it, for a person to read (150, 71;
 /// record 0123).
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -608,6 +671,13 @@ pub struct Output {
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum Answer {
+    /// What a session's command writes on standard output, as it writes
+    /// it, before its `output` (the change
+    /// `sluice-host-runs-a-sessions-checks`, design D1).
+    Stdout(String),
+    /// A line that a session's command says on standard error, as it says
+    /// it, before its `output` (design D1).
+    Stderr(String),
     /// A read's output (design D1).
     Output(Output),
     /// A wait's step (design D8).
@@ -622,10 +692,6 @@ pub enum Answer {
     /// A pass's report: for a pass, and each pass of a followed
     /// repository.
     Pass(Report),
-    /// A held room's wait, with why.
-    Waiting(Why),
-    /// The room is the asker's.
-    Held,
     /// The results asked for, one JSON document per line (D17).
     Results(String),
     /// The request could not be answered, in these words.
@@ -1049,32 +1115,98 @@ mod tests {
         assert!(!named.daemon);
     }
 
-    /// 154, design D6 of `each-submission-shows-its-wait-and-its-test`: a
-    /// hold naming `main` reads back naming it, and one an older sluice
-    /// wrote, with no branch, reads naming none.
+    /// The change `sluice-host-runs-a-sessions-checks`, design D1, D2:
+    /// `exec`, `preview`, `equip` and a worktree's `release` each name the
+    /// folder, the command's arguments, the caller and the caller's run
+    /// variables, and read back as they were sent; the streamed `stdout`
+    /// and `stderr` answers read back.
     #[test]
-    fn a_hold_names_its_branch_and_an_older_one_none() {
-        let named = Request::Hold {
-            kind: RunKind::Session,
-            repository: PathBuf::from("/host/repo.git"),
-            place: "unit/a".into(),
-            branch: Some("main".into()),
-        };
-        let mut line = Vec::new();
-        send(&mut line, &named).unwrap();
-        let read: Request = receive(&mut line.as_slice()).unwrap();
-        assert_eq!(read, named);
-        let older = b"{\"ask\":\"hold\",\"kind\":\"session\",\
-                      \"repository\":\"/host/repo.git\",\"place\":\"unit/a\"}\n";
-        let read: Request = receive(&mut older.as_slice()).unwrap();
+    fn a_sessions_commands_and_their_streamed_answers_read_back() {
+        let caller = BTreeMap::from([("SLUICE_AGENT".to_string(), "a".to_string())]);
+        let run_env = BTreeMap::from([("PATH".to_string(), "/b:/usr/bin".to_string())]);
+        let asks = [
+            Request::Exec {
+                folder: "/w/feat".into(),
+                caller: caller.clone(),
+                run_env: run_env.clone(),
+                otel: Default::default(),
+                branch: "main".into(),
+                command: vec!["sh".into(), "-c".into(), "echo one".into()],
+                worktree: "/w/feat".into(),
+                json: false,
+                release: true,
+            },
+            Request::Preview {
+                folder: "/w/feat".into(),
+                caller: caller.clone(),
+                run_env: run_env.clone(),
+                otel: Default::default(),
+                branch: "main".into(),
+                revision: "2eb676c".into(),
+                wait: true,
+                json: true,
+            },
+            Request::Equip {
+                folder: "/w/feat/src".into(),
+                caller: caller.clone(),
+                run_env: run_env.clone(),
+                otel: Default::default(),
+                branch: "main".into(),
+                at: Some("2eb676c".into()),
+                json: false,
+            },
+            Request::ReleaseWorktree {
+                folder: "/w/feat".into(),
+                caller,
+                run_env,
+                otel: crate::telemetry::Choices {
+                    otel: Some(true),
+                    ..Default::default()
+                },
+                worktree: "/w/feat".into(),
+                accept_failure: true,
+                json: true,
+            },
+        ];
+        for ask in asks {
+            let mut line = Vec::new();
+            send(&mut line, &ask).unwrap();
+            assert_eq!(receive::<Request>(&mut line.as_slice()).unwrap(), ask);
+        }
+        let line = br#"{"ask":"exec","folder":"/w/feat","branch":"main","worktree":"/w/feat"}"#;
         assert_eq!(
-            read,
-            Request::Hold {
-                kind: RunKind::Session,
-                repository: PathBuf::from("/host/repo.git"),
-                place: "unit/a".into(),
-                branch: None,
+            serde_json::from_slice::<Request>(line).unwrap(),
+            Request::Exec {
+                folder: "/w/feat".into(),
+                caller: BTreeMap::new(),
+                run_env: BTreeMap::new(),
+                otel: Default::default(),
+                branch: "main".into(),
+                command: vec![],
+                worktree: "/w/feat".into(),
+                json: false,
+                release: false,
             }
         );
+        for (answer, line) in [
+            (
+                Answer::Stdout("running cli:test ...\n".into()),
+                r#"{"stdout":"running cli:test ...\n"}"#,
+            ),
+            (
+                Answer::Stderr("waiting: the host is at its bound".into()),
+                r#"{"stderr":"waiting: the host is at its bound"}"#,
+            ),
+        ] {
+            assert_eq!(serde_json::to_string(&answer).unwrap(), line);
+            assert_eq!(serde_json::from_str::<Answer>(line).unwrap(), answer);
+        }
+    }
+
+    /// Design D5: `hold` is no request of this release.
+    #[test]
+    fn a_hold_is_no_request() {
+        let older = br#"{"ask":"hold","kind":"session","repository":"/host/repo.git","place":"unit/a","branch":"main"}"#;
+        assert!(serde_json::from_slice::<Request>(older).is_err());
     }
 }

@@ -53,6 +53,7 @@ pub mod ask;
 pub mod changes;
 pub mod client;
 pub mod clock;
+pub mod commands;
 pub mod environment;
 pub mod folder;
 pub mod index;
@@ -90,8 +91,8 @@ use crate::instance::Instance;
 use crate::profiles::places::{repository_key, user_scratch, USER_SCRATCH_VAR};
 pub use ask::{Here, Holding, Holds, HostProcess, Socketed, Subscription};
 use folder::{Folder, How};
-use protocol::{Answer, FollowKind, Hello, Named, Request, RoomView, Started};
-use room::{Asked, Asker, Room, Shared};
+use protocol::{Answer, FollowKind, Hello, Named, Request, RoomView};
+use room::{Room, Shared};
 
 /// Set to `record` in tests: the host process takes no pass of its own,
 /// and passes only when a command asks (design D14).
@@ -179,6 +180,36 @@ impl Paths {
             dir,
             socket: user.join(format!("host-{}.sock", repository_key(&real))),
         })
+    }
+
+    /// As [`Paths::from_env`] finds them, where a host process has had
+    /// them, making nothing: `None` where the state folder's `host/` or the
+    /// user's directory is not there (record 0120 as amended 2026-11-17).
+    pub fn found_from_env(
+        var: impl Fn(&str) -> Option<std::ffi::OsString>,
+    ) -> Result<Option<Paths>> {
+        let state = match var("XDG_STATE_HOME").filter(|d| !d.is_empty()) {
+            Some(d) => PathBuf::from(d),
+            None => PathBuf::from(var("HOME").context("HOME is not set")?)
+                .join(".local")
+                .join("state"),
+        }
+        .join("sluice");
+        let user = match var(USER_SCRATCH_VAR).filter(|d| !d.is_empty()) {
+            Some(d) => PathBuf::from(d),
+            None => user_scratch()?,
+        };
+        let dir = state.join("host");
+        if !dir.is_dir() || !user.is_dir() {
+            return Ok(None);
+        }
+        let real = std::fs::canonicalize(&state)
+            .with_context(|| format!("resolving {}", state.display()))?;
+        Ok(Some(Paths {
+            state,
+            dir,
+            socket: user.join(format!("host-{}.sock", repository_key(&real))),
+        }))
     }
 
     /// As a process whose environment `var` reads finds them: its state
@@ -1928,6 +1959,11 @@ async fn answer(hosting: &Arc<Hosting>, stream: UnixStream) -> Result<()> {
         let output = reads::answer(hosting, request).await;
         return send(&mut writer, &Answer::Output(output)).await;
     }
+    // The change `sluice-host-runs-a-sessions-checks`, design D1: a
+    // session's command runs here, its output sent as it comes.
+    if commands::is_command(&request) {
+        return commands::answer(hosting, request, &mut lines, &mut writer).await;
+    }
     // The change `sluice-host-makes-each-change`, design D1: `sluice host`
     // makes each change.
     if changes::is_change(&request) {
@@ -1941,6 +1977,10 @@ async fn answer(hosting: &Arc<Hosting>, stream: UnixStream) -> Result<()> {
         | Request::Home { .. }
         | Request::Forecast { .. }
         | Request::Inbox { .. }
+        | Request::Exec { .. }
+        | Request::Preview { .. }
+        | Request::Equip { .. }
+        | Request::ReleaseWorktree { .. }
         | Request::Previews { .. }
         | Request::Submit { .. }
         | Request::Amend { .. }
@@ -1997,22 +2037,6 @@ async fn answer(hosting: &Arc<Hosting>, stream: UnixStream) -> Result<()> {
                 Err(e) => Answer::Error(e),
             };
             send(&mut writer, &answer).await
-        }
-        Request::Hold {
-            kind,
-            repository,
-            place: _,
-            branch,
-        } => {
-            hold(
-                hosting,
-                kind,
-                &repository,
-                branch.as_deref(),
-                &mut writer,
-                &mut lines,
-            )
-            .await
         }
         Request::Results {
             repository,
@@ -2185,115 +2209,6 @@ pub(crate) fn view_of(room: &Shared) -> Result<RoomView> {
         turn: room.turn(),
         repositories: room.repositories(now)?,
     })
-}
-
-/// A session's or a preview's room (design D12): it waits in the room's
-/// order while its connection is open, saying why once for each change,
-/// and once held, the room is its until it says its run began, or gives it
-/// back when the connection closes. It asks the room again each time the
-/// room changes and when a combination's wait lapses, never at a pace of
-/// its own.
-async fn hold(
-    hosting: &Arc<Hosting>,
-    kind: sluice_seams::RunKind,
-    repository: &Path,
-    branch: Option<&str>,
-    writer: &mut tokio::net::unix::OwnedWriteHalf,
-    lines: &mut Lines,
-) -> Result<()> {
-    // A session's or a preview's ask waits its turn; a combination's, from
-    // a profile beside the host process (task 3.4), is answered once, held
-    // or refused, as a round's own ask is, and counts as no session's wait.
-    let waiter = match kind {
-        sluice_seams::RunKind::Session => Some(hosting.room.lock().wait(repository, branch)),
-        sluice_seams::RunKind::Queue => None,
-    };
-    let let_go = || {
-        if let Some(w) = waiter {
-            hosting.room.lock().let_go(w);
-            hosting.room.changed();
-        }
-    };
-    let asker = match waiter {
-        Some(w) => Asker::Session(w),
-        None => Asker::Queue(repository.to_path_buf()),
-    };
-    let mut changed = hosting.room.subscribe();
-    let mut said = None;
-    let far = Instant::now() + Duration::from_secs(86_400 * 365);
-    let id = loop {
-        changed.borrow_and_update();
-        let asked = {
-            let room = hosting.room.clone();
-            let (asker, repository, branch) = (
-                asker.clone(),
-                repository.to_path_buf(),
-                branch.map(str::to_string),
-            );
-            tokio::task::spawn_blocking(move || {
-                room.lock()
-                    .ask(&asker, &repository, branch.as_deref(), Instant::now())
-            })
-            .await
-            .context("asking the room")?
-        };
-        match asked {
-            Ok(Asked::Held(id)) => break id,
-            Ok(Asked::Refused(why)) => {
-                if said != Some(why) {
-                    said = Some(why);
-                    if send(writer, &Answer::Waiting(why)).await.is_err() {
-                        let_go();
-                        return Ok(());
-                    }
-                }
-                if waiter.is_none() {
-                    return Ok(());
-                }
-            }
-            Err(e) => {
-                let_go();
-                return send(writer, &Answer::Error(format!("{e:#}"))).await;
-            }
-        }
-        let lapse = hosting.room.lock().next_lapse();
-        tokio::select! {
-            _ = changed.changed() => {}
-            () = tokio::time::sleep_until(lapse.unwrap_or(far)), if lapse.is_some() => {}
-            () = closed(lines) => {
-                let_go();
-                return Ok(());
-            }
-            () = hosting.stop.cancelled() => {
-                let_go();
-                return Ok(());
-            }
-        }
-    };
-    let_go();
-    let held = hosting.room.holding(id);
-    if send(writer, &Answer::Held).await.is_err() {
-        return Ok(());
-    }
-    // The run's start, or a connection closed: the room given back.
-    let started: Started = {
-        use tokio_stream::StreamExt;
-        let line = tokio::select! {
-            line = lines.next() => line,
-            () = hosting.stop.cancelled() => None,
-        };
-        let Some(Ok(line)) = line else {
-            return Ok(());
-        };
-        match serde_json::from_str(line.trim_end()) {
-            Ok(s) => s,
-            Err(_) => return Ok(()),
-        }
-    };
-    held.begin(&started.place, &started.run_dir)?;
-    // Its supervisor holds the run directory before the command says so.
-    held.started();
-    Ok(())
 }
 
 #[cfg(test)]

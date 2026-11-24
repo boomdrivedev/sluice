@@ -362,7 +362,7 @@ fn the_host_process_ends_once_its_queues_are_empty() {
 }
 
 /// reader-tick, "An idle tick starts no process" (129, 135; design D4): a
-/// host process that lives on, here for an agent's held room, looks at
+/// host process that lives on, here for a subscription of no folder, looks at
 /// each repository in its index as an idle tick reads it, and starts no
 /// task for one with nothing in play. On a host whose config names a
 /// system it is not, a task's start is refused and logged: nothing is
@@ -373,7 +373,6 @@ fn the_host_processs_look_at_an_idle_repository_starts_nothing() {
     let policy = format!("{POLICY}\n[systems.elsewhere]\nos = \"windows\"\narch = \"x86_64\"\n");
     let d = OnDisk::new("host-look-idle", &policy);
     d.land("a");
-    let repository = d.repository(d.repo.dir());
     within(15, "the host process ends once idle", || {
         answering(&d).is_none()
     });
@@ -385,19 +384,10 @@ fn the_host_processs_look_at_an_idle_repository_starts_nothing() {
     )
     .unwrap();
     let client = d.client(d.repo.dir());
-    let mut held = client
-        .hold(
-            sluice_seams::RunKind::Session,
-            Path::new(&repository),
-            "an-agent",
-            None,
-        )
+    // A subscription of no folder keeps it, and reads nothing.
+    let held = client
+        .subscribe(Vec::new())
         .expect("the host process starts");
-    let answer = held.next(Some(Duration::from_secs(10))).unwrap();
-    assert!(
-        matches!(answer, Some(sluice::host_process::protocol::Answer::Held)),
-        "{answer:?}"
-    );
     let refused = || {
         std::fs::read_to_string(client.paths().log())
             .unwrap()
@@ -417,7 +407,7 @@ fn the_host_processs_look_at_an_idle_repository_starts_nothing() {
 
 /// reader-tick, "A remote's records are asked for once a minute where
 /// nothing is in play" (129 as amended 2026-11-19): a host process that
-/// lives on, here for an agent's held room, asks origin for the records of
+/// lives on, here for a subscription of no folder, asks origin for the records of
 /// a repository with nothing in play once as it starts, and not again
 /// within the minute, however many times it goes through its index; a
 /// watch's opening asks origin at once, and the watch's passes, a second
@@ -431,19 +421,10 @@ fn an_idle_repositorys_remote_is_asked_once_a_minute() {
     });
     let before = d.git.count();
     let client = d.client(d.repo.dir());
-    let mut held = client
-        .hold(
-            sluice_seams::RunKind::Session,
-            Path::new(&repository),
-            "an-agent",
-            None,
-        )
+    // A subscription of no folder keeps it, and reads nothing.
+    let held = client
+        .subscribe(Vec::new())
         .expect("the host process starts");
-    let answer = held.next(Some(Duration::from_secs(10))).unwrap();
-    assert!(
-        matches!(answer, Some(sluice::host_process::protocol::Answer::Held)),
-        "{answer:?}"
-    );
     let pid = answering(&d).expect("the host process answers");
     let asks = || {
         d.git.parented()[before..]
@@ -1083,54 +1064,41 @@ fn agent(d: &OnDisk, name: &str, script: &str) -> std::process::Child {
         .unwrap()
 }
 
-/// Task 3.4 (design D12): a check profile in any process but the host
-/// process holds its runs' parts of the host process's room over its
-/// socket, deciding none by itself: with the host's bound at one, a second
-/// repository's hold is refused while the first holds the run, and held
-/// once the first gives its part back.
+/// The change `sluice-host-runs-a-sessions-checks`, design D3: a check
+/// profile in any process but the host process holds no part of the
+/// host's bound, so no process but `sluice host` decides one.
 #[test]
-fn a_profile_beside_the_host_process_holds_through_its_socket() {
-    use sluice::profiles::checks::{Checks, RoomHandle};
+fn a_profile_beside_the_host_process_holds_no_part() {
+    use sluice::profiles::checks::Checks;
     use sluice_seams::{RunKind, Tests};
-    let d = OnDisk::new("host-room-socket", POLICY);
-    bound(&d, 1);
-    let b = d.another("host-room-socket-b", POLICY);
-    let client = std::sync::Arc::new(d.client(d.repo.dir()));
-    let at = |dir: &Path| {
-        Checks::new(
-            Path::new(&d.repository(dir)),
-            std::path::PathBuf::from(env!("CARGO_BIN_EXE_sluice")),
-            sluice::instance::Instance {
-                bound: 1,
-                reserved: 0,
-                processors: 8,
-                forge: None,
-                signing: None,
-                peers: Default::default(),
-                systems: None,
-                caches: Vec::new(),
-                expire_after: sluice_core::EXPIRE_AFTER,
-                telemetry: None,
-                aws: Default::default(),
-            },
-        )
-        .with_room(RoomHandle::Socket(Some(client.clone())))
-    };
-    let (first, second) = (at(d.repo.dir()), at(b.dir()));
-    let part = first
-        .hold(RunKind::Queue, "main")
-        .unwrap()
-        .expect("the host's one run");
-    assert!(
-        second.hold(RunKind::Queue, "main").unwrap().is_none(),
-        "the host's one run is the first repository's"
+    let d = OnDisk::new("host-room-beside", POLICY);
+    let checks = Checks::new(
+        Path::new(&d.repository(d.repo.dir())),
+        std::path::PathBuf::from(env!("CARGO_BIN_EXE_sluice")),
+        sluice::instance::Instance {
+            bound: 1,
+            reserved: 0,
+            processors: 8,
+            forge: None,
+            signing: None,
+            peers: Default::default(),
+            systems: None,
+            caches: Vec::new(),
+            expire_after: sluice_core::EXPIRE_AFTER,
+            telemetry: None,
+            aws: Default::default(),
+        },
     );
-    drop(part);
-    within(10, "the run given back is the second repository's", || {
-        second.hold(RunKind::Queue, "main").unwrap().is_some()
-    });
-    let room = room_of(&d);
-    assert_eq!(room["waiting"]["sessions"], 0, "no session waits: {room}");
+    for kind in [RunKind::Queue, RunKind::Session] {
+        let refused = match checks.hold(kind, "main") {
+            Ok(_) => panic!("a part held beside the host process"),
+            Err(e) => format!("{e:#}"),
+        };
+        assert!(
+            refused.contains("held only in sluice's host process"),
+            "{refused}"
+        );
+    }
 }
 
 /// run-bound, "Turns on a bound of two" (150, S75; rule core.49; record
@@ -2707,7 +2675,7 @@ fn lands(d: &OnDisk, id: u64) {
 /// reaches `sluice host`, their process group is not its group, and the
 /// host's state names that group.
 #[test]
-fn a_runs_checks_are_a_child_group_of_sluice_host() {
+fn a_combinations_checks_are_a_worker_in_a_group_of_their_own() {
     let marks = support::Scratch::new("host-child-group-marks");
     let d = OnDisk::new("host-child-group", &held_policy(&marks));
     let dir = d.session("a");
@@ -4534,6 +4502,53 @@ fn older_asks(d: &OnDisk, line: &str) -> serde_json::Value {
     let mut answer = String::new();
     reader.read_line(&mut answer).unwrap();
     serde_json::from_str(&answer).unwrap_or_else(|_| panic!("{answer}"))
+}
+
+/// resident-workers, "An older hold" (the change
+/// `sluice-host-runs-a-sessions-checks`, design D5): a client that says
+/// `hello` as the version of `sluice host` and asks `hold` gets the error
+/// that names both versions and says to run sluice of that version.
+#[test]
+fn an_older_hold_gets_the_host_processs_version() {
+    let d = OnDisk::new("host-older-hold", POLICY);
+    let mut sub = held(&d);
+    settled(&mut sub);
+    let repository = d.repository(d.repo.dir());
+    let socket = d.client(d.repo.dir()).paths().socket.clone();
+    let stream = UnixStream::connect(&socket).unwrap();
+    let mut reader = BufReader::new(stream.try_clone().unwrap());
+    let mut writer = stream;
+    writeln!(writer, "{{\"hello\":\"{}\"}}", sluice::VERSION).unwrap();
+    let mut named = String::new();
+    reader.read_line(&mut named).unwrap();
+    let hold = serde_json::json!({
+        "ask": "hold",
+        "kind": "session",
+        "repository": repository,
+        "place": "unit/a",
+        "branch": "main",
+    });
+    writeln!(writer, "{hold}").unwrap();
+    let mut answer = String::new();
+    reader.read_line(&mut answer).unwrap();
+    let answer: serde_json::Value =
+        serde_json::from_str(&answer).unwrap_or_else(|_| panic!("{answer}"));
+    let words = answer["error"]
+        .as_str()
+        .unwrap_or_else(|| panic!("{answer}"));
+    assert!(
+        words.starts_with(&format!(
+            "sluice {} asked what this host process, sluice {}, does not know: ",
+            sluice::VERSION,
+            sluice::VERSION
+        )),
+        "{words}"
+    );
+    assert!(words.contains("\"hold\""), "{words}");
+    assert!(
+        words.ends_with(&format!(". Run sluice {}.", sluice::VERSION)),
+        "{words}"
+    );
 }
 
 /// The error a client of 0.97.0 is answered, naming both versions and the

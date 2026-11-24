@@ -353,3 +353,76 @@ fn equip_refuses_a_folder_in_no_worktree() {
     assert!(doc.get("steps").is_none(), "{doc}");
     assert!(s.log().is_empty(), "{:?}", s.log());
 }
+
+/// resident-workers, "sluice equip with no tools of its own" (the change
+/// `sluice-host-runs-a-sessions-checks`, design D1): with `sluice host`
+/// started with the toolchain and the task runner on its `PATH`, `sluice
+/// equip main` in a worktree with neither on its own prints each step of
+/// the equip, as it printed them before, exits 0, and runs no git but the
+/// branch protection's upkeep.
+#[test]
+fn sluice_equip_with_no_tools_of_its_own() {
+    let s = Setup::new("equip-tools-none-here");
+    let w = s.worktree("a");
+    let command = |dir: &Path| {
+        let mut c = Command::new(env!("CARGO_BIN_EXE_sluice"));
+        support::isolated(&mut c)
+            .current_dir(dir)
+            .env("XDG_CONFIG_HOME", s.config.path())
+            .env("XDG_STATE_HOME", s.state.path())
+            .env(
+                sluice::profiles::checks::ENGINE_SOCKETS_VAR,
+                s.engine.socket(),
+            )
+            .env_remove("SLUICE_AGENT")
+            .env_remove("SLUICE_OTEL")
+            .env_remove("GIT_DIR")
+            .env_remove("GIT_WORK_TREE")
+            .stdin(Stdio::null());
+        c
+    };
+    let held = sluice::host_process::client::Client::new(
+        Path::new(env!("CARGO_BIN_EXE_sluice")),
+        support::env_of(&command(&w)),
+    )
+    .unwrap()
+    .subscribe(Vec::new())
+    .expect("the host process starts");
+    let git = support::CountingGit::new();
+    let mut c = command(&w);
+    c.args(["equip", "main"]).env("PATH", "/usr/bin:/bin");
+    git.on(&mut c);
+    let client = c
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    let pid = client.id();
+    let out = client.wait_with_output().unwrap();
+    assert_eq!(out.status.code(), Some(0), "{}", text(&out));
+    let said = String::from_utf8_lossy(&out.stdout).into_owned();
+    let rev = s.repo.rev("main");
+    assert_eq!(
+        said.lines().next().unwrap(),
+        format!("equipping {} for main at {}", w.display(), &rev[..7]),
+        "{said}"
+    );
+    for step in ["toolchain", "proto install", "moon --version", "moon setup"] {
+        assert!(said.contains(&format!("\n{step}: passed\n")), "{said}");
+    }
+    assert_eq!(s.log(), EQUIPPED);
+    for (_, call) in git.parented().into_iter().filter(|(p, _)| *p == pid) {
+        assert!(
+            [
+                "rev-parse --path-format=absolute --git-path hooks",
+                "rev-parse --path-format=absolute --git-common-dir",
+                "worktree list --porcelain",
+            ]
+            .iter()
+            .any(|u| call.ends_with(u)),
+            "the client ran git {call}"
+        );
+    }
+    drop(held);
+    support::guard::stop_host_processes(s.state.path());
+}

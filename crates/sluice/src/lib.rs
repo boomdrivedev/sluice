@@ -1531,8 +1531,15 @@ extern "C" fn interrupted(_: nix::libc::c_int) {
     INTERRUPTED.store(true, Ordering::SeqCst);
 }
 
-/// Ctrl-C ends a wait and nothing else: the submission stays queued (5)
-/// and its run, in a session of its own, goes on.
+/// Whether Ctrl-C was pressed since [`stop_on_interrupt`] took it.
+pub(crate) fn was_interrupted() -> bool {
+    INTERRUPTED.load(Ordering::SeqCst)
+}
+
+/// Ctrl-C ends a wait and nothing else: the submission stays queued (5).
+/// A session's command, which `sluice host` runs, asks it to stop as
+/// Ctrl-C stopped it (the change `sluice-host-runs-a-sessions-checks`,
+/// design D4).
 pub fn stop_on_interrupt() -> Result<()> {
     use nix::sys::signal::{sigaction, SaFlags, SigAction, SigHandler, SigSet, Signal};
     let action = SigAction::new(
