@@ -16,10 +16,10 @@ Each check runs through sluice, one suite at a time: `sluice exec main -- cargo 
 
 ## 3. Records, rules, docs and the gate
 
-- [ ] 3.1 Amend records 0110 and 0093 with this change's decisions, each with Before and Now in plain words. Check: `sluice exec main -- moon run root:changes`.
-- [ ] 3.2 Rewrite the rules that this change departs from, each with Before and Now. Check: `sluice exec main -- moon run root:changes`.
+- [x] 3.1 Amend records 0110 and 0093 with this change's decisions, each with Before and Now in plain words. Check: `sluice exec main -- moon run root:changes`.
+- [x] 3.2 Rewrite the rules that this change departs from, each with Before and Now. Check: `sluice exec main -- moon run root:changes`.
   - the rule that `sluice host` alone reads a repository's records, for the hook and for a command that puts back the hook
   - the rule on a write that the protection refused, for the hook's own write of it
   - the rule on sluice's one retry policy, for a run of sluice under sluice's own fetch
-- [ ] 3.3 Say in the README, the site's page on branch protection and the using-sluice skill that the hook asks `sluice host`, and that it refuses a write where `sluice host` does not answer. No gate task reads a page's words, by the rule that no task reads Markdown, so the review of the diff checks it. Check: `sluice exec main -- moon run plugin-sluice:validate`.
+- [x] 3.3 Say in the README, the site's page on branch protection and the using-sluice skill that the hook asks `sluice host`, and that it refuses a write where `sluice host` does not answer. No gate task reads a page's words, by the rule that no task reads Markdown, so the review of the diff checks it. Check: `sluice exec main -- moon run plugin-sluice:validate`.
 - [ ] 3.4 Run the gate. Check: `sluice exec main`, then `devenv shell -- moon run cli:sandbox` outside the gate's sandbox, one suite at a time.

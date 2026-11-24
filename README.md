@@ -97,7 +97,9 @@ combination passes.
   sluice so that such a run records no result.
 - **The branch only moves to green.** A git hook refuses every update to
   a protected branch except sluice's, and sluice moves it only from the
-  revision it tested on. A landing the forge refuses, for a rule of its
+  revision it tested on. The hook asks sluice's host process, starting
+  it where none runs, and refuses the write where the host process does
+  not answer within ten seconds. A landing the forge refuses, for a rule of its
   own, is held with the forge's words and pushed again at each round,
   once a minute at most, until the forge takes it or its submitter
   withdraws or replaces the work.
@@ -229,6 +231,13 @@ failures, and how the host's `[runs] max` caps them all.
 ```sh
 sluice protect
 ```
+
+The hook it installs sends each update git makes to sluice's host
+process, which judges it and logs a refused one. Where the host process
+does not answer within ten seconds, the hook refuses the update and
+says so; `sluice protect --remove` takes the protection out. The host
+process puts the hook back for its own sluice as it answers each
+command in the repository.
 
 **3. Submit** from an agent's worktree, with its work committed:
 
