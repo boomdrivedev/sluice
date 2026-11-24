@@ -202,7 +202,7 @@ as ever. When sluice can't read what the sandbox refused a run, the run
 is read as refused nothing and says so:
 `sluice could not read what its sandbox refused the run: <why>`. The cure
 for a refusal is the policy, the host's [`[[caches]]`](#caches) or the
-test, since nothing was recorded to set aside.
+test, since nothing was recorded under the test's key.
 
 Some executors cannot hold every limit: the open executor holds no `memory`
 limit and cannot keep a run off the network, and the sandbox on macOS
@@ -431,13 +431,14 @@ through.
 Under `"fail"`, a submit names such a test `failed: <test> (flaky)`. It
 says whether the test passed or failed in this run, when and on which
 combination the same inputs did otherwise, and where that run's log is
-kept. The same inputs fail whenever they're tested. When the fail was
-the host's or a time limit's, not the test's, the operator sets it aside
-with [`sluice set-aside`](/sluice/reference/commands/#sluice-set-aside),
-the same inputs read passed from their passes, and the same head lands.
-When the test itself is flaky, a fix to it does. A change to what the
-test reads made only to have it tested again leaves the fail under its
-key for any tree that returns to those inputs.
+kept. The same inputs fail whenever they're tested, since no result is
+ever set aside: the same head lands once a real fix changes what the
+test reads. When the test itself is flaky, that fix is to the test. A
+fail the host caused, not the test, is a fault of sluice, which is
+fixed in sluice so that such a run records no result, as a run the
+time limit or the sandbox ended records none. A change to what the test
+reads made only to have it tested again leaves the fail under its key
+for any tree that returns to those inputs.
 
 A test's results are weighed together only under one
 [grant](#executor-what-the-tests-may-touch). A result recorded before

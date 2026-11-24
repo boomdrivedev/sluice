@@ -64,3 +64,17 @@ On 0.97.1, at `boomdrivedev/sluice-actions-trial`, a pool's job ended with no re
 - *Count the time limit over a run and its follow-ups.* A job lost in seconds would be dispatched dozens of times inside one limit, and an honest run with follow-ups would be cut short.
 - *A bound for pools alone.* A standing host that dies on the same run each time loops the same way, and the two are one case (77).
 - *Treat a lost job as a run that never began (core.58).* sluice cannot see why a pool lost a job. core.58's case is one the host saw before anything ran, and any other host may take it.
+
+## Amendment, 2026-11-23: no result is set aside
+
+Decider: the user, on 2026-11-23.
+
+Sources: the statement's clauses 19, 116, S43 and S44 (as amended 2026-11-23, boomdrivedev/blueprints 9de7d63); rules core.7 and core.37; records 0043 and 0072; the change `sluice-host-makes-each-change`, design D4.
+
+**Before:** for a host failure that nobody declared, the operator set the recorded result aside (option 3, 116). The set-aside was kept in `set-aside.jsonl` beside `results.jsonl`, or under `refs/sluice/set-aside` on a remote, and no branch read the result after that. The Claude Code plugin's guard refused it from an agent.
+
+**Now:** no command sets a result aside, and nothing writes or reads a set-aside. Every result a branch's records hold is read under its key. A fail the host caused, and not the code, is a fault of sluice. sluice is fixed at that cause, so that such a run records no outcome, as this record does for a check a run did not judge, record 0043 for a check its time limit ended and record 0072 for a check that failed on what its executor refused.
+
+- A set-aside an earlier release wrote stays in the records, and nothing reads it. A key whose fail it held, and that also holds a pass, reads flaky until a real fix changes what the check reads.
+- `sluice set-aside` is no command, and exits 64 as any command sluice does not know.
+- The guard has no set-aside to refuse.

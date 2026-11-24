@@ -297,7 +297,7 @@ fn icon(r: &Row) -> &'static str {
         RowResult::Passed => "🟩",
         RowResult::Failed => "🟥",
         RowResult::Flaky => "🟨",
-        RowResult::NotRun | RowResult::Missing | RowResult::TimedOut | RowResult::SetAside => "⬛",
+        RowResult::NotRun | RowResult::Missing | RowResult::TimedOut => "⬛",
     }
 }
 
@@ -310,7 +310,6 @@ fn result_word(r: &Row) -> &'static str {
         RowResult::NotRun => "Could not run",
         RowResult::Missing => "Missing",
         RowResult::TimedOut => "Timed out",
-        RowResult::SetAside => "Set aside",
     }
 }
 
@@ -359,9 +358,6 @@ fn info(r: &Row, markdown: bool) -> String {
             })
             .collect();
         parts.push(format!("failed by {}", crate::words::and_list(&named)));
-    }
-    if let Some(why) = &r.set_aside {
-        parts.push(format!("set aside: {}", cell(why)));
     }
     parts.join(" · ")
 }
@@ -499,7 +495,6 @@ pub fn time(ms: u64) -> String {
 pub fn row_check(r: &Row, cx: &Context) -> (String, Posting) {
     let status = match r.result {
         RowResult::Passed => Status::Success,
-        RowResult::SetAside => Status::Queued,
         _ => Status::Failure,
     };
     let mut title = result_word(r).to_lowercase();
@@ -566,7 +561,6 @@ mod tests {
             flaky: None,
             not_run: None,
             failed_by: Vec::new(),
-            set_aside: None,
             log: None,
         }
     }

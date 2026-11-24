@@ -42,7 +42,9 @@ impl Worktrunk {
     fn git(&self, worktree: &Path, args: &[&str]) -> Result<std::process::Output> {
         crate::workers::command("git", "git")
             .arg("-C")
-            .arg(worktree)
+            // A request's call reads a relative path from its caller's
+            // folder (the change `sluice-host-makes-each-change`, design D1).
+            .arg(crate::caller::path(worktree))
             .args(args)
             .env_remove("GIT_DIR")
             .env_remove("GIT_WORK_TREE")

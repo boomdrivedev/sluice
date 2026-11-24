@@ -59,3 +59,22 @@ The build shows the refusal on each entry the landing carries, and tells it as a
 - **Told as an outcome is told.** `sluice inbox` hands over a refusal owed under `<id>:refused` while its entry is refused, its words read from the held landing once the round has pushed it, and every document of the entry gives its `delivery` under that key. It still decides no outcome: `Submission::decided` gives none for it.
 
 *Not taken:* `Submission::decided` giving the refusal as an outcome, which every reader of an outcome would then read as decided, against "the refusal decides no outcome"; the documents' words read from the delivery's message, which a done delivery no longer holds.
+
+## Amendment, 2026-11-23: each round pushes a held landing again, and `sluice push` goes
+
+Status: the user's answer of 2026-11-23, which the statement's clause 152 now says (boomdrivedev/blueprints 9de7d63). The points below are the change `sluice-host-makes-each-change`'s, design D3.
+
+Deciders: the user, on 2026-11-23. The change `sluice-host-makes-each-change` made the choices within it.
+
+Sources: the statement's clauses 129 and 152 (as amended 2026-11-23); record 0093 as amended 2026-11-19 and 2026-11-23; rules core.5 and core.29; the change `sluice-host-makes-each-change`, design D3.
+
+A held landing waited for the operator's word. sluice cannot read a forge's push rules, so it cannot tell when they change, and an operator who did not know the rule had changed left the branch held.
+
+1. **Each round pushes a held landing again.** Before: no round pushed a held landing again, and the operator ran `sluice push <branch>` once the forge's rule had changed. Now: each round of the branch pushes the held landing again, as the same landing, before it forms anything. Where the forge takes it, it lands as the landing formed, with no run. Nothing is formed again for it, and the submissions behind it wait, as before.
+2. **Once a minute at most.** Before: a held landing was pushed only on the operator's word, so how often its branch's rounds came did not matter. Now: a branch whose one work in play is a held landing takes its rounds at the pace of a repository with nothing in play, once a minute at most (record 0093 as amended 2026-11-19), so its landing is pushed once a minute, and not at each pass of three seconds.
+3. **Logged once for each of the forge's words.** Before: the refusal was logged once, and `sluice push` refused again wrote the forge's new words. Now: a round refused in the words the landing was held with writes nothing. A round refused in other words writes them on the held landing and logs one more `forge_refused` line. The status, the inbox and a wait show the latest words, read from the held landing as before.
+4. **Each push is a new call.** Each round's push is a call of its own under sluice's one retry policy, and no try of the push the forge refused (core.29). A push whose answer was not read is settled by reading the branch, as before.
+5. **Its entries stay their submitters'.** A withdrawal, or a submission from its place, takes an entry out as before, and drops the landing. A round after one of its entries left pushes nothing of the landing, and the entries that remain are formed again on the branch.
+6. **`sluice push` goes.** Before: `sluice push <branch>` pushed the held landing again on the operator's word. Now: there is no such command, and `sluice push` exits 64 as any command sluice does not know.
+
+This is the record's option 3, not taken at first because the forge's answer is pushed against again and again and an entry whose content is refused never leaves. Its entries leave by their submitters, as decided above, and the pace of an idle repository bounds the pushes to one a minute. *Not taken:* a push again only once the forge's rule has changed, which sluice cannot read.

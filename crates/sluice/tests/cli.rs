@@ -473,15 +473,11 @@ fn a_flaky_failure_says_so() {
             format!("  log of this run: {this_log}"),
             format!("  log of the run that failed: {failed_log}"),
             format!(
-                "  if the host or a time limit caused that fail, the operator can set it aside: \
-                 sluice set-aside tests:t-batch-cards --at {at} --reason \"…\""
-            ),
-            format!(
                 "  {BRANCH} reads a test that passed and failed on the same inputs as failed \
                  (flaky = \"fail\")"
             ),
-            "the same head lands once the operator sets the other result aside, or once a \
-             real fix changes what tests:t-batch-cards reads"
+            "the same head lands once a real fix changes what tests:t-batch-cards reads; a \
+             fail the host caused, not the test, is a fault of sluice"
                 .to_string(),
         ],
         "{out}"
@@ -587,10 +583,15 @@ fn a_timed_out_submission_names_the_test_the_limit_ended() {
     assert!(!out.contains("flaky"), "{out}");
 }
 
-/// Could-not-run-1 116: the operator sets aside the fail a host caused;
-/// the same head then lands, and asking again for it is refused.
+/// run-outcome, "A flaky failure" (the change
+/// `sluice-host-makes-each-change`, design D4): a submission failed on a
+/// test read flaky against an earlier fail names that fail and when it was
+/// recorded, says that the same head lands once a real fix changes what
+/// the test reads and that a fail the host caused is a fault of sluice,
+/// and names no command that sets a result aside and no step of the
+/// operator's.
 #[test]
-fn a_fail_set_aside_lets_the_same_head_land() {
+fn a_flaky_failure_names_no_operators_step() {
     let f = setup();
     f.world
         .flaky("tests:t-batch-cards", &[Outcome::Fail, Outcome::Pass]);
@@ -602,41 +603,57 @@ fn a_fail_set_aside_lets_the_same_head_land() {
     );
     let submit = ["submit", BRANCH, "--worktree", "unit/batch-review"];
     assert_eq!(sluice(&f, &submit).0, FAILED);
-    assert_eq!(sluice(&f, &submit).0, FAILED, "the key reads flaky");
+    let (code, out) = sluice(&f, &submit);
+    assert_eq!(code, FAILED, "the key reads flaky: {out}");
     let (_, json) = sluice(&f, &["status", "2", "--json"]);
     let v: serde_json::Value = serde_json::from_str(&json).unwrap();
-    let at = v["failed"][0]["flaky"]["other"]["at"]
-        .as_str()
-        .unwrap()
-        .to_string();
-
-    let aside = [
+    let at = v["failed"][0]["flaky"]["other"]["at"].as_str().unwrap();
+    assert!(
+        out.contains(&format!(
+            "tests:t-batch-cards passed in this run and failed on the same inputs at {at}"
+        )),
+        "{out}"
+    );
+    assert!(
+        out.contains("the same head lands once a real fix changes what tests:t-batch-cards reads"),
+        "{out}"
+    );
+    assert!(
+        out.contains("a fail the host caused, not the test, is a fault of sluice"),
+        "{out}"
+    );
+    for word in [
         "set-aside",
-        "tests:t-batch-cards",
-        "--at",
-        &at,
-        "--reason",
-        "the engine was down",
-    ];
-    let (code, out) = sluice(&f, &aside);
-    assert_eq!(code, 0, "{out}");
-    assert!(out.starts_with("set aside tests:t-batch-cards "), "{out}");
-    assert!(
-        out.contains(&format!("recorded at {at} on {BRANCH} ")),
-        "{out}"
-    );
-    assert!(
-        out.ends_with(
-            ": the engine was down\nno gate reads it from now; its line stays in the results\n"
-        ),
-        "{out}"
-    );
-    let (code, out) = sluice(&f, &aside);
-    assert_eq!(code, 2, "{out}");
-    assert!(out.contains("already set aside"), "{out}");
+        "set it aside",
+        "sets the other result aside",
+        "operator",
+    ] {
+        assert!(!out.contains(word), "{word}: {out}");
+    }
+}
 
-    let (code, out) = sluice(&f, &submit);
-    assert_eq!(code, LANDED, "{out}");
+/// run-outcome, "set-aside is no command" (design D4): sluice says that
+/// `set-aside` is no command it knows, exits as for any such command, and
+/// writes nothing.
+#[test]
+fn set_aside_is_no_command() {
+    let d = support::OnDisk::new("cli-no-set-aside", ON_DISK);
+    let before = d.git.count();
+    let out = d.sluice(&[
+        "set-aside",
+        "cli:tools",
+        "--at",
+        "2026-10-17T13:05:32Z",
+        "--reason",
+        "x",
+    ]);
+    assert_eq!(out.status.code(), Some(sluice::USAGE), "{out:?}");
+    assert!(
+        String::from_utf8_lossy(&out.stderr).contains("unrecognized subcommand 'set-aside'"),
+        "{out:?}"
+    );
+    assert_eq!(d.git.count(), before, "nothing run");
+    assert!(!d.repo.dir().join(".git/sluice/set-aside.jsonl").exists());
 }
 
 #[test]
@@ -5436,11 +5453,48 @@ fn a_report_waited_on_elsewhere_names_the_agent_in_the_worktree_it_came_from() {
     sluice(&f, &submit);
     let (code, out) = sluice(&f, &["wait", "2", "--worktree", "unit/b"]);
     assert_eq!(code, FAILED, "{out}");
+    for word in ["your worktree", "inside", "set-aside", "operator"] {
+        assert!(!out.contains(word), "{word}: {out}");
+    }
+}
+
+/// submit-hints, "The operator's step" (the change
+/// `sluice-host-makes-each-change`, design D4): a blamed submission's way
+/// on, its check read flaky against a fail recorded earlier, names that
+/// fail and when it was recorded, and no step of the operator's and no
+/// command that sets a result aside.
+#[test]
+fn a_flaky_reports_way_on_names_no_operators_step() {
+    let f = setup();
+    f.world
+        .flaky("tests:t-batch-cards", &[Outcome::Fail, Outcome::Pass]);
+    work(
+        &f,
+        "unit/a",
+        "agent-a",
+        &[("tests/t_cards.py", Some("flaky"))],
+    );
+    let submit = ["submit", BRANCH, "--worktree", "unit/a", "--no-wait"];
+    sluice(&f, &submit);
+    assert_eq!(sluice(&f, &["wait", "1"]).0, FAILED);
+    sluice(&f, &submit);
+    let (code, out) = sluice(&f, &["wait", "2"]);
+    assert_eq!(code, FAILED, "{out}");
+    let (_, json) = sluice(&f, &["status", "2", "--json"]);
+    let v: serde_json::Value = serde_json::from_str(&json).unwrap();
+    let at = v["failed"][0]["flaky"]["other"]["at"].as_str().unwrap();
     assert!(
-        out.contains("the operator can set it aside: sluice set-aside tests:t-batch-cards --at "),
+        out.contains(&format!("failed on the same inputs at {at}")),
         "{out}"
     );
-    for word in ["your worktree", "inside"] {
+    let way_on = out.lines().last().unwrap_or_default();
+    assert_eq!(
+        way_on,
+        "the same head lands once a real fix changes what tests:t-batch-cards reads; a fail \
+         the host caused, not the test, is a fault of sluice",
+        "{out}"
+    );
+    for word in ["set-aside", "set it aside", "operator"] {
         assert!(!out.contains(word), "{word}: {out}");
     }
 }
@@ -11537,7 +11591,7 @@ fn a_sessions_command_binds_no_repository() {
         "worktree list --porcelain",
     ];
     let d = support::OnDisk::new(
-        "cli-binds-nothing",
+        "cli-session-binds-nothing",
         "[tests]\nrunner = \"command\"\ncommand = \"true\"\n\n\
          [branches.main]\ntimeout = \"1m\"\n\n\
          [preview]\ncommand = \"sleep 30\"\n",
@@ -11593,4 +11647,153 @@ fn a_sessions_command_binds_no_repository() {
         String::from_utf8_lossy(&out.stderr)
     );
     drop(held);
+}
+
+/// Each git that the process `pid` started after `before` that is no part
+/// of the branch protection's upkeep of its hook, `protect.rs`'s `git`.
+fn own_git(d: &support::OnDisk, pid: u32, before: usize) -> Vec<String> {
+    d.git.parented()[before..]
+        .iter()
+        .filter(|(p, args)| {
+            *p == pid
+                && !args.contains(" rev-parse --path-format=absolute ")
+                && !args.contains(" worktree list --porcelain")
+        })
+        .map(|(_, a)| a.clone())
+        .collect()
+}
+
+/// `sluice <args>` in `dir` through the binary, as a child: its output,
+/// and the git it ran that is no part of the hook's upkeep.
+fn run_on_disk(
+    d: &support::OnDisk,
+    dir: &std::path::Path,
+    args: &[&str],
+) -> (std::process::Output, Vec<String>) {
+    let before = d.git.count();
+    let child = d
+        .command(dir)
+        .env("SLUICE_ROUND_SLEEP", "record")
+        .args(args)
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .unwrap();
+    let pid = child.id();
+    let out = child.wait_with_output().unwrap();
+    (out, own_git(d, pid, before))
+}
+
+const ON_DISK: &str =
+    "[tests]\nrunner = \"command\"\ncommand = \"true\"\n\n[branches.main]\ntimeout = \"1m\"\n\n[branches.\"bolt/*\"]\ntimeout = \"1m\"\n";
+
+/// resident-changes, "A group's wait" (the change
+/// `sluice-host-makes-each-change`, design D2): two worktrees submitted as
+/// one act print each outcome in their order, as the act printed them,
+/// exit with the first that did not land, and the command ran no git but
+/// the upkeep of the branch protection's hook.
+#[test]
+fn a_groups_wait_runs_no_git() {
+    let d = support::OnDisk::new("cli-group-no-git", ON_DISK);
+    let a = d.session("a");
+    let b = d.session("b");
+    let (out, own) = run_on_disk(
+        &d,
+        d.repo.dir(),
+        &[
+            "submit",
+            "main",
+            "--worktree",
+            a.to_str().unwrap(),
+            "--worktree",
+            b.to_str().unwrap(),
+        ],
+    );
+    let said = String::from_utf8_lossy(&out.stdout).into_owned();
+    assert_eq!(
+        out.status.code(),
+        Some(LANDED),
+        "{said}{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let first = said
+        .find(&format!("submission 1 from {}:", a.display()))
+        .unwrap_or_else(|| panic!("{said}"));
+    let second = said
+        .find(&format!("submission 2 from {}:", b.display()))
+        .unwrap_or_else(|| panic!("{said}"));
+    assert!(first < second, "{said}");
+    assert_eq!(said.matches("passed · landed as").count(), 2, "{said}");
+    assert!(own.is_empty(), "the submit ran git: {own:?}");
+}
+
+/// resident-changes, "A change command runs no git and reads no forge"
+/// (design D1, D5): each change command of this change and each read,
+/// run through the binary with `sluice host` running, runs no git but the
+/// upkeep of the branch protection's hook, whatever it answers, and none
+/// says that sluice itself failed.
+#[test]
+fn a_change_command_binds_no_repository() {
+    let d = support::OnDisk::new("cli-binds-nothing", ON_DISK);
+    let a = d.session("a");
+    let out = d
+        .command(&a)
+        .env("SLUICE_ROUND_SLEEP", "record")
+        .args(["submit", "main", "--no-wait", "--json"])
+        .output()
+        .unwrap();
+    assert!(out.status.success(), "{out:?}");
+    let b = d.session("b");
+    let commands: [(&std::path::Path, &[&str]); 16] = [
+        (&b, &["submit", "main", "--no-wait"]),
+        (&b, &["submit", "main", "--status"]),
+        (&b, &["submit", "main", "--check"]),
+        (d.repo.dir(), &["amend", "2", "--priority", "3"]),
+        (d.repo.dir(), &["withdraw", "2"]),
+        (&a, &["confirm", "1:landed"]),
+        (d.repo.dir(), &["release", "sluice/try/main/99"]),
+        (d.repo.dir(), &["release", "0000000"]),
+        (
+            d.repo.dir(),
+            &["branch", "create", "bolt/x", "--from", "main"],
+        ),
+        (
+            d.repo.dir(),
+            &["branch", "delete", "bolt/x", "--into", "main"],
+        ),
+        (d.repo.dir(), &["protect", "--json"]),
+        (d.repo.dir(), &["previews", "--json"]),
+        (d.repo.dir(), &["step", "main"]),
+        (d.repo.dir(), &["status", "main"]),
+        (d.repo.dir(), &["overview", "--json"]),
+        (&a, &["inbox"]),
+    ];
+    for (dir, args) in commands {
+        let (out, own) = run_on_disk(&d, dir, args);
+        assert_ne!(
+            out.status.code(),
+            Some(sluice::INTERNAL),
+            "{args:?}: {}{}",
+            String::from_utf8_lossy(&out.stdout),
+            String::from_utf8_lossy(&out.stderr)
+        );
+        assert!(own.is_empty(), "{args:?} ran git: {own:?}");
+    }
+}
+
+/// refused-landing, "sluice push is no command" (the change
+/// `sluice-host-makes-each-change`, design D3): sluice says that `push`
+/// is no command it knows, exits as for any such command, and pushes
+/// nothing.
+#[test]
+fn push_is_no_command() {
+    let d = support::OnDisk::new("cli-no-push", ON_DISK);
+    let before = d.git.count();
+    let out = d.sluice(&["push", "main"]);
+    assert_eq!(out.status.code(), Some(sluice::USAGE), "{out:?}");
+    assert!(
+        String::from_utf8_lossy(&out.stderr).contains("unrecognized subcommand 'push'"),
+        "{out:?}"
+    );
+    assert_eq!(d.git.count(), before, "nothing run");
 }

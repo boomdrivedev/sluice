@@ -72,6 +72,10 @@ pub const FINISH_FOR: Duration = Duration::from_secs(60);
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct Looked {
     pub in_play: bool,
+    /// 152 (the change `sluice-host-makes-each-change`, design D3): a
+    /// branch holds a landing the forge refused, whose rounds come at the
+    /// minute.
+    pub held: bool,
     pub refused: Option<String>,
     /// The branches it read as last fetched, each with the remote's
     /// refusal (the change `sluice-host-answers-every-read`, design D3).
@@ -345,7 +349,15 @@ struct Inner {
     runtime: tokio::runtime::Handle,
     /// How a repository's document is read (design D6).
     document: std::sync::OnceLock<DocumentRead>,
+    /// Each repository's change in flight, which its worker's passes and
+    /// steps wait out, and which waits out the one in flight (the change
+    /// `sluice-host-makes-each-change`, design D1).
+    changing: Mutex<BTreeMap<PathBuf, Changing>>,
 }
+
+/// A repository's change in flight, against its worker's passes and
+/// steps: a change holds it whole, and a pass or a step shares it.
+pub type Changing = Arc<std::sync::RwLock<()>>;
 
 fn locked<T>(m: &Mutex<T>) -> MutexGuard<'_, T> {
     m.lock().unwrap_or_else(|e| e.into_inner())
@@ -374,6 +386,7 @@ impl Tasks {
             wakes: Arc::default(),
             runtime: tokio::runtime::Handle::current(),
             document: std::sync::OnceLock::new(),
+            changing: Mutex::default(),
         }))
     }
 
@@ -387,6 +400,18 @@ impl Tasks {
     /// `None` while the tasks stop (design D6).
     pub fn documents(&self, repository: &Path) -> Option<Documents> {
         self.repo(repository).map(|r| r.documents.subscribe())
+    }
+
+    /// What a change to `repository` holds while it is made, which its
+    /// worker's passes and steps share: a change waits out the pass in
+    /// flight, and no pass begins until the change is made, so a pass
+    /// never takes a lock the change reaches for (the change
+    /// `sluice-host-makes-each-change`, design D1).
+    pub fn changing(&self, repository: &Path) -> Changing {
+        locked(&self.0.changing)
+            .entry(repository.to_path_buf())
+            .or_default()
+            .clone()
     }
 
     /// The same tasks, passing only when asked (D14).
@@ -457,6 +482,7 @@ impl Tasks {
             wants_worker: false,
             reading_due: false,
             in_play: false,
+            held: false,
             last_pass: None,
             stopping: false,
         };
@@ -922,6 +948,10 @@ struct Scheduler {
     wants_worker: bool,
     reading_due: bool,
     in_play: bool,
+    /// 152 (the change `sluice-host-makes-each-change`, design D3): the
+    /// last reading found a landing the forge refused held, whose rounds
+    /// come at the minute's backstop and keep the host process.
+    held: bool,
     last_pass: Option<Instant>,
     stopping: bool,
 }
@@ -1059,6 +1089,7 @@ impl Scheduler {
         let busy = self.worker.is_some()
             || self.flight.is_some()
             || self.looking.is_some()
+            || self.held
             || !self.jobs.is_empty();
         let held = self.worker.is_some()
             && !matches!(
@@ -1280,12 +1311,13 @@ impl Scheduler {
         let repository = self.repository.clone();
         let asked_only = self.asked_only();
         let runtime = self.tasks.0.runtime.clone();
+        let changing = self.tasks.changing(&self.repository);
         let started = std::thread::Builder::new()
             .name("sluice-worker".to_string())
             .spawn(move || {
                 let _entered = runtime.enter();
                 let ran = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                    worker(bind, repository, asked_only, inbox, tx)
+                    worker(bind, repository, asked_only, inbox, tx, changing)
                 }));
                 let _ = ended.send(ran.map_err(|panic| {
                     panic
@@ -1448,6 +1480,7 @@ impl Scheduler {
                     }
                 };
                 self.in_play = report.as_ref().map_or(true, |r| r.in_play && !r.no_sluice);
+                self.held = report.as_ref().is_ok_and(|r| r.held);
                 self.end_reading(
                     asks,
                     report.as_ref().ok().and_then(|r| r.refused.clone()),
@@ -1488,6 +1521,7 @@ impl Scheduler {
                 );
                 self.document();
                 self.in_play = looked.in_play;
+                self.held = looked.held;
                 if looked.in_play && !self.refused() && !self.stopping {
                     self.wants_worker = true;
                 }
@@ -1542,6 +1576,7 @@ fn worker(
     asked_only: bool,
     mut inbox: mpsc::UnboundedReceiver<Work>,
     bound: oneshot::Sender<Result<bool, String>>,
+    changing: Changing,
 ) -> WorkerEnd {
     let mut held = match bind(&repository) {
         Ok(w) => w,
@@ -1563,9 +1598,11 @@ fn worker(
                 tick,
                 reply,
             } => {
+                let _sharing = changing.read().unwrap_or_else(|e| e.into_inner());
                 let _ = reply.send(held.pass(asks, at, tick));
             }
             Work::Step { branch, reply } => {
+                let _sharing = changing.read().unwrap_or_else(|e| e.into_inner());
                 let _ = reply.send(held.step(&branch));
             }
         }

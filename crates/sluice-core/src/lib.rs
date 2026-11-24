@@ -36,7 +36,7 @@ use sluice_seams::{Branch, Checkout, Driver, ReadRefused, Rev, State, Tests, Wri
 
 use crate::line::Line;
 use crate::policy::{Policy, Rules, POLICY_PATH};
-use crate::records::{parse_lines, to_line, ResultLine, SetAside, Submission, SET_ASIDE_SCHEMA};
+use crate::records::{parse_lines, ResultLine, Submission};
 use crate::refused::Refusal;
 
 pub use notice::notice;
@@ -842,100 +842,14 @@ impl<'a> Sluice<'a> {
 
     /// 69 (design D17): the results `ask` names, as `branch`'s gate reads
     /// them, its signed runs verified with the signers `branch`'s own
-    /// policy names (78; rule core.22), less every result set aside
-    /// (could-not-run-1 116); the lines themselves stay (rule core.7). An
+    /// policy names (78; rule core.22). Every one is read: none is set
+    /// aside (the change `sluice-host-makes-each-change`, design D4). An
     /// ask for nothing reads nothing.
     fn results_for(&self, branch: &str, ask: &sluice_seams::ResultAsk) -> Result<Vec<ResultLine>> {
         if ask.is_empty() {
             return Ok(Vec::new());
         }
-        let all: Vec<ResultLine> = parse_lines(&self.seams.state.results_for(branch, ask)?)?;
-        let aside: Vec<SetAside> = parse_lines(&self.seams.state.set_asides()?)?;
-        Ok(all
-            .into_iter()
-            .filter(|r| !aside.iter().any(|a| r.set_aside_by(a)))
-            .collect())
-    }
-
-    /// Could-not-run-1 116: set aside the one result of `task` recorded at
-    /// `at` (and whose key starts with `hash`, when given), for `reason`,
-    /// by `by`. More than one such result is an error listing them, so the
-    /// operator names one.
-    pub fn set_aside(
-        &self,
-        task: &str,
-        at: &str,
-        hash: Option<&str>,
-        reason: &str,
-        by: &str,
-    ) -> Result<SetAside> {
-        if reason.trim().is_empty() {
-            bail!("a result is set aside with why: give a reason");
-        }
-        // Design D17: each branch with records asked for `task`'s results
-        // alone, a line two branches read kept once. A branch whose
-        // results cannot be read is passed by into the unread list with
-        // its words (26; rule core.11).
-        let ask = sluice_seams::ResultAsk::default().task(task);
-        let mut seen = std::collections::BTreeSet::new();
-        let mut every = Vec::new();
-        let mut unread = Vec::new();
-        for b in self.seams.state.branches()? {
-            match self.results_for(&b, &ask) {
-                Ok(lines) => every.extend(lines.into_iter().filter(|r| seen.insert(to_line(r)))),
-                Err(e) => unread.push(Unread::of(&b, &e)),
-            }
-        }
-        let found: Vec<ResultLine> = every
-            .into_iter()
-            .filter(|r| r.task == task && r.at == at)
-            .filter(|r| match hash {
-                Some(h) => r.hash.starts_with(h),
-                None => true,
-            })
-            .collect();
-        let r = match found.as_slice() {
-            [] if unread.is_empty() => {
-                bail!("no result of {task} recorded at {at} that is not already set aside")
-            }
-            [] => bail!(
-                "no result of {task} recorded at {at} that is not already set aside, \
-                 where these branches' results could be read; these could not:\n{}",
-                unread
-                    .iter()
-                    .map(|u| format!("  {}: {}", u.branch, u.error))
-                    .collect::<Vec<_>>()
-                    .join("\n")
-            ),
-            [r] => r.clone(),
-            many => bail!(
-                "{} results of {task} were recorded at {at}; name one by its key:\n{}",
-                many.len(),
-                many.iter()
-                    .map(|r| format!(
-                        "  {}  {:?} on {} {}",
-                        r.hash,
-                        r.outcome,
-                        r.branch,
-                        r.combination.short()
-                    ))
-                    .collect::<Vec<_>>()
-                    .join("\n")
-            ),
-        };
-        let aside = SetAside {
-            schema: SET_ASIDE_SCHEMA.into(),
-            at: self.now(),
-            task: r.task,
-            hash: r.hash,
-            run_at: r.at,
-            branch: r.branch,
-            combination: r.combination,
-            reason: reason.trim().into(),
-            by: by.into(),
-        };
-        self.seams.state.set_aside(&to_line(&aside))?;
-        Ok(aside)
+        parse_lines(&self.seams.state.results_for(branch, ask)?)
     }
 
     /// The branch that holds submission `id`, live or finished. With no

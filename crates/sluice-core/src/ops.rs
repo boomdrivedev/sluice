@@ -1530,8 +1530,9 @@ impl Sluice<'_> {
     pub fn in_play(&self, branch: &str) -> Result<bool> {
         let line = Line::load(branch, self.seams.state.read_held(branch)?)?;
         // 152, record 0124 (design D10): a landing the forge refused holds
-        // the branch until a submitter or the operator acts: nothing of it
-        // is in play but its places to release.
+        // the branch: nothing of it is in play but its places to release,
+        // and its rounds, which push it again, come at the pace of a
+        // branch with nothing in play ([`Sluice::holds_refused_landing`]).
         if line
             .doc
             .landing
@@ -1543,6 +1544,20 @@ impl Sluice<'_> {
         Ok(line.subs.values().any(|s| !s.state.is_out())
             || line.doc.candidates.iter().any(|c| c.state.under_test())
             || !line.doc.release.is_empty())
+    }
+
+    /// 152, record 0124 as amended 2026-11-23 (the change
+    /// `sluice-host-makes-each-change`, design D3): whether `branch` holds
+    /// a landing the forge refused, read from the records alone, as
+    /// [`Sluice::in_play`] reads them: work whose rounds push it again
+    /// once a minute at most, the pace of a branch with nothing in play.
+    pub fn holds_refused_landing(&self, branch: &str) -> Result<bool> {
+        let line = Line::load(branch, self.seams.state.read_held(branch)?)?;
+        Ok(line
+            .doc
+            .landing
+            .as_ref()
+            .is_some_and(|l| l.refused.is_some()))
     }
 
     /// 26: a branch's queue as last written, at the revision its records
@@ -1873,8 +1888,6 @@ mod tests {
         /// The results log as each branch's gate reads it, each a branch
         /// with records.
         results: RefCell<BTreeMap<String, Vec<u8>>>,
-        /// The results set aside.
-        asides: RefCell<Vec<u8>>,
     }
 
     impl Host {
@@ -2120,15 +2133,6 @@ mod tests {
 
         fn record_results(&self, _: &[u8]) -> Result<()> {
             unreachable!("a submit records no result")
-        }
-
-        fn set_asides(&self) -> Result<Vec<u8>> {
-            Ok(self.asides.borrow().clone())
-        }
-
-        fn set_aside(&self, line: &[u8]) -> Result<()> {
-            self.asides.borrow_mut().extend(line);
-            Ok(())
         }
 
         fn keep_logs(&self, _: &str, _: &str, _: &[TaskLog]) -> Result<Vec<TaskLog>> {
@@ -2975,42 +2979,6 @@ mod tests {
         s.step("main").unwrap();
         assert!(s.read_line("main").unwrap().doc.release.is_empty());
         assert!(!in_play());
-    }
-
-    /// A result of `task` at `at` on `branch`, failed.
-    fn failed(task: &str, at: &str, branch: &str) -> Vec<u8> {
-        format!(
-            "{{\"at\":\"{at}\",\"kind\":\"ran\",\"task\":\"{task}\",\"hash\":\"h-{task}\",\
-             \"outcome\":\"fail\",\"branch\":\"{branch}\",\"combination\":\"c\"}}\n"
-        )
-        .into_bytes()
-    }
-
-    /// Could-not-run-1 116, design D1: a result is set aside from among
-    /// every branch's results, a result only a second branch's gate reads
-    /// found there, and one two branches read found once.
-    #[test]
-    fn a_result_only_a_second_branch_reads_is_set_aside() {
-        let h = Host::new();
-        h.results
-            .borrow_mut()
-            .insert(BRANCH.into(), failed("a:test", "t1", BRANCH));
-        let mut release = failed("b:test", "t2", "release");
-        release.extend(failed("a:test", "t1", BRANCH));
-        h.results.borrow_mut().insert("release".into(), release);
-        let s = h.sluice();
-        let aside = s
-            .set_aside("b:test", "t2", None, "the host was down", "op@host")
-            .unwrap();
-        assert_eq!(
-            (aside.branch.as_str(), aside.hash.as_str()),
-            ("release", "h-b:test")
-        );
-        assert!(s
-            .set_aside("b:test", "t2", None, "twice", "op@host")
-            .is_err());
-        let both = s.set_aside("a:test", "t1", None, "read twice, kept once", "op@host");
-        assert_eq!(both.unwrap().branch, BRANCH);
     }
 }
 

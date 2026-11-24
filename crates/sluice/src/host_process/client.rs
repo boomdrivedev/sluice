@@ -464,6 +464,29 @@ impl Client {
         }
     }
 
+    /// A submit's answer (the change `sluice-host-makes-each-change`,
+    /// design D2): what it printed, and the wait it follows next, as
+    /// `output` answers a read.
+    pub fn submitted(&self, request: &Request) -> Result<super::protocol::Submitted> {
+        let mut c = self.reach()?;
+        let named = c.named.clone();
+        send(&mut c.writer, request)?;
+        match receive::<Answer>(&mut c.reader) {
+            Ok(Answer::Submitted(submitted)) => Ok(submitted),
+            Ok(Answer::Error(words)) => bail!(
+                "sluice's host process, sluice {} (pid {}), did not answer: {words}",
+                named.version,
+                named.pid
+            ),
+            Ok(other) => Err(unexpected(other)),
+            Err(e) => bail!(
+                "sluice's host process, sluice {} (pid {}), ended before it answered: {e:#}",
+                named.version,
+                named.pid
+            ),
+        }
+    }
+
     /// A wait's step of `ask`, from `folder` (the change
     /// `sluice-host-answers-every-read`, design D8), as `output` answers a
     /// read.
@@ -507,11 +530,12 @@ impl Client {
         }
     }
 
-    /// One round of `branch` of `repository`, as `sluice step --json`
-    /// prints it, with what it said and its line (D10).
-    pub fn step(&self, repository: &Path, branch: &str) -> Result<serde_json::Value> {
+    /// One round of `branch` of the repository that holds `folder`, as
+    /// `sluice step --json` prints it, with what it said and its line
+    /// (D10; the change `sluice-host-makes-each-change`, design D5).
+    pub fn step(&self, folder: &Path, branch: &str) -> Result<serde_json::Value> {
         match self.ask(&Request::Step {
-            repository: repository.to_path_buf(),
+            folder: folder.to_path_buf(),
             branch: branch.to_string(),
         })? {
             Answer::Step(doc) => Ok(doc),
@@ -538,15 +562,11 @@ impl Client {
         }
     }
 
-    /// A pass of `repository` now, once it ends, at the asker's time `at`
-    /// (D14).
-    pub fn pass(
-        &self,
-        repository: &Path,
-        at: Option<chrono::DateTime<chrono::Utc>>,
-    ) -> Result<Report> {
+    /// A pass of the repository that holds `folder` now, once it ends, at
+    /// the asker's time `at` (D14; design D5).
+    pub fn pass(&self, folder: &Path, at: Option<chrono::DateTime<chrono::Utc>>) -> Result<Report> {
         match self.ask(&Request::Pass {
-            repository: repository.to_path_buf(),
+            folder: folder.to_path_buf(),
             at: at.map(|at| at.to_rfc3339()),
         })? {
             Answer::Pass(r) => Ok(r),

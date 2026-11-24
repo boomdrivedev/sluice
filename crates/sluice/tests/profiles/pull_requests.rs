@@ -7896,3 +7896,90 @@ fn a_refused_query_falls_back_to_the_reads_per_pull_request() {
     );
     assert_eq!(g.of(one).len(), 1, "{:?}", g.subs());
 }
+
+/// An address that refuses each call: a command run with it as
+/// `SLUICE_FORGE_API` that read the forge itself would fail.
+const REFUSING: &str = "http://127.0.0.1:9";
+
+/// resident-changes, "A submit to a branch that takes pull requests" (the
+/// change `sluice-host-makes-each-change`, design D2): with `sluice host`
+/// running on the test's forge, `sluice submit main --no-wait` run with
+/// `SLUICE_FORGE_API` naming an address that refuses each call exits 0 as
+/// it did, and the forge holds an open request from the worktree's branch,
+/// marked ready, the remote the worktree's head on that branch.
+#[test]
+fn a_submit_to_a_branch_that_takes_pull_requests_reads_no_forge() {
+    let g = OnGitHub::new("pr-submit-no-forge", "");
+    let w = g.session("nf", &[("nf.txt", "nf\n")]);
+    // `sluice host`, started on the test's forge and kept running by a
+    // watch's connection, so the submit meets it and starts none of its
+    // own on the refusing address however long the submit takes to come.
+    let mut watch = g
+        .command(env!("CARGO_BIN_EXE_sluice"), g.repo.dir())
+        .args(["overview", "--json", "--watch"])
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+        .unwrap();
+    let mut first = String::new();
+    std::io::BufRead::read_line(
+        &mut std::io::BufReader::new(watch.stdout.as_mut().unwrap()),
+        &mut first,
+    )
+    .unwrap();
+    assert!(!first.is_empty(), "the watch saw no host process");
+    let out = g
+        .command(env!("CARGO_BIN_EXE_sluice"), &w)
+        .env("SLUICE_FORGE_API", REFUSING)
+        .args(["submit", "main", "--no-wait", "--json"])
+        .output()
+        .unwrap();
+    let _ = watch.kill();
+    let _ = watch.wait();
+    assert_eq!(out.status.code(), Some(0), "{}", text(&out));
+    let doc: Value =
+        serde_json::from_slice(&out.stdout).unwrap_or_else(|e| panic!("{e}: {}", text(&out)));
+    let pull = g.pull_from("unit/nf");
+    assert_eq!(doc["pull_request"], pull.number, "{doc}");
+    assert!(pull.open, "{pull:?}");
+    assert!(!pull.draft, "{pull:?}");
+    let head = g
+        .repo
+        .git(&["-C", w.to_str().unwrap(), "rev-parse", "HEAD"]);
+    assert_eq!(pull.head, head);
+    assert_eq!(
+        github::rev(g.bare.path(), "refs/heads/unit/nf").as_deref(),
+        Some(head.as_str())
+    );
+}
+
+/// resident-changes, "A wait on a request that lands" (design D2): with
+/// request `#n` open into `main`, `sluice wait main --pull-request <n>` run
+/// with `SLUICE_FORGE_API` naming an address that refuses each call prints
+/// the landing, as a wait printed it, once `sluice host` lands the request,
+/// and exits 0.
+#[test]
+fn a_wait_on_a_request_that_lands_reads_no_forge() {
+    let g = OnGitHub::new("pr-wait-no-forge", "");
+    let w = g.session("wl", &[("wl.txt", "wl\n")]);
+    let out = g
+        .command(env!("CARGO_BIN_EXE_sluice"), &w)
+        .args(["submit", "main", "--no-wait"])
+        .output()
+        .unwrap();
+    assert_eq!(out.status.code(), Some(0), "{}", text(&out));
+    let n = g.pull_from("unit/wl").number.to_string();
+    let out = g
+        .command(env!("CARGO_BIN_EXE_sluice"), g.repo.dir())
+        .env("SLUICE_FORGE_API", REFUSING)
+        .args(["wait", "main", "--pull-request", &n, "--timeout", "2m"])
+        .output()
+        .unwrap();
+    assert_eq!(out.status.code(), Some(sluice::LANDED), "{}", text(&out));
+    let landed = g.main_on_github();
+    assert!(
+        text(&out).contains(&format!("landed as {}", &landed[..7])),
+        "{}",
+        text(&out)
+    );
+}

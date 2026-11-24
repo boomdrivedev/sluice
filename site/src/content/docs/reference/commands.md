@@ -24,13 +24,12 @@ sidebar:
 | `sluice equip <branch>` | Make this worktree ready for the branch's runner, as sluice makes every checkout ready before it runs anything there: the toolchain, then under moon the tool versions `.prototools` lists installed, moon's version checked and `moon setup`. It holds nothing. `--at <revision>` reads the policy at that revision; `--json` for scripts ([below](#sluice-equip)). |
 | `sluice release` | Release this worktree: run the policy's release command, end what its runs left running, and free its ports. The worktree stays. In a worktree sluice holds nothing for, it runs the default branch's release command all the same ([below](#worktrees-sluice-holds)). `--accept-failure` frees its ports and ends its runs without running the release command. `--json` for scripts. |
 | `sluice preview <branch> <revision>` | Bring up a revision the branch has landed in a checkout of its own, at addresses a person opens, until it is released. `--wait` returns once its command has ended; `--json` for scripts. |
-| `sluice previews` | Every preview on the host, with its addresses and state. `--json` for scripts. |
+| `sluice previews` | Every preview on the host, with its addresses and state, as sluice's host process answers it ([below](#changes)). `--json` for scripts. |
 | `sluice release <name>` | Release a preview, by its name or its revision: its release command runs, its checkout goes, its ports and names are free. Given a checkout held because its release failed, `sluice/try/<branch>/<n>`, run its release once more. `--accept-failure` frees either without running the release command. `--json` for scripts. |
 | `sluice branch create <branch> --from <branch>` | Make a branch sluice lands on, such as a feature branch, at another such branch's current revision: on its remote when its policy names one. `--json` for scripts. |
 | `sluice branch delete <branch>` | Delete it once its work has landed into `main`, or the branch `--into` names, and nothing is queued on it. `--json` for scripts. |
 | `sluice branch accept <branch> <revision>` | Accept the revision a held branch is read at, which lacks its last landing, as the one it stands on: the next round forms the queue on it. The operator's to do, never an agent's. `--json` for scripts. |
 | `sluice forge check [<branch>]` | Whether sluice's own identity on GitHub is set up so only sluice may move the branch there, and, for a pool on GitHub Actions, whether it is set up as `sluice init actions` sets it up. `--json` for scripts. |
-| `sluice push <branch>` | Push again a landing the forge refused, on your word, once the forge's rule allows it: it lands as the same landing, or is held again with the forge's new words ([below](#sluice-push)). `--json` for scripts. |
 | `sluice init actions` | Set up a pool on GitHub Actions in this working copy: write its two workflows and append its signer and pool to the policy where it names none ([below](#sluice-init-actions)). `--force` writes a workflow that differs. |
 | `sluice init codebuild` | Write the CloudFormation template of a pool on a CodeBuild fleet and say how to deploy it; `--stack <name>` reads the deployed stack's key and appends its signer and pool to the policy ([below](#sluice-init-codebuild)). |
 | `sluice job run`, `release`, `sign`, `record` | A pool's job, as the workflow `sluice init actions` writes or the builds of `sluice init codebuild`'s stack run it; you don't run them yourself ([below](#sluice-job)). |
@@ -911,10 +910,11 @@ submission.
 
 When the branch's policy has a
 [`pull_requests` table](/sluice/reference/configuration/#branchespatternpull_requests),
-`sluice submit` and `wt submit` don't queue the worktree's head. They
-push the worktree's branch to the branch's remote and open a pull
-request from it, ready for review, or update the one already open from
-that branch. `--subject` titles the pull request, and the branch's name
+`sluice submit` and `wt submit` don't queue the worktree's head.
+sluice's host process pushes the worktree's branch to the branch's
+remote and opens a pull request from it, ready for review, or updates
+the one already open from that branch; the submit itself pushes
+nothing and calls GitHub for nothing ([changes](#changes)). `--subject` titles the pull request, and the branch's name
 titles it where the submit gives none. It waits for its conditions like
 any other, and sluice submits it once they hold:
 
@@ -1104,25 +1104,27 @@ ok      the app may run acme/widgets's workflows
 failed  any branch may use acme/widgets's sluice environment, and so its key: let only main deploy from it
 ```
 
-## `sluice push`
+## A landing the forge refused
 
 A landing the forge refuses, for a rule on the branch or push
-protection finding what looks like a secret, is held: nothing is pushed
-or formed on the branch, and each of its submissions is `refused`, with
-the forge's words. A submission's fixed head from the same worktree, or
-`sluice withdraw`, takes its entry out, and the rest go back to the
-queue. Once the forge's rule allows the landing, `sluice push <branch>`
-pushes it again:
+protection finding what looks like a secret, is held: nothing is formed
+on the branch for it, and each of its submissions is `refused`, with
+the forge's words. Each round of the branch pushes the held landing
+again, as the same landing, before it forms anything, so once the
+forge's rule allows it, it lands as the same landing with no tests run
+again, and nobody has to push it. Where the held landing is the
+branch's one work, its round comes once a minute at most, so the forge
+is asked once a minute.
 
-```console
-$ sluice push main
-#12, #13 landed on main as b7d2e94
-```
+Refused again in the same words, it stays held, and nothing more is
+written. Refused in other words, it is held with them: the branch's log
+gains one more `forge_refused` line, and `sluice status`, `sluice inbox`
+and a wait show the newest words. The submissions behind it wait.
 
-Refused again, it is held again with the forge's new words, and the
-command exits `6` with them. Where one of its submissions has left the
-queue, nothing is pushed: the landing is dropped and the rest are
-formed again.
+A submission's fixed head from the same worktree, or `sluice withdraw`,
+takes its submission out. The landing is then dropped, no round pushes
+it again, and the rest of its submissions go back to the queue and are
+formed again on the branch.
 
 ## `sluice init actions`
 
@@ -1268,40 +1270,6 @@ The workflow `sluice init actions` writes, and the builds of the stack
   the branch from the run build again, adds `<dir>/record.json`, where
   the sign build wrote one, to the signer's runs, and writes the run
   ended and closed under its claim, as `--claim` does.
-
-## `sluice set-aside`
-
-sluice records nothing under a test's key for four failures it tells
-apart on its own, so none of them needs setting aside:
-
-- a run whose program never started;
-- an exit `[tests] not_run` names;
-- a run whose executor reports refusing it something it needs;
-- a test the time limit ended.
-
-A host failure none of these catches still sits under the test's
-key, and a later pass makes the key read as flaky. On a branch whose
-`flaky` is `"fail"`, the same inputs then never pass. The operator who
-finds the cause on the host sets the fail aside:
-
-```console
-$ sluice set-aside cli:tools --at 2026-10-17T13:05:32Z --reason "OrbStack was down"
-set aside cli:tools 7272335f33f8 recorded at 2026-10-17T13:05:32Z on main 79b832d: OrbStack was down
-no gate reads it from now; its line stays in the results
-```
-
-`--at` is when the result was recorded, as a flaky failure names it.
-`--hash` gives the start of its key when two results of the test were
-recorded at once. The result's line stays in `results.jsonl`. The
-set-aside, with who made it and why, is kept in `set-aside.jsonl` beside
-it, and no branch reads the result again. An agent never sets aside a
-result; the Claude Code plugin refuses it, and tells the agent to bring
-the operator what it found instead. Under `--json`, the set-aside's
-record is printed.
-
-Each set-aside marks a result sluice recorded when it should not have.
-Its reason says what the host was doing, so a failure sluice could have
-told apart on its own can be taught to it.
 
 ## `sluice wait`
 
@@ -1476,9 +1444,10 @@ head, as when the branch moves under it, the wait follows the new
 head's submission and ends with its own, as above.
 
 When another host takes the branch's pull requests in, the wait takes
-none in and runs no rounds of that branch. It follows the pull request
-on GitHub instead, reading it and sluice's check on its head at most
-once in a quarter of `[forge] discovery`. It prints the check's title
+none in and runs no rounds of that branch. sluice's host process
+follows the pull request on GitHub for it instead, reading it and
+sluice's check on its head at most once in a quarter of `[forge]
+discovery`. It prints the check's title
 and summary as they change. Above them it prints where the pull request
 stands, again only when that changes:
 
@@ -1800,7 +1769,7 @@ not start afresh within seventy seconds.
 | `2` | a conflict, or a refusal |
 | `4` | withdrawn, and none of its work landed |
 | `5` | `sluice wait --timeout` ran out; the submission stays queued |
-| `6` | the forge refused its landing: held, with the forge's words, until `sluice push` or a withdrawal ([above](#sluice-push)). Under `--json`, the submission's record carries `refused`, the forge's `words` and `at` |
+| `6` | the forge refused its landing: held, with the forge's words, and pushed again at each round until the forge takes it or one of its submissions is withdrawn ([above](#a-landing-the-forge-refused)). Under `--json`, the submission's record carries `refused`, the forge's `words` and `at` |
 | `130` | stopped with Ctrl-C; the submission stays queued |
 
 A submission has landed once its branch holds its work, and nothing that
@@ -1882,7 +1851,6 @@ else they say goes to stderr:
 | `sluice branch` | `{"branch","created","from"}`, `{"branch","deleted","into"}` or `{"branch","accepted","lacked"}` |
 | `sluice amend` | `{"id","after","priority"}`, as the submission now stands |
 | `sluice withdraw` | `{"id","state":"withdrawn"}`, with `"already":true` when it was withdrawn before |
-| `sluice set-aside` | `{"schema","at","task","hash","run_at","branch","combination","reason","by"}`, the record kept |
 | `sluice release` | `{"worktree","released"}`, or `{"preview","released"}` for a preview; `released` is `false` when the policy names no release command, the folder is in no worktree, or the release failed. With `--accept-failure` it adds `accepted`, and a release that failed adds `failed`. For a held checkout, `{"place","released","accepted","failed"}` |
 | `sluice protect` | `{"protection":"installed","changed","held"}`: `changed` is `false` when the hook was in place already, and `held` lists each worktree that has checked out a protected branch; with `--remove`, `{"protection":"removed","changed"}` |
 | `sluice forge check` | `{"branch","ok","checks"}`, each check with its `ok` and `message` |
@@ -1943,6 +1911,37 @@ Where no host process answers, or it ends before it answers, the
 command says that sluice's host process did not answer, and exits `3`.
 A host process of another release that does not know the read answers
 with an error that names its version and the sluice to run.
+
+## Changes
+
+sluice's host process makes each change: a submit, `sluice amend`,
+`sluice withdraw`, `sluice confirm`, `sluice release` of a preview or of
+a checkout held because its release failed, `sluice branch create`,
+`accept` and `delete`, and `sluice protect`. It answers `sluice
+previews` the same way, since listing the previews frees each one whose
+checkout is gone. The command sends
+its folder, its arguments, `SLUICE_AGENT`, the terminal pane it runs in
+and `TRACEPARENT` to the host process, starting it where none answers,
+and prints what the host process answers, with its exit code, as a
+[one-shot read](#one-shot-reads) does. The command runs no git for the
+change, calls GitHub for nothing and writes no state of its own. The
+host process reads the worktree's head from its folder and writes the
+submission, so the submission names the agent and the pane the command
+ran in. For a branch with pull requests, it pushes the worktree's
+branch and opens, updates and marks the pull request ready. A waiting
+submit, and a wait on a pull request or on worktrees submitted as one
+act, follow the host process, which reads GitHub for each step.
+
+Every command, these among them, puts the branch protection's hook
+back in place. `sluice exec`, `sluice preview`, `sluice equip` and `sluice release` in
+a worktree run in the command itself, as do `sluice forge check`,
+`sluice pool check`, `sluice init` and `sluice credential`, which call
+GitHub or AWS.
+
+Where no host process answers, or it ends before it answers, the
+command says that sluice's host process did not answer, exits `3`, and
+changes nothing. A host process of another release answers with an
+error that names its version and the sluice to run.
 
 ## Who runs the rounds
 

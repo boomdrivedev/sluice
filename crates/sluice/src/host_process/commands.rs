@@ -62,7 +62,7 @@ pub fn is_command(request: &Request) -> bool {
         Request::Exec { .. }
             | Request::Preview { .. }
             | Request::Equip { .. }
-            | Request::Release { .. }
+            | Request::ReleaseWorktree { .. }
     )
 }
 
@@ -153,7 +153,7 @@ fn call_of(request: Request) -> Option<Call> {
             true,
             Command::Equip { branch, at, json },
         ),
-        Request::Release {
+        Request::ReleaseWorktree {
             folder,
             caller,
             run_env,
@@ -334,26 +334,24 @@ fn run(
         traced(&mut || {
             let (caller, run_env, cli, runtime, stopped) =
                 call.take().expect("the command runs once");
-            crate::caller::as_caller(caller, || {
-                crate::caller::in_folder(&folder, || {
-                    crate::profiles::checks::with_run_env(run_env, || -> Result<i32> {
-                        let bound = bind(hosting, repository, dir, runtime, stopped.clone())?;
-                        let every = match &cli.command {
-                            Some(Command::Exec { .. }) => STREAM,
-                            command => crate::tick(command.as_ref()),
-                        };
-                        let pause = Stopping { stopped, every };
-                        crate::run(
-                            cli,
-                            bound.seams(),
-                            &bound,
-                            &bound.branch,
-                            &*bound.pulls,
-                            &sluice_core::SystemClock,
-                            &pause,
-                            &mut out,
-                        )
-                    })
+            crate::caller::in_folder(caller, Some(folder.clone()), || {
+                crate::profiles::checks::with_run_env(run_env, || -> Result<i32> {
+                    let bound = bind(hosting, repository, dir, runtime, stopped.clone())?;
+                    let every = match &cli.command {
+                        Some(Command::Exec { .. }) => STREAM,
+                        command => crate::tick(command.as_ref()),
+                    };
+                    let pause = Stopping { stopped, every };
+                    crate::run(
+                        cli,
+                        bound.seams(),
+                        &bound,
+                        &bound.branch,
+                        &*bound.pulls,
+                        &sluice_core::SystemClock,
+                        &pause,
+                        &mut out,
+                    )
                 })
             })
         })

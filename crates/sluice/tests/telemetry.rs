@@ -555,3 +555,33 @@ fn telemetry_is_off_unless_asked() {
         assert!(!line.contains("sluice.trace_id"), "{line}");
     }
 }
+
+/// 153; resident-changes, "A change names its caller's session" (the
+/// change `sluice-host-makes-each-change`, design D1): a submit run under
+/// a caller's `TRACEPARENT` sends it to `sluice host`, which was started
+/// with none, and the submission `sluice host` writes keeps it as its
+/// `trace`, the caller's span.
+#[test]
+fn a_submits_trace_names_its_callers_span() {
+    let policy =
+        "[tests]\nrunner = \"command\"\ncommand = \"true\"\n\n[branches.main]\ntimeout = \"1m\"\n";
+    let d = support::OnDisk::new("telemetry-submit-trace", policy);
+    let dir = d.session("a");
+    // `sluice host`, started by a command under no trace.
+    let out = d.sluice(&["status", "main"]);
+    assert!(out.status.success(), "{out:?}");
+    let traceparent = "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01";
+    let out = d
+        .command(&dir)
+        .env("SLUICE_ROUND_SLEEP", "record")
+        .env("TRACEPARENT", traceparent)
+        .args(["submit", "main", "--no-wait", "--json"])
+        .output()
+        .unwrap();
+    assert!(out.status.success(), "{out:?}");
+    let doc: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    let id = doc["id"].as_u64().expect("a number");
+    let out = d.sluice(&["status", &id.to_string(), "--json"]);
+    let doc: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert_eq!(doc["trace"], traceparent, "{doc}");
+}

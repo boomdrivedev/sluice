@@ -206,8 +206,17 @@ pub fn in_play(
             );
         }
     }
+    // 152, record 0124 as amended 2026-11-23 (the change
+    // `sluice-host-makes-each-change`, design D3): a held landing is pushed
+    // again at the look that asks the remote, once a minute.
+    if asks && super::pass::held(&s) {
+        let s = sluice_core::Sluice::new(bound.seams(), &sluice_core::SystemClock)
+            .as_peer(crate::exec::Host::peer(&bound));
+        super::pass::push_held(&s);
+    }
     Ok(super::tasks::Looked {
         in_play: super::pass::in_play(&s),
+        held: super::pass::held(&s),
         refused,
         stale: bound.state.stale_all(),
     })

@@ -17,7 +17,7 @@ use anyhow::{anyhow, Context, Result};
 use sluice_core::home::{HomeStore, Owed};
 use sluice_core::policy::{Policy, POLICY_PATH};
 use sluice_core::records::{
-    parse_lines, to_document, to_line, HomeDoc, HomeState, ResultLine, SetAside, HERE, HOME_FILE,
+    parse_lines, to_document, to_line, HomeDoc, HomeState, ResultLine, HERE, HOME_FILE,
 };
 use sluice_seams::{
     read_refused, Branch, Carried, Changes, Guard, ReadRefused, ResultAsk, Rev, Setting, Snapshot,
@@ -1215,26 +1215,6 @@ impl State for Records {
         match self.route(branch)? {
             None => self.local.add_signed(branch, signer, path, record),
             Some(r) => r.add_signed(branch, signer, path, record),
-        }
-    }
-
-    fn set_asides(&self) -> Result<Vec<u8>> {
-        let mut bytes = self.local.set_asides()?;
-        let remotes: Vec<Rc<RemoteRefs>> = self.remotes.borrow().values().cloned().collect();
-        for r in remotes {
-            bytes.extend(r.set_asides()?);
-        }
-        Ok(bytes)
-    }
-
-    /// Kept where the result's branch keeps its records, so every host
-    /// that reads the result reads it set aside (rule core.11).
-    fn set_aside(&self, line: &[u8]) -> Result<()> {
-        let aside: Vec<SetAside> = parse_lines(line)?;
-        let branch = aside.first().map(|a| a.branch.as_str()).unwrap_or_default();
-        match self.route(branch)? {
-            None => self.local.set_aside(line),
-            Some(r) => r.set_aside(line),
         }
     }
 
