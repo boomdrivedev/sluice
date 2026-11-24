@@ -72,6 +72,15 @@ fn alive(pid: u32) -> bool {
     )
 }
 
+/// The answer to a hand-over: an error the host process answered with
+/// fails with its words; any other answer, or none, goes on.
+fn refused(answer: Result<Answer>) -> Result<()> {
+    match answer {
+        Ok(Answer::Error(why)) => Err(anyhow!(why)),
+        _ => Ok(()),
+    }
+}
+
 impl Client {
     /// `program`'s way to the host process a command whose environment is
     /// `env` reaches: that environment's state folder's.
@@ -165,9 +174,14 @@ impl Client {
     /// in place as this command's executable, whose image started afresh is
     /// this command's own start (design D4 of `sluice-runs-as-a-daemon`; D3
     /// of `sluice-host-owns-its-workers`).
+    /// A command older than the newest sluice that has run as the host
+    /// process asks for no hand-over, and uses the host process that
+    /// answers as it is (design D3 of `an-older-client-starts-no-older-host`).
     pub fn reach(&self) -> Result<Connection> {
         if let Some(c) = self.answering()? {
-            if !older(&c.named.version, &self.version) {
+            if !older(&c.named.version, &self.version)
+                || self.paths.refused_start(&self.version).is_some()
+            {
                 return Ok(c);
             }
             return self.afresh(c);
@@ -190,7 +204,9 @@ impl Client {
     /// version. A host process of an older sluice that ends instead lets
     /// its pid go, and the command then starts its own. Where the image it
     /// asked still answers, or its pid still runs, at the end of the wait,
-    /// it fails naming the log.
+    /// it fails naming the log. Where the process refuses the hand-over,
+    /// it fails at once with its words (design D3 of
+    /// `an-older-client-starts-no-older-host`).
     fn afresh(&self, mut c: Connection) -> Result<Connection> {
         let asked = c.named.clone();
         send(
@@ -200,7 +216,7 @@ impl Client {
                 ends: false,
             },
         )?;
-        let _ = receive::<Answer>(&mut c.reader);
+        refused(receive::<Answer>(&mut c.reader))?;
         drop(c);
         let until = Instant::now() + HAND_OVER_WAIT;
         loop {
@@ -241,7 +257,13 @@ impl Client {
     /// afresh. It starts no host process. The process asked and the one
     /// that answers after; `None` where none answers, or where it runs this
     /// command's executable already.
+    /// A sluice older than the newest that has run as the host process
+    /// asks nothing, and fails (design D3 of
+    /// `an-older-client-starts-no-older-host`).
     pub fn hand_over_here(&self) -> Result<Option<(Named, Named)>> {
+        if let Some(why) = self.paths.refused_start(&self.version) {
+            bail!(why);
+        }
         let Some(mut c) = self.answering()? else {
             return Ok(None);
         };
@@ -257,7 +279,7 @@ impl Client {
                 ends: false,
             },
         )?;
-        let _ = receive::<Answer>(&mut c.reader);
+        refused(receive::<Answer>(&mut c.reader))?;
         drop(c);
         let until = Instant::now() + HAND_OVER_WAIT;
         loop {
@@ -288,11 +310,17 @@ impl Client {
     }
 
     /// Start the host process under the start lock, unless one answers
-    /// once the lock is this command's, and wait for it to answer.
+    /// once the lock is this command's, and wait for it to answer. A
+    /// command older than the newest sluice that has run as the host
+    /// process starts none, and fails saying why (design D2 of
+    /// `an-older-client-starts-no-older-host`).
     fn start(&self) -> Result<Connection> {
         let lock = self.start_lock()?;
         if let Some(c) = self.answering()? {
             return Ok(c);
+        }
+        if let Some(why) = self.paths.refused_start(&self.version) {
+            bail!(why);
         }
         // The process keeps the log before its own as `log.1` once it holds
         // its lock; what it says before that goes to the last one's.

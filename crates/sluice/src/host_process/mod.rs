@@ -12,6 +12,8 @@
 //!   start.lock     held by a command starting it, and by the process as
 //!                  it decides to end
 //!   version        its version, pid and start time, written whole
+//!   newest         the newest sluice that has run as its host process,
+//!                  written whole, never lowered
 //!   log            what its passes say, its warnings and failures; the
 //!                  previous process's kept as log.1
 //!   repositories   the index of repositories, written whole
@@ -153,6 +155,7 @@ const ASK_WAIT: Duration = Duration::from_secs(10);
 const LOCK: &str = "lock";
 const START_LOCK: &str = "start.lock";
 const VERSION: &str = "version";
+const NEWEST: &str = "newest";
 const LOG: &str = "log";
 const PREVIOUS_LOG: &str = "log.1";
 
@@ -266,6 +269,96 @@ impl Paths {
         let bytes = std::fs::read(self.version()).ok()?;
         serde_json::from_slice(&bytes).ok()
     }
+
+    /// `host/newest`: the newest sluice that has run as this state
+    /// folder's host process (the change
+    /// `an-older-client-starts-no-older-host`, design D1).
+    pub fn newest(&self) -> PathBuf {
+        self.dir.join(NEWEST)
+    }
+
+    /// The newest sluice that has run as the host process, as
+    /// `host/newest` names it; `None` where none has, or the file cannot
+    /// be read.
+    pub fn newest_run(&self) -> Option<Newest> {
+        Newest::from_bytes(&std::fs::read(self.newest()).ok()?)
+    }
+
+    /// Why sluice `version` starts no host process: the words of design D2
+    /// of `an-older-client-starts-no-older-host`, where a newer sluice has
+    /// run as the host process; `None` where none has.
+    pub fn refused_start(&self, version: &str) -> Option<String> {
+        let newest = self.newest_run()?;
+        version::older(version, &newest.version).then(|| {
+            format!(
+                "sluice {version} starts no host process: sluice {} has run as this host's \
+                 process{}. Run sluice {} or newer, or remove {} to run sluice {version}'s host \
+                 process.",
+                newest.version,
+                newest
+                    .program
+                    .as_ref()
+                    .map(|p| format!(" ({})", p.display()))
+                    .unwrap_or_default(),
+                newest.version,
+                self.newest().display()
+            )
+        })
+    }
+}
+
+/// The newest sluice that has run as a state folder's host process, as
+/// `host/newest` keeps it (the change `an-older-client-starts-no-older-host`,
+/// design D1).
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct Newest {
+    pub version: String,
+    /// Its executable, where it knew it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub program: Option<PathBuf>,
+}
+
+impl Newest {
+    fn from_bytes(bytes: &[u8]) -> Option<Newest> {
+        serde_json::from_slice(bytes).ok()
+    }
+}
+
+/// Design D1 of `an-older-client-starts-no-older-host`: `host/newest`
+/// raised to `own` where it names no version, or one older than `own`;
+/// never lowered.
+fn raise_newest(folder: &Folder, own: &Newest) -> Result<()> {
+    let held = folder
+        .read(NEWEST)
+        .ok()
+        .and_then(|b| Newest::from_bytes(&b));
+    if held
+        .as_ref()
+        .is_none_or(|n| version::older(&n.version, &own.version))
+    {
+        folder.write(NEWEST, &serde_json::to_vec(own)?)?;
+    }
+    Ok(())
+}
+
+/// Design D3 of `an-older-client-starts-no-older-host`: why a host
+/// process of sluice `own`, in `folder`, hands over to no sluice `by`: the
+/// newest that has run, or its own, is newer; `None` where neither is.
+fn refused_hand_over(folder: &Folder, own: &str, by: &str) -> Option<String> {
+    let recorded = folder
+        .read(NEWEST)
+        .ok()
+        .and_then(|b| Newest::from_bytes(&b))
+        .map(|n| n.version)
+        .filter(|v| !version::older(v, own))
+        .unwrap_or_else(|| own.to_string());
+    version::older(by, &recorded).then(|| {
+        format!(
+            "sluice {by} asked this host process, sluice {own}, to hand over, and a host process \
+             hands over to no sluice older than {recorded}, which has run as this host's \
+             process. Run sluice {recorded} or newer."
+        )
+    })
 }
 
 /// Whether passes are taken only when asked (design D14).
@@ -505,6 +598,14 @@ pub fn run(choices: crate::telemetry::Choices, mut carried: Carried) -> Result<i
     // image handed it, until its socket answers.
     let start = carried.start.take();
     let afresh = start.is_some();
+    // Design D2 of `an-older-client-starts-no-older-host`: an older sluice
+    // than the newest that has run starts no host process; an image
+    // started afresh in place was asked for (D3).
+    if !afresh {
+        if let Some(why) = paths.refused_start(crate::VERSION) {
+            anyhow::bail!(why);
+        }
+    }
     let folder =
         Folder::open(&paths.dir).with_context(|| format!("opening {}", paths.dir.display()))?;
     let Some(lock) = folder.try_lock(LOCK)? else {
@@ -545,6 +646,11 @@ pub fn daemon(choices: crate::telemetry::Choices, mut carried: Carried) -> Resul
     let start = carried.start.take();
     let afresh = start.is_some();
     if !afresh {
+        // Design D2 of `an-older-client-starts-no-older-host`: before it
+        // takes the host's lock or asks a host process to hand over.
+        if let Some(why) = paths.refused_start(crate::VERSION) {
+            anyhow::bail!(why);
+        }
         note_here(&paths);
     }
     let folder = Arc::new(
@@ -813,6 +919,14 @@ fn run_holding(runtime: &tokio::runtime::Runtime, holder: Holder) -> Result<i32>
         program: successor.program.as_ref().ok().cloned(),
     };
     folder.write(VERSION, &serde_json::to_vec(&named)?)?;
+    // Design D1 of `an-older-client-starts-no-older-host`.
+    raise_newest(
+        &folder,
+        &Newest {
+            version: named.version.clone(),
+            program: named.program.clone(),
+        },
+    )?;
     // D6 of `sluice-host-runs-on-a-tokio-edge`: a daemon started afresh in
     // place answers on the socket it was handed, so a command that
     // connected meanwhile is answered.
@@ -2059,6 +2173,21 @@ async fn answer(hosting: &Arc<Hosting>, stream: UnixStream) -> Result<()> {
         // `sluice-host-owns-its-workers`: the host process starts afresh in
         // place, or ends where the asker takes its place.
         Request::HandOver { program, ends } => {
+            // Design D3 of `an-older-client-starts-no-older-host`: it hands
+            // over to no sluice older than the newest that has run.
+            if let Some(why) =
+                refused_hand_over(&hosting.folder, &hosting.named.version, &hello.hello)
+            {
+                log(&format!(
+                    "sluice {}: warning: {why}",
+                    if hosting.named.daemon {
+                        "daemon"
+                    } else {
+                        "host"
+                    }
+                ));
+                return send(&mut writer, &Answer::Error(why)).await;
+            }
             let _ = hosting.control.send(Control::HandOver {
                 program,
                 by: hello.hello.clone(),
