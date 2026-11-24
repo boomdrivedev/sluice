@@ -86,10 +86,14 @@ pub fn test_git_config() -> PathBuf {
 }
 
 /// git, [`isolated`], with every credential helper cleared before any a
-/// test gives.
+/// test gives. A `sluice host` its hook starts passes only when asked, as
+/// the ones the tests' commands start do, so a git command of a test moves
+/// no queue (the change `the-git-hook-asks-sluice-host`, design D1).
 pub fn git_command() -> Command {
     let mut c = Command::new("git");
-    isolated(&mut c).args(["-c", "credential.helper="]);
+    isolated(&mut c)
+        .args(["-c", "credential.helper="])
+        .env("SLUICE_ROUND_SLEEP", "record");
     c
 }
 
