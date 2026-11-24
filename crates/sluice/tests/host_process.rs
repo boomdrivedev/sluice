@@ -1055,8 +1055,12 @@ fn bound(d: &OnDisk, max: usize) {
 /// An agent's `sluice exec main -- sh -c <script>` in a session of its
 /// own, `name`, started now.
 fn agent(d: &OnDisk, name: &str, script: &str) -> std::process::Child {
-    let dir = d.session(name);
-    d.command(&dir)
+    agent_in(d, &d.session(name), script)
+}
+
+/// [`agent`], in the session already made at `dir`.
+fn agent_in(d: &OnDisk, dir: &Path, script: &str) -> std::process::Child {
+    d.command(dir)
         .args(["exec", "main", "--", "sh", "-c", script])
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped())
@@ -1126,13 +1130,16 @@ fn s75_a_combination_starts_before_a_third_agents_check() {
             kind: FollowKind::Wait,
         }])
         .unwrap();
+    // The third agent's session and the combination's are made first: their
+    // git, and the hook it runs, take no part of the first agent's time.
+    let (third, combined) = (d.session("c"), d.session("q"));
     let a = agent(&d, "a", &format!("touch '{}'; sleep 3", m("a").display()));
     let b = agent(&d, "b", &format!("touch '{}'; sleep 9", m("b").display()));
     within(30, "two agents' checks hold both runs", || {
         m("a").exists() && m("b").exists()
     });
-    let c = agent(&d, "c", &format!("touch '{}'", m("c").display()));
-    let id = queued_live(&d, &d.session("q"));
+    let c = agent_in(&d, &third, &format!("touch '{}'", m("c").display()));
+    let id = queued_live(&d, &combined);
     within(60, "the combination's run starts", || m("q").exists());
     assert!(!m("c").exists(), "the third agent's check still waits");
     within(60, "the third agent's check starts", || m("c").exists());
