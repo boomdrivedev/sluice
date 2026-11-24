@@ -528,6 +528,7 @@ mod tests {
             timed_out: false,
             executor,
             refusals_unread: None,
+            refused: None,
         }
     }
 

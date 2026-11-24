@@ -1522,13 +1522,15 @@ fn given_and_resolved(path: &Path) -> Vec<PathBuf> {
 
 /// The Seatbelt profile of a run in `place`, and its grant: its checkout
 /// and scratch directory writable, each `dir` of the host's `caches`, and
-/// the runner's `store`, where moon keeps what it shares for the run,
-/// where it lies outside them (C.2 sandbox row as amended at
-/// agentplot/blueprints 0c38f24; record 0105; rule core.9); the container
+/// each folder of `shared`, where the runner keeps what it shares between
+/// runs, moon's store and its task archives, where it lies outside them
+/// (C.2 sandbox row as amended at agentplot/blueprints 0c38f24; record
+/// 0105; rule core.9; design D3 of the change
+/// `the-gate-sandbox-lets-the-tools-write`); the container
 /// engine's `engines`, its sockets and its TCP addresses, reachable when
 /// `limits` allow it (ADR 0016; design D5), and each `socket` of the
-/// caches, whatever the network (35; design D4). The grant names the
-/// store a `<cache>`, as a declared cache is (design D1). Each refusal
+/// caches, whatever the network (35; design D4). The grant names each
+/// shared folder a `<cache>`, as a declared cache is (design D1). Each refusal
 /// rule carries `mark`, the run's (139; design D4 of the change
 /// `a-check-its-executor-refused-has-no-outcome`).
 fn sandbox_profile(
@@ -1536,13 +1538,13 @@ fn sandbox_profile(
     limits: &Limits,
     stamps: &[&str],
     caches: &[HostCache],
-    store: Option<&Path>,
+    shared: &[&Path],
     engines: Vec<Endpoint>,
     mark: Option<&str>,
 ) -> Profile {
     Reach {
         mark: mark.map(str::to_string),
-        ..sandbox_reach(place, limits, stamps, caches, store, engines, user_tmp())
+        ..sandbox_reach(place, limits, stamps, caches, shared, engines, user_tmp())
     }
     .profile()
 }
@@ -1554,7 +1556,7 @@ fn sandbox_reach(
     limits: &Limits,
     stamps: &[&str],
     caches: &[HostCache],
-    store: Option<&Path>,
+    shared: &[&Path],
     engines: Vec<Endpoint>,
     user_tmp: Option<PathBuf>,
 ) -> Reach {
@@ -1563,13 +1565,15 @@ fn sandbox_reach(
         (Role::Scratch, resolved(&place.tmp)),
     ];
     // Record 0105: the store the run records, the one its proof is read
-    // from; a store in the checkout or its scratch adds nothing, so such
-    // a run's profile is the one it is given with none (rule core.34).
-    if let Some(store) = store {
-        let real = resolved(store);
+    // from, and design D3: the folder the runner keeps its task archives
+    // in, wherever a link leads it. One in the checkout or its scratch
+    // adds nothing, so such a run's profile is the one it is given with
+    // none (rule core.34).
+    for folder in shared {
+        let real = resolved(folder);
         if !writable.iter().any(|(_, w)| real.starts_with(w)) {
             writable.extend(
-                given_and_resolved(store)
+                given_and_resolved(folder)
                     .into_iter()
                     .map(|p| (Role::Cache, p)),
             );
@@ -1614,6 +1618,16 @@ fn sandbox_reach(
         user_tmp,
         mark: None,
     }
+}
+
+/// Design D2 of the change `the-gate-sandbox-lets-the-tools-write`: what a
+/// run's command is told of the network, `PROTO_OFFLINE=1` where the
+/// sandbox holds it from the network, so proto and moon take themselves
+/// for offline and ask no host whether they are, which the sandbox would
+/// refuse; nothing where the run may reach the network.
+fn offline(kind: Kind, network: Option<Network>) -> Option<(String, String)> {
+    let held = matches!(network, Some(Network::Denied | Network::Localhost));
+    (kind == Kind::Sandbox && held).then(|| ("PROTO_OFFLINE".to_string(), "1".to_string()))
 }
 
 /// Design D4: a run's mark, `sluice-run:` and 16 hex characters of the
@@ -1747,7 +1761,7 @@ pub fn release_request(
         std::fs::write(
             &profile,
             // A release runs no check whose proof sluice reads.
-            sandbox_profile(place, limits, &[], caches, None, engines, None).text,
+            sandbox_profile(place, limits, &[], caches, &[], engines, None).text,
         )?;
         argv.splice(
             0..0,
@@ -1974,6 +1988,23 @@ impl Tests for Checks {
             }
             _ => None,
         };
+        // Design D3: the folder moon keeps its task archives in, beside
+        // its store, so a run's archive is kept where its link leads.
+        let archives = match runner.as_str() {
+            "moon" => Some(super::moon::archives(&request.place.path)),
+            _ => None,
+        };
+        let shared: Vec<&Path> = store
+            .iter()
+            .chain(&archives)
+            .map(PathBuf::as_path)
+            .collect();
+        // Design D2: a run the policy holds from the network is told so in
+        // proto's own word, so moon and the tools proto runs ask no host
+        // whether they are offline, which the sandbox refuses. Equipping,
+        // outside the executor, is not told.
+        let mut env = env;
+        env.extend(offline(kind, request.limits.network));
         let docker = request.limits.docker;
         let started_ms = chrono::Utc::now().timestamp_millis();
         // Design D4, D5: a sandboxed run's mark, and the watch that keeps
@@ -2007,8 +2038,9 @@ impl Tests for Checks {
                     &plan.stamps,
                     caches,
                     // Record 0105: the store the run's record names,
-                    // and its release's, which runs under this profile.
-                    store.as_deref(),
+                    // and its release's, which runs under this profile;
+                    // design D3: moon's task archives.
+                    &shared,
                     match request.limits.docker {
                         true => self.engines(),
                         false => Vec::new(),
@@ -2236,6 +2268,7 @@ impl Tests for Checks {
             failed_by,
             timed_out: ended.timed_out,
             refusals_unread: None,
+            refused: None,
         }))
     }
 
@@ -3023,7 +3056,7 @@ mod tests {
             &sandbox(Some(Network::Localhost), true),
             &[".last-used"],
             &caches,
-            Some(&store),
+            &[&store],
             engines,
             Some(std::fs::canonicalize(host.dir("user-tmp")).unwrap()),
         );
@@ -3111,7 +3144,7 @@ mod tests {
                 &limits,
                 &[".last-used"],
                 &host.caches(caches),
-                store,
+                store.as_slice(),
                 Vec::new(),
                 Some(std::fs::canonicalize(host.dir(&format!("{at}/user-tmp"))).unwrap()),
             )
@@ -3139,7 +3172,7 @@ mod tests {
         let caches = host.caches(1);
         let engines = vec![Endpoint::Unix(host.dir("engine").join("docker.sock"))];
         let grant = |limits: Limits, caches: &[HostCache]| {
-            sandbox_reach(&place, &limits, &[], caches, None, engines.clone(), None)
+            sandbox_reach(&place, &limits, &[], caches, &[], engines.clone(), None)
                 .profile()
                 .grant
         };
@@ -3181,7 +3214,7 @@ mod tests {
                     &sandbox(network, false),
                     &[],
                     &host.caches(1),
-                    None,
+                    &[],
                     Vec::new(),
                     None,
                 )
@@ -3218,6 +3251,82 @@ mod tests {
         assert_ne!(run_mark(dir, 1), run_mark(dir, 2));
         assert!(run_mark(dir, 1).starts_with("sluice-run:"));
         assert_eq!(run_mark(dir, 1).len(), "sluice-run:".len() + 16);
+    }
+
+    /// Design D2 of the change `the-gate-sandbox-lets-the-tools-write` (the
+    /// moon-runner spec's "A run held from the network"): a sandboxed run
+    /// held from the network is told it is offline in proto's word; one
+    /// that may reach it, and an open run, are told nothing.
+    #[test]
+    fn a_run_held_from_the_network_is_told_it_is_offline() {
+        let told = Some(("PROTO_OFFLINE".to_string(), "1".to_string()));
+        assert_eq!(offline(Kind::Sandbox, Some(Network::Localhost)), told);
+        assert_eq!(offline(Kind::Sandbox, Some(Network::Denied)), told);
+        assert_eq!(offline(Kind::Sandbox, Some(Network::Allowed)), None);
+        assert_eq!(offline(Kind::Sandbox, None), None);
+        assert_eq!(offline(Kind::Open, None), None);
+    }
+
+    /// Design D3 of the change `the-gate-sandbox-lets-the-tools-write` (the
+    /// host-caches spec's "moon's archives through a link"): moon's task
+    /// archives, in the checkout's `.moon/cache/outputs`, a link to a
+    /// folder outside the checkout, are opened where the link leads, and
+    /// add nothing where they lie in the checkout.
+    #[test]
+    fn the_profile_opens_moons_archives_where_their_link_leads() {
+        let root = std::env::temp_dir().join(format!("sluice-archives-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let (checkout, tmp, common) = (
+            root.join("checkout"),
+            root.join("tmp"),
+            root.join("repo.git"),
+        );
+        for d in [
+            &checkout.join(".moon/cache"),
+            &tmp,
+            &common.join("moon-outputs"),
+        ] {
+            std::fs::create_dir_all(d).unwrap();
+        }
+        let place = Place {
+            name: "p".into(),
+            path: checkout.clone(),
+            tmp,
+            env: BTreeMap::new(),
+        };
+        let opened = |shared: &[&Path]| -> std::collections::BTreeSet<PathBuf> {
+            sandbox_profile(
+                &place,
+                &Limits::default(),
+                &[],
+                &[],
+                shared,
+                Vec::new(),
+                None,
+            )
+            .text
+            .split("(subpath \"")
+            .skip(1)
+            .filter_map(|s| s.split("\")").next())
+            .map(PathBuf::from)
+            .collect()
+        };
+        let archives = super::super::moon::archives(&checkout);
+        assert_eq!(archives, checkout.join(".moon/cache/outputs"));
+        // In the checkout: the profile is the one given none.
+        std::fs::create_dir_all(&archives).unwrap();
+        assert_eq!(opened(&[&archives]), opened(&[]));
+        // A link out of the checkout: opened where it leads.
+        std::fs::remove_dir_all(&archives).unwrap();
+        std::os::unix::fs::symlink(common.join("moon-outputs"), &archives).unwrap();
+        let with = opened(&[&archives]);
+        let real = std::fs::canonicalize(common.join("moon-outputs")).unwrap();
+        assert!(with.contains(&real), "{with:?}");
+        assert!(
+            !with.contains(&std::fs::canonicalize(&common).unwrap()),
+            "{with:?}"
+        );
+        let _ = std::fs::remove_dir_all(&root);
     }
 
     /// The host-caches spec's "Only the store is opened", "A store moon has
@@ -3258,7 +3367,7 @@ mod tests {
                 &Limits::default(),
                 &[],
                 &[],
-                store,
+                store.as_slice(),
                 Vec::new(),
                 None,
             )

@@ -1567,6 +1567,7 @@ impl World {
                 failed_by: Vec::new(),
                 timed_out: false,
                 refusals_unread: None,
+                refused: None,
             };
         }
         let tree = inner.commits[&request.revision].tree.clone();
@@ -1610,6 +1611,7 @@ impl World {
                 failed_by: Vec::new(),
                 timed_out: false,
                 refusals_unread: None,
+                refused: None,
             };
         }
         let since = request
@@ -1648,6 +1650,7 @@ impl World {
             failed_by: Vec::new(),
             timed_out: false,
             refusals_unread: None,
+            refused: None,
         };
         let names: Vec<String> = wanted.iter().map(|t| t.name.clone()).collect();
         let mut seen = BTreeMap::new();

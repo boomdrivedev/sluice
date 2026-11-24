@@ -1492,6 +1492,15 @@ pub fn store(checkout: &Path, env: &BTreeMap<String, String>) -> PathBuf {
     }
 }
 
+/// Design D3 of the change `the-gate-sandbox-lets-the-tools-write`: where
+/// moon keeps a run's task archives in `checkout`, the workspace's own
+/// `.moon/cache/outputs` whatever its shared worktree setting (moon 2.6.1),
+/// a link there leading wherever the repository's toolchain points it.
+/// The sandbox opens it where it resolves.
+pub fn archives(checkout: &Path) -> PathBuf {
+    checkout.join(".moon/cache/outputs")
+}
+
 /// moon's shared worktree setting for a run given `env` (moon 2.6.1,
 /// `crates/config/src/workspace/cache_config.rs`). moon applies the
 /// environment over its files, so `MOON_CACHE_SHARED_WORKTREE_CACHE`, when

@@ -5077,22 +5077,32 @@ fn report(
                     )?;
                 }
             }
-            // 139, design D8: a run of it whose executor could not read
-            // what its sandbox refused it, read as refused nothing.
-            let mut unread: Vec<&str> = Vec::new();
+            // 139: what the sandbox refused a run of it, beside the fails,
+            // which stand (design D1 of the change
+            // `the-gate-sandbox-lets-the-tools-write`), and, design D8, a
+            // run whose executor could not read it, read as refused nothing.
+            let mut said: Vec<String> = Vec::new();
             for l in &combination_log {
                 if let Event::Detail {
-                    refusals_unread: Some(why),
+                    refusals_unread,
+                    refused,
                     ..
                 } = &l.event
                 {
-                    if !unread.contains(&why.as_str()) {
-                        unread.push(why);
+                    let lines = refused.iter().cloned().chain(
+                        refusals_unread
+                            .iter()
+                            .map(|why| words::refusals_unread(why)),
+                    );
+                    for line in lines {
+                        if !said.contains(&line) {
+                            said.push(line);
+                        }
                     }
                 }
             }
-            for why in unread {
-                writeln!(out, "  {}", words::refusals_unread(why))?;
+            for line in said {
+                writeln!(out, "  {line}")?;
             }
             // Could-not-run-1 115: a test that could not run, and why.
             for f in &could_not {

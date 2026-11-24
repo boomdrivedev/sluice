@@ -399,10 +399,11 @@ fn a_signed_branch_counts_the_dependency_through_its_signer() {
     assert_eq!(signed[0].signer.as_deref(), Some("box"));
 }
 
-/// satisfies: 149, 114, 139; records 0072 and 0084; rule core.35; the
+/// satisfies: 149, 114, 139; records 0072 and 0084; design D1 of the
+/// change `the-gate-sandbox-lets-the-tools-write`; rule core.35; the
 /// run-outcome spec's "A test failed by a task the run was refused"
 #[test]
-fn a_refusal_leaves_a_check_failed_by_a_dependency_unjudged() {
+fn a_refusal_leaves_a_check_failed_by_a_dependency_failed_by_it() {
     const REFUSED: &str = "sluice's sandbox refused the run file-write-create \
                            /Users/me/.cache/x (by python3)";
     let h = rig(&integration("fail"));
@@ -410,20 +411,16 @@ fn a_refusal_leaves_a_check_failed_by_a_dependency_unjudged() {
     h.w().refuses(Some(REFUSED));
     let one = submit_a(&h, "broken");
     for _ in 0..8 {
-        if !not_run_events(&h).is_empty() {
-            break;
-        }
         h.step();
     }
-    assert_eq!(
-        not_run_events(&h),
-        [vec![(CHECK.to_string(), REFUSED.to_string())]]
-    );
-    assert!(results(&h).iter().all(|r| r.task != CHECK && r.task != DEP));
-    assert!(!h.events().iter().any(|e| matches!(
-        e,
-        Event::Ran { task, .. } if task == DEP
-    )));
-    assert_ne!(h.sub(one).state, State::Failed);
-    assert!(h.w().delivered().is_empty(), "nobody is blamed");
+    assert!(not_run_events(&h).is_empty());
+    let sub = h.sub(one);
+    assert_eq!(sub.state, State::Failed);
+    assert_eq!(sub.failed[0].task, DEP);
+    assert_eq!(sub.failed[1].failed_by, [DEP]);
+    assert!(results(&h)
+        .iter()
+        .any(|r| r.task == DEP && r.outcome == Outcome::Fail));
+    assert!(results(&h).iter().all(|r| r.task != CHECK));
+    assert_eq!(h.delivered_to("agent-a").len(), 1, "blamed");
 }

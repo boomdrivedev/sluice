@@ -1535,7 +1535,7 @@ pub enum Event {
     },
     /// Clause 119: what a run's runner said of it beyond
     /// its results, the required checks it keeps out of its CI mode, and
-    /// why its executor could not read what it refused the run (139).
+    /// what its executor refused the run, or why it could not read it (139).
     /// Shown; nothing reads a verdict from it.
     Detail {
         combination: Rev,
@@ -1551,6 +1551,12 @@ pub enum Event {
         /// read as refused nothing.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         refusals_unread: Option<String>,
+        /// 139 (design D1 of the change
+        /// `the-gate-sandbox-lets-the-tools-write`): what the run's executor
+        /// reports it refused the run, in the profile's words, said beside
+        /// its fails, which stand.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        refused: Option<String>,
     },
     Result {
         combination: Rev,

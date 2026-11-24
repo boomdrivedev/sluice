@@ -922,6 +922,13 @@ pub struct RunReport {
     /// words of what failed; the run is read as one refused nothing. `None`
     /// where it read it, and wherever it was not asked.
     pub refusals_unread: Option<String>,
+    /// 139 (design D1 of the change `the-gate-sandbox-lets-the-tools-write`):
+    /// what the executor reports it refused the run, in the profile's
+    /// words, read after a run in which a check did not pass. It is said
+    /// beside the run's fails, which stand. `None` where it refused
+    /// nothing, and wherever it was not asked.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub refused: Option<String>,
 }
 
 /// 139 (design D6 of the change
@@ -1113,10 +1120,10 @@ pub trait Tests {
     ///
     /// The core asks it only after a run in which a check did not pass and
     /// the time limit did not end it, after [`Tests::switched`] and before
-    /// it looks at the engine: where it answers `Refused`, those checks
-    /// have no outcome, naming what was refused, and the engine is not
-    /// looked at; where it answers `Unread`, the run is read as before and
-    /// says so.
+    /// it looks at the engine. What it answers decides no outcome: a fail
+    /// stands, and the run says what was refused beside it, or, where it
+    /// answers `Unread`, that it could not be read (design D1 of the change
+    /// `the-gate-sandbox-lets-the-tools-write`).
     fn refused(&self, run: &RunHandle) -> Result<Refusals>;
 
     /// 71: the most checks running on the host at once, whatever
@@ -2310,6 +2317,7 @@ mod tests {
             detail: None,
             kept_out: vec![],
             refusals_unread: None,
+            refused: None,
         }
     }
 

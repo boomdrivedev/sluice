@@ -1127,15 +1127,16 @@ fn run_grants(s: &Setup) -> Vec<String> {
         .collect()
 }
 
-/// 114, 138, 139, S66; record 0072 (the run-outcome spec's "S66"): a
-/// sandboxed branch's test that writes a folder outside the worktree is
-/// listed as not run by the first `sluice exec`, naming the write the
-/// sandbox refused, and nothing is recorded; once the host's `[[caches]]`
+/// 138, 139, S66; record 0072; design D1 of the change
+/// `the-gate-sandbox-lets-the-tools-write` (the run-outcome spec's "S66"):
+/// a sandboxed branch's test that writes a folder outside the worktree
+/// fails in the first `sluice exec`, which records the fail and names the
+/// write the sandbox refused beside it; once the host's `[[caches]]`
 /// declares the folder, the second records its pass under a wider grant,
-/// the one result under the test's key.
+/// which no reading weighs with the fail.
 #[cfg(target_os = "macos")]
 #[test]
-fn exec_records_nothing_for_a_test_the_sandbox_refused_and_its_pass_under_a_wider_grant() {
+fn exec_records_a_fail_the_sandbox_refused_with_its_words_and_its_pass_under_a_wider_grant() {
     let s = Setup::new("exec-sandbox-refused");
     s.policy(&format!(
         "{}\n[executor]\nkind = \"sandbox\"\nnetwork = \"localhost\"\n",
@@ -1160,14 +1161,18 @@ fn exec_records_nothing_for_a_test_the_sandbox_refused_and_its_pass_under_a_wide
 
     let out = s.sluice(&["exec", "bolt/x"]);
     let said = text(&out);
+    assert!(!out.status.success(), "{said}");
+    assert!(!said.contains("could not run"), "{said}");
     assert!(
-        said.contains(
-            "could not run: sh check.sh: sluice's sandbox refused the run file-write-create "
-        ),
+        said.contains("sluice's sandbox refused the run file-write-create "),
         "{said}"
     );
     assert!(said.contains("/made (by mkdir)"), "{said}");
-    assert_eq!(s.results(), "", "nothing recorded: {said}");
+    let failed = s.results();
+    assert!(
+        failed.contains("\"outcome\":\"fail\""),
+        "the fail recorded: {failed}"
+    );
 
     std::fs::create_dir_all(s.config.path().join("sluice")).unwrap();
     std::fs::write(
@@ -1182,13 +1187,14 @@ fn exec_records_nothing_for_a_test_the_sandbox_refused_and_its_pass_under_a_wide
         .lines()
         .map(|l| serde_json::from_str(l).unwrap())
         .collect();
-    assert_eq!(lines.len(), 1, "{results}");
-    assert_eq!(lines[0]["task"], "sh check.sh");
-    assert_eq!(lines[0]["outcome"], "pass");
+    assert_eq!(lines.len(), 2, "{results}");
+    assert_eq!(lines[1]["task"], "sh check.sh");
+    assert_eq!(lines[1]["outcome"], "pass");
     let grants = run_grants(&s);
     assert_eq!(grants.len(), 2, "{grants:?}");
     assert_ne!(grants[0], grants[1], "a wider grant");
-    assert_eq!(lines[0]["executor"]["grant"], grants[1].as_str());
+    assert_eq!(lines[0]["executor"]["grant"], grants[0].as_str());
+    assert_eq!(lines[1]["executor"]["grant"], grants[1].as_str());
 }
 
 /// Session-runs-1 clause 97, 123: a worktree removed with `rm -rf`, with
