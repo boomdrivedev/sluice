@@ -3,9 +3,10 @@ $schema: 'https://moonrepo.dev/schemas/project.json'
 dependsOn: [seams, core, fakes]
 
 tasks:
-  # Everything but the tests that start a sandbox (`sandbox` task).
+  # Everything but the tests that start a sandbox (`sandbox` task) and the
+  # bounds on speed (`speed` task).
   test:
-    command: "cargo nextest run -p sluice -E 'not test(sandbox)'"
+    command: "cargo nextest run -p sluice -E 'not test(sandbox) and not test(speed)'"
     # The flake module's rendered files, which a unit test reads as sluice
     # reads the host's settings (record 0098), and the module's options,
     # whose `prefixes` a unit test holds to the scrub's GitHub token
@@ -30,6 +31,15 @@ tasks:
     command: "cargo nextest run -p sluice --features tools --test checks --test moon --test stack --test exec -E 'test(sandbox)'"
     inputs: ['/crates/sluice/**/*', '/crates/sluice-seams/**/*', '/crates/sluice-core/**/*', '/crates/sluice-fakes/**/*', '/Cargo.toml', '/Cargo.lock', '/.config/nextest.toml', '/devenv.nix', '/devenv.lock']
     tags: [cargo-test, starts-a-sandbox, needs-localhost]
+    options: {runFromWorkspaceRoot: true}
+  # The bounds on speed of the host process, every test whose name holds
+  # `speed`, here and nowhere else. A gate runs beside the host's other
+  # work, under which no bound on milliseconds holds, so no tier and no
+  # tag runs them: `moon run cli:speed` runs them on a quiet host, before a
+  # change to the host process's edge lands.
+  speed:
+    command: "cargo nextest run -p sluice --test host_process -E 'test(speed)'"
+    inputs: ['/crates/sluice/**/*', '/crates/sluice-seams/**/*', '/crates/sluice-core/**/*', '/crates/sluice-fakes/**/*', '/Cargo.toml', '/Cargo.lock', '/.config/nextest.toml', '/devenv.nix', '/devenv.lock']
     options: {runFromWorkspaceRoot: true}
   # S1 to S4 through wt submit on scratch repositories: the check-e2e tier.
   # It reads the tools it drives from outside the tree, so it never replays.

@@ -175,6 +175,40 @@ let
     installPhase = "install -Dm755 vale $out/bin/vale";
   };
 
+  # Allium's checker, run by models:typecheck over the design model
+  # (models/). From its own release: nixpkgs holds none. Bump the version
+  # and the four hashes from the release's assets' digests.
+  alliumVersion = "3.7.2";
+  alliumAssets = {
+    aarch64-darwin = {
+      target = "aarch64-apple-darwin";
+      sha256 = "3de3acfbc7874d92c63ce4fbb92ff4333348743471b885ed15318e9401f6fc36";
+    };
+    x86_64-darwin = {
+      target = "x86_64-apple-darwin";
+      sha256 = "15bf4e8e46fb76634572a03b90b9ccb7c53bb3a05db8cbd5080634c783911393";
+    };
+    aarch64-linux = {
+      target = "aarch64-unknown-linux-gnu";
+      sha256 = "6a21afc1347bfcdb82e566ddf696e1e0b5aa56fe4acbc3428bd29f33c00a2465";
+    };
+    x86_64-linux = {
+      target = "x86_64-unknown-linux-gnu";
+      sha256 = "f299548d8401a761ea5059abd202d1918da4c4ec445dc6c62db287755bf961da";
+    };
+  };
+  alliumAsset = alliumAssets.${pkgs.stdenv.hostPlatform.system};
+  allium = pkgs.stdenvNoCC.mkDerivation {
+    pname = "allium";
+    version = alliumVersion;
+    src = pkgs.fetchurl {
+      url = "https://github.com/juxt/allium-tools/releases/download/v${alliumVersion}/allium-${alliumAsset.target}.tar.gz";
+      inherit (alliumAsset) sha256;
+    };
+    sourceRoot = ".";
+    installPhase = "install -Dm755 allium $out/bin/allium";
+  };
+
   # Claude Code, run by the plugins' projects and by root:marketplace
   # (plugins/claude.sh): the release the board's engine-types were written
   # by, so every host checks the plugins against one engine, and never the
@@ -303,6 +337,7 @@ in
     proto
     worktrunk
     vale
+    allium
     claude
     openspec
     # The board's type check (plugin-board:typecheck); its engine-types
