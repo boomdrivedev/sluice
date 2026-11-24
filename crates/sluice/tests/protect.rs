@@ -1542,7 +1542,9 @@ fn kept(repo: &Repo) -> Connection {
         .expect("sluice host")
 }
 
-/// Once no `sluice host` of `repo`'s state folder answers.
+/// Once no `sluice host` of `repo`'s state folder answers, and each its
+/// logs say started has exited: one that ends takes its socket's path
+/// with it as it exits.
 fn no_host(repo: &Repo) {
     let client = client(repo);
     let until = Instant::now() + Duration::from_secs(30);
@@ -1550,6 +1552,21 @@ fn no_host(repo: &Repo) {
         assert!(
             Instant::now() < until,
             "sluice host still answers after 30 seconds"
+        );
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    let alive = |pid: &String| {
+        pid.parse::<i32>().is_ok_and(|p| {
+            !matches!(
+                nix::sys::signal::kill(nix::unistd::Pid::from_raw(p), None),
+                Err(nix::errno::Errno::ESRCH)
+            )
+        })
+    };
+    while host_starts(repo).iter().any(alive) {
+        assert!(
+            Instant::now() < until,
+            "sluice host still runs after 30 seconds"
         );
         std::thread::sleep(Duration::from_millis(50));
     }
