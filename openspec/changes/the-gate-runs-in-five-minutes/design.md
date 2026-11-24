@@ -142,8 +142,12 @@ Options:
   tenth of a second up to 10 seconds, and does not sleep.
 - `within` and `ends_within` check every tenth of a second. Their
   bounds stay in seconds.
-- `settled` checks every tenth of a second for two seconds in which the
-  stand-ins log nothing.
+- `settled` checks every tenth of a second for three seconds in which
+  the stand-ins log nothing.
+- A test that kills a watcher waits for the watcher to settle its
+  source's identity, `SLUICE_HERDR_IDENTITY_DELAY` after the source
+  starts, which the next watcher ends the source by. A check once a
+  second had always waited that long by chance.
 - The tests that count a watcher's ticks keep ticks of 1 second: their
   checks read windows of seconds against the tick, and they are a few
   of the 155.

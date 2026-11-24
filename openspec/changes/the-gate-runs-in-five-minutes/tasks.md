@@ -19,7 +19,7 @@ and written into design.md's table of expected gate time.
 ## 2. The herdr suite waits on events
 
 - [x] 2.1 In `plugins/herdr/tests/run.sh`, `within` and `ends_within` check every tenth of a second, and `reap` waits for each watcher it ends to be gone, with no sleep (design D2). True when `sluice exec main -- moon run plugin-herdr:test-sh` passes.
-- [x] 2.2 `settled` checks every tenth of a second for two still seconds. True when `sluice exec main -- moon run plugin-herdr:test-sh` passes.
+- [x] 2.2 `settled` checks every tenth of a second for three still seconds, and a test that kills a watcher waits for its source's identity to settle. True when `sluice exec main -- moon run plugin-herdr:test-sh` passes.
 
 ## 3. The herdr suite runs in four groups
 
