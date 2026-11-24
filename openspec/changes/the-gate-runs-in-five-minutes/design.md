@@ -212,13 +212,43 @@ test's waits; it is reported, and the test is left as it is.
 
 ### D6. A round in a test starts fewer processes
 
-**Recommended, measured first.** Points 1 to 3 of D5 move time, but
-the work stays: about 8,600 seconds of test time, which the host's
-cores share. Task 4.3 counts the processes one `sluice step` of the
-`pull_requests` fixture starts, the `git` calls among them, and where
-its time goes, and cuts what the test does not need: a second
-process per command where one serves, a fetch the fixture's remote
-cannot have moved. The gain is not known until it is measured.
+**Recommended.** Measured on deneb on 2026-11-24, outside the sandbox,
+`pull_requests s56_a_request_the_operator_withdrew_waits_for_a_new_head`
+(28 s alone; 40 s with every `git` call logged), its processes sampled
+every 50 ms:
+
+| Process | Count | Time alive |
+|---|---|---|
+| `sluice step main` | 5 | 5.3 to 7.7 s each, 31.6 s in all |
+| `sluice host` | 1 for the test | the whole test |
+| `git`, all callers | 436 | |
+| of them, started by `sluice host` | 317 | |
+| `git fetch` of `refs/sluice/state/main` | 147 | about 80 ms each |
+| other fetches | 47 | about 90 ms each |
+| `sluice status main` | 6 | 0.2 to 1.5 s |
+| `sh check.sh`, with `sleep 5` for `slow` | 2 | 5 s each |
+
+A step that runs no check takes 5.3 to 6.3 s, and `sluice host` makes
+31 to 36 fetches of the remote during it, 40 to 90 `git` calls in all.
+`git` is busy for about half the step; the rest is the gaps between
+calls, 30 to 70 ms each, which is the host's work between them. Each
+fetch also starts `git-remote-https` and the credential helper, a
+`sluice credential` process: three processes for each fetch.
+
+The cause: the records seam's `read` (`remote_refs.rs`, `read_remote`)
+fetches `refs/sluice/state/<branch>` every time it is called, and a
+round reads the branch's state about thirty times. `read_held`, which
+reads the state as last fetched with no fetch, exists beside it.
+
+The cut: a round fetches a branch's state once, at its start, and reads
+it as fetched from then on; a write stays a leased push with the
+expected old commit (rule core.5), and only a push the remote refused
+fetches again. A host on GitHub saves the same calls over the network,
+each slower than a local fetch, and from the app's allowance (rule
+core.29). Expected: a step's fetches from about 33 to 2 or 3, its
+`git` calls about halved, an idle step from about 4.4 s unwrapped to
+about 2 s, and the `pull_requests` tests, 69% of `cli:tools`, about
+half as long.
 
 ### D7. Where the pull request scenarios run
 
@@ -270,7 +300,7 @@ counting the wait for room:
 | The herdr plugin alone | 9 min | about 2 min (D2, D3), measured |
 | A crate's `moon.yml` and its code | 9 to 10 min, every task | as a crate change (D1) |
 | A crate of sluice, D5 alone | 10 to 11 min | 8 to 9 min |
-| A crate of sluice, D5 and D6 | 10 to 11 min | not known until task 4.3 |
+| A crate of sluice, D5 and D6 | 10 to 11 min | about 6 to 7 min, estimated from D6 |
 
 ## Risks
 

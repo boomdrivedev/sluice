@@ -30,7 +30,7 @@ and written into design.md's table of expected gate time.
 
 - [x] 4.1 In `crates/sluice/tests/profiles/pull_requests.rs`, `step_until` and the other loops wait 50 milliseconds between steps; in `crates/sluice/tests/peers.rs` and `crates/sluice/tests/remote_branch.rs`, their loops the same (design D5). True when `sluice exec main -- moon run cli:tools` passes.
 - [x] 4.2 `s56_a_refused_request_waits_for_its_submitter` is three tests, one for each scenario. True when `sluice exec main -- cargo nextest run -p sluice --features tools --test pull_requests -E 'test(s56)'` passes.
-- [ ] 4.3 Count the processes one `sluice step` of the `pull_requests` fixture starts, the `git` calls among them, and where its time goes, and write it into design D6. True when design D6 gives them, measured.
+- [x] 4.3 Count the processes one `sluice step` of the `pull_requests` fixture starts, the `git` calls among them, and where its time goes, and write it into design D6. True when design D6 gives them, measured.
 
 ## 5. moon's results are kept for a replay
 
