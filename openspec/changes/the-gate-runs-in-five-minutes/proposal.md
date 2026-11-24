@@ -108,8 +108,8 @@ None.
   the split scenarios and the polls.
 - `devenv.nix`, `crates/sluice/src/profiles/checks.rs`: where moon
   keeps its archives and its shared store under the sandbox.
-- Records and rules: a new record in `docs/adr/` for the `moon.yml`
-  reading.
+- Decisions: design D1 proposed in Boom,
+  `a-projects-own-moon-yml-affects-that-projects-checks@07db0a2d6188`.
 - Sources: clauses 15, 16, 36, 70, 108, 140, C.2; rules core.9, core.21,
   core.35; `a-leaked-child-fails-its-test@9a82a5147ba6`.
 
@@ -127,6 +127,5 @@ plugins/herdr/tests/run.sh
 plugins/herdr/tests/dash.sh
 plugins/herdr/bin/watch.sh
 devenv.nix
-docs/adr/**
 openspec/changes/the-gate-runs-in-five-minutes/**
 ```
