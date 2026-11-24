@@ -53,6 +53,9 @@ _: {
     # dash, and a parse error fails it.
     "plugins/herdr/lib/*.awk"
     "plugins/herdr/lib/*.jq"
+    # The design model, in Allium: Allium has no formatter; models:typecheck
+    # runs its checker over each model.
+    "*.allium"
   ];
 
   programs.rustfmt.enable = true;

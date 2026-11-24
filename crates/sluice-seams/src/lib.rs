@@ -119,7 +119,7 @@ pub fn read_refused(e: &anyhow::Error) -> Option<&ReadRefused> {
 /// Every caller asks for what it reads: a candidate's verdict its checks'
 /// keys and its combination, a session run its plan's keys, a verdict view
 /// its submission's combination, a landing's second reading the
-/// combinations it lands and their keys, a set-aside the task it names.
+/// combinations it lands and their keys.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ResultAsk {
     #[serde(default, skip_serializing_if = "BTreeSet::is_empty")]
@@ -1719,7 +1719,7 @@ pub struct VerdictView {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub runs: Vec<RunShown>,
     /// One per required check on each system: failed, flaky, could not
-    /// run, missing, timed out and set aside first, then by name.
+    /// run, missing and timed out first, then by name.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub rows: Vec<Row>,
     /// ADR 0028: while its combination is under test, its tasks as last
@@ -1824,9 +1824,6 @@ pub struct Row {
     /// check that ran, or was left without a result, on its own.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub failed_by: Vec<String>,
-    /// Could-not-run-1 116: why its result was set aside.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub set_aside: Option<String>,
     /// 20: where what it printed is kept.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub log: Option<String>,
@@ -1840,7 +1837,6 @@ pub enum RowResult {
     NotRun,
     Missing,
     TimedOut,
-    SetAside,
     Passed,
 }
 
@@ -2223,13 +2219,6 @@ pub trait State {
     fn add_signed(&self, branch: &str, _signer: &str, _path: &str, _record: &[u8]) -> Result<()> {
         anyhow::bail!("{branch}'s records hold no signer's runs, since its policy names no signer")
     }
-
-    /// Could-not-run-1 116: the results set aside, one JSON document per
-    /// line, beside the results log and never in it.
-    fn set_asides(&self) -> Result<Vec<u8>>;
-
-    /// Could-not-run-1 116: append one set-aside, under the records' lock.
-    fn set_aside(&self, line: &[u8]) -> Result<()>;
 
     /// 20: keep a failed candidate's task outputs, readable with no sluice
     /// running (26); the answer says where each is. Only the last

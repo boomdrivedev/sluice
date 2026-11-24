@@ -372,6 +372,25 @@ fn bind_read(
     reading: Reading,
     runtime: tokio::runtime::Handle,
 ) -> Result<crate::profiles::Bound> {
+    bind_read_with(
+        hosting,
+        repository,
+        folder,
+        reading,
+        runtime,
+        crate::retry::Policy::command(),
+    )
+}
+
+/// [`bind_read`], every call to a remote under `policy` (134).
+fn bind_read_with(
+    hosting: &Hosting,
+    repository: &Path,
+    folder: &Path,
+    reading: Reading,
+    runtime: tokio::runtime::Handle,
+    policy: crate::retry::Policy,
+) -> Result<crate::profiles::Bound> {
     // A read reads the host's settings as its command read them as it
     // started; a round takes a change up only between rounds (rule
     // core.54).
@@ -381,7 +400,7 @@ fn bind_read(
         folder,
         std::env::current_exe()?,
         settings,
-        Rc::new(crate::retry::Policy::command().recording_where_set()),
+        Rc::new(policy.recording_where_set()),
         &hosting.tokens,
     )?;
     let bound = crate::profiles::Bound {
@@ -389,17 +408,29 @@ fn bind_read(
             .state
             .reading_results(crate::profiles::records::ResultsFrom::Indexed)
             .seeded(reading.stale.clone()),
-        host_process: Box::new(Answering {
-            room: hosting.room.clone(),
-            named: hosting.named.clone(),
-            reading,
-            tasks: hosting.tasks.clone(),
-            repository: repository.to_path_buf(),
-            runtime,
-        }),
+        host_process: answering(hosting, repository, reading, runtime),
         ..bound
     };
     Ok(bound)
+}
+
+/// The host process as a call of `sluice host` on `repository` asks it:
+/// `reading`, a reading afresh where a forecast asks one, and the room as
+/// it holds it; nothing it is told, and no socket of its own.
+pub(crate) fn answering(
+    hosting: &Hosting,
+    repository: &Path,
+    reading: Reading,
+    runtime: tokio::runtime::Handle,
+) -> Box<dyn HostProcess> {
+    Box::new(Answering {
+        room: hosting.room.clone(),
+        named: hosting.named.clone(),
+        reading,
+        tasks: hosting.tasks.clone(),
+        repository: repository.to_path_buf(),
+        runtime,
+    })
 }
 
 /// Answer a wait's step (design D8): the folder resolved and the
@@ -424,18 +455,61 @@ pub(crate) async fn wait(
         .await;
     let held = hosting.clone();
     let runtime = tokio::runtime::Handle::current();
+    // 134: a forge read of a pull request's step is tried again until the
+    // wait's own time runs out, as the wait tried it (the change
+    // `sluice-host-makes-each-change`, design D2).
+    let until = ask
+        .deadline
+        .as_deref()
+        .and_then(|d| d.parse::<chrono::DateTime<chrono::Utc>>().ok())
+        .map(|d| {
+            let left = (d - chrono::Utc::now()).to_std().unwrap_or_default();
+            std::time::Instant::now() + left
+        });
     let stepped = tokio::task::spawn_blocking(move || {
         let (ran, stderr) = crate::telemetry::capturing(|| {
-            crate::caller::as_caller(caller, || -> Result<(crate::WaitStepped, Vec<u8>)> {
-                let bound = bind_read(&held, &repository, &folder, reading, runtime)?;
-                let clock = super::clock::TokioClock::new();
-                let s = sluice_core::Sluice::new(bound.seams(), &clock)
-                    .as_peer(crate::exec::Host::peer(&bound))
-                    .holding();
-                let mut out = Vec::new();
-                let stepped = crate::wait_step(&s, &bound, &*bound.pulls, &clock, &ask, &mut out)?;
-                Ok((stepped, out))
-            })
+            let within = Some(folder.clone());
+            crate::caller::in_folder(
+                caller,
+                within,
+                || -> Result<(crate::WaitStepped, Vec<u8>)> {
+                    let policy = crate::retry::Policy::waiting(until);
+                    let bound =
+                        bind_read_with(&held, &repository, &folder, reading, runtime, policy)?;
+                    // 136: the requests the waits on the repository follow,
+                    // as the last step left what GitHub said of them.
+                    bound.pulls.remember(held.followed(&repository));
+                    let clock = super::clock::TokioClock::new();
+                    let s = sluice_core::Sluice::new(bound.seams(), &clock)
+                        .as_peer(crate::exec::Host::peer(&bound))
+                        .holding();
+                    let mut out = Vec::new();
+                    // 134: the spent allowance the wait has said already,
+                    // which this step says no more.
+                    let told = ask
+                        .pull
+                        .as_ref()
+                        .and_then(|p| p.told)
+                        .or(ask.pulls.as_ref().and_then(|p| p.told));
+                    let ask = past_its_time(ask, chrono::Utc::now());
+                    let (stepped, told) = crate::caller::telling(told, || {
+                        crate::wait_step(&s, &bound, &*bound.pulls, &clock, &ask, &mut out)
+                    });
+                    held.keep_followed(&repository, bound.pulls.remembered());
+                    let stepped = match stepped? {
+                        crate::WaitStepped::Pull(mut p) => {
+                            p.told = told;
+                            crate::WaitStepped::Pull(p)
+                        }
+                        crate::WaitStepped::Pulls(mut p) => {
+                            p.told = told;
+                            crate::WaitStepped::Pulls(p)
+                        }
+                        other => other,
+                    };
+                    Ok((stepped, out))
+                },
+            )
         });
         (ran, stderr)
     })
@@ -459,8 +533,18 @@ pub(crate) async fn wait(
             own,
             follows,
             said: String::from_utf8_lossy(&out).into_owned(),
+            stderr,
         }),
-        Ok((crate::WaitStepped::PullRequest, _)) => Answer::Waited(WaitStep::PullRequest),
+        Ok((crate::WaitStepped::Pull(pull), out)) => Answer::Waited(WaitStep::Pull {
+            pull: Box::new(pull),
+            said: String::from_utf8_lossy(&out).into_owned(),
+            stderr,
+        }),
+        Ok((crate::WaitStepped::Pulls(pulls), out)) => Answer::Waited(WaitStep::Pulls {
+            pulls: Box::new(pulls),
+            said: String::from_utf8_lossy(&out).into_owned(),
+            stderr,
+        }),
         Err(e) => {
             let mut output = failed(&format!("{e:#}"), json);
             stderr.append(&mut output.stderr);
@@ -468,6 +552,27 @@ pub(crate) async fn wait(
             Answer::Waited(WaitStep::Ended(output))
         }
     }
+}
+
+/// 134, 136: a wait asks the forge nothing past its own time. A pull
+/// request's step that reaches `sluice host` once the wait's deadline has
+/// passed, its bound and its reading waited for, is its last: it says the
+/// request as it stands and exits as out of time, reading no forge, so a
+/// wait's reads of its request fit within its `--timeout` however long a
+/// step took to arrive (the change `sluice-host-makes-each-change`,
+/// design D2).
+fn past_its_time(
+    mut ask: super::protocol::WaitAsk,
+    now: chrono::DateTime<chrono::Utc>,
+) -> super::protocol::WaitAsk {
+    let deadline = ask
+        .deadline
+        .as_deref()
+        .and_then(|d| d.parse::<chrono::DateTime<chrono::Utc>>().ok());
+    if ask.stopped.is_none() && ask.pull.is_some() && deadline.is_some_and(|d| now >= d) {
+        ask.stopped = Some(crate::WAITING);
+    }
+    ask
 }
 
 /// The host process as a read's call asks it (design D3): the reading the
@@ -560,5 +665,38 @@ impl HostProcess for Answering {
         _: &super::protocol::WaitAsk,
     ) -> Result<super::protocol::WaitStep> {
         Err(anyhow!("a read asks no wait"))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::host_process::protocol::{PullWait, WaitAsk};
+
+    /// 134, 136: a pull request's step that reaches `sluice host` past
+    /// its wait's deadline reads no forge, and one within it, or a wait's
+    /// first step, steps as asked.
+    #[test]
+    fn a_pull_step_past_its_waits_time_reads_no_forge() {
+        let now = chrono::Utc::now();
+        let ask = |deadline: chrono::DateTime<chrono::Utc>, pull: bool| WaitAsk {
+            pull: pull.then(|| Box::new(PullWait::default())),
+            deadline: Some(deadline.to_rfc3339()),
+            ..Default::default()
+        };
+        let late = past_its_time(ask(now - chrono::TimeDelta::seconds(1), true), now);
+        assert_eq!(late.stopped, Some(crate::WAITING));
+        let within = past_its_time(ask(now + chrono::TimeDelta::seconds(1), true), now);
+        assert_eq!(within.stopped, None);
+        let first = past_its_time(ask(now - chrono::TimeDelta::seconds(1), false), now);
+        assert_eq!(
+            first.stopped, None,
+            "a wait's first step is taken whatever its time"
+        );
+        let stopped = WaitAsk {
+            stopped: Some(crate::STOPPED),
+            ..ask(now - chrono::TimeDelta::seconds(1), true)
+        };
+        assert_eq!(past_its_time(stopped, now).stopped, Some(crate::STOPPED));
     }
 }

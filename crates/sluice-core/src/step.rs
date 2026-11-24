@@ -119,24 +119,6 @@ impl Unmet {
     }
 }
 
-/// 152, record 0124 (design D10): what the operator's push of a branch's
-/// held landing came to.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub enum PushedHeld {
-    /// The branch holds no landing the forge refused: nothing is pushed.
-    Nothing,
-    /// The forge took it: its submissions landed as the same landing.
-    Landed { ids: Vec<u64>, to: Rev },
-    /// The forge refused it again: held with its new words.
-    Refused { ids: Vec<u64>, words: String },
-    /// The branch had moved: the landing is dropped and its submissions
-    /// form again, as any landing that finds the branch elsewhere (24).
-    Elsewhere { ids: Vec<u64>, found: Option<Rev> },
-    /// Submissions `left` of it had left the queue: nothing is pushed, the
-    /// landing is dropped and `back` form again (24; rule core.48).
-    Dropped { left: Vec<u64>, back: Vec<u64> },
-}
-
 /// Design D4: what starting a claimed run came to.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Started {
@@ -641,14 +623,26 @@ impl Sluice<'_> {
     /// 24, 45, 46: move the branch from exactly the revision the landing
     /// was formed on; a branch found elsewhere refuses the landing, which
     /// is reported and never retried (rule core.5).
+    ///
+    /// 152, record 0124 as amended 2026-11-23 (the change
+    /// `sluice-host-makes-each-change`, design D3): a landing the forge
+    /// refused is pushed again at each round, as the same landing, before
+    /// the round forms anything. Taken, its submissions land as the
+    /// landing it formed, with no run; refused again in the words it was
+    /// held with, nothing is written; refused in other words, they are
+    /// written on the held landing and logged once more. One of whose
+    /// submissions has left the queue is dropped first, pushing nothing,
+    /// the rest back in the queue (24; rule core.48).
     fn perform_landing(&self, branch: &str) -> Result<()> {
         let line = self.read_line(branch)?;
         let Some(intent) = line.doc.landing.clone() else {
             return Ok(());
         };
-        // 152, rule core.5, record 0124 (design D10): a landing the forge
-        // refused is never pushed again by itself.
-        if intent.refused.is_some() {
+        if intent.refused.is_some()
+            && self
+                .update(branch, |l| Ok(l.drop_left_landing()))?
+                .is_some()
+        {
             return Ok(());
         }
         let span = info_span!(
@@ -799,11 +793,19 @@ impl Sluice<'_> {
                 }
                 Ok(())
             }
+            // 152, record 0124 as amended 2026-11-23 (design D3): refused
+            // again in the words it is held with: nothing new is written,
+            // so the refusal is logged once for each of the forge's words.
+            Moved::Refused(words) if intent.refused.as_ref().is_some_and(|r| r.words == words) => {
+                span.record("sluice.outcome", "forge_refused");
+                Ok(())
+            }
             Moved::Refused(words) => {
                 // 152, rule core.5, record 0124 (design D10): the forge
                 // refused the landing with the branch where it expected
                 // it: held with the forge's words, its submissions refused,
-                // logged once, and pushed again only on the operator's word.
+                // logged once for each of its words, and pushed again at
+                // the next round.
                 span.record("sluice.outcome", "forge_refused");
                 self.update(branch, |l| {
                     if l.doc.landing.as_ref() != Some(&intent) {
@@ -855,7 +857,7 @@ impl Sluice<'_> {
                     l.doc.landing = None;
                     for id in &intent.ids {
                         let s = l.sub_mut(*id);
-                        if s.state == State::Landing {
+                        if matches!(s.state, State::Landing | State::Refused) {
                             s.state = State::Queued;
                             s.tested = None;
                             s.result = None;
@@ -874,66 +876,6 @@ impl Sluice<'_> {
                 })
             }
         }
-    }
-
-    /// 152, rule core.5, record 0124 (design D10): the operator's word that
-    /// `branch`'s landing the forge refused be pushed again: under the
-    /// branch's lock its refusal is cleared, its submissions landing again,
-    /// and the landing is run once, as a round runs it: taken, they land as
-    /// the same landing; refused again, it is held with the forge's new
-    /// words. A branch with no landing held pushes nothing, and a held
-    /// landing one of whose submissions has left the queue is dropped,
-    /// pushing nothing, the rest back in the queue (24; rule core.48).
-    pub fn push_held(&self, branch: &str) -> Result<PushedHeld> {
-        let _lock = self.seams.state.wait_lock(branch)?;
-        let line = self.read_line(branch)?;
-        let Some(intent) = line.doc.landing.clone().filter(|l| l.refused.is_some()) else {
-            return Ok(PushedHeld::Nothing);
-        };
-        let left = self.update(branch, |l| Ok(l.drop_left_landing()))?;
-        if let Some(left) = left {
-            let back = intent
-                .ids
-                .iter()
-                .copied()
-                .filter(|id| !left.contains(id))
-                .collect();
-            return Ok(PushedHeld::Dropped { left, back });
-        }
-        self.update(branch, |l| {
-            if let Some(landing) = l.doc.landing.as_mut() {
-                landing.refused = None;
-            }
-            for id in &intent.ids {
-                let s = l.sub_mut(*id);
-                if s.state == State::Refused {
-                    s.state = State::Landing;
-                }
-            }
-            Ok(())
-        })?;
-        self.perform_landing(branch)?;
-        let line = self.read_line(branch)?;
-        let ids = intent.ids.clone();
-        Ok(match &line.doc.landing {
-            Some(l) => match &l.refused {
-                Some(r) => PushedHeld::Refused {
-                    ids,
-                    words: r.words.clone(),
-                },
-                None => bail!("{branch}'s landing is still unsettled after its push"),
-            },
-            None if ids
-                .iter()
-                .all(|id| line.subs.get(id).is_none_or(|s| s.state == State::Landed)) =>
-            {
-                PushedHeld::Landed { ids, to: intent.to }
-            }
-            None => PushedHeld::Elsewhere {
-                ids,
-                found: self.seams.branch.read(branch)?,
-            },
-        })
     }
 
     /// 50, 51: push each outcome's notice to its submission's session

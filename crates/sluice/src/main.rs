@@ -158,15 +158,30 @@ fn main() {
     if let Some(code) = read(&cli) {
         std::process::exit(code);
     }
+    // A change is made by sluice's host process: the command sends its
+    // folder, its arguments and its caller's session, and prints the
+    // answer, and binds no repository (the change
+    // `sluice-host-makes-each-change`, design D1, D2).
+    if let Some(code) = change(&cli) {
+        std::process::exit(code);
+    }
     // A watch follows sluice's host process on a subscription, and binds
     // no repository either (design D7).
     if let Some(code) = watch(&cli) {
         std::process::exit(code);
     }
     // A wait follows sluice's host process, which takes each of its steps,
-    // and binds no repository; one that follows a pull request goes on
-    // below, as before (design D8).
+    // a pull request's among them, and binds no repository (design D8 of
+    // `sluice-host-answers-every-read`, D2 of
+    // `sluice-host-makes-each-change`).
     if let Some(code) = wait(&cli) {
+        std::process::exit(code);
+    }
+    // A session's command runs in sluice's host process: the command sends
+    // its folder and prints what the host process sends as it comes, and
+    // binds no repository (the change `sluice-host-runs-a-sessions-checks`,
+    // design D1).
+    if let Some(code) = session(&cli) {
         std::process::exit(code);
     }
     let retry = Rc::new(retry(&cli));
@@ -276,7 +291,7 @@ fn main() {
         finish(telemetry);
         std::process::exit(code);
     }
-    let opened = repository_dir(&cli).and_then(|dir| {
+    let opened = repository_dir().and_then(|dir| {
         let program = std::env::current_exe()?;
         let bound = Bound::open_with(&dir, program.clone(), instance, retry.clone())?;
         // Design D17: a command asks sluice's host process for results.
@@ -285,6 +300,15 @@ fn main() {
                 .state
                 .reading_results(sluice::profiles::records::ResultsFrom::Asked),
             ..bound
+        };
+        // Record 0120 as amended 2026-11-17 (rule core.10): a worktree's
+        // release that no host process answered asks none.
+        let bound = match &cli.command {
+            Some(Command::Release { name: None, .. }) => sluice::profiles::Bound {
+                host_process: Box::new(sluice::host_process::ask::Unasked),
+                ..bound
+            },
+            _ => bound,
         };
         // Record 0119 (design D11; rule core.49): a pool's job is its
         // runner's one work, and holds its run's room in its own process,
@@ -429,8 +453,235 @@ fn read_request(cli: &Cli, folder: &Path) -> Option<sluice::host_process::protoc
             confirm: *confirm,
             new: *new,
         },
+        Some(Command::Previews { json }) => Request::Previews {
+            folder: folder.to_path_buf(),
+            caller: sluice::caller::here(),
+            json: *json,
+        },
         _ => return None,
     })
+}
+
+/// The request a change command sends to sluice's host process, naming its
+/// caller's session and trace context; `None` for a command that is no
+/// change (the change `sluice-host-makes-each-change`, design D1).
+fn change_request(cli: &Cli, folder: &Path) -> Option<sluice::host_process::protocol::Request> {
+    use sluice::host_process::protocol::{Request, SubmitAsk};
+    let folder = folder.to_path_buf();
+    let caller = sluice::caller::traced();
+    Some(match &cli.command {
+        Some(Command::Submit {
+            branch,
+            after,
+            priority,
+            no_wait,
+            subject,
+            check: false,
+            head,
+            status,
+            worktree,
+            json,
+            confirm,
+            confirm_landing,
+        }) => Request::Submit {
+            folder,
+            caller,
+            submit: SubmitAsk {
+                branch: branch.clone(),
+                after: after.clone(),
+                priority: *priority,
+                no_wait: *no_wait,
+                subject: subject.clone(),
+                head: head.clone(),
+                status: *status,
+                worktree: worktree.clone(),
+                json: *json,
+                confirm: *confirm,
+                confirm_landing: *confirm_landing,
+            },
+        },
+        Some(Command::Amend {
+            id,
+            after,
+            priority,
+            by,
+            json,
+            branch,
+        }) => Request::Amend {
+            folder,
+            caller,
+            id: *id,
+            after: after.clone(),
+            priority: *priority,
+            by: by.clone(),
+            json: *json,
+            branch: branch.clone(),
+        },
+        Some(Command::Withdraw {
+            id,
+            by,
+            json,
+            branch,
+        }) => Request::Withdraw {
+            folder,
+            caller,
+            id: *id,
+            by: by.clone(),
+            json: *json,
+            branch: branch.clone(),
+        },
+        Some(Command::Confirm {
+            keys,
+            who,
+            worktree,
+            json,
+        }) => Request::Confirm {
+            worktree: from_folder(&folder, worktree),
+            folder,
+            caller,
+            keys: keys.clone(),
+            who: who.clone(),
+            json: *json,
+        },
+        Some(Command::Release {
+            name: Some(name),
+            accept_failure,
+            json,
+            ..
+        }) => Request::Release {
+            folder,
+            caller,
+            name: name.clone(),
+            accept_failure: *accept_failure,
+            json: *json,
+        },
+        Some(Command::Branch { command }) => Request::Branch {
+            folder,
+            caller,
+            branch: command.clone(),
+        },
+        Some(Command::Protect { remove, json }) => Request::Protect {
+            folder,
+            caller,
+            remove: *remove,
+            json: *json,
+        },
+        _ => return None,
+    })
+}
+
+/// A change, made by sluice's host process, started where none answers:
+/// its output printed, and its exit code; `None` for a command that is no
+/// change. A waiting submit then follows the wait `sluice host` names, and
+/// `sluice step` prints the round `sluice host` took. Where no host process
+/// answers, the command says so and exits 3, and changes nothing itself
+/// (the change `sluice-host-makes-each-change`, design D1, D2, D5).
+fn change(cli: &Cli) -> Option<i32> {
+    let folder = match std::env::current_dir() {
+        Ok(f) => f,
+        Err(e) => {
+            let e = anyhow::Error::from(e);
+            eprintln!("sluice: {e:#}");
+            tell_json(cli.json(), &e);
+            return Some(3);
+        }
+    };
+    let step = match &cli.command {
+        Some(Command::Step { branch, json }) => Some((branch.clone(), *json)),
+        _ => None,
+    };
+    let request = match step {
+        Some(_) => None,
+        None => Some(change_request(cli, &folder)?),
+    };
+    // 124: a command still reads the host's settings in full, and refuses
+    // a field it does not know, naming the file and the field.
+    if let Err(e) = Instance::read() {
+        eprintln!("sluice: {e:#}");
+        tell_json(cli.json(), &e);
+        return Some(3);
+    }
+    let did_not = |e: anyhow::Error| {
+        let e = e.context("sluice's host process did not answer");
+        eprintln!("sluice: {e:#}");
+        tell_json(cli.json(), &e);
+        Some(3)
+    };
+    let client = match sluice::host_process::client::Client::host() {
+        Ok(c) => c,
+        Err(e) => return did_not(e),
+    };
+    let mut out = std::io::stdout();
+    if let Some((branch, json)) = step {
+        return match client.step(&folder, &branch) {
+            Ok(stepped) => match sluice::say_step(&stepped, json, &mut out) {
+                Ok(code) => Some(code),
+                Err(e) => did_not(e),
+            },
+            Err(e) => did_not(e),
+        };
+    }
+    let request = request?;
+    let printed = |o: &sluice::host_process::protocol::Output| {
+        let mut out = std::io::stdout();
+        let _ = out.write_all(o.stdout.as_bytes());
+        let _ = out.flush();
+        for line in &o.stderr {
+            eprintln!("{line}");
+        }
+    };
+    if !matches!(
+        request,
+        sluice::host_process::protocol::Request::Submit { .. }
+    ) {
+        return match client.output(&request) {
+            Ok(output) => {
+                printed(&output);
+                Some(output.code)
+            }
+            Err(e) => did_not(e),
+        };
+    }
+    let submitted = match client.submitted(&request) {
+        Ok(s) => s,
+        Err(e) => return did_not(e),
+    };
+    printed(&submitted.output);
+    let Some(ask) = submitted.wait else {
+        return Some(submitted.output.code);
+    };
+    // The waiting submit follows `sluice host`, which takes each step of
+    // its wait (design D2).
+    let every = sluice::tick(cli.command.as_ref());
+    let skipped = Skipped::new(every);
+    let (clock, pause): (&dyn Clock, &dyn Pause) = match std::env::var(ROUND_SLEEP_VAR).as_deref() {
+        Ok("record") => (&skipped, &skipped),
+        _ => (&SystemClock, &Sleep(every)),
+    };
+    let process = sluice::host_process::Socketed::default();
+    let followed = sluice::stop_on_interrupt().and_then(|()| {
+        sluice::follow_wait(
+            &process,
+            None,
+            folder,
+            ask,
+            submitted
+                .queued
+                .then_some(sluice_core::records::State::Queued),
+            None,
+            clock,
+            pause,
+            &mut out,
+        )
+    });
+    match followed {
+        Ok(code) => Some(code),
+        Err(e) => {
+            sluice::telemetry::error(&format!("sluice: {e:#}"));
+            tell_json(cli.json(), &e);
+            Some(3)
+        }
+    }
 }
 
 /// A read, asked of sluice's host process, started where none answers: its
@@ -476,6 +727,133 @@ fn read(cli: &Cli) -> Option<i32> {
     }
 }
 
+/// The request a session's command sends to sluice's host process; `None`
+/// for any other command (the change `sluice-host-runs-a-sessions-checks`,
+/// design D1, D2).
+fn session_request(cli: &Cli, folder: &Path) -> Option<sluice::host_process::protocol::Request> {
+    use sluice::host_process::protocol::Request;
+    let caller = sluice::caller::traced();
+    let run_env = sluice::profiles::checks::run_env_here();
+    let otel = cli.choices();
+    let folder_of = |path: &str| from_folder(folder, path);
+    Some(match &cli.command {
+        Some(Command::Exec {
+            branch,
+            command,
+            worktree,
+            json,
+            release,
+        }) => Request::Exec {
+            folder: folder.to_path_buf(),
+            caller,
+            run_env,
+            otel: otel.clone(),
+            branch: branch.clone(),
+            command: command.clone(),
+            worktree: folder_of(worktree),
+            json: *json,
+            release: *release,
+        },
+        Some(Command::Preview {
+            branch,
+            revision,
+            wait,
+            json,
+        }) => Request::Preview {
+            folder: folder.to_path_buf(),
+            caller,
+            run_env,
+            otel: otel.clone(),
+            branch: branch.clone(),
+            revision: revision.clone(),
+            wait: *wait,
+            json: *json,
+        },
+        Some(Command::Equip { branch, at, json }) => Request::Equip {
+            folder: folder.to_path_buf(),
+            caller,
+            run_env,
+            otel: otel.clone(),
+            branch: branch.clone(),
+            at: at.clone(),
+            json: *json,
+        },
+        Some(Command::Release {
+            name: None,
+            worktree,
+            accept_failure,
+            json,
+        }) => Request::ReleaseWorktree {
+            folder: folder.to_path_buf(),
+            caller,
+            run_env,
+            otel: otel.clone(),
+            worktree: folder_of(worktree),
+            accept_failure: *accept_failure,
+            json: *json,
+        },
+        _ => return None,
+    })
+}
+
+/// A session's command, run by sluice's host process, started where none
+/// answers: what it writes printed as it comes, and its exit code; `None`
+/// for any other command. A host process that ends before the command
+/// does is said, and the command exits 3 (the change
+/// `sluice-host-runs-a-sessions-checks`, design D1, D4).
+fn session(cli: &Cli) -> Option<i32> {
+    let folder = match std::env::current_dir() {
+        Ok(f) => f,
+        Err(e) => {
+            let e = anyhow::Error::from(e);
+            eprintln!("sluice: {e:#}");
+            tell_json(cli.json(), &e);
+            return Some(3);
+        }
+    };
+    let request = session_request(cli, &folder)?;
+    // 124: a command still reads the host's settings in full, and refuses
+    // a field it does not know, naming the file and the field.
+    if let Err(e) = Instance::read() {
+        eprintln!("sluice: {e:#}");
+        tell_json(cli.json(), &e);
+        return Some(3);
+    }
+    // Record 0120 as amended 2026-11-17 (rule core.10): a worktree's
+    // release asks sluice's host process only where one answers; where
+    // none does, it frees what it reads of the records itself, below, and
+    // starts none.
+    let release = matches!(
+        request,
+        sluice::host_process::protocol::Request::ReleaseWorktree { .. }
+    );
+    if let Err(e) = sluice::stop_on_interrupt() {
+        eprintln!("sluice: {e:#}");
+        tell_json(cli.json(), &e);
+        return Some(3);
+    }
+    let ran = match release {
+        // Where no host process has run, or none answers, the release goes
+        // on below, making nothing to find one.
+        true => match sluice::host_process::client::Client::found() {
+            Ok(Some(c)) => match c.command_if_answering(&request) {
+                Ok(None) => return None,
+                ran => ran.map(|code| code.unwrap_or(0)),
+            },
+            Ok(None) | Err(_) => return None,
+        },
+        false => sluice::host_process::client::Client::host().and_then(|c| c.command(&request)),
+    };
+    Some(match ran {
+        Ok(code) => code,
+        Err(e) => {
+            eprintln!("sluice: {e:#}");
+            tell_json(cli.json(), &e);
+            3
+        }
+    })
+}
+
 /// `sluice overview --json --watch`, with `--stdin` or without, as a
 /// client of a subscription to sluice's host process: its exit; `None` for
 /// any other command (the change `sluice-host-answers-every-read`, design
@@ -518,8 +896,8 @@ fn watch(cli: &Cli) -> Option<i32> {
 }
 
 /// `sluice wait` as a client of sluice's host process: its exit; `None` for
-/// any other command, and for a wait that follows a pull request (the
-/// change `sluice-host-answers-every-read`, design D8).
+/// any other command (the change `sluice-host-answers-every-read`, design
+/// D8; the change `sluice-host-makes-each-change`, design D2).
 fn wait(cli: &Cli) -> Option<i32> {
     let Some(Command::Wait {
         target,
@@ -568,8 +946,7 @@ fn wait(cli: &Cli) -> Option<i32> {
             )
         });
     match followed {
-        Ok(Some(code)) => Some(code),
-        Ok(None) => None,
+        Ok(code) => Some(code),
         Err(e) => {
             sluice::telemetry::error(&format!("sluice: {e:#}"));
             tell_json(*json, &e);
@@ -770,19 +1147,11 @@ fn start_afresh(
 }
 
 /// The folder the repository is opened from: the one the command runs
-/// in, but for `sluice equip`, which equips the worktree holding that
-/// folder (147), the worktree's top where git finds one, so it runs from
-/// any folder of the worktree. Every other command opens the folder it
-/// runs in, so none takes a folder below a worktree's top for the
-/// worktree.
-fn repository_dir(cli: &Cli) -> anyhow::Result<PathBuf> {
-    let dir = std::env::current_dir()?;
-    if let Some(Command::Equip { .. }) = &cli.command {
-        if let Some(top) = sluice::profiles::worktree_top(&dir)? {
-            return Ok(PathBuf::from(top));
-        }
-    }
-    Ok(dir)
+/// in, so none takes a folder below a worktree's top for the worktree.
+/// `sluice equip`, which equips the worktree holding its folder (147), runs
+/// in sluice's host process, which finds the worktree's top.
+fn repository_dir() -> anyhow::Result<PathBuf> {
+    Ok(std::env::current_dir()?)
 }
 
 /// 124: the protection hook, judging the repository git names: `GIT_DIR`

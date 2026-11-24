@@ -93,10 +93,14 @@ impl Setup {
         }
     }
 
+    /// The binary in the repository, this setup's host. The host process
+    /// its commands start passes only when asked, so a listing frees what
+    /// it finds gone with no pass of the host's beside it (design D14).
     fn sluice(&self, args: &[&str]) -> Output {
         support::isolated(&mut Command::new(env!("CARGO_BIN_EXE_sluice")))
             .args(args)
             .current_dir(self.repo.dir())
+            .env("SLUICE_ROUND_SLEEP", "record")
             .env("XDG_CONFIG_HOME", self.config.path())
             .env("XDG_STATE_HOME", self.state.path())
             .env(sluice::profiles::checks::ENGINE_SOCKETS_VAR, &self.sockets)
@@ -200,7 +204,7 @@ fn a_failed_command_is_released_and_kept_listed() {
     let out = s.sluice(&["preview", "bolt/x", &rev, "--wait"]);
     assert_eq!(out.status.code(), Some(1), "{}", text(&out));
     assert!(text(&out).contains("  | cannot start"), "{}", text(&out));
-    assert!(s.held().is_empty());
+    assert!(s.held().is_empty(), "{:?}: {}", s.held(), text(&out));
     assert!(!s.repo.dir().join(".git/sluice/results.jsonl").exists());
     let listed = s.sluice(&["previews", "--json"]);
     let docs: serde_json::Value = serde_json::from_slice(&listed.stdout).unwrap();
@@ -470,4 +474,146 @@ fn a_gone_previews_refused_container_is_tried_again_by_the_next_listing() {
     assert_eq!(s.engine.removed(), ["publishes", "mounts"]);
     assert!(s.held().is_empty());
     assert_eq!(std::fs::read_to_string(&s.log).unwrap(), "tried\n");
+}
+
+/// The pid of `s`'s host process, as its state names it.
+fn host_pid(s: &Setup) -> u32 {
+    let named = std::fs::read(s.state.path().join("sluice/host/version")).unwrap();
+    let named: serde_json::Value = serde_json::from_slice(&named).unwrap();
+    named["pid"].as_u64().unwrap() as u32
+}
+
+/// `pid` and its parents, nearest first.
+fn ancestors(pid: u32) -> Vec<u32> {
+    let mut chain = Vec::new();
+    let mut at = pid as i32;
+    while at > 1 {
+        chain.push(at as u32);
+        at = sluice::workers::parent(at).unwrap_or(0);
+    }
+    chain
+}
+
+/// The pid a preview's command wrote at `path`, once it did.
+fn written_pid(path: &std::path::Path) -> u32 {
+    let until = std::time::Instant::now() + std::time::Duration::from_secs(60);
+    loop {
+        if let Some(pid) = std::fs::read_to_string(path)
+            .ok()
+            .and_then(|t| t.trim().parse().ok())
+        {
+            return pid;
+        }
+        assert!(std::time::Instant::now() < until, "no pid at {path:?}");
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    }
+}
+
+/// resident-workers, "A preview's command" (the change
+/// `sluice-host-runs-a-sessions-checks`, design D1): the parent chain of a
+/// preview's command reaches `sluice host`, below it no `sluice preview`,
+/// and the host's state names its group.
+#[test]
+fn a_previews_command_is_a_worker_of_sluice_host() {
+    let s = Setup::new("preview-worker", 44300, "echo $$ > {place}; exec sleep 30");
+    let rev = s.repo.rev("bolt/x");
+    let client = support::isolated(&mut Command::new(env!("CARGO_BIN_EXE_sluice")))
+        .args(["preview", "bolt/x", &rev, "--json"])
+        .current_dir(s.repo.dir())
+        .env("XDG_CONFIG_HOME", s.config.path())
+        .env("XDG_STATE_HOME", s.state.path())
+        .env(sluice::profiles::checks::ENGINE_SOCKETS_VAR, &s.sockets)
+        .env_remove("SLUICE_AGENT")
+        .env_remove("SLUICE_OTEL")
+        .env_remove("GIT_DIR")
+        .env_remove("GIT_WORK_TREE")
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    let pid = client.id();
+    let sleep = written_pid(&s.place);
+    let chain = ancestors(sleep);
+    let host = host_pid(&s);
+    let at = chain
+        .iter()
+        .position(|p| *p == host)
+        .unwrap_or_else(|| panic!("sluice host {host} is not above it: {chain:?}"));
+    assert!(!chain[..at].contains(&pid), "{chain:?}");
+    let group = nix::unistd::getpgid(Some(nix::unistd::Pid::from_raw(sleep as i32)))
+        .unwrap()
+        .as_raw();
+    assert!(
+        s.state
+            .path()
+            .join("sluice/host/workers")
+            .join(group.to_string())
+            .exists(),
+        "no record of its group {group}"
+    );
+    let out = client.wait_with_output().unwrap();
+    assert!(out.status.success(), "{}", text(&out));
+    // Its stop ends the preview's command, a worker of its own.
+    support::guard::stop_host_processes(s.state.path());
+    assert!(
+        sluice::workers::started(sleep as i32).is_none(),
+        "the preview's command outlived sluice host"
+    );
+}
+
+/// resident-workers (the change `sluice-host-runs-a-sessions-checks`,
+/// design D1; preview 98): a preview's command stays a worker of `sluice
+/// host` after its client ends, until `sluice release` ends it.
+#[test]
+fn a_preview_stays_after_its_client_ends() {
+    let s = Setup::new("preview-stays", 44310, "echo $$ > {place}; exec sleep 60");
+    let rev = s.repo.rev("bolt/x");
+    let out = s.sluice(&["preview", "bolt/x", &rev, "--json"]);
+    assert!(out.status.success(), "{}", text(&out));
+    let doc: serde_json::Value =
+        serde_json::from_slice(&out.stdout).unwrap_or_else(|_| panic!("{}", text(&out)));
+    let name = doc["name"].as_str().unwrap().to_string();
+    let sleep = written_pid(&s.place);
+    std::thread::sleep(std::time::Duration::from_secs(2));
+    assert!(
+        sluice::workers::started(sleep as i32).is_some(),
+        "the preview's command ended with its client"
+    );
+    let out = s.sluice(&["release", &name]);
+    assert!(out.status.success(), "{}", text(&out));
+    let until = std::time::Instant::now() + sluice::workers::STOP_GRACE;
+    while sluice::workers::started(sleep as i32).is_some() {
+        assert!(
+            std::time::Instant::now() < until,
+            "the preview's command outlived its release"
+        );
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    }
+    support::guard::stop_host_processes(s.state.path());
+}
+
+/// resident-reads, "The previews" (the change
+/// `sluice-host-makes-each-change`, design D1): with a preview of `bolt/x`
+/// up, `sluice previews --json` prints the preview as `sluice host`
+/// answers it, which its log names, and exits 0.
+#[test]
+fn the_previews_are_answered_by_sluice_host() {
+    let s = Setup::new("preview-by-host", 42090, "true");
+    let doc = s.preview();
+    let name = doc["name"].as_str().unwrap().to_string();
+    let out = s.sluice(&["previews", "--json"]);
+    assert_eq!(out.status.code(), Some(0), "{}", text(&out));
+    let listed: serde_json::Value =
+        serde_json::from_slice(&out.stdout).unwrap_or_else(|_| panic!("{}", text(&out)));
+    assert_eq!(listed[0]["name"], name.as_str(), "{listed}");
+    // `sluice host` answered it, which its log names.
+    let log = std::fs::read_to_string(s.state.path().join("sluice/host/log")).unwrap_or_default();
+    assert!(
+        log.lines()
+            .any(|l| l.contains(": change {") && l.contains("\"ask\":\"previews\"")),
+        "{log}"
+    );
+    let out = s.sluice(&["release", &name]);
+    assert!(out.status.success(), "{}", text(&out));
 }

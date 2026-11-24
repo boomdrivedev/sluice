@@ -988,14 +988,6 @@ impl State for Unwritten<'_> {
         Ok(())
     }
 
-    fn set_asides(&self) -> Result<Vec<u8>> {
-        self.inner.set_asides()
-    }
-
-    fn set_aside(&self, _line: &[u8]) -> Result<()> {
-        Ok(())
-    }
-
     fn keep_logs(&self, _branch: &str, _candidate: &str, logs: &[TaskLog]) -> Result<Vec<TaskLog>> {
         Ok(logs.to_vec())
     }

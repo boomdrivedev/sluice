@@ -221,10 +221,14 @@ fn queued(name: &str) -> Repo {
     std::fs::write(session.join("s.txt"), "s\n").unwrap();
     git_in(&repo, &session, &["add", "-A"]);
     git_in(&repo, &session, &["commit", "-q", "-m", "s"]);
+    // The host process it starts passes only when asked, so #1 stays
+    // queued for the test (design D14).
     let out = support::isolated(&mut Command::new(sluice()))
         .current_dir(&session)
         .args(["submit", "bolt/x", "--no-wait"])
+        .env("SLUICE_ROUND_SLEEP", "record")
         .env("XDG_CONFIG_HOME", repo.dir().join(".git/no-config"))
+        .env("XDG_STATE_HOME", repo.dir().join(".git/no-state"))
         .stdin(Stdio::null())
         .output()
         .unwrap();
@@ -547,12 +551,17 @@ fn installing_is_idempotent_and_follows_the_binary() {
         modified
     );
 
+    // A sluice at another path, with a state folder of its own, so its
+    // command reaches a `sluice host` of that path, which writes the hook
+    // (the change `sluice-host-makes-each-change`, design D1).
     let moved = repo.dir().join(".git/moved-sluice");
     copy_executable(Path::new(sluice()), &moved);
     let out = run_copied(&moved, || {
         support::isolated(&mut Command::new(&moved))
             .current_dir(repo.dir())
             .arg("protect")
+            .env("XDG_CONFIG_HOME", repo.dir().join(".git/no-config"))
+            .env("XDG_STATE_HOME", repo.dir().join(".git/moved-state"))
             .stdin(Stdio::null())
             .output()
     });
@@ -563,6 +572,51 @@ fn installing_is_idempotent_and_follows_the_binary() {
         .dir()
         .join(".git/hooks/reference-transaction.pre-sluice")
         .exists());
+}
+
+/// resident-changes, "sluice protect" (the change
+/// `sluice-host-makes-each-change`, design D1): `sluice host` makes `sluice
+/// protect`: started from a sluice at another path, it writes the hook
+/// naming its own path, whatever binary the command runs, and the command
+/// prints what it printed.
+#[test]
+fn sluice_protect_is_made_by_sluice_host() {
+    let (repo, _) = protected("protect-by-host");
+    let host = repo.dir().join(".git/host-sluice");
+    copy_executable(Path::new(sluice()), &host);
+    // A state folder no command has used yet, so the first command's
+    // `sluice host` is the one that answers the rest.
+    let run = |program: &Path, args: &[&str]| {
+        run_copied(program, || {
+            support::isolated(&mut Command::new(program))
+                .current_dir(repo.dir())
+                .args(args)
+                .env("XDG_CONFIG_HOME", repo.dir().join(".git/no-config"))
+                .env("XDG_STATE_HOME", repo.dir().join(".git/host-state"))
+                .stdin(Stdio::null())
+                .output()
+        })
+    };
+    // `sluice host`, started by a command of the sluice at `host`.
+    let out = run(&host, &["status", "main"]);
+    assert!(out.status.success(), "{}", text(&out));
+    let out = run(Path::new(sluice()), &["protect", "--remove"]);
+    assert!(out.status.success(), "{}", text(&out));
+    assert_eq!(
+        String::from_utf8_lossy(&out.stdout),
+        "branch protection removed\n"
+    );
+    let out = run(Path::new(sluice()), &["protect", "--json"]);
+    assert!(out.status.success(), "{}", text(&out));
+    let doc: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert_eq!(doc["protection"], "installed", "{doc}");
+    assert_eq!(doc["changed"], true, "{doc}");
+    assert_eq!(doc["held"][0]["branch"], "bolt/x", "{doc}");
+    let hook =
+        std::fs::read_to_string(repo.dir().join(".git/hooks/reference-transaction")).unwrap();
+    let path = |p: &Path| std::fs::canonicalize(p).unwrap().display().to_string();
+    assert!(hook.contains(&path(&host)), "{hook}");
+    assert!(!hook.contains(&path(Path::new(sluice()))), "{hook}");
 }
 
 /// Copy `from` to `to` as an executable through a file of our own,
@@ -961,6 +1015,7 @@ fn the_protection_judges_the_repository_git_names() {
         .current_dir(x.path())
         .arg("protect")
         .env("XDG_CONFIG_HOME", x.path().join("no-config"))
+        .env("XDG_STATE_HOME", x.path().join("no-state"))
         .stdin(Stdio::null())
         .output()
         .unwrap();
@@ -1220,6 +1275,7 @@ fn a_newer_sluices_next_command_reinstalls_the_hook() {
             .current_dir(repo.dir())
             .arg("protect")
             .env("XDG_CONFIG_HOME", repo.dir().join(".git/no-config"))
+            .env("XDG_STATE_HOME", repo.dir().join(".git/no-state"))
             .stdin(Stdio::null())
             .output()
     });
@@ -1274,6 +1330,7 @@ fn a_sluice_on_the_callers_path_is_not_the_one_that_judges() {
         .args(["update-ref", "refs/heads/bolt/x", &head])
         .env("PATH", path)
         .env("XDG_CONFIG_HOME", repo.dir().join(".git/no-config"))
+        .env("XDG_STATE_HOME", repo.dir().join(".git/no-state"))
         .env_remove("GIT_DIR")
         .env_remove("GIT_WORK_TREE")
         .stdin(Stdio::null())
@@ -1311,6 +1368,7 @@ fn the_hook_reads_its_whole_transaction_before_it_leaves() {
             .current_dir(&scratch.0)
             .args(["hook", "reference-transaction", state])
             .env("XDG_CONFIG_HOME", scratch.0.join("no-config"))
+            .env("XDG_STATE_HOME", scratch.0.join("no-state"))
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());

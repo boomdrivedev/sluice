@@ -57,3 +57,13 @@ Each runner would also bring its own layout. Option 3 has the same faults, and r
 - `--ci` changes moon's own printed output, for example log groups on a CI provider. It does not set `CI` in the tasks' environment (checked on moon 2.6.1). sluice reads the report, not the printed output.
 - The app needs Checks and Pull requests write, which ADR 0021 already named. `sluice forge check` now verifies them.
 - nx and turbo profiles fill the same detail, or leave a field empty when their runner does not report it. The report leaves out what is empty.
+
+## Amendment, 2026-11-23: the report reads no set-aside
+
+Decider: the user, on 2026-11-23, who decided that no result is set aside.
+
+Sources: the statement's clause 116 (as amended 2026-11-23, boomdrivedev/blueprints 9de7d63); record 0031 as amended 2026-11-23; the change `sluice-host-makes-each-change`, design D4.
+
+**Before:** the core read a submission's report from the submission, the results, the set-asides and the branch's log, and listed a check whose result was set aside, with its reason.
+
+**Now:** the core reads the report from the submission, the results and the branch's log. It reads no set-aside and lists none. A check whose fail an earlier release set aside, and that also holds a pass, is listed flaky, with the result it contradicts.

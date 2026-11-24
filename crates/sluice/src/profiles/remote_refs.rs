@@ -46,10 +46,6 @@ use crate::signing::dsse::Envelope;
 use crate::signing::ssh;
 use crate::signing::statement::{Claims, Held, Run, RunResult, Statement};
 
-/// Where the results set aside are kept, one file each (could-not-run-1
-/// 116).
-const SET_ASIDE: &str = "refs/sluice/set-aside";
-
 /// Every head submitted to the remote, by its revision (82).
 const HEADS: &str = "refs/sluice/heads/*";
 
@@ -1393,10 +1389,6 @@ impl State for RemoteRefs {
         Ok(false)
     }
 
-    /// Could-not-run-1 116: every result set aside on the remote, one file
-    /// each under `refs/sluice/set-aside`. A set-aside only stops a result
-    /// counting, so any host that submits may add one. 129 (design D16):
-    /// held, as this host last fetched them, with no fetch.
     /// Record 0119 (design D11; 109): added to `refs/sluice/runs/<signer>`
     /// on top of whatever it holds.
     fn add_signed(&self, _branch: &str, signer: &str, path: &str, record: &[u8]) -> Result<()> {
@@ -1405,33 +1397,6 @@ impl State for RemoteRefs {
             &format!("refs/sluice/runs/{signer}"),
             &files,
             &format!("sluice: {signer}'s run {path}"),
-        )
-    }
-
-    fn set_asides(&self) -> Result<Vec<u8>> {
-        let commit = match self.held.get() {
-            true => self.pushed.read_ref(&self.fetched(SET_ASIDE))?.map(|r| r.0),
-            false => self.fetch(SET_ASIDE)?,
-        };
-        let Some(commit) = commit else {
-            return Ok(Vec::new());
-        };
-        let mut bytes = Vec::new();
-        for (_, (_, b)) in self.tree(&commit)? {
-            bytes.extend(&b);
-            if !b.ends_with(b"\n") {
-                bytes.push(b'\n');
-            }
-        }
-        Ok(bytes)
-    }
-
-    fn set_aside(&self, line: &[u8]) -> Result<()> {
-        let name = format!("{}.json", sha256_hex(line));
-        self.add(
-            SET_ASIDE,
-            &BTreeMap::from([(name, line.to_vec())]),
-            "a result set aside",
         )
     }
 

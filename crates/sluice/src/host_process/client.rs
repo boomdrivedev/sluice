@@ -24,10 +24,9 @@ use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
 
 use anyhow::{anyhow, bail, Context, Result};
-use sluice_seams::RunKind;
 
 use super::pass::Report;
-use super::protocol::{receive, send, Answer, Hello, Named, Output, Request, Started};
+use super::protocol::{receive, send, Answer, Hello, Named, Output, Request};
 use super::version::older;
 use super::{environment, Paths};
 
@@ -84,6 +83,23 @@ impl Client {
             version: crate::VERSION.to_string(),
             env,
         })
+    }
+
+    /// This sluice's way to its user's host process where one has run,
+    /// making nothing: `None` where none has (record 0120 as amended
+    /// 2026-11-17).
+    pub fn found() -> Result<Option<Client>> {
+        let env: Vec<(OsString, OsString)> = std::env::vars_os().collect();
+        let var = |k: &str| env.iter().find(|(n, _)| n == k).map(|(_, v)| v.clone());
+        let Some(paths) = Paths::found_from_env(var)? else {
+            return Ok(None);
+        };
+        Ok(Some(Client {
+            program: std::env::current_exe()?,
+            paths,
+            version: crate::VERSION.to_string(),
+            env,
+        }))
     }
 
     /// This sluice's way to its user's host process.
@@ -379,6 +395,98 @@ impl Client {
         }
     }
 
+    /// A session's command (the change `sluice-host-runs-a-sessions-checks`,
+    /// design D1): the host process, started where none answers, runs
+    /// `request`; what it writes is printed as it comes, on standard output
+    /// and standard error as the command wrote it, and its exit code is
+    /// given. Ctrl-C, where [`crate::stop_on_interrupt`] took it, closes the
+    /// connection's side of this command, which stops the command as
+    /// Ctrl-C stopped it, and what the command says of its stop is still
+    /// printed (design D4). A host process that ends before the command's
+    /// `output`, or answers with an error, is an error, in its words.
+    pub fn command(&self, request: &Request) -> Result<i32> {
+        let c = self.reach()?;
+        Client::command_on(c, request)
+    }
+
+    /// [`Client::command`] where a host process answers now, starting none:
+    /// `None` where none answers, or its socket cannot be reached (record
+    /// 0120 as amended 2026-11-17: a worktree's release with nothing to free
+    /// starts no host process).
+    pub fn command_if_answering(&self, request: &Request) -> Result<Option<i32>> {
+        let Ok(Some(c)) = self.answering() else {
+            return Ok(None);
+        };
+        Client::command_on(c, request).map(Some)
+    }
+
+    /// `request` asked on `c`, its lines printed as they come (design D1,
+    /// D4).
+    fn command_on(mut c: Connection, request: &Request) -> Result<i32> {
+        use std::io::Write as _;
+        let named = c.named.clone();
+        send(&mut c.writer, request)?;
+        let closing = c.writer.try_clone()?;
+        std::thread::spawn(move || {
+            while !crate::was_interrupted() {
+                std::thread::sleep(Duration::from_millis(50));
+            }
+            let _ = closing.shutdown(std::net::Shutdown::Write);
+        });
+        let mut out = std::io::stdout();
+        loop {
+            match receive::<Answer>(&mut c.reader) {
+                Ok(Answer::Stdout(text)) => {
+                    let _ = out.write_all(text.as_bytes());
+                    let _ = out.flush();
+                }
+                Ok(Answer::Stderr(line)) => eprintln!("{line}"),
+                Ok(Answer::Output(output)) => {
+                    let _ = out.write_all(output.stdout.as_bytes());
+                    let _ = out.flush();
+                    for line in &output.stderr {
+                        eprintln!("{line}");
+                    }
+                    return Ok(output.code);
+                }
+                Ok(Answer::Error(words)) => bail!(
+                    "sluice's host process, sluice {} (pid {}), did not answer: {words}",
+                    named.version,
+                    named.pid
+                ),
+                Ok(other) => return Err(unexpected(other)),
+                Err(e) => bail!(
+                    "sluice's host process, sluice {} (pid {}), ended before the command did: {e:#}",
+                    named.version,
+                    named.pid
+                ),
+            }
+        }
+    }
+
+    /// A submit's answer (the change `sluice-host-makes-each-change`,
+    /// design D2): what it printed, and the wait it follows next, as
+    /// `output` answers a read.
+    pub fn submitted(&self, request: &Request) -> Result<super::protocol::Submitted> {
+        let mut c = self.reach()?;
+        let named = c.named.clone();
+        send(&mut c.writer, request)?;
+        match receive::<Answer>(&mut c.reader) {
+            Ok(Answer::Submitted(submitted)) => Ok(submitted),
+            Ok(Answer::Error(words)) => bail!(
+                "sluice's host process, sluice {} (pid {}), did not answer: {words}",
+                named.version,
+                named.pid
+            ),
+            Ok(other) => Err(unexpected(other)),
+            Err(e) => bail!(
+                "sluice's host process, sluice {} (pid {}), ended before it answered: {e:#}",
+                named.version,
+                named.pid
+            ),
+        }
+    }
+
     /// A wait's step of `ask`, from `folder` (the change
     /// `sluice-host-answers-every-read`, design D8), as `output` answers a
     /// read.
@@ -422,11 +530,12 @@ impl Client {
         }
     }
 
-    /// One round of `branch` of `repository`, as `sluice step --json`
-    /// prints it, with what it said and its line (D10).
-    pub fn step(&self, repository: &Path, branch: &str) -> Result<serde_json::Value> {
+    /// One round of `branch` of the repository that holds `folder`, as
+    /// `sluice step --json` prints it, with what it said and its line
+    /// (D10; the change `sluice-host-makes-each-change`, design D5).
+    pub fn step(&self, folder: &Path, branch: &str) -> Result<serde_json::Value> {
         match self.ask(&Request::Step {
-            repository: repository.to_path_buf(),
+            folder: folder.to_path_buf(),
             branch: branch.to_string(),
         })? {
             Answer::Step(doc) => Ok(doc),
@@ -453,15 +562,11 @@ impl Client {
         }
     }
 
-    /// A pass of `repository` now, once it ends, at the asker's time `at`
-    /// (D14).
-    pub fn pass(
-        &self,
-        repository: &Path,
-        at: Option<chrono::DateTime<chrono::Utc>>,
-    ) -> Result<Report> {
+    /// A pass of the repository that holds `folder` now, once it ends, at
+    /// the asker's time `at` (D14; design D5).
+    pub fn pass(&self, folder: &Path, at: Option<chrono::DateTime<chrono::Utc>>) -> Result<Report> {
         match self.ask(&Request::Pass {
-            repository: repository.to_path_buf(),
+            folder: folder.to_path_buf(),
             at: at.map(|at| at.to_rfc3339()),
         })? {
             Answer::Pass(r) => Ok(r),
@@ -478,29 +583,6 @@ impl Client {
         send(&mut c.writer, &Request::Subscribe { folders })?;
         Ok(c)
     }
-
-    /// Ask for a session's or a preview's room (D12), for the branch its
-    /// run is held to where it names one (154), the connection kept while
-    /// it waits and while it is held.
-    pub fn hold(
-        &self,
-        kind: RunKind,
-        repository: &Path,
-        place: &str,
-        branch: Option<&str>,
-    ) -> Result<Connection> {
-        let mut c = self.reach()?;
-        send(
-            &mut c.writer,
-            &Request::Hold {
-                kind,
-                repository: repository.to_path_buf(),
-                place: place.to_string(),
-                branch: branch.map(str::to_string),
-            },
-        )?;
-        Ok(c)
-    }
 }
 
 impl Connection {
@@ -510,7 +592,7 @@ impl Connection {
         receive(&mut self.reader)
     }
 
-    /// The next answer on a follow or a held room, waiting up to `wait`
+    /// The next answer on the connection, waiting up to `wait`
     /// where given: `None` where none came within it.
     pub fn next(&mut self, wait: Option<Duration>) -> Result<Option<Answer>> {
         self.reader.get_ref().set_read_timeout(wait)?;
@@ -560,17 +642,6 @@ impl Connection {
     /// D6).
     pub fn say(&mut self, ask: &super::protocol::SubscriptionAsk) -> Result<()> {
         send(&mut self.writer, ask)
-    }
-
-    /// Say a held room's run began, in `place` with `run_dir` (D12).
-    pub fn started(&mut self, place: &str, run_dir: &Path) -> Result<()> {
-        send(
-            &mut self.writer,
-            &Started {
-                place: place.to_string(),
-                run_dir: run_dir.to_path_buf(),
-            },
-        )
     }
 }
 

@@ -259,8 +259,10 @@ fn removing_a_run_in_progress_ends_it() {
 }
 
 /// 35: the command's environment is the request's and nothing of
-/// sluice's own; the supervisor is in a session of its own, so a
-/// terminal's Ctrl-C to the submitter never reaches the run.
+/// sluice's own; the supervisor leads a process group of its own, so a
+/// terminal's Ctrl-C to its starter's group never reaches the run, and
+/// stays in its starter's session, never one of its own (the change
+/// `sluice-host-runs-a-sessions-checks`; `nothing-detached@f807c7f5fcea`).
 #[test]
 fn a_run_has_its_own_environment_and_session() {
     let dir = Scratch::new("runs-env");
@@ -279,8 +281,12 @@ fn a_run_has_its_own_environment_and_session() {
     wait_for(&dir.path().join("seen"));
     let supervisor = number(&run.join("lock"));
     assert_eq!(
-        nix::unistd::getsid(Some(Pid::from_raw(supervisor))).unwrap(),
+        nix::unistd::getpgid(Some(Pid::from_raw(supervisor))).unwrap(),
         Pid::from_raw(supervisor)
+    );
+    assert_eq!(
+        nix::unistd::getsid(Some(Pid::from_raw(supervisor))).unwrap(),
+        nix::unistd::getsid(None).unwrap()
     );
     r.remove("p1").unwrap();
     let seen = std::fs::read_to_string(dir.path().join("seen")).unwrap();

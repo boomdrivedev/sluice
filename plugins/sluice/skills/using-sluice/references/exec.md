@@ -75,8 +75,8 @@ nothing was recorded for a test that could not run: once the host can run it, ru
 ```
 
 sluice's sandbox stopped it, not the test's code. The cure is the
-branch's policy, the host's `[[caches]]` or the test, never a set-aside,
-since nothing was recorded. A command after `--` is never read so. When
+branch's policy, the host's `[[caches]]` or the test, since nothing was
+recorded under its key. A command after `--` is never read so. When
 sluice can't read what the sandbox refused the run, it says so after the
 run's lines, and records the run as one refused nothing:
 
@@ -160,3 +160,11 @@ stays.
   or round on the host.
 - `sluice status` (no argument) lists every worktree sluice holds ports or
   runs for.
+
+`sluice exec`, `sluice equip` and `sluice release` in the worktree run in
+the command itself. A submit, `sluice amend`, `sluice withdraw`, `sluice
+confirm`, `sluice release <preview>` and the branch commands are made by
+sluice's host process instead: the command sends its folder and prints
+the answer, and exits `3`, changing nothing, where the host process does
+not answer. Run the command again; it starts the host process where none
+runs.

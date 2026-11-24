@@ -180,6 +180,18 @@ ends. One process runs for each user: a second one started while the
 first holds `host/lock` ends at once. Removing `host/`, or the whole
 state folder, ends the process at its next look.
 
+sluice's host process runs every run on the host: a combination's tests,
+an agent's `sluice exec`, a preview's command, `sluice equip`'s steps
+and a worktree's release command. Each run is its child, in a process
+group of its own, named in `host/workers/` before it starts, and ends
+when the host process stops, unless the host process starts afresh in
+place, which keeps them. `sluice exec`, `sluice preview` and `sluice
+equip` send their folder and their arguments, and print what the host
+process sends as it comes; Ctrl-C on one ends its run, and a preview's
+command stays up until its release. `sluice release` in a worktree is
+sent the same way where a host process answers; where none does, it
+frees what it reads of the records itself and starts none.
+
 A checkout's name is written as one file name, each `/` of it as `%2F`
 (or `+2F` for a directory a test works in), so a worktree's whole path
 is one name. macOS and Linux allow a file name of 255 bytes, so a name
@@ -220,8 +232,9 @@ room from the count that chose the run to its start, and holds its
 host process counts the same, so the two count each other. One whose
 run has ended, or whose starter stopped before the run began, holds
 nothing: the next run that starts removes it. A file in `sessions/` is there while its agent's run is going, and
-its `sluice exec` rewrites it as each task ends, for `sluice overview`
-to show; nothing that decides a result reads it.
+sluice's host process, which runs the `sluice exec`, rewrites it as each
+task ends, for `sluice overview` to show; nothing that decides a result
+reads it.
 
 One process on the host reads a repository's queues: sluice's host
 process, for each repository that it holds. It keeps each repository's
@@ -242,7 +255,12 @@ last document until the new one comes. A status, a one-shot `sluice
 overview`, `sluice` with no command, a forecast and `sluice inbox` read
 no file: each sends its folder to the host process, which answers with
 what the command prints, starting it where none answers
-([one-shot reads](/sluice/reference/commands/#one-shot-reads)).
+([one-shot reads](/sluice/reference/commands/#one-shot-reads)). A
+submit, `sluice amend`, `sluice withdraw`, `sluice confirm`, `sluice
+release` of a preview or a held checkout, `sluice branch` and `sluice
+protect` write no file either: sluice's host process makes each change
+in its own process and answers with what the command prints
+([changes](/sluice/reference/commands/#changes)).
 
 ## A branch whose state is on its remote
 
@@ -267,8 +285,8 @@ refs/sluice/logs/<branch>/<id>   what a failed combination's tests printed, for
                                  the last 20
 refs/sluice/hosts/<host>         a host's sign of life and the room it has, rewritten
                                  by that host alone
-refs/sluice/set-aside            the results `sluice set-aside` set aside, one file
-                                 each, only ever added to
+refs/sluice/set-aside            results an older sluice set aside, which nothing
+                                 reads: every result counts under its key
 ```
 
 A write to a branch's state is a push that the remote takes only if the
@@ -479,9 +497,12 @@ combination's runs.
 A landing the forge refused stays in `landing`, with `refused`:
 `{"words": "remote: error: GH013: Repository rule violations found for
 refs/heads/main.", "at": "2026-11-16T09:16:40Z"}`, the forge's words
-whole. Nothing is pushed or formed on the branch while it stands.
-`sluice push <branch>` pushes it again, and it is dropped once any of
-its submissions is withdrawn.
+whole. Nothing is formed on the branch while it stands. Each round of
+the branch pushes it again, as the same landing, once a minute at most
+where it is the branch's one work, until the forge takes it. Refused in
+other words, `refused` takes the newest. It is dropped once any of its
+submissions is withdrawn ([a landing the forge
+refused](/sluice/reference/commands/#a-landing-the-forge-refused)).
 
 ## A submission
 
@@ -509,7 +530,8 @@ its submissions is withdrawn.
 `state` is one of `queued`, `waiting` (behind the submissions in
 `after`), `testing`, `passed`, `landing`, `landed`, `failed`,
 `conflict`, `withdrawn` and `refused`, a submission whose landing the
-forge refused, held until it is pushed again or withdrawn. These ten
+forge refused, held and pushed again at each round until the forge
+takes it or one of its submissions is withdrawn. These ten
 are stable: under `sluice/submission@1` none of them is renamed or
 removed, so a script that reads `state`, such as an agent looping on
 `sluice wait --json`, can match all of them.
@@ -685,8 +707,8 @@ run:
 
 `landing` is written before the branch moves and `landed` after, so a
 round that crashes between the two is finished correctly by the next
-one. A landing the forge refused is logged once, `forge_refused`, with
-the forge's words:
+one. A landing the forge refused is logged once for each of the
+forge's distinct words, `forge_refused`, however many rounds push it:
 
 ```json
 {"schema":"sluice/log@1","event":"forge_refused","ids":[12],"words":"remote: error: GH013: Repository rule violations found for refs/heads/main."}

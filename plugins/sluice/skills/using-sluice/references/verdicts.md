@@ -13,12 +13,27 @@
 | `failed` | blamed for a failure |
 | `conflict` | does not merge with what is ahead of it |
 | `withdrawn` | taken out, by its agent, a planner, the operator or a resubmission; an older sluice's hand-over to the host that took its pull requests in names that host in `withdrawn.handed_over_to` |
+| `refused` | the forge refused its landing, for a rule of its own: held with the forge's words, and pushed again at each round until the forge takes it |
 
 `failed` and `conflict` are out of the queue until you submit again.
-These nine are all the states there are: `sluice wait --json` and
+These ten are all the states there are: `sluice wait --json` and
 `sluice status <id> --json` give one of them as `state`, and none is
 renamed, removed or added under `sluice/submission@1`. Decided means
 `landed`, `failed`, `conflict` or `withdrawn`.
+
+## A landing the forge refused
+
+A forge can refuse a landing for a rule of its own, such as push
+protection finding what looks like a secret. sluice holds the landing
+with the forge's words, and a wait on any of its submissions ends with
+exit `6`, saying the forge refused it, in the forge's words. Each round
+of the branch pushes the held landing again, once a minute at most, so
+it lands as it is once the forge's rule allows it, with no step of
+yours. When the forge refused it for what your work holds, fix that in
+your worktree and submit again: the new submission takes the held one
+out, and the rest of the landing goes back to the queue. `sluice
+withdraw <id>` takes it out too. `sluice status <id>` shows the forge's
+newest words.
 
 ## Reading a failure
 
@@ -150,8 +165,8 @@ Here the test looked up a name under `network = "localhost"`, which
 refuses every lookup. sluice's sandbox stopped it, not your code. The
 cure is the branch's policy (a wider `network`), the host's `[[caches]]`
 (a folder the test must write, declared for every run), or the test (one
-that needs nothing the sandbox refuses). Never a set-aside: nothing was
-recorded, so there is no result to set aside. After three such runs in a
+that needs nothing the sandbox refuses). Nothing was recorded under the
+test's key. After three such runs in a
 row the newest submission is blamed, each test named with what was
 refused.
 
@@ -212,7 +227,7 @@ The cure is the toolchain or the host. Fix what the words name in your
 worktree when the repository holds it, a stale lock file or a toolchain
 that no longer builds, and submit again; when it is the host's (a full
 disk, a tool missing), tell the user what the host lacks. Nothing was
-recorded, so there is no result to set aside.
+recorded under the test's key.
 
 sluice tells these apart on its own and records nothing for them: a run
 that never started, a `not_run` exit, a test the time limit ended, a test
@@ -229,17 +244,17 @@ failed: checks:macbook-pro (flaky)
   checks:macbook-pro passed in this run and failed on the same inputs at 2026-10-17T15:28:04Z on 88de9be
   log of this run: .git/sluice/.logs/main/c64/checks:macbook-pro.log
   log of the run that failed: .git/sluice/.logs/main/c51/checks:macbook-pro.log
-  if the host or a time limit caused that fail, the operator can set it aside: sluice set-aside …
   main reads a test that passed and failed on the same inputs as failed (flaky = "fail")
-the same head lands once the operator sets the other result aside, or once a real fix changes what checks:macbook-pro reads
+the same head lands once a real fix changes what checks:macbook-pro reads; a fail the host caused, not the test, is a fault of sluice
 ```
 
+No result is ever set aside: every result recorded counts under its key.
 Read the log of the run that failed. When that fail looks like the host's
-doing (the run timed out, or the host was overloaded or broken then), you
-have one move: stop, and tell the user what you found. Give the test, the
-time of each run, what each log shows and what the host was doing. Setting
-the fail aside is the operator's ruling; once they have, submit the same
-head again.
+doing (the run timed out, or the host was overloaded or broken then), it
+is a fault of sluice, which should have recorded no result for it. Stop,
+and tell the user what you found, as a fault of sluice to fix: give the
+test, the time of each run, what each log shows and what the host was
+doing.
 
 Never change what the test reads only to get it tested again. The fail
 stays under its key for any tree that returns to those inputs, and the

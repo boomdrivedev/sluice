@@ -85,18 +85,6 @@ allows() { # dir command
   fi
 }
 
-denies_set_aside() { # dir command
-  local out
-  out=$(run_guard "$1" "$2")
-  if printf '%s' "$out" | jq -e '.hookSpecificOutput.permissionDecision == "deny"' >/dev/null 2>&1 &&
-    printf '%s' "$out" | grep -q "operator's"; then
-    echo "ok    denies: $2"
-  else
-    echo "FAIL  should deny: $2 (in $1) -> ${out:-nothing}"
-    failures=$((failures + 1))
-  fi
-}
-
 wt=$scratch/unit-x
 
 denies "$wt" 'git push origin HEAD:main'
@@ -110,9 +98,6 @@ denies "$wt" 'git update-ref refs/heads/main HEAD'
 denies "$wt" 'git status; git push origin HEAD:main'
 FAKE_GH_BASE=main denies "$wt" 'gh pr merge 5 --merge'
 denies "$wt" 'gh pr merge 5'
-
-denies_set_aside "$wt" 'sluice set-aside cli:tools --at 2026-10-17T13:05:32Z --reason x'
-denies_set_aside "$plain" 'cd .. && sluice --json set-aside cli:tools --at t --reason x'
 
 allows "$wt" 'sluice status --all'
 allows "$wt" 'sluice exec main -- cargo test'
