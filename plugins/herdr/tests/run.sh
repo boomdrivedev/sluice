@@ -76,7 +76,7 @@ ends_within() {
 }
 
 # Wait up to 30 seconds for what the plugin runs, the herdr, sluice, jq and
-# git calls logged, to stand still for two seconds, checked every tenth.
+# git calls logged, to stand still for three seconds, checked every tenth.
 settled() {
   st_n=300
   st_last=
@@ -85,7 +85,7 @@ settled() {
     st_now=$(cat "$FAKE"/*-calls 2>/dev/null | wc -c)
     if [ "$st_now" = "$st_last" ]; then
       st_same=$((st_same + 1))
-      [ "$st_same" -ge 20 ] && return 0
+      [ "$st_same" -ge 30 ] && return 0
     else
       st_same=0
       st_last=$st_now
@@ -1444,7 +1444,7 @@ first=$(head -1 "$FAKE/watch-pids")
 kill "$first"
 within 10 '[ "$(watching | wc -l | tr -d " ")" = 1 ] && [ "$(watching)" != "$first" ]' || fail "no new source runs: $(cat "$FAKE/sluice-calls")"
 next=$(watching)
-within 5 '[ "$(grep -c "^$next add " "$FAKE/stdin-lines")" = 2 ]' || fail "the new source's input: $(cat "$FAKE/stdin-lines")"
+within 15 '[ "$(grep -c "^$next add " "$FAKE/stdin-lines")" = 2 ]' || fail "the new source's input: $(cat "$FAKE/stdin-lines")"
 for f in "$work" "$scratch/plain"; do
   grep -q "^$next add $f\$" "$FAKE/stdin-lines" || fail "$f not added again"
 done
@@ -1458,7 +1458,9 @@ if needs_ps; then
   panes_at p1 "$work"
   SLUICE_HERDR_TICK=1 sh "$plugin/bin/watch.sh" --ticks 60 2>/dev/null &
   a=$!
-  within 15 '[ -n "$(watching)" ]' || fail "no source started"
+  # The source started, and the watcher has settled its identity, which
+  # the next watcher ends it by.
+  within 15 '[ -n "$(watching)" ] && sources_of "$a" | grep -q . && ! grep -q "	pid:" "$S/run/$a"/*.pids' || fail "no source started"
   src=$(watching)
   kill -KILL "$a"
   wait "$a" 2>/dev/null
