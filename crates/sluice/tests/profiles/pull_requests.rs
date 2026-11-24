@@ -7917,15 +7917,31 @@ const REFUSING: &str = "http://127.0.0.1:9";
 fn a_submit_to_a_branch_that_takes_pull_requests_reads_no_forge() {
     let g = OnGitHub::new("pr-submit-no-forge", "");
     let w = g.session("nf", &[("nf.txt", "nf\n")]);
-    // `sluice host`, started on the test's forge.
-    let out = g.sluice(&["status", "main"]);
-    assert!(out.status.success(), "{}", text(&out));
+    // `sluice host`, started on the test's forge and kept running by a
+    // watch's connection, so the submit meets it and starts none of its
+    // own on the refusing address however long the submit takes to come.
+    let mut watch = g
+        .command(env!("CARGO_BIN_EXE_sluice"), g.repo.dir())
+        .args(["overview", "--json", "--watch"])
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+        .unwrap();
+    let mut first = String::new();
+    std::io::BufRead::read_line(
+        &mut std::io::BufReader::new(watch.stdout.as_mut().unwrap()),
+        &mut first,
+    )
+    .unwrap();
+    assert!(!first.is_empty(), "the watch saw no host process");
     let out = g
         .command(env!("CARGO_BIN_EXE_sluice"), &w)
         .env("SLUICE_FORGE_API", REFUSING)
         .args(["submit", "main", "--no-wait", "--json"])
         .output()
         .unwrap();
+    let _ = watch.kill();
+    let _ = watch.wait();
     assert_eq!(out.status.code(), Some(0), "{}", text(&out));
     let doc: Value =
         serde_json::from_slice(&out.stdout).unwrap_or_else(|e| panic!("{e}: {}", text(&out)));
