@@ -204,6 +204,58 @@ fn two_hosts_write_one_version_and_one_is_refused() {
     assert_eq!(ha.branches().unwrap(), ["main"]);
 }
 
+/// The change `the-gate-runs-in-five-minutes`, design D6: a round, which
+/// holds its branch's lock, fetches the branch's state once and reads
+/// what it fetched or wrote from then on; its write is leased on what it
+/// read, so a write another host made meanwhile refuses it, and the read
+/// after that fetches again, as the next round's first read does (rule
+/// core.5).
+#[test]
+fn a_round_fetches_the_state_once() {
+    let (_bare, a, b) = two_hosts("rr-round");
+    let (ha, hb) = (host(&a, None), host(&b, None));
+    assert_eq!(
+        hb.write("main", 0, put(&[("branch.json", "{}\n")]))
+            .unwrap(),
+        Written::Written(1)
+    );
+    let round = ha.lock("main").unwrap().unwrap();
+    assert_eq!(ha.read("main").unwrap().version, 1);
+    assert_eq!(
+        hb.write("main", 1, put(&[("branch.json", "{\"b\":1}\n")]))
+            .unwrap(),
+        Written::Written(2)
+    );
+    assert_eq!(ha.read("main").unwrap().version, 1, "read as fetched");
+    assert_eq!(
+        ha.write("main", 1, put(&[("branch.json", "{\"a\":1}\n")]))
+            .unwrap(),
+        Written::Refused
+    );
+    let again = ha.read("main").unwrap();
+    assert_eq!(again.version, 2, "fetched again after the refusal");
+    assert_eq!(
+        ha.write("main", 2, put(&[("branch.json", "{\"a\":2}\n")]))
+            .unwrap(),
+        Written::Written(3)
+    );
+    let own = ha.read("main").unwrap();
+    assert_eq!(own.version, 3);
+    assert_eq!(own.files["branch.json"], b"{\"a\":2}\n");
+    drop(round);
+    assert_eq!(
+        hb.write("main", 3, put(&[("branch.json", "{\"b\":2}\n")]))
+            .unwrap(),
+        Written::Written(4)
+    );
+    let _next = ha.lock("main").unwrap().unwrap();
+    assert_eq!(
+        ha.read("main").unwrap().version,
+        4,
+        "the next round fetches"
+    );
+}
+
 /// A log is appended to, and a finished record is kept beside the live
 /// ones, never read with them (130).
 #[test]

@@ -176,6 +176,51 @@ pub struct RemoteRefs {
     /// 129 (design D16): every answer reads what the host process's last
     /// ask fetched, and none fetches ([`RemoteRefs::hold`]).
     held: std::cell::Cell<bool>,
+    /// The branches whose lock this binding holds, each with whether its
+    /// state was fetched, or written, since the lock was taken: a round
+    /// fetches a branch's state once and reads what it fetched or wrote
+    /// from then on, since each write is a push leased on the commit it
+    /// read (rule core.5). A refused write, and the lock's end, fetch
+    /// again (the change `the-gate-runs-in-five-minutes`, design D6).
+    rounds: Rounds,
+}
+
+/// The branches whose lock a binding holds, each with the remotes whose
+/// copy of its state was fetched or written since ([`RemoteRefs::rounds`]).
+pub(crate) type Rounds = Rc<RefCell<BTreeMap<String, BTreeSet<String>>>>;
+
+/// `lock`, a branch's lock taken for a round: `rounds` knows the branch
+/// is locked, its state not yet fetched, while the lock lives, and
+/// forgets it when it ends.
+pub(crate) fn round<'a>(
+    rounds: &Rounds,
+    branch: &str,
+    lock: Box<dyn Guard + 'a>,
+) -> Box<dyn Guard + 'a> {
+    rounds
+        .borrow_mut()
+        .insert(branch.to_string(), BTreeSet::new());
+    Box::new(RoundGuard {
+        _lock: lock,
+        rounds: rounds.clone(),
+        branch: branch.to_string(),
+    })
+}
+
+/// A branch's lock, held by a round: [`RemoteRefs::rounds`] knows the
+/// branch is locked while it lives, and forgets it when it ends.
+struct RoundGuard<'a> {
+    _lock: Box<dyn Guard + 'a>,
+    rounds: Rounds,
+    branch: String,
+}
+
+impl Guard for RoundGuard<'_> {}
+
+impl Drop for RoundGuard<'_> {
+    fn drop(&mut self) {
+        self.rounds.borrow_mut().remove(&self.branch);
+    }
 }
 
 impl RemoteRefs {
@@ -195,6 +240,29 @@ impl RemoteRefs {
             verified: RefCell::default(),
             asked: std::cell::Cell::new(false),
             held: std::cell::Cell::new(false),
+            rounds: Rc::default(),
+        }
+    }
+
+    /// The same profile, knowing the rounds of the binding that holds the
+    /// branches' locks, as [`RemoteRefs::sharing_locks`] shares the locks.
+    pub(crate) fn sharing_rounds(self, rounds: Rounds) -> Self {
+        RemoteRefs { rounds, ..self }
+    }
+
+    /// Whether `branch`'s state on this remote is fetched in the round
+    /// that holds its lock, or `known` sets it so.
+    fn fresh(&self, branch: &str, known: Option<bool>) -> bool {
+        let mut rounds = self.rounds.borrow_mut();
+        let remote = self.remote();
+        match (rounds.get_mut(branch), known) {
+            (Some(fresh), Some(true)) => fresh.insert(remote.to_string()) || true,
+            (Some(fresh), Some(false)) => {
+                fresh.remove(remote);
+                false
+            }
+            (Some(fresh), None) => fresh.contains(remote),
+            (None, _) => false,
         }
     }
 
@@ -561,14 +629,20 @@ impl RemoteRefs {
         )
     }
 
-    /// Read `branch`'s state from the remote, keeping it for a write.
+    /// Read `branch`'s state from the remote, keeping it for a write; in a
+    /// round that fetched it already, as it fetched or wrote it (design D6
+    /// of `the-gate-runs-in-five-minutes`).
     fn read_remote(&self, branch: &str) -> Result<Read> {
+        if self.fresh(branch, None) {
+            return self.read_fetched(branch);
+        }
         let name = state_ref(branch)?;
         // 80: a remote that cannot be reached leaves the state as it was
         // last fetched, readable, and the read says so.
         let fetched = match self.fetch(&name) {
             Ok(f) => {
                 self.stale.borrow_mut().remove(branch);
+                self.fresh(branch, Some(true));
                 f
             }
             Err(e) => {
@@ -1015,11 +1089,15 @@ pub(crate) fn sha256_hex(bytes: &[u8]) -> String {
 
 impl State for RemoteRefs {
     fn lock<'a>(&'a self, branch: &str) -> Result<Option<Box<dyn Guard + 'a>>> {
-        self.locks.lock(branch)
+        Ok(self
+            .locks
+            .lock(branch)?
+            .map(|lock| round(&self.rounds, branch, lock)))
     }
 
     fn wait_lock<'a>(&'a self, branch: &str) -> Result<Box<dyn Guard + 'a>> {
-        self.locks.wait_lock(branch)
+        let lock = self.locks.wait_lock(branch)?;
+        Ok(round(&self.rounds, branch, lock))
     }
 
     fn publish_head(&self, _branch: &str, head: &Rev) -> Result<()> {
@@ -1318,6 +1396,7 @@ impl State for RemoteRefs {
         let name = state_ref(branch)?;
         if !self.push_leased(&commit, &name, read.commit.as_deref())? {
             self.read.borrow_mut().remove(branch);
+            self.fresh(branch, Some(false));
             return Ok(Written::Refused);
         }
         self.read.borrow_mut().remove(branch);
@@ -1327,6 +1406,7 @@ impl State for RemoteRefs {
         self.pushed
             .local()
             .write_ref(&self.fetched(&name), &Rev(commit.clone()))?;
+        self.fresh(branch, Some(true));
         // 82: a submission moved to the finished records has left sluice,
         // and its head with it.
         let prefix = format!("{FINISHED}/");
