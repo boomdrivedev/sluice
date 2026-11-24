@@ -427,6 +427,10 @@ pub struct Status {
     /// 121: the branch was last read at a revision lacking its last
     /// landing, and nothing is formed or landed on it.
     pub held: Option<crate::records::BranchHold>,
+    /// The decision `a-key-the-tree-does-not-bear-out-holds-the-branch`:
+    /// the branch held on a check whose key names a file the tree does not
+    /// hold, and the entries it holds.
+    pub key_held: Option<crate::records::KeyHold>,
     /// 124, S64: this host's copy of the branch, while a round could not
     /// level it to the landing.
     pub copy: Option<crate::records::CopyBehind>,
@@ -1653,6 +1657,7 @@ impl Sluice<'_> {
             window: line.doc.window,
             parallel,
             held: line.doc.held.clone(),
+            key_held: line.doc.key_held.clone(),
             landing_refused: line
                 .doc
                 .landing

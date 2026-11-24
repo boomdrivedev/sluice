@@ -36,9 +36,9 @@ use crate::overview::Room;
 use crate::policy::{Rules, POLICY_PATH};
 use crate::records::{
     Beside, BesideWhy, BranchHold, Candidate, CandidateState, CheckOutcome, Claim, ConflictRecord,
-    CopyBehind, DecidedRecord, Ended, Event, FailedTask, Held, HomeState, LandingCommitRecord,
-    LandingIntent, LandingRefused, LostRun, Moving, OutboxItem, Recorded, ResultKind, ResultLine,
-    RunState, State, SystemRun, Tested, HERE,
+    CopyBehind, DecidedRecord, Ended, Event, FailedTask, Held, HomeState, KeyHold,
+    LandingCommitRecord, LandingIntent, LandingRefused, LostRun, Moving, OutboxItem, Recorded,
+    ResultKind, ResultLine, RunState, State, SystemRun, Tested, HERE,
 };
 use crate::refused::Refusal;
 use crate::release::{ReleaseOutcome, Releasing};
@@ -1862,6 +1862,7 @@ impl Sluice<'_> {
             line.doc.covered_by = None;
         }
         let rules = self.gate(branch, &tip)?;
+        self.weigh_key_hold(&mut line, &rules, &tip, &now)?;
         // Record 0122 (design D3): the home the rules at the head name,
         // weighed against the one the queue is open in.
         let moving = self.weigh_home(&mut line, &crate::home::named(&rules), &tip, &now);
@@ -1973,6 +1974,66 @@ impl Sluice<'_> {
         } else {
             Decided::Contended
         })
+    }
+
+    /// The decision `a-key-the-tree-does-not-bear-out-holds-the-branch`:
+    /// the branch's hold on a key, weighed against its revision `tip`. It
+    /// ends where no entry it holds is left in the queue, or where `tip`
+    /// changes the held check's inputs from the revision the hold was read
+    /// on, by the check's affected reading (140); a reading that fails ends
+    /// it, its entries formed again and read afresh. Its end is logged
+    /// once.
+    fn weigh_key_hold(&self, line: &mut Line, rules: &Rules, tip: &Rev, now: &str) -> Result<()> {
+        let live: BTreeSet<u64> = line
+            .subs
+            .values()
+            .filter(|s| !s.state.is_out())
+            .map(|s| s.id)
+            .collect();
+        let Some(h) = line.doc.key_held.as_mut() else {
+            return Ok(());
+        };
+        h.ids.retain(|id| live.contains(id));
+        let ended = if h.ids.is_empty() {
+            Some(None)
+        } else if h.at != *tip {
+            let changes = match self.policy_at(tip)? {
+                Some(policy) => self.seams.tests.reads(&Reading {
+                    required: rules.required.clone(),
+                    tests: policy.tests,
+                    pairs: vec![(h.at.clone(), tip.clone())],
+                }),
+                None => Err(anyhow!("{tip} holds no policy")),
+            };
+            let changed = match changes {
+                Ok(reads) => reads.first().is_none_or(|r| match r {
+                    sluice_seams::Reads::Every => true,
+                    sluice_seams::Reads::Checks(c) => c.contains(&h.check),
+                }),
+                Err(e) => {
+                    warn!(
+                        sluice.branch = %line.branch,
+                        "the affected reading failed; the hold on {} ends: {e:#}",
+                        h.check
+                    );
+                    true
+                }
+            };
+            changed.then(|| Some(tip.clone()))
+        } else {
+            None
+        };
+        if let Some(revision) = ended {
+            let h = line.doc.key_held.take().expect("a hold weighed");
+            line.log(
+                now,
+                Event::KeyHoldEnded {
+                    check: h.check,
+                    revision,
+                },
+            );
+        }
+        Ok(())
     }
 
     /// Record 0122, 58 (design D3): in a round that keeps the queue's open
@@ -2557,6 +2618,25 @@ impl Sluice<'_> {
         } else {
             (None, Vec::new())
         };
+        // The decision `a-key-the-tree-does-not-bear-out-holds-the-branch`
+        // (C.6): a key naming a file the combination's tree does not hold
+        // is no work of any entry's. It is recorded under no key and blames
+        // no one: the check is left without an outcome, and the branch
+        // holds on it, holding this combination's entries.
+        let (lacking, refused): (Vec<sluice_seams::Refused>, Vec<sluice_seams::Refused>) =
+            refused.into_iter().partition(|r| r.file.is_some());
+        if !lacking.is_empty() {
+            // The check it holds on is a check of the run's where one is,
+            // which the affected reading names.
+            let held = lacking
+                .iter()
+                .find(|r| report.tasks.iter().any(|t| t.task == r.task))
+                .unwrap_or(&lacking[0]);
+            hold_on_key(line, c, held, now);
+            let lacks = |task: &str| lacking.iter().any(|r| r.task == task);
+            report.tasks.retain(|t| !lacks(&t.task));
+            report.dependencies.retain(|t| !lacks(&t.task));
+        }
         // 149, 16: the run of a task a check was failed by is recorded
         // under its own key as any check's run is (rule core.7).
         for t in report.tasks.iter().chain(&report.dependencies) {
@@ -2682,6 +2762,19 @@ impl Sluice<'_> {
         // 70, 55: a revision with no verdict runs every required check; a
         // report holding none of them is no pass.
         if c.every_check && !checks.is_empty() && report.tasks.is_empty() {
+            v.passed = false;
+        }
+        // The decision `a-key-the-tree-does-not-bear-out-holds-the-branch`:
+        // a check whose key names a file the tree does not hold has no
+        // outcome, saying so; the hold, not a run again, decides when it is
+        // formed again.
+        for r in &lacking {
+            v.none.retain(|n| n.task != r.task);
+            v.none.push(NotRun {
+                task: r.task.clone(),
+                reason: key_held_why(&r.why),
+                key: Some(r.key.clone()),
+            });
             v.passed = false;
         }
         // 60, 114, record 0122 (design D8): a check the report holds nothing
@@ -2875,6 +2968,18 @@ impl Sluice<'_> {
             // 66, 87, record 0122 (design D6): a run no live executor may
             // take ended at the limit: not passed, and nobody blamed.
             CandidateState::NotPassed
+        } else if read.waiting
+            && line
+                .doc
+                .key_held
+                .as_ref()
+                .is_some_and(|h| c.submissions.iter().all(|id| h.ids.contains(id)))
+        {
+            // The decision `a-key-the-tree-does-not-bear-out-holds-the-branch`:
+            // a combination the branch holds on is not run again, and nobody
+            // is blamed: not passed, its entries formed again once the hold
+            // ends.
+            CandidateState::NotPassed
         } else if read.waiting {
             // Record 0122 (design D7): each run ended with checks undecided
             // is followed up, holding only those; the verdict waits for it.
@@ -2987,6 +3092,25 @@ impl Sluice<'_> {
         let base = line.doc.base.clone().expect("decide reads the base first");
         let ord = line.order(Some(&base), false);
         let mut removed = false;
+        // The decision `a-key-the-tree-does-not-bear-out-holds-the-branch`:
+        // the entries a hold on a key holds stay queued out of the chain,
+        // with each entry after one of them (7); every other entry is
+        // formed, and tested once, as any is, so work that changes the
+        // check's inputs can land and end the hold.
+        let mut left_out: BTreeSet<u64> = line
+            .doc
+            .key_held
+            .as_ref()
+            .map(|h| h.ids.iter().copied().collect())
+            .unwrap_or_default();
+        let mut chain_ids = Vec::new();
+        for &id in &ord.chain {
+            if left_out.contains(&id) || line.sub(id)?.after.iter().any(|a| left_out.contains(a)) {
+                left_out.insert(id);
+            } else {
+                chain_ids.push(id);
+            }
+        }
 
         // Form (10, 12): reuse a candidate formed on this revision with
         // exactly these submissions, form the rest.
@@ -2994,7 +3118,7 @@ impl Sluice<'_> {
         let mut prefix: Vec<u64> = Vec::new();
         let mut ahead: Vec<(u64, Rev)> = Vec::new();
         let mut ids: Vec<String> = Vec::new();
-        for &id in &ord.chain {
+        for &id in &chain_ids {
             prefix.push(id);
             let reused = line
                 .doc
@@ -5363,6 +5487,46 @@ fn failing(named: &[FailedTask], now: &str) -> Ended {
 /// 108, record 0122 (design D7): why a run whose replays no counted pass
 /// proved ended with checks undecided.
 const UNPROVEN: &str = "a replay no counted pass proved";
+
+/// The decision `a-key-the-tree-does-not-bear-out-holds-the-branch`: why a
+/// check whose key names a file the combination's tree does not hold has no
+/// outcome, after the check profile's words `why`.
+pub fn key_held_why(why: &str) -> String {
+    format!("{why}, so the branch holds until a revision of it changes the check's inputs")
+}
+
+/// The decision `a-key-the-tree-does-not-bear-out-holds-the-branch`: the
+/// branch holds on `r`, a check of candidate `c` whose key names a file the
+/// tree does not hold. A hold that stands takes `c`'s entries in; one that
+/// opens is logged once, naming them.
+fn hold_on_key(line: &mut Line, c: &Candidate, r: &sluice_seams::Refused, now: &str) {
+    let file = r.file.clone().expect("a file the tree does not hold");
+    if let Some(h) = &mut line.doc.key_held {
+        for id in &c.submissions {
+            if !h.ids.contains(id) {
+                h.ids.push(*id);
+            }
+        }
+        return;
+    }
+    line.log(
+        now,
+        Event::KeyHeld {
+            check: r.task.clone(),
+            file: file.clone(),
+            combination: c.revision.clone(),
+            ids: c.submissions.clone(),
+        },
+    );
+    line.doc.key_held = Some(KeyHold {
+        check: r.task.clone(),
+        file,
+        why: r.why.clone(),
+        at: c.on.clone(),
+        ids: c.submissions.clone(),
+        since: now.into(),
+    });
+}
 
 /// 87, S18, record 0122 (design D7): why a run whose results count for
 /// nothing for the branch's gate ended with no outcome for them.

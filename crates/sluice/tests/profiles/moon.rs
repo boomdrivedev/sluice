@@ -1368,10 +1368,37 @@ fn proven_drops_a_key_the_tree_does_not_bear_out() {
             task: "alpha:test".into(),
             key: alpha.hash.clone(),
             why: format!("{words:#}"),
+            // A manifest changed after the run no longer hashes to its key:
+            // it names no file the tree lacks, and is blamed.
+            file: None,
         }]
     );
     assert!(
         proof.refused[0].why.starts_with("alpha:test: "),
+        "{proof:?}"
+    );
+}
+
+/// The decision `a-key-the-tree-does-not-bear-out-holds-the-branch`
+/// (C.6): a checkout holding an input other than the combination's tree
+/// does, as a file a tool writes there, gives a key the tree does not
+/// bear out. `proven` answers it refused, naming the file, so the core
+/// holds the branch on it rather than blaming the submission.
+#[test]
+fn proven_names_the_file_a_key_names_that_the_tree_does_not_hold() {
+    let repo = workspace("moon-not-held");
+    repo.write("alpha/notes.md", "written by a tool in the checkout\n");
+    let c = checks(&repo);
+    let (run, report) = finish_run(&c, &request(&repo, "p1", &["#check-fast"], None));
+    let proof = c.proven(&run, &report).unwrap();
+    let alpha = proof
+        .refused
+        .iter()
+        .find(|r| r.task == "alpha:test")
+        .unwrap_or_else(|| panic!("{proof:?}"));
+    assert_eq!(alpha.file.as_deref(), Some("alpha/notes.md"), "{proof:?}");
+    assert_eq!(
+        alpha.why, "alpha:test: alpha/notes.md is not what the tree holds",
         "{proof:?}"
     );
 }

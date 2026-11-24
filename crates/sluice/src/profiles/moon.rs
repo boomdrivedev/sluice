@@ -1255,6 +1255,31 @@ impl std::fmt::Display for NoManifest {
 
 impl std::error::Error for NoManifest {}
 
+/// The decision `a-key-the-tree-does-not-bear-out-holds-the-branch` (C.6):
+/// a key's manifest, the task's own or a dependency's, names an input
+/// `path` that the combination's tree does not hold: absent from the tree,
+/// or held there with other content. No submission's work makes a file the
+/// tree lacks, so such a key holds the branch rather than blaming anyone.
+/// `task` is the task whose manifest names it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct NotHeld {
+    pub task: String,
+    pub path: String,
+    /// Whether the tree holds `path` at all, with other content.
+    pub differs: bool,
+}
+
+impl std::fmt::Display for NotHeld {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self.differs {
+            true => write!(f, "{}: {} is not what the tree holds", self.task, self.path),
+            false => write!(f, "{}: {} is not in the tree", self.task, self.path),
+        }
+    }
+}
+
+impl std::error::Error for NotHeld {}
+
 /// The marks moon 2.6.1's `dep_hash_input` gives a dependency in a hash
 /// manifest's `deps` in place of a key: `ignored`, its default for a
 /// dependency with no outputs; `passthrough`, for an edge the graph
@@ -1275,7 +1300,8 @@ pub const DEPENDENCY_MARKS: [&str; 4] =
 /// `a-signed-run-without-a-sandbox-proves-its-passes`). Any other value
 /// that is not a key is refused. `blob` reads the store, `tree` a path of
 /// the combination's tree. A signer signs only keys this passes. Where a
-/// manifest the walk needs is missing, it fails with [`NoManifest`].
+/// manifest the walk needs is missing, it fails with [`NoManifest`]; where
+/// a manifest names an input the tree does not hold, with [`NotHeld`].
 pub fn check_key(
     key: &str,
     task: &str,
@@ -1312,9 +1338,14 @@ pub fn check_key(
             .as_object()
             .ok_or_else(|| anyhow!("{task}: the manifest names no inputs"))?;
         for (path, sum) in inputs {
-            let held = tree(path).ok_or_else(|| anyhow!("{task}: {path} is not in the tree"))?;
+            let not_held = |differs| NotHeld {
+                task: task.to_string(),
+                path: path.clone(),
+                differs,
+            };
+            let held = tree(path).ok_or_else(|| not_held(false))?;
             if Some(sha256_hex(&held).as_str()) != sum.as_str() {
-                bail!("{task}: {path} is not what the tree holds");
+                return Err(not_held(true).into());
             }
         }
         if let Some(deps) = m["deps"].as_object() {
@@ -1818,6 +1849,53 @@ mod tests {
             let e = check_key(&b, "b:test", &blob, &tree(&[("b/y", "2")])).unwrap_err();
             assert!(e.to_string().contains("a/x is not in the tree"), "{e}");
             assert_eq!(missing(&e), None, "{e}");
+        }
+
+        /// The decision `a-key-the-tree-does-not-bear-out-holds-the-branch`
+        /// (C.6): a key whose manifest, its own or a dependency's, names an
+        /// input the tree lacks or holds with other content is told apart
+        /// by its type, naming the task and the file; a manifest that does
+        /// not hash to its key names no file.
+        #[test]
+        fn a_file_the_tree_does_not_hold_is_named() {
+            let not_held = |e: &anyhow::Error| e.downcast_ref::<NotHeld>().cloned();
+            let mut s = Store(BTreeMap::new());
+            let a = s.manifest("a:test", &[("a/x", "1")], &[]);
+            let b = s.manifest("b:test", &[("b/y", "2")], &[("a:test", &a)]);
+            let blob = |k: &str| s.0.get(k).cloned();
+
+            // A dependency's input the tree lacks.
+            let e = check_key(&b, "b:test", &blob, &tree(&[("b/y", "2")])).unwrap_err();
+            assert_eq!(
+                not_held(&e),
+                Some(NotHeld {
+                    task: "a:test".into(),
+                    path: "a/x".into(),
+                    differs: false,
+                })
+            );
+            assert_eq!(e.to_string(), "a:test: a/x is not in the tree");
+
+            // The key's own input the tree holds with other content.
+            let t = tree(&[("a/x", "1"), ("b/y", "other")]);
+            let e = check_key(&b, "b:test", &blob, &t).unwrap_err();
+            assert_eq!(
+                not_held(&e),
+                Some(NotHeld {
+                    task: "b:test".into(),
+                    path: "b/y".into(),
+                    differs: true,
+                })
+            );
+            assert_eq!(e.to_string(), "b:test: b/y is not what the tree holds");
+
+            // A manifest that does not hash to its key.
+            let mut forged = s.0.clone();
+            forged.get_mut(&a).unwrap().extend(b" ");
+            let blob = |k: &str| forged.get(k).cloned();
+            let t = tree(&[("a/x", "1"), ("b/y", "2")]);
+            let e = check_key(&b, "b:test", &blob, &t).unwrap_err();
+            assert_eq!(not_held(&e), None, "{e}");
         }
     }
 

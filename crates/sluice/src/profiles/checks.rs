@@ -2397,6 +2397,7 @@ impl Tests for Checks {
                     task: t.task.clone(),
                     key: t.hash.clone(),
                     why: format!("{e:#}"),
+                    file: e.downcast_ref::<moon::NotHeld>().map(|n| n.path.clone()),
                 });
             }
             tracing::warn!(
@@ -2508,6 +2509,7 @@ impl Tests for Checks {
                 task: t.task.clone(),
                 key: t.hash.clone(),
                 why: format!("{e:#}"),
+                file: e.downcast_ref::<moon::NotHeld>().map(|n| n.path.clone()),
             });
             tracing::warn!(
                 sluice.task = %t.task,

@@ -7218,6 +7218,10 @@ fn write_status(
     if let Some(hold) = &status.held {
         writeln!(out, "{}", held_line(&status.branch, hold))?;
     }
+    // The decision `a-key-the-tree-does-not-bear-out-holds-the-branch`.
+    if let Some(hold) = &status.key_held {
+        writeln!(out, "{}", words::key_held(&status.branch, hold))?;
+    }
     // 152, record 0124 (design D10): the landing the forge refused, held.
     if let Some((ids, refused)) = &status.landing_refused {
         writeln!(
@@ -7428,6 +7432,7 @@ fn status_json(
         "warnings": status.warnings,
         "stale": status.stale,
         "held": status.held.as_ref().map(held_json),
+        "key_held": status.key_held,
         "held_checkouts": held_checkouts,
         "copy": status.copy,
         "refused_writes": status.refused_writes,

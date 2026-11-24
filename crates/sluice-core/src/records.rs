@@ -1064,6 +1064,12 @@ pub struct BranchDoc {
     /// nothing is formed or landed on it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub held: Option<BranchHold>,
+    /// The decision `a-key-the-tree-does-not-bear-out-holds-the-branch`: a
+    /// check whose key names a file the combination's tree does not hold
+    /// holds the branch, blaming no one, until a revision of the branch
+    /// changes the check's inputs.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub key_held: Option<KeyHold>,
     /// 124: each host whose copy of the branch a round could not level to
     /// `landed`, by the instance's name; a host whose copy holds it has no
     /// entry, and each host writes only its own.
@@ -1106,6 +1112,26 @@ pub struct ProofMissing {
 pub struct BranchHold {
     pub read: Rev,
     pub lacks: Rev,
+    pub since: String,
+}
+
+/// The decision `a-key-the-tree-does-not-bear-out-holds-the-branch`: the
+/// branch held on a check whose key names a file the combination's tree
+/// does not hold. No entry is blamed for it: the entries it holds stay
+/// queued and are formed again once a revision of the branch changes the
+/// check's inputs from `at`.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct KeyHold {
+    /// The check, by the runner's name.
+    pub check: String,
+    /// The file its key names, as a path of the tree.
+    pub file: String,
+    /// The check profile's words for it.
+    pub why: String,
+    /// The branch's revision the refused combination was formed on.
+    pub at: Rev,
+    /// The entries it holds: those of each combination refused so.
+    pub ids: Vec<u64>,
     pub since: String,
 }
 
@@ -1162,6 +1188,7 @@ impl BranchDoc {
             lead: None,
             landed: None,
             held: None,
+            key_held: None,
             copies: BTreeMap::new(),
             refused_writes: Vec::new(),
             proof_missing: Vec::new(),
@@ -1552,6 +1579,24 @@ pub enum Event {
     Held {
         read: Rev,
         lacks: Rev,
+    },
+    /// The decision `a-key-the-tree-does-not-bear-out-holds-the-branch`:
+    /// the branch held on `check`, whose key in `combination` names `file`,
+    /// which the tree does not hold; one line as the hold opens, naming the
+    /// entries it holds.
+    KeyHeld {
+        check: String,
+        file: String,
+        combination: Rev,
+        ids: Vec<u64>,
+    },
+    /// The hold on a key ended: at `revision`, a revision of the branch
+    /// that changes the check's inputs, or with no revision where no entry
+    /// is left for it to hold.
+    KeyHoldEnded {
+        check: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        revision: Option<Rev>,
     },
     /// 121: the operator accepted the revision a held branch was read at,
     /// which lacked the landing named.
