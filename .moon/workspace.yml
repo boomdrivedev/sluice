@@ -23,6 +23,7 @@ projects:
   plugin-board: 'plugins/sluice-board'
   plugin-herdr: 'plugins/herdr'
   nix: 'nix'
+  models: 'models'
   root: '.'
 
 # --affected compares against the merge-base with main.
