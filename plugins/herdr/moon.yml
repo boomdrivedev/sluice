@@ -11,9 +11,10 @@ tasks:
     inputs: ['herdr-plugin.toml', 'bin/**/*', 'tests/manifest.sh', '/devenv.nix', '/devenv.lock']
     tags: [check-fast]
   # The scripts against stand-in herdr and sluice, under the system's sh,
+  # in four groups at once (tests/groups.sh),
   # failed where they leave a process (/tests/leaks.sh).
   test-sh:
-    command: 'sh $workspaceRoot/tests/leaks.sh sh tests/run.sh'
+    command: 'sh $workspaceRoot/tests/leaks.sh sh tests/groups.sh'
     inputs: ['herdr-plugin.toml', 'bin/**/*', 'lib/**/*', 'tests/**/*', '/tests/leaks.sh', '/devenv.nix', '/devenv.lock']
     tags: [check-fast]
   # The same under dash, where it is installed.

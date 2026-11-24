@@ -9,8 +9,34 @@
 # nothing here reaches a network, a credential or a running herdr.
 
 set -u
-here=$(cd "$(dirname "$0")" && pwd -P)
+here=${SLUICE_HERDR_TESTS:-$(cd "$(dirname "$0")" && pwd -P)}
 plugin=$(dirname "$here")
+
+# `--group <n>/<of>`: only the tests whose place in this file, counted
+# from 0, leaves <n> divided by <of>, with every line between two tests,
+# which defines what later tests read. The group's own copy of this file
+# runs, from the scratch directory of its own (tests/groups.sh).
+if [ "${1:-}" = --group ]; then
+  g_n=${2%/*}
+  g_of=${2#*/}
+  g_dir=$(mktemp -d "${SLUICE_TMP:-${TMPDIR:-/tmp}}/sluice-herdr-group.XXXXXX")
+  # A test runs from its `fresh` to its last `pass` or `fi` at the
+  # margin before the next test; the first reading finds those ends.
+  awk -v n="$g_n" -v of="$g_of" '
+    FNR == NR {
+      if (/^fresh / || /^echo$/) { if (k) end[k] = last; if (/^fresh /) k++ }
+      if (/^(pass|fi)$/) last = FNR
+      next
+    }
+    /^fresh / { j++; inside = 1; mine = ((j - 1) % of == n) }
+    !inside || mine { print }
+    inside && FNR == end[j] { inside = 0 }
+  ' "$here/run.sh" "$here/run.sh" >"$g_dir/run.sh"
+  SLUICE_HERDR_TESTS=$here sh "$g_dir/run.sh"
+  g_status=$?
+  rm -rf "$g_dir"
+  exit "$g_status"
+fi
 
 # Under sluice's sandbox only SLUICE_TMP is writable beside the checkout.
 scratch=$(mktemp -d "${SLUICE_TMP:-${TMPDIR:-/tmp}}/sluice-herdr.XXXXXX")
@@ -24,46 +50,47 @@ hold_lease() {
   printf '%s\n%s\n%s\n%s\n' $$ "$(procs identity $$)" "$plugin" "$plugin_version" >"$S/watch.lease"
 }
 
-# Wait up to $1 seconds for the shell condition $2, checking each second.
+# Wait up to $1 seconds for the shell condition $2, checking it every
+# tenth of a second: a test waits on what it checks, never on the clock.
 within() {
-  n=$1
+  n=$(($1 * 10))
   while [ "$n" -gt 0 ]; do
     eval "$2" && return 0
-    sleep 1
+    sleep 0.1
     n=$((n - 1))
   done
   eval "$2"
 }
 
-# Wait up to $2 seconds for process $1 to end, checking each second; say
-# how long it took in $took. A process is waited for, never slept on: under
+# Wait up to $2 seconds for process $1 to end, checking every tenth of a
+# second; say how long it took in $took. A process is waited for, never slept on: under
 # a loaded gate, ending takes longer than any fixed sleep allows.
 ends_within() {
   began=$(date +%s)
   while kill -0 "$1" 2>/dev/null; do
     took=$(($(date +%s) - began))
     [ "$took" -ge "$2" ] && return 1
-    sleep 1
+    sleep 0.1
   done
   took=$(($(date +%s) - began))
 }
 
 # Wait up to 30 seconds for what the plugin runs, the herdr, sluice, jq and
-# git calls logged, to stand still for three seconds.
+# git calls logged, to stand still for three seconds, checked every tenth.
 settled() {
-  st_n=30
+  st_n=300
   st_last=
   st_same=0
   while [ "$st_n" -gt 0 ]; do
     st_now=$(cat "$FAKE"/*-calls 2>/dev/null | wc -c)
     if [ "$st_now" = "$st_last" ]; then
       st_same=$((st_same + 1))
-      [ "$st_same" -ge 3 ] && return 0
+      [ "$st_same" -ge 30 ] && return 0
     else
       st_same=0
       st_last=$st_now
     fi
-    sleep 1
+    sleep 0.1
     st_n=$((st_n - 1))
   done
   return 1
@@ -125,16 +152,45 @@ holder_of() {
 }
 
 # A watcher a test started, through --ensure or itself, is ended with it:
-# only those whose lease is in this run's scratch directory.
+# only those whose lease is in this run's scratch directory, each waited
+# for until it has gone, up to ten seconds in all.
 reap() {
+  rp_pids=
   for l in "$scratch"/t*/state/watch.lease "$scratch"/t*/state/*/*/watch.lease; do
     [ -f "$l" ] || continue
     p=$(holder_of "$l")
-    [ -n "$p" ] && [ "$p" != $$ ] && kill "$p" 2>/dev/null
+    [ -n "$p" ] && [ "$p" != $$ ] && kill "$p" 2>/dev/null && rp_pids="$rp_pids $p" && rp_all="$rp_all $p"
   done
-  sleep 1
+  rp_n=100
+  for p in $rp_pids; do
+    while kill -0 "$p" 2>/dev/null && [ "$rp_n" -gt 0 ]; do
+      sleep 0.1
+      rp_n=$((rp_n - 1))
+    done
+  done
 }
-trap 'reap; rm -rf "$scratch"' EXIT
+# At the end, a watcher the last test started may take its lease after a
+# first look: reap until half a second has passed with none found, then
+# wait up to twenty seconds for every watcher ended to be gone.
+rp_all=
+reap_all() {
+  ra_still=0
+  ra_n=100
+  while [ "$ra_still" -lt 5 ] && [ "$ra_n" -gt 0 ]; do
+    reap
+    if [ -z "$rp_pids" ]; then ra_still=$((ra_still + 1)); else ra_still=0; fi
+    sleep 0.1
+    ra_n=$((ra_n - 1))
+  done
+  ra_n=200
+  for p in $rp_all; do
+    while kill -0 "$p" 2>/dev/null && [ "$ra_n" -gt 0 ]; do
+      sleep 0.1
+      ra_n=$((ra_n - 1))
+    done
+  done
+}
+trap 'reap_all; rm -rf "$scratch"' EXIT
 woken=0
 trap 'woken=$((woken + 1))' USR1
 scratch=$(cd "$scratch" && pwd -P)
@@ -1388,7 +1444,7 @@ first=$(head -1 "$FAKE/watch-pids")
 kill "$first"
 within 10 '[ "$(watching | wc -l | tr -d " ")" = 1 ] && [ "$(watching)" != "$first" ]' || fail "no new source runs: $(cat "$FAKE/sluice-calls")"
 next=$(watching)
-within 5 '[ "$(grep -c "^$next add " "$FAKE/stdin-lines")" = 2 ]' || fail "the new source's input: $(cat "$FAKE/stdin-lines")"
+within 15 '[ "$(grep -c "^$next add " "$FAKE/stdin-lines")" = 2 ]' || fail "the new source's input: $(cat "$FAKE/stdin-lines")"
 for f in "$work" "$scratch/plain"; do
   grep -q "^$next add $f\$" "$FAKE/stdin-lines" || fail "$f not added again"
 done
@@ -1402,7 +1458,9 @@ if needs_ps; then
   panes_at p1 "$work"
   SLUICE_HERDR_TICK=1 sh "$plugin/bin/watch.sh" --ticks 60 2>/dev/null &
   a=$!
-  within 15 '[ -n "$(watching)" ]' || fail "no source started"
+  # The source started, and the watcher has settled its identity, which
+  # the next watcher ends it by.
+  within 15 '[ -n "$(watching)" ] && sources_of "$a" | grep -q . && ! grep -q "	pid:" "$S/run/$a"/*.pids' || fail "no source started"
   src=$(watching)
   kill -KILL "$a"
   wait "$a" 2>/dev/null
@@ -1463,8 +1521,10 @@ pass
 
 ## herdr-status
 
-fresh 'status: testing'
+# The board most status tests feed, read for this run's repository.
 board=$(jq -c --arg repo "$common" '.repository = $repo' "$here/docs/board.json")
+
+fresh 'status: testing'
 printf '%s\n' "$board" | sh "$plugin/bin/document.sh" local
 frame_of "$work" --once >"$t/frame"
 sed "s|$common|REPO|" "$t/frame" >"$t/got"
