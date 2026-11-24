@@ -9,6 +9,9 @@
 //! ```text
 //! $XDG_STATE_HOME/sluice/running/     (default ~/.local/state)
 //!   .lock                   held only across counting and admitting one run
+//!   .let-go                 written over by a run's supervisor once it lets
+//!                           go of its run directory: the event that tells
+//!                           the host process the run no longer counts
 //!   <name>.json             one admitted run: its kind, repository, place,
 //!                           run directory, starter and when it was admitted
 //!   <name>.hold             locked by the process that admitted the run,
