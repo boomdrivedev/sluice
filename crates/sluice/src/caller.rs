@@ -106,7 +106,6 @@ pub fn untold(until: chrono::DateTime<chrono::Utc>) -> bool {
 }
 
 /// The session variables of this process's environment, which a read
-/// sends./// The session variables of this process's environment, which a read
 /// sends.
 pub fn here() -> BTreeMap<String, String> {
     vars_of(&SESSION)
