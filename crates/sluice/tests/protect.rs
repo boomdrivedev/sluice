@@ -1555,6 +1555,28 @@ fn no_host(repo: &Repo) {
     }
 }
 
+/// The pids of each `sluice host` of `repo`'s state folder that its logs
+/// say started.
+fn host_starts(repo: &Repo) -> Vec<String> {
+    let host = state_of(repo).join("sluice/host");
+    ["log.1", "log"]
+        .iter()
+        .flat_map(|f| {
+            std::fs::read_to_string(host.join(f))
+                .unwrap_or_default()
+                .lines()
+                .filter_map(|l| l.split_once(" started, pid ").map(|(_, p)| p.to_string()))
+                .collect::<Vec<_>>()
+        })
+        .map(|p| {
+            p.split(|c: char| !c.is_ascii_digit())
+                .next()
+                .unwrap_or("")
+                .to_string()
+        })
+        .collect()
+}
+
 /// What `repo`'s `sluice host` has said in its log.
 fn host_log(repo: &Repo) -> String {
     std::fs::read_to_string(state_of(repo).join("sluice/host/log")).unwrap_or_default()
@@ -1730,6 +1752,7 @@ fn the_refused_write_is_logged_by_sluice_host() {
 fn a_hook_with_no_sluice_host_running_starts_it() {
     let (repo, _) = protected("protect-starts-host");
     no_host(&repo);
+    let started = host_starts(&repo);
     let tip = repo.rev("bolt/x");
     let head = repo.rev("unit/a");
     let out = repo.git_raw(&["update-ref", "refs/heads/bolt/x", &head, &tip]);
@@ -1737,9 +1760,15 @@ fn a_hook_with_no_sluice_host_running_starts_it() {
     assert_eq!(out.status.code(), Some(128), "{t}");
     assert!(t.contains("bolt/x is protected by sluice"), "{t}");
     assert_eq!(repo.rev("bolt/x"), tip);
+    // The hook started a `sluice host`, which judged the write; it ends
+    // once idle.
+    let log = host_log(&repo);
+    let now = host_starts(&repo);
+    assert!(now.iter().any(|p| !started.contains(p)), "{log}");
     assert!(
-        client(&repo).answering().unwrap().is_some(),
-        "no sluice host runs"
+        log.lines()
+            .any(|l| l.contains("update-ref refs/heads/bolt/x") && l.contains(": refused in ")),
+        "{log}"
     );
 }
 
