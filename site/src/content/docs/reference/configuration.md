@@ -190,19 +190,21 @@ run. Results under two grants are never weighed together: a test
 that failed under one and passed under another isn't flaky, and a pass
 under one proves no replay under another.
 
-A test that did not pass in a run the sandbox refused something has no
-result. sluice reads what the sandbox refused from the sandbox's own
-report, kept as the run goes, never from what the test printed or how it
-failed. The test is named with what was refused, nothing is recorded
-under its key, nobody is blamed, and the combination is tested again; a
-test that passed keeps its pass. After three such runs in a row the
-combination is not passed, each test naming what was refused. A test
-that fails in a run the sandbox refused nothing is recorded and blamed
-as ever. When sluice can't read what the sandbox refused a run, the run
-is read as refused nothing and says so:
+A test that fails in a run the sandbox refused something is a fail: it's
+recorded under its key and blamed, as any fail is. sluice reads what the
+sandbox refused from the sandbox's own report, kept as the run goes,
+never from what the test printed or how it failed, and says it beside
+the fail: `sluice's sandbox refused the run <what> (by <program>)`. When
+sluice can't read what the sandbox refused a run, it says so:
 `sluice could not read what its sandbox refused the run: <why>`. The cure
-for a refusal is the policy, the host's [`[[caches]]`](#caches) or the
-test, since nothing was recorded under the test's key.
+for a refusal that makes a test fail is the policy, the host's
+[`[[caches]]`](#caches) or the test.
+
+Under `network = "denied"` or `"localhost"`, the run's command gets
+`PROTO_OFFLINE=1`, so moon and the tools proto runs don't look up names
+to find out whether they're offline. Under the moon runner the sandbox
+also lets the run write moon's task archives, the checkout's
+`.moon/cache/outputs`, wherever a link there leads.
 
 Some executors cannot hold every limit: the open executor holds no `memory`
 limit and cannot keep a run off the network, and the sandbox on macOS

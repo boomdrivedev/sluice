@@ -2458,23 +2458,25 @@ impl Sluice<'_> {
 
     /// 114, 139; records 0072 (design D7 of the change
     /// `a-check-its-executor-refused-has-no-outcome`), 0074 (design D5) and
-    /// 0097 (design D3): the finished run `run` under `limits`, read with
-    /// what became of the host during it and what its executor refused it.
-    /// Where a check did not pass in a run its time limit did not end, the
-    /// check seam is asked, once, as the report is first taken: first
-    /// whether the host's system was switched during the run, whatever the
-    /// policy asks of the host; then what the executor reports refusing
-    /// the run; then, where the run asks for the container engine, whether
-    /// the engine has gone. The first that answers gives the reason, and
-    /// none after it is asked: every check that failed, was failed by a
-    /// task it depends on or was left without a result has no outcome, with
-    /// why, the tasks it was failed by none either, and a check that passed
-    /// keeps its pass (84, 149; rule core.35). A report of what was
-    /// refused that could not be read is kept on the report, the run read
-    /// as one refused nothing and the engine asked as before (design D8).
-    /// A run whose checks all passed, or that its time limit ended, is
-    /// never looked at, and a required check the runner keeps out of its
-    /// CI mode stays missing.
+    /// 0097 (design D3); design D1 of the change
+    /// `the-gate-sandbox-lets-the-tools-write`: the finished run `run` under
+    /// `limits`, read with what became of the host during it and what its
+    /// executor refused it. Where a check did not pass in a run its time
+    /// limit did not end, the check seam is asked, once, as the report is
+    /// first taken: first whether the host's system was switched during
+    /// the run, whatever the policy asks of the host; then what the
+    /// executor reports refusing the run; then, where the run asks for the
+    /// container engine, whether the engine has gone. A switch, or an
+    /// engine gone, gives the reason, and nothing after it is asked: every
+    /// check that failed, was failed by a task it depends on or was left
+    /// without a result has no outcome, with why, the tasks it was failed
+    /// by none either, and a check that passed keeps its pass (84, 149). A
+    /// refusal gives none: the fails stand, and the report says what was
+    /// refused beside them (rule core.35 as the change amends it). A report
+    /// of what was refused that could not be read is kept on the report as
+    /// before (design D8). A run whose checks all passed, or that its time
+    /// limit ended, is never looked at, and a required check the runner
+    /// keeps out of its CI mode stays missing.
     pub(crate) fn after_run(
         &self,
         run: &RunHandle,
@@ -2489,25 +2491,24 @@ impl Sluice<'_> {
         }
         let reason = match self.seams.tests.switched(run)? {
             Some(why) => why,
-            None => match self.seams.tests.refused(run)? {
-                Refusals::Refused(why) => why,
-                refusals => {
-                    if let Refusals::Unread(why) = refusals {
-                        report.refusals_unread = Some(why);
-                    }
-                    if !limits.docker {
-                        return Ok(report);
-                    }
-                    let engine = Limits {
-                        docker: true,
-                        ..Limits::default()
-                    };
-                    match self.seams.tests.unmet(&engine)? {
-                        Some(why) => format!("after the run, {why}"),
-                        None => return Ok(report),
-                    }
+            None => {
+                match self.seams.tests.refused(run)? {
+                    Refusals::Refused(words) => report.refused = Some(words),
+                    Refusals::Unread(why) => report.refusals_unread = Some(why),
+                    Refusals::None => {}
                 }
-            },
+                if !limits.docker {
+                    return Ok(report);
+                }
+                let engine = Limits {
+                    docker: true,
+                    ..Limits::default()
+                };
+                match self.seams.tests.unmet(&engine)? {
+                    Some(why) => format!("after the run, {why}"),
+                    None => return Ok(report),
+                }
+            }
         };
         let (failed, passed) = std::mem::take(&mut report.tasks)
             .into_iter()
@@ -2674,10 +2675,15 @@ impl Sluice<'_> {
             line.log(now, event);
         }
         // Clause 119: what the runner said of the run, kept for the
-        // report, and, 139 (design D8), why its executor could not read
-        // what it refused it; no verdict reads either.
+        // report, and, 139, what its executor refused it (design D1 of the
+        // change `the-gate-sandbox-lets-the-tools-write`) or why it could
+        // not read it (design D8); no verdict reads any of them.
         let detail = report.detail.clone().unwrap_or_default();
-        if !detail.is_empty() || !report.kept_out.is_empty() || report.refusals_unread.is_some() {
+        if !detail.is_empty()
+            || !report.kept_out.is_empty()
+            || report.refusals_unread.is_some()
+            || report.refused.is_some()
+        {
             line.log(
                 now,
                 Event::Detail {
@@ -2686,6 +2692,7 @@ impl Sluice<'_> {
                     detail,
                     kept_out: report.kept_out.clone(),
                     refusals_unread: report.refusals_unread.clone(),
+                    refused: report.refused.clone(),
                 },
             );
         }
@@ -5258,6 +5265,7 @@ fn unstarted(checks: &[String], kind: &str, reason: String) -> RunReport {
         detail: None,
         kept_out: Vec::new(),
         refusals_unread: None,
+        refused: None,
     }
 }
 

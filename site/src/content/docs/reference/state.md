@@ -835,23 +835,22 @@ result. Its combination is tested again. `not_run` lists each test the
 run left not run, with its `reason`. A test that passed in a run that
 kept no proof of it also has `key`, the key of the manifest that's
 missing. That's the test's own key, or, as its reason names, the key of
-a task it depends on. A line written by an older sluice has no `key`. A
-test that did not pass in a run the sandbox refused something names what
-was refused:
+a task it depends on. A line written by an older sluice has no `key`:
 
 ```json
 {"schema":"sluice/log@1","event":"lost","combination":"e20a6f9b48","not_run":[{"task":"tests:t-after","reason":"it passed, but nothing the run kept proves it ran: moon's manifest of it is not in /home/me/app/.moon/cache, where moon kept none of the run's manifests","key":"4d1e22b0c9"}]}
-{"schema":"sluice/log@1","event":"lost","combination":"e20a6f9b48","not_run":[{"task":"site:install","reason":"sluice's sandbox refused the run network-outbound /private/var/run/mDNSResponder (a name lookup, by bun)"}]}
 ```
 
 `detail` is logged after a run with what its runner said of it beyond
 its results. `detail` holds how long the run took, its estimate and the
 files it read as changed; `kept_out`, the required tests it keeps out of
-its CI mode. Where sluice couldn't read what the sandbox refused the
-run, so read it as refused nothing, `refusals_unread` says why. No
-verdict reads this event:
+its CI mode. After a run in which a test didn't pass, `refused` says
+what the sandbox refused the run, and `refusals_unread` why sluice
+couldn't read it. The run's fails stand either way. No verdict reads
+this event:
 
 ```json
+{"schema":"sluice/log@1","event":"detail","combination":"e20a6f9b48","refused":"sluice's sandbox refused the run network-outbound /private/var/run/mDNSResponder (a name lookup, by bun)"}
 {"schema":"sluice/log@1","event":"detail","combination":"e20a6f9b48","refusals_unread":"log: exited 1 before it was ready"}
 ```
 

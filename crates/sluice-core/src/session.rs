@@ -620,6 +620,9 @@ fn joined(first: &RunReport, again: &RunReport) -> RunReport {
     if report.refusals_unread.is_none() {
         report.refusals_unread = again.refusals_unread.clone();
     }
+    if report.refused.is_none() {
+        report.refused = again.refused.clone();
+    }
     report
 }
 

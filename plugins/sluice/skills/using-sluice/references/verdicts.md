@@ -149,31 +149,23 @@ failed.
 
 ## A test the sandbox refused something
 
-On a branch whose `[executor] kind = "sandbox"`, a test that did not pass
-in a run the sandbox refused something has no result. sluice reads what
-the sandbox refused from its own report of the run, never from what the
-test printed. Nothing is recorded under the test's key, nobody is blamed,
-the combination is tested again, and a test that passed keeps its
-result:
+On a branch whose `[executor] kind = "sandbox"`, a test that fails in a
+run the sandbox refused something is a fail: it's recorded under its key
+and blamed, as any fail is. sluice reads what the sandbox refused from
+its own report of the run, never from what the test printed, and says it
+beside the fail:
 
 ```
-could not run: site:install: sluice's sandbox refused the run network-outbound /private/var/run/mDNSResponder (a name lookup, by bun)
-nothing was recorded for a test that could not run: once the host can run it, run again
+sluice's sandbox refused the run network-outbound /private/var/run/mDNSResponder (a name lookup, by bun)
 ```
 
-Here the test looked up a name under `network = "localhost"`, which
-refuses every lookup. sluice's sandbox stopped it, not your code. The
-cure is the branch's policy (a wider `network`), the host's `[[caches]]`
-(a folder the test must write, declared for every run), or the test (one
-that needs nothing the sandbox refuses). Nothing was recorded under the
-test's key. After three such runs in a
-row the newest submission is blamed, each test named with what was
-refused.
-
-A test that fails in a run the sandbox refused nothing is recorded and
-blamed as ever. When sluice can't read what the sandbox refused a run, it
-reads the run as refused nothing, records the fail, and says so beside
-it:
+The refusal may be the cause, or only beside it. Here a test looked up a
+name under `network = "localhost"`, which refuses every lookup. When the
+refusal is what failed the test, the cure is the branch's policy (a wider
+`network`), the host's `[[caches]]` (a folder the test must write,
+declared for every run), or the test (one that needs nothing the sandbox
+refuses). When sluice can't read what the sandbox refused a run, it says
+so beside the fail:
 
 ```
 sluice could not read what its sandbox refused the run: log: exited 1 before it was ready
@@ -230,9 +222,8 @@ disk, a tool missing), tell the user what the host lacks. Nothing was
 recorded under the test's key.
 
 sluice tells these apart on its own and records nothing for them: a run
-that never started, a `not_run` exit, a test the time limit ended, a test
-that did not pass in a run the sandbox refused something, and, on a
-branch with `docker = true`, a test that did not pass after which the
+that never started, a `not_run` exit, a test the time limit ended, and,
+on a branch with `docker = true`, a test that did not pass after which the
 container engine no longer answers. A host failure none of them catches is recorded like any fail, under the
 test's key. A later pass on the same key then makes the
 test read as flaky, and on a branch with `flaky = "fail"` the same head

@@ -325,9 +325,14 @@ worktree.
 
 A test that could not run is listed as `could not run: <test>: <why>`
 and has no result, so nothing is recorded under its key. A test could
-not run when its program could not be started, when it exits with a code
-`[tests] not_run` names, or when the executor reports refusing the run
-something it needs.
+not run when its program could not be started or when it exits with a
+code `[tests] not_run` names. A test that fails in a run the sandbox
+refused something is a fail, recorded under its key, and exec says what
+the sandbox refused after the run's lines:
+
+```console
+sluice's sandbox refused the run file-write-create /Users/me/.cache/tool/lock (by tool)
+```
 
 When a task a required test depends on runs and fails, and the task
 runner skips the test for it, that task fails the test. exec lists the

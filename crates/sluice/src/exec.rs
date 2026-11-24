@@ -768,6 +768,12 @@ impl Exec<'_> {
                 "nothing was recorded for a test that could not run: once the host can run it, run again",
             )?;
         }
+        // 139: what the sandbox refused the run, beside its fails, which
+        // stand (design D1 of the change
+        // `the-gate-sandbox-lets-the-tools-write`).
+        if let Some(words) = &report.refused {
+            say(out, json, words)?;
+        }
         // 139, design D8: the run was read as refused nothing.
         if let Some(why) = &report.refusals_unread {
             say(out, json, &words::refusals_unread(why))?;
