@@ -327,6 +327,10 @@ struct Inner {
     /// Tasks whose reported keys the candidate's tree does not bear out
     /// (design D9).
     forged: BTreeSet<String>,
+    /// Tasks whose keys name a file, by task: refused, naming the file,
+    /// in a run whose tree does not hold it (the decision
+    /// `a-key-the-tree-does-not-bear-out-holds-the-branch`).
+    lacks: BTreeMap<String, String>,
     /// Where the run's record of a pass is looked for and not found:
     /// while set, every ran pass is unkept (114; record 0105).
     no_proof: Option<String>,
@@ -1416,11 +1420,49 @@ impl World {
 
     /// From now, `task`'s reported key is one the candidate's tree does
     /// not bear out, as a check that lies about its key reports it: the
-    /// profile answers it refused, saying `<task>: its record names an
-    /// input the tree does not hold` (C.6, 20; design D6 of
+    /// profile answers it refused, saying `<task>: the manifest under its
+    /// key does not hash to it`, naming no file (C.6, 20; design D6 of
     /// `a-signed-run-without-a-sandbox-proves-its-passes`).
     pub fn forges(&self, task: &str) {
         self.0.borrow_mut().forged.insert(task.into());
+    }
+
+    /// From now, `task`'s key names `file` among its inputs, as a task
+    /// whose inputs take in a file git ignores names it: in a run whose
+    /// tree does not hold `file`, the profile answers the key refused,
+    /// saying `<task>: <file> is not in the tree` and naming `file`; with
+    /// `None`, its key names no such file again (the decision
+    /// `a-key-the-tree-does-not-bear-out-holds-the-branch`).
+    pub fn lacks(&self, task: &str, file: Option<&str>) {
+        let mut inner = self.0.borrow_mut();
+        match file {
+            Some(f) => inner.lacks.insert(task.into(), f.into()),
+            None => inner.lacks.remove(task),
+        };
+    }
+
+    /// The refusal of `t`'s key in a run of `revision`, where the world
+    /// forges it or it names a file `revision`'s tree does not hold.
+    fn key_refusal(inner: &Inner, t: &TaskResult, revision: &Rev) -> Option<sluice_seams::Refused> {
+        if inner.forged.contains(&t.task) {
+            return Some(sluice_seams::Refused {
+                task: t.task.clone(),
+                key: t.hash.clone(),
+                why: format!("{}: the manifest under its key does not hash to it", t.task),
+                file: None,
+            });
+        }
+        let file = inner.lacks.get(&t.task)?;
+        let held = inner
+            .commits
+            .get(revision)
+            .is_some_and(|c| c.tree.contains_key(file));
+        (!held).then(|| sluice_seams::Refused {
+            task: t.task.clone(),
+            key: t.hash.clone(),
+            why: format!("{}: {file} is not in the tree", t.task),
+            file: Some(file.clone()),
+        })
     }
 
     /// Design D8 of the change `a-pass-nothing-proves-blames-no-one` (114;
@@ -2959,8 +3001,15 @@ impl Tests for FakeTests {
             .collect())
     }
 
-    fn proven(&self, _run: &RunHandle, report: &RunReport) -> Result<Proof> {
+    fn proven(&self, run: &RunHandle, report: &RunReport) -> Result<Proof> {
         let inner = self.0 .0.borrow();
+        let revision = run
+            .0
+            .strip_prefix("run-")
+            .and_then(|n| n.parse::<usize>().ok())
+            .and_then(|n| inner.runs.get(n))
+            .map(|r| r.request.revision.clone())
+            .ok_or_else(|| anyhow!("no run {}", run.0))?;
         let unkept = |t: &TaskResult| {
             inner
                 .no_proof
@@ -2969,18 +3018,11 @@ impl Tests for FakeTests {
         };
         // Design D6 of `a-signed-run-without-a-sandbox-proves-its-passes`
         // (C.6, 20): a forged key is refused with the profile's words.
-        let refuse = |t: &TaskResult| sluice_seams::Refused {
-            task: t.task.clone(),
-            key: t.hash.clone(),
-            why: format!(
-                "{}: its record names an input the tree does not hold",
-                t.task
-            ),
-        };
+        let refuse = |t: &TaskResult| World::key_refusal(&inner, t, &revision);
         let mut proof = Proof::default();
         for t in &report.tasks {
-            if inner.forged.contains(&t.task) {
-                proof.refused.push(refuse(t));
+            if let Some(r) = refuse(t) {
+                proof.refused.push(r);
                 continue;
             }
             match unkept(t) {
@@ -2996,8 +3038,8 @@ impl Tests for FakeTests {
             }
         }
         for t in &report.dependencies {
-            if inner.forged.contains(&t.task) {
-                proof.refused.push(refuse(t));
+            if let Some(r) = refuse(t) {
+                proof.refused.push(r);
             } else {
                 proof.proven.push(t.task.clone());
             }
@@ -3037,7 +3079,7 @@ impl Tests for FakeTests {
     fn proven_from(
         &self,
         dir: &std::path::Path,
-        _revision: &Rev,
+        revision: &Rev,
         _tests: &sluice_seams::Settings,
         report: &RunReport,
     ) -> Result<Proof> {
@@ -3046,15 +3088,8 @@ impl Tests for FakeTests {
         let kept = |t: &TaskResult| keys.lines().any(|l| l == format!("{} {}", t.task, t.hash));
         let mut proof = Proof::default();
         for t in report.tasks.iter().chain(&report.dependencies) {
-            if inner.forged.contains(&t.task) {
-                proof.refused.push(sluice_seams::Refused {
-                    task: t.task.clone(),
-                    key: t.hash.clone(),
-                    why: format!(
-                        "{}: its record names an input the tree does not hold",
-                        t.task
-                    ),
-                });
+            if let Some(r) = World::key_refusal(&inner, t, revision) {
+                proof.refused.push(r);
             } else if kept(t) {
                 proof.proven.push(t.task.clone());
             } else if matches!(t.source, Source::Ran { .. }) && t.outcome == Outcome::Pass {
@@ -5072,9 +5107,57 @@ mod tests {
             [sluice_seams::Refused {
                 task: "a:test".into(),
                 key: a.hash.clone(),
-                why: "a:test: its record names an input the tree does not hold".into(),
+                why: "a:test: the manifest under its key does not hash to it".into(),
+                file: None,
             }]
         );
+    }
+
+    /// The decision `a-key-the-tree-does-not-bear-out-holds-the-branch`:
+    /// a task whose key names a file is refused, naming it, in a run whose
+    /// tree does not hold the file, and proven in one whose tree does.
+    #[test]
+    fn a_key_naming_a_file_the_tree_lacks_is_refused_naming_it() {
+        let f = Fakes::new();
+        let lacking = f.world.init("main", &[("a/x", "1"), ("b/x", "1")]);
+        f.world.task("a:test", "a/");
+        f.world.task("b:test", "b/");
+        f.world.lacks("a:test", Some("a/settings"));
+        let run = |rev: &Rev, place: &str| {
+            let request = RunRequest {
+                place: f
+                    .checkout
+                    .materialize(place, rev, &Settings::new())
+                    .unwrap(),
+                revision: rev.clone(),
+                required: vec!["a:test".into(), "b:test".into()],
+                since: None,
+                beyond: Vec::new(),
+                limit: None,
+                limits: Default::default(),
+                tests: Settings::new(),
+                command: None,
+                replay: false,
+                system: None,
+            };
+            let h = f.tests.start(&request, queue_part(&f)).unwrap();
+            let Progress::Finished(r) = f.tests.progress(&h).unwrap() else {
+                panic!("finished")
+            };
+            f.tests.proven(&h, &r).unwrap()
+        };
+        let proof = run(&lacking, "sluice/try/main/1");
+        assert_eq!(proof.proven, ["b:test"]);
+        assert_eq!(proof.refused.len(), 1, "{proof:?}");
+        assert_eq!(proof.refused[0].file.as_deref(), Some("a/settings"));
+        assert_eq!(
+            proof.refused[0].why,
+            "a:test: a/settings is not in the tree"
+        );
+        let holding = f.world.work(&lacking, &[("a/settings", Some("1"))]);
+        let mut proven = run(&holding, "sluice/try/main/2").proven;
+        proven.sort();
+        assert_eq!(proven, ["a:test", "b:test"]);
     }
 
     /// A part of the fakes' host's bound for a combination's run.

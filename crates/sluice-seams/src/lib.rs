@@ -869,6 +869,12 @@ pub struct Refused {
     pub task: String,
     pub key: String,
     pub why: String,
+    /// The file the key names that the combination's tree does not hold,
+    /// as a path of the tree, where that is why: a file the tree lacks, or
+    /// holds with other content. Such a key holds the branch and blames no
+    /// one (the decision `a-key-the-tree-does-not-bear-out-holds-the-branch`);
+    /// any other refusal is blamed with `why` (C.6, 20).
+    pub file: Option<String>,
 }
 
 /// 149: a required check the runner skipped because the tasks `by` it

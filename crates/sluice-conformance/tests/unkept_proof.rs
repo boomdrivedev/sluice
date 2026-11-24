@@ -381,7 +381,7 @@ fn a_key_the_tree_does_not_bear_out_is_blamed_with_why() {
         [(
             "a:test".to_string(),
             key,
-            Some("a:test: its record names an input the tree does not hold".to_string())
+            Some("a:test: the manifest under its key does not hash to it".to_string())
         )]
     );
 }

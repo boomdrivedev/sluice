@@ -10263,7 +10263,7 @@ fn job_sign_signs_only_what_the_tree_bears_out() {
             .clone()
     };
     let (a, _) = (key_of("a:test"), key_of("b:test"));
-    // b:test's key names an input the combination's tree does not hold.
+    // b:test's key is one the combination's tree does not bear out.
     f.world.forges("b:test");
     let starts = f.world.run_starts().len();
     let version = f.world.version("main");
@@ -10498,7 +10498,7 @@ fn job_record_leaves_a_key_the_tree_does_not_bear_out_without_a_result() {
     let claim = pooled(&f, &["a", "b"]);
     let out = support::Scratch::new("job-record-left-out");
     let ran = job_run(&f, &claim, out.path());
-    // b:test's key names an input the combination's tree does not hold.
+    // b:test's key is one the combination's tree does not bear out.
     f.world.forges("b:test");
     let bundle = out.path().join("bundle.json");
     std::fs::write(&bundle, job_sign(&f, &claim, &ran, out.path())).unwrap();
@@ -10526,7 +10526,7 @@ fn job_record_leaves_a_key_the_tree_does_not_bear_out_without_a_result() {
     assert_eq!(
         ended.outcomes.get("b:test"),
         Some(&CheckOutcome::None {
-            why: "b:test: its record names an input the tree does not hold".into()
+            why: "b:test: the manifest under its key does not hash to it".into()
         }),
         "{ended:?}"
     );

@@ -269,6 +269,22 @@ pub fn not_borne_out(task: &str, why: &str) -> String {
     format!("{task}: the combination's tree does not bear its key out: {why}")
 }
 
+/// The decision `a-key-the-tree-does-not-bear-out-holds-the-branch`: the
+/// branch held on a check whose key names a file the tree does not hold,
+/// with the check, the file, the entries it holds and the way on.
+pub fn key_held(branch: &str, hold: &sluice_core::records::KeyHold) -> String {
+    let ids: Vec<String> = hold.ids.iter().map(|id| format!("#{id}")).collect();
+    format!(
+        "held: {check}'s key names {file}, which the tree of {branch} does not hold, \
+         so nobody is blamed and {ids} wait; they are tested again once a revision of \
+         {branch} changes {check}'s inputs ({why})",
+        check = hold.check,
+        file = hold.file,
+        ids = and_list(&ids),
+        why = hold.why,
+    )
+}
+
 /// 149: a required check its runner skipped for the tasks `by` it depends
 /// on, which ran and failed; the tasks joined with `, ` and the last with
 /// ` and `.
@@ -335,9 +351,33 @@ mod tests {
     #[test]
     fn a_key_not_borne_out_is_said_with_why() {
         assert_eq!(
-            not_borne_out("a:test", "a:test: a/x is not in the tree"),
+            not_borne_out(
+                "a:test",
+                "a:test: the manifest under its key does not hash to it"
+            ),
             "a:test: the combination's tree does not bear its key out: \
-             a:test: a/x is not in the tree"
+             a:test: the manifest under its key does not hash to it"
+        );
+    }
+
+    /// The decision `a-key-the-tree-does-not-bear-out-holds-the-branch`
+    /// (the key-hold spec's "The branch's status").
+    #[test]
+    fn a_hold_on_a_key_is_said_with_its_check_file_and_entries() {
+        let hold = sluice_core::records::KeyHold {
+            check: "root:format".into(),
+            file: ".claude/settings.json".into(),
+            why: "root:format: .claude/settings.json is not in the tree".into(),
+            at: sluice_seams::Rev::new("10e4791"),
+            ids: vec![5, 6],
+            since: "2026-11-24T12:00:00Z".into(),
+        };
+        assert_eq!(
+            key_held("main", &hold),
+            "held: root:format's key names .claude/settings.json, which the tree of main \
+             does not hold, so nobody is blamed and #5 and #6 wait; they are tested again \
+             once a revision of main changes root:format's inputs \
+             (root:format: .claude/settings.json is not in the tree)"
         );
     }
 
