@@ -117,9 +117,11 @@ impl Moon {
         // 36, 70: what the run changed since `since`, an ancestor of its
         // revision, read once, with the paths a worktree holds beyond its
         // revision (design D2); every required task when there is no
-        // `since`, or when moon's own configuration changed, since then the
-        // graph itself did. moon is handed the files rather than the range
-        // (design D3).
+        // `since`, or when a setting every check reads changed (140,
+        // `own_setting`). moon is handed the files rather than the range
+        // (design D3); a project's own `moon.yml` affects that project's
+        // tasks and what depends on them (the change
+        // `the-gate-runs-in-five-minutes`, design D1).
         if let Some(since) = &request.since {
             let mut changed = changed_files(place, since.as_str(), request.revision.as_str())?;
             for path in &request.beyond {
@@ -127,14 +129,12 @@ impl Moon {
                     changed.push(path.clone());
                 }
             }
-            let graph_changed = changed
-                .iter()
-                .any(|p| p.starts_with(".moon/") || p == "moon.yml" || p.ends_with("/moon.yml"));
-            if !graph_changed {
-                let affected: BTreeSet<String> = self
+            if !changed.iter().any(|p| own_setting(p)) {
+                let mut affected: BTreeSet<String> = self
                     .tasks(cx, Affected::Files(&changed))?
                     .into_keys()
                     .collect();
+                affected.extend(self.settings_affect(cx, &tasks, &changed)?);
                 wanted.retain(|t| affected.contains(t));
             }
         }
@@ -237,11 +237,16 @@ impl Moon {
                 reads.push(Reads::Every);
                 continue;
             }
-            let affected = self.tasks(cx, Affected::Range(from.as_str(), to.as_str()))?;
+            let mut affected: BTreeSet<String> = self
+                .tasks(cx, Affected::Range(from.as_str(), to.as_str()))?
+                .into_keys()
+                .collect();
+            let changed = changed_files(place, from.as_str(), to.as_str())?;
+            affected.extend(self.settings_affect(cx, &tasks, &changed)?);
             reads.push(Reads::Checks(
                 wanted
                     .iter()
-                    .filter(|t| affected.contains_key(*t))
+                    .filter(|t| affected.contains(*t))
                     .cloned()
                     .collect(),
             ));
@@ -547,6 +552,41 @@ impl Moon {
         failed(NAME, &reason, &printed(&[&out.stderr]))
     }
 
+    /// Design D1 of `the-gate-runs-in-five-minutes`: the tasks a changed
+    /// project's own `moon.yml` affects among `changed`: every task of
+    /// that project, and every task that depends on one of them at any
+    /// depth, by the `deps` of `tasks`. moon reads such a file as
+    /// affecting a task only where the task names it as an input, so the
+    /// projects are read by `moon query projects`, asked only where a
+    /// `moon.yml` changed.
+    fn settings_affect(
+        &self,
+        cx: &Context,
+        tasks: &BTreeMap<String, Task>,
+        changed: &[String],
+    ) -> Result<BTreeSet<String>> {
+        let dirs: BTreeSet<&str> = changed
+            .iter()
+            .filter_map(|p| match p.as_str() {
+                "moon.yml" => Some("."),
+                p => p.strip_suffix("/moon.yml"),
+            })
+            .collect();
+        if dirs.is_empty() {
+            return Ok(BTreeSet::new());
+        }
+        let out = self.command(cx, &["query", "projects"], &[], None)?;
+        let json: Value = serde_json::from_slice(&out).context("reading moon query projects")?;
+        let projects: BTreeSet<&str> = json["projects"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter(|p| p["source"].as_str().is_some_and(|s| dirs.contains(s)))
+            .filter_map(|p| p["id"].as_str())
+            .collect();
+        Ok(own_and_dependents(tasks, &projects))
+    }
+
     /// The tasks moon knows in the place, with their tags, or those
     /// `affected` names as affected, dependents included.
     fn tasks(&self, cx: &Context, affected: Affected) -> Result<BTreeMap<String, Task>> {
@@ -657,6 +697,34 @@ fn dependencies(
         .collect()
 }
 
+/// Design D1 of `the-gate-runs-in-five-minutes`: every task of
+/// `projects`, by the project its target names before its last `:`, and
+/// every task that depends on one of them at any depth.
+fn own_and_dependents(
+    tasks: &BTreeMap<String, Task>,
+    projects: &BTreeSet<&str>,
+) -> BTreeSet<String> {
+    let mut found: BTreeSet<String> = tasks
+        .keys()
+        .filter(|t| {
+            t.rsplit_once(':')
+                .is_some_and(|(project, _)| projects.contains(project))
+        })
+        .cloned()
+        .collect();
+    loop {
+        let more: Vec<String> = tasks
+            .iter()
+            .filter(|(t, task)| !found.contains(*t) && task.deps.iter().any(|d| found.contains(d)))
+            .map(|(t, _)| t.clone())
+            .collect();
+        if more.is_empty() {
+            return found;
+        }
+        found.extend(more);
+    }
+}
+
 /// ADR 0044, 0050: the tasks `required` names, by name or through a tag
 /// they carry, that moon keeps out of its CI mode, each with the entry
 /// that names it: its own name before the first tag. `plan` and
@@ -693,10 +761,14 @@ fn holds_cold(tasks: &BTreeMap<String, Task>, targets: &[String], cold: &[String
     })
 }
 
-/// 140: whether `path` is a setting of the runner's own: moon's
-/// configuration, the versions proto installs, or a file the toolchain a
-/// place enters is set up from, at the repository's root. A change to one
-/// changes what every check runs with, so it reads every check.
+/// 140: whether `path` is a setting every check reads: moon's workspace
+/// configuration, the versions proto installs, a file the toolchain a
+/// place enters is set up from, at the repository's root, or the
+/// branch's policy. A change to one changes what every check runs with,
+/// so it reads every check. A project's own `moon.yml` is none: it
+/// affects that project's tasks and what depends on them
+/// ([`Moon::settings_affect`]; the change `the-gate-runs-in-five-minutes`,
+/// design D1).
 fn own_setting(path: &str) -> bool {
     const TOOLCHAIN: [&str; 11] = [
         ".prototools",
@@ -712,9 +784,8 @@ fn own_setting(path: &str) -> bool {
         "rust-toolchain.toml",
     ];
     path.starts_with(".moon/")
-        || path == "moon.yml"
-        || path.ends_with("/moon.yml")
         || path.ends_with("/.prototools")
+        || path == sluice_core::policy::POLICY_PATH
         || TOOLCHAIN.contains(&path)
 }
 

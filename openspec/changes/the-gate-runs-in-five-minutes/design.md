@@ -213,11 +213,11 @@ cannot have moved. The gain is not known until it is measured.
 
 ### D7. Where the pull request scenarios run
 
-**A decision for the user.** The `pull_requests` scenarios are 69% of
+**Decided by the user on 2026-11-24: A.** The `pull_requests` scenarios are 69% of
 `cli:tools`'s test time. They test the forge's intake and its waits
 against a stand-in GitHub.
 
-- **A (recommended until D6 is measured):** they stay in every gate
+- **A (chosen):** they stay in every gate
   `cli:tools` runs in. Nothing is caught later.
 - **B:** they become their own task, `cli:forge`, tagged `check-tools`,
   whose inputs are the forge's code, `crates/sluice/src/profiles/github/`,
