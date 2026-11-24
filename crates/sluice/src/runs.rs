@@ -752,6 +752,34 @@ pub fn supervise(dir: &Path) -> Result<()> {
         .open(dir.join("lock"))?;
     lock.lock()?;
     std::fs::write(dir.join("lock"), format!("{}\n", std::process::id()))?;
+    let ran = run_held(dir, started);
+    drop(lock);
+    let_go_is_seen();
+    ran
+}
+
+/// The run counts toward the host's bound while its supervisor holds
+/// `lock`, and letting it go is no event of the file system, which
+/// `result.json`, written while it is held, cannot tell: `.let-go` in the
+/// host's registry of running checks, written over once it is let go, is
+/// the event that tells the host process's watch the run no longer
+/// counts. The registry passes over a file whose name starts with `.`.
+/// Nothing is written in the run folder, which its remover may be removing
+/// by then.
+fn let_go_is_seen() {
+    let Ok(registry) = crate::host_count::HostCount::host() else {
+        return;
+    };
+    if registry.dir().is_dir() {
+        let _ = std::fs::write(
+            registry.dir().join(".let-go"),
+            format!("{}\n", std::process::id()),
+        );
+    }
+}
+
+/// The run in `dir`, its supervisor holding its lock, to its end.
+fn run_held(dir: &Path, started: String) -> Result<()> {
     if read_ended(dir)?.is_some() {
         return Ok(());
     }

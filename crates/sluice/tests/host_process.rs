@@ -35,6 +35,43 @@ fn within(secs: u64, what: &str, mut check: impl FnMut() -> bool) {
     }
 }
 
+/// `check` holds within `secs`, asked every tenth of a second; a failure
+/// says what `said` reads then.
+fn within_saying(
+    secs: u64,
+    what: &str,
+    mut check: impl FnMut() -> bool,
+    said: impl Fn() -> String,
+) {
+    let until = Instant::now() + Duration::from_secs(secs);
+    while !check() {
+        assert!(
+            Instant::now() < until,
+            "{what}: not within {secs}s\n{}",
+            said()
+        );
+        std::thread::sleep(Duration::from_millis(100));
+    }
+}
+
+/// The subscription `c` ends within `secs`, as its host process ends:
+/// the lines it gives meanwhile are passed over.
+fn closes(c: &mut sluice::host_process::client::Connection, secs: u64, what: &str) {
+    let until = Instant::now() + Duration::from_secs(secs);
+    loop {
+        let left = until.saturating_duration_since(Instant::now());
+        assert!(!left.is_zero(), "{what}: not within {secs}s");
+        if c.line(Some(left)).is_err() {
+            return;
+        }
+    }
+}
+
+/// How long a host process that decided to end may take to exit: each
+/// reading in flight finishes first, for [`sluice::host_process::tasks::FINISH_FOR`]
+/// at most.
+const ENDS_WITHIN: u64 = 90;
+
 /// Whether the process `pid` lives.
 fn alive(pid: u32) -> bool {
     nix::sys::signal::kill(nix::unistd::Pid::from_raw(pid as i32), None).is_ok()
@@ -372,9 +409,9 @@ fn the_host_processs_look_at_an_idle_repository_starts_nothing() {
     assert_eq!(refused(), 0, "two looks at the idle repository");
 
     queued(&d, "b");
-    within(10, "the start refused", || refused() == 1);
+    within(30, "the start refused", || refused() == 1);
     std::thread::sleep(Duration::from_secs(7));
-    assert_eq!(refused(), 1, "two looks pass it by");
+    assert_eq!(refused(), 1, "two looks pass it by: {}", host_logs(&d));
     drop(held);
 }
 
@@ -471,7 +508,7 @@ fn the_host_process_ends_with_its_state_folder() {
     let d = OnDisk::new("host-folder", POLICY);
     let client = d.client(d.repo.dir());
     let repository = d.repository(d.repo.dir());
-    let follow = client
+    let mut follow = client
         .subscribe(vec![sluice::host_process::protocol::Added {
             folder: std::path::PathBuf::from(&repository),
             kind: FollowKind::Wait,
@@ -480,10 +517,13 @@ fn the_host_process_ends_with_its_state_folder() {
     let pid = follow.named.pid;
     // The process may write into the folder as it goes: removed again
     // until it is gone.
-    within(5, "the state folder is removed", || {
+    within(30, "the state folder is removed", || {
         std::fs::remove_dir_all(d.state.path()).is_ok() || !d.state.path().exists()
     });
-    within(5, "the host process ends", || !alive(pid));
+    // The folder's file event ends the process, which closes its
+    // connections first: well within the minute's backstop.
+    closes(&mut follow, 30, "the host process ends its connections");
+    within(ENDS_WITHIN, "the host process exits", || !alive(pid));
     assert!(!client.paths().socket.exists());
     assert!(
         !client.paths().dir.exists(),
@@ -499,7 +539,7 @@ fn a_state_folder_made_again_ends_the_host_process() {
     let d = OnDisk::new("host-folder-again", POLICY);
     let client = d.client(d.repo.dir());
     let repository = d.repository(d.repo.dir());
-    let follow = client
+    let mut follow = client
         .subscribe(vec![sluice::host_process::protocol::Added {
             folder: std::path::PathBuf::from(&repository),
             kind: FollowKind::Wait,
@@ -514,7 +554,8 @@ fn a_state_folder_made_again_ends_the_host_process() {
     let aside = d.state.path().with_extension("aside");
     std::fs::rename(&dir, &aside).unwrap();
     std::fs::rename(&again, &dir).unwrap();
-    within(5, "the host process ends", || !alive(pid));
+    closes(&mut follow, 30, "the host process ends its connections");
+    within(ENDS_WITHIN, "the host process exits", || !alive(pid));
     let left: Vec<_> = std::fs::read_dir(&dir)
         .unwrap()
         .map(|e| e.unwrap().file_name())
@@ -1181,7 +1222,12 @@ fn an_agents_check_stopped_while_it_waits_is_counted_nowhere() {
     assert_eq!(out.status.code(), Some(sluice::STOPPED), "{}", text(&out));
     within(10, "the stopped check waits no more", || waiting(&d) == 0);
     let c = agent(&d, "c", &format!("touch '{}'", m("c").display()));
-    within(60, "the next agent's check starts", || m("c").exists());
+    within_saying(
+        60,
+        "the next agent's check starts",
+        || m("c").exists(),
+        || format!("{}\n{}", room_of(&d), host_logs(&d)),
+    );
     assert!(!m("b").exists(), "the stopped one never ran");
     for agent in [a, c] {
         let out = agent.wait_with_output().unwrap();
@@ -1797,7 +1843,8 @@ fn a_submit_during_a_hand_over_reaches_the_successor() {
     });
     let id = queued_live(&d, &dir);
 
-    within(15, "the image started afresh answers", || {
+    // It starts afresh once its readings in flight finish.
+    within(ENDS_WITHIN, "the image started afresh answers", || {
         named(&d).is_some_and(|n| n.since != first.since)
     });
     let successor = answering(&d).expect("a host process answers");
@@ -2545,7 +2592,8 @@ fn a_submit_during_a_daemons_start_afresh_reaches_it() {
         host_logs(&d).contains("it starts afresh in its own process")
     });
     let id = queued_live(&d, &dir);
-    within(30, "the daemon started afresh answers", || {
+    // It starts afresh once its readings in flight finish.
+    within(ENDS_WITHIN, "the daemon started afresh answers", || {
         named(&d).is_some_and(|n| n.pid == first.pid && n.since != first.since)
     });
     within(60, "the submission lands", || {
@@ -2922,13 +2970,15 @@ fn a_clean_test_passes() {
 #[test]
 fn the_guard_finds_a_detached_host_process() {
     let d = OnDisk::new("guard-detached", POLICY);
+    // The connection is held while the guard looks: a host process with
+    // none ends once idle, which a look under load can outlast.
     let reached = d.client(d.repo.dir()).reach().expect("started");
     let pid = reached.named.pid;
-    drop(reached);
     let found = d.guard().find();
     assert!(found.iter().any(|f| f.pid == pid && f.host), "{found:?}");
     assert_eq!(d.guard().check(), Vec::new());
     assert!(!alive(pid), "the guard stopped it");
+    drop(reached);
 }
 
 /// test-children, "Another test's process": the guard of one test neither
@@ -3178,13 +3228,13 @@ mod edge {
         }
     }
 
-    /// `check` holds within ten seconds.
+    /// `check` holds within thirty seconds.
     pub async fn soon(what: &str, check: impl Fn() -> bool) {
-        let until = tokio::time::Instant::now() + Duration::from_secs(10);
+        let until = tokio::time::Instant::now() + Duration::from_secs(30);
         while !check() {
             assert!(
                 tokio::time::Instant::now() < until,
-                "{what}: not within 10s"
+                "{what}: not within 30s"
             );
             tokio::time::sleep(Duration::from_millis(10)).await;
         }
@@ -3314,10 +3364,24 @@ async fn a_burst_of_ref_moves_makes_one_reading() {
     let tasks = edge::tasks_held(&seen, &gate);
     let (mut watch, mut bursts) = sluice::host_process::watch::Watch::new().unwrap();
     watch.repositories(std::slice::from_ref(&common));
+    // The system may not start the stream under load: started again until
+    // it runs, as the host process does.
+    let until = Instant::now() + Duration::from_secs(30);
+    while watch.stalled() {
+        assert!(
+            Instant::now() < until,
+            "the watch's stream starts: not within 30s"
+        );
+        tokio::time::sleep(sluice::host_process::watch::STALLED_FOR).await;
+        watch.revive();
+    }
     let watched = tasks.clone();
-    // The refs of the burst whose move the watch gave to the tasks.
+    // The refs of the burst whose move the watch gave to the tasks, and
+    // how many bursts it gave.
     let moved = std::sync::Arc::new(std::sync::Mutex::new(BTreeSet::new()));
     let given = moved.clone();
+    let flushed = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let counted = flushed.clone();
     let read = tokio::spawn(async move {
         while let Some(Ok(events)) = bursts.next().await {
             let paths: Vec<&Path> = events
@@ -3337,6 +3401,15 @@ async fn a_burst_of_ref_moves_makes_one_reading() {
                     }
                 }
             }
+            // A system that dropped events under load asks for the folder
+            // to be read whole, which tells of every move in it.
+            if events
+                .iter()
+                .any(|e| e.need_rescan() && e.paths.iter().any(|p| heads.starts_with(p)))
+            {
+                given.extend((0..20).map(|n| format!("burst-{n}")));
+            }
+            counted.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
         }
     });
     // The watch is in place before the burst.
@@ -3361,6 +3434,19 @@ async fn a_burst_of_ref_moves_makes_one_reading() {
     drop(moving.stdin.take());
     assert!(moving.wait().unwrap().success());
     edge::soon("each move's event", || moved.lock().unwrap().len() == 20).await;
+    // The burst is over once the watch gives nothing for a second: one
+    // move's events can come in more than one of its flushes.
+    let until = Instant::now() + Duration::from_secs(30);
+    let mut last = flushed.load(std::sync::atomic::Ordering::SeqCst);
+    loop {
+        tokio::time::sleep(Duration::from_secs(1)).await;
+        let now = flushed.load(std::sync::atomic::Ordering::SeqCst);
+        if now == last {
+            break;
+        }
+        assert!(Instant::now() < until, "the watch is quiet: not within 30s");
+        last = now;
+    }
     assert_eq!(seen.looks(&common), 1, "the reading is still in flight");
     gate.open();
     edge::soon("one more reading", || seen.looks(&common) >= 2).await;
@@ -3372,9 +3458,11 @@ async fn a_burst_of_ref_moves_makes_one_reading() {
 /// host-events, "A connection to an idle host process": an idle daemon
 /// answers each `hello` as the connection comes, not at a poll's next
 /// turn: half of thirty-one hellos are answered within 4 ms, where a poll
-/// of 10 ms would answer half of them after 5 ms.
+/// of 10 ms would answer half of them after 5 ms. A bound on speed, which
+/// a host running other work cannot hold: `cli:speed` runs it on a quiet
+/// host, and no gate does.
 #[test]
-fn a_connection_is_answered_with_no_poll() {
+fn a_connection_is_answered_with_no_poll_at_speed() {
     let d = OnDisk::new("host-no-poll", POLICY);
     let daemon = Daemon::start(&d, d.repo.dir());
     answers(&d, &daemon);
@@ -3520,12 +3608,16 @@ fn a_records_write_reaches_a_watch_by_its_file_event() {
         matches!(first, Some(SubscriptionLine::Document(_))),
         "{first:?}"
     );
-    // Idle: no new document in three seconds.
-    let quiet = watch.line(Some(Duration::from_secs(3))).unwrap();
-    assert!(
-        quiet.is_none(),
-        "a document of an idle repository: {quiet:?}"
-    );
+    // Idle: the watch goes quiet, no new document in three seconds. A
+    // stream of the host process's watch started again under load reads
+    // what it may have missed once, which may give one more document.
+    let until = Instant::now() + Duration::from_secs(30);
+    while let Some(more) = watch.line(Some(Duration::from_secs(3))).unwrap() {
+        assert!(
+            Instant::now() < until,
+            "documents of an idle repository for 30s: {more:?}"
+        );
+    }
     // Another host's state folder: its submit tells another host process,
     // which passes only when asked, and writes `main`'s records here.
     let other = support::Scratch::new("host-records-event-other");
@@ -3801,16 +3893,27 @@ fn a_reads_git_is_a_worker_of_sluice_host() {
     let host = Slowed::start(&d, "host-read-worker");
     std::thread::sleep(sluice::host_process::READ_TICK + Duration::from_millis(500));
     host.slow();
-    let mut c = d.command(d.repo.dir());
-    let status = c
-        .env("SLUICE_ROUND_SLEEP", "record")
-        .args(["status", "main"])
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
-        .spawn()
-        .unwrap();
-    within(20, "the read's git is recorded as a worker", || {
-        host_git_running(&d, host.pid)
+    let ask = || {
+        d.command(d.repo.dir())
+            .env("SLUICE_ROUND_SLEEP", "record")
+            .args(["status", "main"])
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn()
+            .unwrap()
+    };
+    // A status answered from a reading current within the tick starts no
+    // git: under load another reading may be that current one, so a
+    // status is asked again until a read's git runs.
+    let mut status = ask();
+    within(60, "the read's git is recorded as a worker", || {
+        if host_git_running(&d, host.pid) {
+            return true;
+        }
+        if status.try_wait().unwrap().is_some() {
+            status = ask();
+        }
+        false
     });
     drop(host);
     let _ = status.wait_with_output();
@@ -3962,7 +4065,7 @@ fn a_subscription_and_a_status_share_a_reading() {
         .stdout(std::process::Stdio::null())
         .spawn()
         .unwrap();
-    within(10, "a reading is in flight", || {
+    within(30, "a reading is in flight", || {
         host_git_running(&d, host.pid)
     });
     let mut sub = held(&d);

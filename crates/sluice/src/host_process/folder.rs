@@ -66,6 +66,52 @@ impl Folder {
         self.id
     }
 
+    /// 135 (design D6): a message each time the folder held is removed or
+    /// moved from its place, as the kernel tells it of the folder itself.
+    /// The kernel holds the watch from this call on, where macOS's file
+    /// events, under load, may begin later than asked and miss the
+    /// folder's end. On another system, whose file events begin as they are
+    /// asked, it gives none, and the file events read the folder.
+    pub fn moves(&self) -> std::io::Result<Option<tokio::sync::mpsc::UnboundedReceiver<()>>> {
+        #[cfg(target_os = "macos")]
+        {
+            use nix::sys::event::{EvFlags, EventFilter, FilterFlag, KEvent, Kqueue};
+            use std::os::fd::AsRawFd;
+            let queue = Kqueue::new()?;
+            let watch = KEvent::new(
+                self.file.as_raw_fd() as usize,
+                EventFilter::EVFILT_VNODE,
+                EvFlags::EV_ADD | EvFlags::EV_CLEAR,
+                FilterFlag::NOTE_DELETE | FilterFlag::NOTE_RENAME | FilterFlag::NOTE_REVOKE,
+                0,
+                0,
+            );
+            queue.kevent(&[watch], &mut [], None)?;
+            let (moved, moves) = tokio::sync::mpsc::unbounded_channel();
+            std::thread::Builder::new()
+                .name("sluice-host-folder".to_string())
+                .spawn(move || {
+                    let mut told = [watch];
+                    loop {
+                        match queue.kevent(&[], &mut told, None) {
+                            Ok(0) | Err(nix::errno::Errno::EINTR) => {}
+                            Ok(_) => {
+                                if moved.send(()).is_err() {
+                                    return;
+                                }
+                            }
+                            Err(_) => return,
+                        }
+                    }
+                })?;
+            Ok(Some(moves))
+        }
+        #[cfg(not(target_os = "macos"))]
+        {
+            Ok(None)
+        }
+    }
+
     /// The file `name` in it, as `how` says, closed on exec as every file
     /// of std's is.
     pub fn file(&self, name: &str, how: How) -> std::io::Result<File> {
