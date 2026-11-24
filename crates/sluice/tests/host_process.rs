@@ -3893,16 +3893,27 @@ fn a_reads_git_is_a_worker_of_sluice_host() {
     let host = Slowed::start(&d, "host-read-worker");
     std::thread::sleep(sluice::host_process::READ_TICK + Duration::from_millis(500));
     host.slow();
-    let mut c = d.command(d.repo.dir());
-    let status = c
-        .env("SLUICE_ROUND_SLEEP", "record")
-        .args(["status", "main"])
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
-        .spawn()
-        .unwrap();
-    within(20, "the read's git is recorded as a worker", || {
-        host_git_running(&d, host.pid)
+    let ask = || {
+        d.command(d.repo.dir())
+            .env("SLUICE_ROUND_SLEEP", "record")
+            .args(["status", "main"])
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn()
+            .unwrap()
+    };
+    // A status answered from a reading current within the tick starts no
+    // git: under load another reading may be that current one, so a
+    // status is asked again until a read's git runs.
+    let mut status = ask();
+    within(60, "the read's git is recorded as a worker", || {
+        if host_git_running(&d, host.pid) {
+            return true;
+        }
+        if status.try_wait().unwrap().is_some() {
+            status = ask();
+        }
+        false
     });
     drop(host);
     let _ = status.wait_with_output();
