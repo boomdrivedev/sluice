@@ -92,7 +92,14 @@ A test alone takes about two thirds of its time in the suite. Its
 time is mostly its chain of processes, each started, each reading
 git; then the 5-second checks and the 200-millisecond polls.
 
-[48 threads: filled in from the run with `--test-threads 48`.]
+With `--test-threads 48` in place of 18, the suite took 524 seconds
+in place of 556. Each test took about twice as long, seven failed at
+their backstops, and the run used 464 seconds of user CPU and 889 of
+system CPU, as `time` counts the processes it waits for. The tests do
+not wait on idle time that more threads would fill: they wait on
+process starts, git and the file system, which the host's other work
+shares. Without the `pull_requests` tests, the rest of `cli:tools` is
+2,643 seconds of test time, 31% of the whole.
 
 ## Decisions
 
@@ -188,13 +195,39 @@ run under the shell herdr uses on macOS.
 3. **The `slow` check waits on its event.** The check script waits for
    a file the test writes when it has seen the run start, with the 5
    seconds as its bound, not a fixed sleep.
-4. **nextest runs more tests at once than cores.** [Decided from the
-   48-thread run.]
+4. **nextest keeps one test for each core.** More threads made each
+   test slower and failed seven (Measurements).
 
 `run_again_marks_a_draft_ready`, which failed once under load, waits
 on the state it needs in place of a count of rounds.
 
-### D6. A budget for a slow test
+### D6. A round in a test starts fewer processes
+
+**Recommended, measured first.** Points 1 to 3 of D5 move time, but
+the work stays: about 8,600 seconds of test time, which the host's
+cores share. Task 4.5 counts the processes one `sluice step` of the
+`pull_requests` fixture starts, the `git` calls among them, and where
+its time goes, and cuts what the test does not need: a second
+process per command where one serves, a fetch the fixture's remote
+cannot have moved. The gain is not known until it is measured.
+
+### D7. Where the pull request scenarios run
+
+**A decision for the user.** The `pull_requests` scenarios are 69% of
+`cli:tools`'s test time. They test the forge's intake and its waits
+against a stand-in GitHub.
+
+- **A (recommended until D6 is measured):** they stay in every gate
+  `cli:tools` runs in. Nothing is caught later.
+- **B:** they become their own task, `cli:forge`, tagged `check-tools`,
+  whose inputs are the forge's code, `crates/sluice/src/profiles/github/`,
+  the core's, `crates/sluice-core/`, the seams and the test file. A
+  change elsewhere in the `sluice` crate, the host process or a
+  command's output, would not run them, and a fault there in a pull
+  request's path would be caught at the next change to the forge's
+  code. It brings a crate change's gate under 5 minutes.
+
+### D8. A budget for a slow test
 
 **Option, not recommended in this change.** `.config/nextest.toml`
 marks a test slow at 30 seconds and ends it at 120. A test that grows
@@ -203,7 +236,7 @@ past it fails, so the gate cannot drift back. Under a host load of
 fails it would make the gate fail for the host, not the code. The
 user decides.
 
-### D7. moon's results are kept for a replay
+### D9. moon's results are kept for a replay
 
 **Investigate, in this change.** Under `sluice exec main -- moon run`,
 moon said `Failed to package task outputs into archive` and `Failed to
@@ -224,7 +257,9 @@ counting the wait for room:
 | Specs, docs or records alone | about 1 min | about 1 min |
 | The herdr plugin alone | 9 min | about 2 min (D2, D3) |
 | A crate's `moon.yml` and its code | 9 to 10 min, every task | as a crate change (D1) |
-| A crate of sluice | 10 to 11 min | [from the 48-thread run] |
+| A crate of sluice, D5 alone | 10 to 11 min | 8 to 9 min |
+| A crate of sluice, D5 and D6 | 10 to 11 min | not known until task 4.5 |
+| A crate of sluice, D5 and D7 B | 10 to 11 min | about 4.5 min |
 
 ## Risks
 

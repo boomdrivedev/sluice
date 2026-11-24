@@ -67,7 +67,15 @@ Four causes:
   rules core.9 and core.35 already ask. A replay still counts only
   through a pass the branch counts (108).
 
+- **A round in a test starts fewer processes.** The tools tests'
+  time is process starts, git and the file system, shared with the
+  host's other work; more threads made them slower. One `sluice step`
+  of the fixture is measured, and what it does not need is cut.
+
 No check is dropped. Every test still runs where its files change.
+Design D7 gives the user one option that would drop some: running the
+pull request scenarios, 69% of `cli:tools`, only where the forge's or
+the core's code changes.
 
 ## Capabilities
 
@@ -90,7 +98,7 @@ None.
 - **The host's bound.** In each measured run, `sluice exec` waited 1
   to 7 minutes for room before it started. That is the queue's time,
   not the gate's. It waits on a change of its own.
-- **A test budget that fails a slow test.** Design D6 gives the
+- **A test budget that fails a slow test.** Design D8 gives the
   option; the user decides.
 - **Other repositories' gates.** Flume and Boomdrive run their own.
   This change gives them the rule for a project's `moon.yml`, since
