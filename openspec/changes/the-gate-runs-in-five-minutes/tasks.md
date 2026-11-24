@@ -14,7 +14,7 @@ and written into design.md's table of expected gate time.
 - [x] 1.2 The workspace's settings and the branch's policy run every check. True when `sluice exec main -- cargo test -p sluice --features tools --test moon the_workspaces_settings_and_the_policy_run_every_check` passes. That new test holds moon-runner's "The workspace's settings" and "The branch's policy".
 - [x] 1.3 `Moon::reads` reads the same way. True when `sluice exec main -- cargo test -p sluice --features tools --test moon a_moon_yml_no_check_reads_lands_beside` passes. That new test is moon-runner's "Work beside the chain".
 - [x] 1.4 A worktree's run reads a project's `moon.yml` as a combination's does. In `crates/sluice/tests/exec.rs`, `a_worktrees_own_moon_yml_runs_every_check` becomes `a_worktrees_own_moon_yml_runs_its_project`, and a new test holds exec-checks' "The toolchain". True when `sluice exec main -- cargo test -p sluice --features tools --test exec a_worktrees_own_moon_yml_runs_its_project` and `... --test exec a_worktrees_toolchain_runs_every_check` pass.
-- [x] 1.5 A record in `docs/adr/` for design D1, with Before and Now; no rule names a `moon.yml`. True when `sluice exec main -- moon run root:format` passes.
+- [x] 1.5 Design D1 proposed as the Boom decision `a-projects-own-moon-yml-affects-that-projects-checks@07db0a2d6188`, with Before and Now; no rule names a `moon.yml`. True when `boom show a-projects-own-moon-yml-affects-that-projects-checks` gives it.
 
 ## 2. The herdr suite waits on events
 
