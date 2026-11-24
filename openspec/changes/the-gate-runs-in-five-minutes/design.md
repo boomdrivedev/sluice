@@ -300,7 +300,7 @@ counting the wait for room:
 | The herdr plugin alone | 9 min | about 2 min (D2, D3), measured |
 | A crate's `moon.yml` and its code | 9 to 10 min, every task | as a crate change (D1) |
 | A crate of sluice, D5 alone | 10 to 11 min | 8 to 9 min |
-| A crate of sluice, D5 and D6 | 10 to 11 min | about 6 to 7 min, estimated from D6 |
+| A crate of sluice, D5 and D6 | 10 to 11 min | about 7 to 8 min, estimated from D6 |
 
 ## Risks
 
