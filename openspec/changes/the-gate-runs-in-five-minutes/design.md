@@ -142,33 +142,35 @@ Options:
   tenth of a second up to 10 seconds, and does not sleep.
 - `within` and `ends_within` check every tenth of a second. Their
   bounds stay in seconds.
-- `settled` waits for the watcher's own sign that its pass is done. The
-  watcher writes its tick count to `$S/ticked` at the end of each pass
-  under `SLUICE_HERDR_TEST`; `settled` waits for the count to move by
-  two. Where a test asks for the stand-ins to stand still, it keeps a
-  stillness of half a second, checked every tenth.
-- The tests that count idle ticks run with `SLUICE_HERDR_TICK=0.2`.
-  `watch.sh` hands the tick to `sleep` alone, which takes fractions on
-  macOS, GNU and busybox. `sleep 6` becomes a wait for 5 ticks by the
-  tick count.
+- `settled` checks every tenth of a second for two seconds in which the
+  stand-ins log nothing.
+- The tests that count a watcher's ticks keep ticks of 1 second: their
+  checks read windows of seconds against the tick, and they are a few
+  of the 155.
 
-Expected: 473 s to about 120 s, one after another.
+Measured: 473 s to 282 s, one after another.
 
 ### D3. The herdr suite runs in four groups at once
 
-**Recommended.** `run.sh` takes `--group <n>/<of>` and runs the tests
-whose number modulo `<of>` is `<n>`, each group in a scratch folder of
-its own. `tests/groups.sh` starts four groups at once and fails where
-any fails. Each test already has its own folder, server sockets and
-leases; `reap` and `watching` read only their own run's scratch. The
-`USR1` count a test reads is its own process's.
+**Recommended.** `run.sh --group <n>/<of>` runs the tests whose place
+in the file, counted from 0, leaves `<n>` divided by `<of>`, with every
+line between two tests, which defines what later tests read. A test
+runs from its `fresh` to its last `pass` or `fi` at the margin before
+the next test. The group's copy of the file runs from a scratch folder
+of its own. `tests/groups.sh` starts four groups at once, prints each
+group's output whole, and fails where any group fails. Each test
+already has its own folder, server sockets and leases; `reap` and
+`watching` read only their own run's scratch. The `USR1` count a test
+reads is its own process's.
 
-Expected: about 120 s to 30 to 40 s.
+Measured: `plugin-herdr:test-sh` 1 min 29 s and `plugin-herdr:test-dash`
+1 min 46 s, run at once on a loaded host, in place of 7.4 and 7.5
+minutes.
 
 Options:
 
 - **A (recommended):** four groups.
-- **B:** no groups; D2 alone, about 2 minutes a shell.
+- **B:** no groups; D2 alone, about 5 minutes a shell.
 
 ### D4. Both shells stay in the gate
 
@@ -255,7 +257,7 @@ counting the wait for room:
 | Submission changes | Today | After |
 |---|---|---|
 | Specs, docs or records alone | about 1 min | about 1 min |
-| The herdr plugin alone | 9 min | about 2 min (D2, D3) |
+| The herdr plugin alone | 9 min | about 2 min (D2, D3), measured |
 | A crate's `moon.yml` and its code | 9 to 10 min, every task | as a crate change (D1) |
 | A crate of sluice, D5 alone | 10 to 11 min | 8 to 9 min |
 | A crate of sluice, D5 and D6 | 10 to 11 min | not known until task 4.5 |

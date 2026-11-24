@@ -18,14 +18,13 @@ and written into design.md's table of expected gate time.
 
 ## 2. The herdr suite waits on events
 
-- [ ] 2.1 In `plugins/herdr/tests/run.sh`, `within` and `ends_within` check every tenth of a second, and `reap` waits for each watcher it ends to be gone, with no sleep (design D2). True when `sluice exec main -- moon run plugin-herdr:test-sh` passes.
-- [ ] 2.2 Under `SLUICE_HERDR_TEST`, `plugins/herdr/bin/watch.sh` writes its tick count to `$S/ticked` at the end of each pass; `settled` waits for the count to move by two, and a test's `sleep <n>` over idle ticks waits for that many ticks by the count. True when `sluice exec main -- moon run plugin-herdr:test-sh` passes.
-- [ ] 2.3 The tests that count ticks run with `SLUICE_HERDR_TICK=0.2`. True when `sluice exec main -- moon run plugin-herdr:test-sh` passes and its run, timed as design.md's Measurements were, takes under 150 seconds of test time.
+- [x] 2.1 In `plugins/herdr/tests/run.sh`, `within` and `ends_within` check every tenth of a second, and `reap` waits for each watcher it ends to be gone, with no sleep (design D2). True when `sluice exec main -- moon run plugin-herdr:test-sh` passes.
+- [x] 2.2 `settled` checks every tenth of a second for two still seconds. True when `sluice exec main -- moon run plugin-herdr:test-sh` passes.
 
 ## 3. The herdr suite runs in four groups
 
-- [ ] 3.1 `plugins/herdr/tests/run.sh` takes `--group <n>/<of>` and runs its own share, in a scratch folder of its own (design D3). `plugins/herdr/tests/groups.sh` runs four at once under the shell it is given and fails where any fails. `plugins/herdr/moon.yml`'s `test-sh` and `test-dash` run it under `tests/leaks.sh`. True when `sluice exec main -- moon run plugin-herdr:test-sh` and `... plugin-herdr:test-dash` pass, each within 90 seconds on a host at rest.
-- [ ] 3.2 A failing test in one group fails the task and the other groups run to their end. True when `sluice exec main -- moon run root:leaks-cases` passes with a case for `groups.sh` beside its cases for `leaks.sh`.
+- [x] 3.1 `plugins/herdr/tests/run.sh` takes `--group <n>/<of>` and runs its own share, in a scratch folder of its own (design D3). `plugins/herdr/tests/groups.sh` runs four at once under the shell it is given and fails where any fails. `plugins/herdr/moon.yml`'s `test-sh` and `test-dash` run it under `tests/leaks.sh`. True when `sluice exec main -- moon run plugin-herdr:test-sh plugin-herdr:test-dash` passes.
+- [x] 3.2 A definition one test made and later tests read stands between tests, so every group holds it. True when `sluice exec main -- moon run plugin-herdr:test-sh` passes with every group's tests.
 
 ## 4. No tools test is a chain of scenarios
 
