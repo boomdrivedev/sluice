@@ -1396,7 +1396,14 @@ impl Sluice<'_> {
             self.not_started(branch, c, i, &name, &report, home, releases)?;
             return Ok(Started::NotRun(why));
         }
-        let since = (from.verified && c.on == from.base).then(|| c.on.clone());
+        // 36, 70: a run of the gate, a candidate's first or a follow-up
+        // given every check, runs the checks its combination affects since
+        // the branch's revision. A follow-up that holds checks of its own
+        // holds those the run it follows left undecided, which that run's
+        // reading chose: it runs each of them and reads no change again,
+        // since the branch may have moved under its candidate since (17).
+        let gate = r.follows.is_none() || r.checks.is_empty();
+        let since = (gate && from.verified && c.on == from.base).then(|| c.on.clone());
         let place = self.fetch_lacking(branch, c).and_then(|()| {
             self.seams
                 .checkout
