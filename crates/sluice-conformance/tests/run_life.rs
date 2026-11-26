@@ -427,11 +427,16 @@ fn replaying(h: &Harness) -> &'static str {
 
 /// A submission of `changes` from `unit/y` to `branch`.
 fn submit_to(h: &Harness, branch: &str, changes: &[(&str, Option<&str>)]) -> u64 {
+    submit_from(h, "unit/y", branch, changes)
+}
+
+/// A submission of `changes` from the session in `unit` to `branch`.
+fn submit_from(h: &Harness, unit: &str, branch: &str, changes: &[(&str, Option<&str>)]) -> u64 {
     let head = h.w().work(&h.w().tip(branch), changes);
-    h.w().session("unit/y", "agent-y", &head);
+    h.w().session(unit, unit, &head);
     h.sluice()
         .submit(&sluice_core::SubmitRequest {
-            head: sluice_core::SubmitHead::Worktree("unit/y".into()),
+            head: sluice_core::SubmitHead::Worktree(unit.into()),
             branch: branch.into(),
             after: vec![],
             priority: 0,
@@ -503,6 +508,72 @@ fn an_unproven_replay_runs_again_alone() {
             (vec!["b:test".to_string(), "c:test".to_string()], false),
         ]
     );
+}
+
+/// satisfies: record 0122; 108, 17, 36, 70; the run-life spec's "A
+/// follow-up run runs every check it holds"
+#[test]
+fn a_follow_up_run_runs_its_checks_after_the_work_ahead_lands() {
+    let h = local();
+    let other = replaying(&h);
+    // A landing gives `bolt/y` a verdict, so its runs read what changed
+    // since its revision (70).
+    let first = submit_from(&h, "unit/y", other, &[("c/lib", Some("c2"))]);
+    let s = h.sluice();
+    for _ in 0..10 {
+        s.step(other).unwrap();
+    }
+    assert_eq!(h.sub(first).state, State::Landed);
+
+    // `a/lib` as `bolt/x` landed it: each run replays `a:test` with no
+    // counted pass behind it. The work behind changes `c/` alone.
+    h.w().hold_runs(true);
+    let ahead = submit_from(&h, "unit/p", other, &[("a/lib", Some("a2"))]);
+    let behind = submit_from(&h, "unit/q", other, &[("c/lib", Some("c3"))]);
+    s.step(other).unwrap();
+    h.w().hold_runs(false);
+    let one = h.sub(ahead).tested.expect("tested").combination;
+    let two = h.sub(behind).tested.expect("tested").combination;
+    assert_ne!(one, two, "the work behind is tested with the work ahead");
+
+    // Both first runs leave `a:test` unproven. The host has room for one
+    // run, which the work ahead's follow-up takes: it lands while the
+    // second's follow-up waits for room.
+    h.w().host_limit(1);
+    h.w().complete(&one);
+    h.w().complete(&two);
+    for _ in 0..10 {
+        s.step(other).unwrap();
+        if h.sub(ahead).state == State::Landed {
+            break;
+        }
+    }
+    assert_eq!(h.sub(ahead).state, State::Landed);
+    assert_eq!(h.sub(behind).state, State::Testing);
+
+    // The second's follow-up starts on the revision the work ahead landed
+    // as, which `a/` did not change since, and runs `a:test` all the same.
+    for _ in 0..10 {
+        s.step(other).unwrap();
+    }
+    assert_eq!(h.sub(behind).state, State::Landed);
+    let asked: Vec<(Vec<String>, bool)> = h
+        .w()
+        .requests()
+        .into_iter()
+        .filter(|r| r.revision == two)
+        .map(|r| (r.required, r.replay))
+        .collect();
+    assert_eq!(
+        asked,
+        [
+            (vec!["#gate".to_string()], true),
+            (vec!["a:test".to_string()], false),
+        ],
+        "one follow-up, which ran"
+    );
+    let follow = h.w().requests().into_iter().rfind(|r| r.revision == two);
+    assert_eq!(follow.expect("a follow-up").since, None);
 }
 
 /// The combination submission `id` of `branch` was tested in.
