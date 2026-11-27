@@ -119,6 +119,7 @@ pub fn failed(words: &str, json: bool) -> Output {
         stdout,
         stderr: vec![format!("sluice: {words}")],
         code: crate::INTERNAL,
+        pass: None,
     }
 }
 
@@ -354,6 +355,7 @@ fn render(
             stdout: String::from_utf8_lossy(&out).into_owned(),
             stderr,
             code,
+            pass: None,
         },
         Err(e) => {
             let mut output = failed(&format!("{e:#}"), json);
@@ -457,6 +459,7 @@ pub(crate) async fn wait(
         .read(&repository, super::READ_TICK, super::read_for(), false)
         .await;
     let held = hosting.clone();
+    let settles = repository.clone();
     let runtime = tokio::runtime::Handle::current();
     // 134: a forge read of a pull request's step is tried again until the
     // wait's own time runs out, as the wait tried it (the change
@@ -527,11 +530,20 @@ pub(crate) async fn wait(
         }
     };
     match ran {
-        Ok((crate::WaitStepped::Ended(code), out)) => Answer::Waited(WaitStep::Ended(Output {
-            stdout: String::from_utf8_lossy(&out).into_owned(),
-            stderr,
-            code,
-        })),
+        // 122, 123: a step that ends the wait may have read the records
+        // in the middle of a pass, its landing written and what follows
+        // it, its checkout's release, not yet: it names the last pass
+        // reported once that pass ends, and the wait says its report
+        // first.
+        Ok((crate::WaitStepped::Ended(code), out)) => {
+            let pass = hosting.tasks.settled(&settles, super::read_for()).await;
+            Answer::Waited(WaitStep::Ended(Output {
+                stdout: String::from_utf8_lossy(&out).into_owned(),
+                stderr,
+                code,
+                pass,
+            }))
+        }
         Ok((crate::WaitStepped::Follow(own, follows), out)) => Answer::Waited(WaitStep::Follow {
             own,
             follows,

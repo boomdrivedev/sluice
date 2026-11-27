@@ -960,6 +960,7 @@ impl sluice::host_process::HostProcess for FakeProcess {
                     stdout: String::from_utf8_lossy(&out).into_owned(),
                     stderr: Vec::new(),
                     code,
+                    pass: None,
                 }),
                 sluice::WaitStepped::Follow(own, follows) => WaitStep::Follow {
                     own,

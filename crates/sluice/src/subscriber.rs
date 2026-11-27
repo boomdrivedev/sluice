@@ -357,6 +357,15 @@ pub struct Waiter<'a> {
     reached: Reached<'a>,
     folder: PathBuf,
     document: Option<serde_json::Value>,
+    /// The reports that came and no look or tick has handed on yet, so no
+    /// report a wait got is lost (122, 123).
+    reports: Vec<crate::host_process::pass::Report>,
+    /// The highest number of a pass whose report came.
+    seen: u64,
+    /// Whether `sluice host` held it as a follower before the wait's
+    /// submission was made, so every pass that its submission starts
+    /// reports to it ([`Waiter::served`]).
+    served: bool,
 }
 
 impl<'a> Waiter<'a> {
@@ -373,6 +382,9 @@ impl<'a> Waiter<'a> {
             reached: Reached::new(process, here, folders),
             folder,
             document: None,
+            reports: Vec::new(),
+            seen: 0,
+            served: false,
         }
     }
 
@@ -381,12 +393,63 @@ impl<'a> Waiter<'a> {
         self.document.as_ref()
     }
 
+    /// Open the subscription and wait up to `wait` for its first document,
+    /// which `sluice host` sends once it holds the follower: from then on,
+    /// each pass it begins reports to this wait. A waiting submit opens it
+    /// so before it submits, so the pass that its submission starts, and
+    /// what that pass released, is never one that began before the wait
+    /// followed (122, 123). The reports of passes before the submit are
+    /// no wait's: they are passed over. No pass is asked.
+    pub fn served(&mut self, wait: Duration) {
+        let until = std::time::Instant::now() + wait;
+        while self.document.is_none() && std::time::Instant::now() < until {
+            if INTERRUPTED.load(Ordering::SeqCst) || self.reached.open().is_none() {
+                return;
+            }
+            self.take_lines(LINE_WAIT);
+        }
+        self.served = self.document.is_some();
+        self.reports.clear();
+    }
+
+    /// The reports that came since the last look or tick, once the report
+    /// of pass `pass` came, waiting up to `wait` for it where `sluice host`
+    /// held this wait before its submission; otherwise as they stand, with
+    /// no wait, since a follower that came during a pass gets no report of
+    /// it (122, 123).
+    pub fn through(&mut self, pass: u64, wait: Duration) -> Vec<crate::host_process::pass::Report> {
+        let until = std::time::Instant::now() + wait;
+        if self.reached.open.is_some() {
+            self.take_lines(Duration::from_millis(1));
+        }
+        while self.served && self.seen < pass && std::time::Instant::now() < until {
+            if INTERRUPTED.load(Ordering::SeqCst) || self.reached.open.is_none() {
+                break;
+            }
+            self.take_lines(LINE_WAIT);
+        }
+        std::mem::take(&mut self.reports)
+    }
+
+    /// Where the subscription is open, each report that came on it since
+    /// the last look or tick; it opens none. A waiting submit, whose
+    /// subscription opened before it submitted, says them before its
+    /// first step, which may end the wait (122, 123).
+    pub fn came(&mut self) -> Vec<crate::host_process::pass::Report> {
+        if self.reached.open.is_some() {
+            self.take_lines(Duration::from_millis(1));
+        }
+        std::mem::take(&mut self.reports)
+    }
+
     /// The document `sluice host` sends as the subscription opens, where it
-    /// holds one: no pass is asked.
-    pub fn look(&mut self) {
+    /// holds one, and each report that came before it, which the wait says
+    /// before the document can end it: no pass is asked.
+    pub fn look(&mut self) -> Vec<crate::host_process::pass::Report> {
         if self.reached.open().is_some() {
             self.take_lines(Duration::from_millis(1));
         }
+        std::mem::take(&mut self.reports)
     }
 
     /// One tick: a pass asked first where passes are taken only when
@@ -409,21 +472,26 @@ impl<'a> Waiter<'a> {
             if INTERRUPTED.load(Ordering::SeqCst) || self.reached.open.is_none() {
                 break;
             }
-            reports.extend(self.take_lines(LINE_WAIT));
+            self.take_lines(LINE_WAIT);
+            reports.append(&mut self.reports);
         }
         reports
     }
 
+    /// The reports since the last tick: where passes are taken only when
+    /// asked, the pass it asks, whose report the subscription gives again;
+    /// otherwise each that the subscription gave, the ones a look kept
+    /// first.
     fn take(
         &mut self,
         clock: &dyn Clock,
         wait: Duration,
     ) -> Vec<crate::host_process::pass::Report> {
-        let mut reports = Vec::new();
         if self.reached.open().is_none() {
-            return reports;
+            return std::mem::take(&mut self.reports);
         }
         if self.reached.asked_only() {
+            let mut reports = Vec::new();
             match self
                 .reached
                 .process
@@ -434,21 +502,25 @@ impl<'a> Waiter<'a> {
             }
             // The passes the subscription reports are those it asked.
             self.take_lines(wait);
+            self.reports.clear();
             return reports;
         }
-        reports.extend(self.take_lines(wait));
-        reports
+        self.take_lines(wait);
+        std::mem::take(&mut self.reports)
     }
 
-    fn take_lines(&mut self, wait: Duration) -> Vec<crate::host_process::pass::Report> {
-        let mut reports = Vec::new();
+    /// Each line that came within `wait`: the newest document kept, and
+    /// each report kept for the next tick.
+    fn take_lines(&mut self, wait: Duration) {
         for line in self.reached.lines(wait) {
             match line {
                 SubscriptionLine::Document(d) => self.document = Some(d.overview),
-                SubscriptionLine::Pass(p) => reports.push(p.report),
+                SubscriptionLine::Pass(p) => {
+                    self.seen = self.seen.max(p.report.pass);
+                    self.reports.push(p.report);
+                }
                 SubscriptionLine::Error(_) => {}
             }
         }
-        reports
     }
 }

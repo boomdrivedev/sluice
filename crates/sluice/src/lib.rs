@@ -4163,6 +4163,36 @@ pub fn follow_wait<'a>(
     process: &'a dyn host_process::HostProcess,
     here: Option<&'a host_process::Here<'a, 'a>>,
     folder: std::path::PathBuf,
+    ask: host_process::protocol::WaitAsk,
+    said_before: Option<State>,
+    deadline: Option<chrono::DateTime<chrono::Utc>>,
+    clock: &dyn Clock,
+    pause: &dyn Pause,
+    out: &mut dyn Write,
+) -> Result<i32> {
+    let waiter = subscriber::Waiter::new(process, here, folder.clone());
+    follow_waiting(
+        waiter,
+        process,
+        here,
+        folder,
+        ask,
+        said_before,
+        deadline,
+        clock,
+        pause,
+        out,
+    )
+}
+
+/// [`follow_wait`] on `waiter`, a subscription the wait opened already,
+/// as a waiting submit opens it before it submits.
+#[allow(clippy::too_many_arguments)]
+pub fn follow_waiting<'a>(
+    mut waiter: subscriber::Waiter<'a>,
+    process: &'a dyn host_process::HostProcess,
+    here: Option<&'a host_process::Here<'a, 'a>>,
+    folder: std::path::PathBuf,
     mut ask: host_process::protocol::WaitAsk,
     said_before: Option<State>,
     deadline: Option<chrono::DateTime<chrono::Utc>>,
@@ -4171,9 +4201,13 @@ pub fn follow_wait<'a>(
     out: &mut dyn Write,
 ) -> Result<i32> {
     ask.deadline = deadline.map(|d| d.to_rfc3339());
-    let mut waiter = subscriber::Waiter::new(process, here, folder.clone());
+    // 122, 123: what the passes since its submit released, said before a
+    // step that finds the submission decided ends the wait.
+    if let Some(own) = &ask.own {
+        tell_released(&waiter.came(), &own.branch, ask.json, out)?;
+    }
     let mut said_before = said_before;
-    let mut stepped = wait_ask(process, here, &folder, &ask, out)?;
+    let mut stepped = wait_ask(process, here, &folder, &ask, Some(&mut waiter), out)?;
     loop {
         stepped = match stepped {
             Stepped::Ended(code) => return Ok(code),
@@ -4229,17 +4263,32 @@ pub fn follow_wait<'a>(
 }
 
 /// Ask `sluice host` a step of `ask` from `folder`, and say what the step
-/// said.
+/// said. A step that ends the wait names the last pass reported once the
+/// passes in flight as it read had ended: a wait that followed before its
+/// submission, on `waiter`, says what each pass up to that one released
+/// before it prints the end (122, 123).
 fn wait_ask(
     process: &dyn host_process::HostProcess,
     here: Option<&host_process::Here<'_, '_>>,
     folder: &std::path::Path,
     ask: &host_process::protocol::WaitAsk,
+    waiter: Option<&mut subscriber::Waiter<'_>>,
     out: &mut dyn Write,
 ) -> Result<Stepped> {
     use host_process::protocol::WaitStep;
     Ok(match process.wait(here, folder, ask)? {
         WaitStep::Ended(o) => {
+            if let (Some(waiter), Some(pass)) = (waiter, o.pass) {
+                let branch = ask
+                    .own
+                    .as_ref()
+                    .map(|own| own.branch.clone())
+                    .or_else(|| ask.pull.as_ref().map(|p| p.branch.clone()))
+                    .or_else(|| ask.branch.clone())
+                    .unwrap_or_else(|| ask.target.clone());
+                let reports = waiter.through(pass, host_process::read_for());
+                tell_released(&reports, &branch, ask.json, out)?;
+            }
             out.write_all(o.stdout.as_bytes())?;
             out.flush()?;
             for line in &o.stderr {
@@ -4301,7 +4350,7 @@ fn follow_pull(
     let mut said_hold = None;
     let stop = |code: i32, ask: &mut host_process::protocol::WaitAsk, out: &mut dyn Write| {
         ask.stopped = Some(code);
-        wait_ask(process, here, folder, ask, out)
+        wait_ask(process, here, folder, ask, None, out)
     };
     if INTERRUPTED.load(Ordering::SeqCst) {
         return stop(STOPPED, ask, out);
@@ -4325,7 +4374,7 @@ fn follow_pull(
     if INTERRUPTED.load(Ordering::SeqCst) || !pause.pause() {
         return stop(STOPPED, ask, out);
     }
-    wait_ask(process, here, folder, ask, out)
+    wait_ask(process, here, folder, ask, Some(waiter), out)
 }
 
 /// Follow the submission a step named, `followed`'s second, for its own,
@@ -4402,7 +4451,9 @@ fn follow_submission(
             other => Some(other),
         }
     };
-    waiter.look();
+    // 122, 123: what each pass before the first document released is said
+    // first, so a document that ends the wait ends it after them.
+    tell_released(&waiter.look(), &branch, json, out)?;
     loop {
         // The document: the submission it follows as it holds it, or a
         // step where it holds it no longer.
@@ -4430,7 +4481,7 @@ fn follow_submission(
                 }
                 _ if lacked.as_ref() != Some(&doc) => {
                     lacked = Some(doc);
-                    let stepped = wait_ask(process, here, folder, ask, out)?;
+                    let stepped = wait_ask(process, here, folder, ask, Some(waiter), out)?;
                     if let Some(other) = next(stepped, &mut own, &mut follows, &mut said, ask) {
                         return Ok(other);
                     }
@@ -4470,7 +4521,7 @@ fn follow_submission(
          -> Result<Stepped> {
             if ask.group.is_some() {
                 ask.stopped = Some(code);
-                return wait_ask(process, here, folder, ask, out);
+                return wait_ask(process, here, folder, ask, None, out);
             }
             if json {
                 let doc = with_copy(serde_json::to_value(&own)?, ask.copy.as_ref())?;
@@ -4510,7 +4561,7 @@ fn follow_submission(
         if let Some(words) = failed {
             // 122: the branch may have taken the work it follows, and what
             // failed came after: a step says.
-            let stepped = wait_ask(process, here, folder, ask, out)?;
+            let stepped = wait_ask(process, here, folder, ask, Some(waiter), out)?;
             if let Some(other) = next(stepped, &mut own, &mut follows, &mut said, ask) {
                 return Ok(other);
             }

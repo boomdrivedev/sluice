@@ -88,6 +88,10 @@ pub struct Report {
     /// ask with, where one did.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub refused: Option<String>,
+    /// Its number among the repository's passes whose reports `sluice
+    /// host` sent, from one (122, 123); 0 from a host that numbers none.
+    #[serde(default)]
+    pub pass: u64,
     /// The branches its binding reads as last fetched, each with the
     /// remote's refusal (the change `sluice-host-answers-every-read`,
     /// design D3). It stays in the host process.
