@@ -5462,9 +5462,10 @@ fn a_repositorys_branches_share_one_list_each_interval() {
 /// hourly requests are spent": main and two bolts take pull requests,
 /// and the installation's allowance holds what one list of the
 /// repository in each interval and a submit need, with room for the
-/// order the submit's calls and the host's pass fall in. Forty passes of
-/// `sluice run` over two minutes, with nothing on the host moving, leave
-/// the allowance for the submit, which opens its pull request and exits 0
+/// order the submit's calls and the host's pass fall in. A hundred and
+/// sixty passes of `sluice run` over eight minutes, with nothing on the
+/// host moving, leave the allowance for the submit, which opens its pull
+/// request and exits 0
 /// (`one-forge-read-per-repository-per-interval@b3b6757cea2d`).
 #[test]
 fn idle_branches_leave_the_allowance_for_a_submit() {
@@ -5473,8 +5474,9 @@ fn idle_branches_leave_the_allowance_for_a_submit() {
     g.discovery_passes();
     let w = g.session("allowed", &[("a.txt", "a\n")]);
     let before = g.repo_calls();
+    let asked = g.gh.fake.requests().len();
     g.gh.allow(ALLOWED);
-    let out = g.skipping(g.repo.dir(), &["run", "--rounds", "40"]);
+    let out = g.skipping(g.repo.dir(), &["run", "--rounds", "160"]);
     assert!(out.status.success(), "{}", text(&out));
     let idle = g.repo_calls() - before;
     // The run's host process ends, so no pass of its own, a real minute
@@ -5486,18 +5488,27 @@ fn idle_branches_leave_the_allowance_for_a_submit() {
         .args(["submit", "main", "--no-wait"])
         .output()
         .unwrap();
-    assert_eq!(out.status.code(), Some(0), "idle {idle}: {}", text(&out));
-    assert_eq!(idle, 2, "one list in each minute");
+    let calls: Vec<String> = g.gh.fake.requests()[asked..]
+        .iter()
+        .map(|r| format!("{} {}", r.method, r.path))
+        .collect();
+    assert_eq!(
+        out.status.code(),
+        Some(0),
+        "idle {idle}, calls {calls:#?}: {}",
+        text(&out)
+    );
+    assert_eq!(idle, 8, "one list in each minute: {calls:#?}");
     assert!(g.gh.forge.by_ref("unit/allowed").unwrap().is_some());
 }
 
 /// The calls the installation's allowance holds in
 /// [`idle_branches_leave_the_allowance_for_a_submit`]: the repository's
-/// one list in each of two minutes, and the submit's calls, three to five
-/// as the host's pass and the submit's own list fall. A list of each
-/// branch in each minute spends six before the submit, which leaves it
-/// one call, and the submit exits 3.
-const ALLOWED: usize = 7;
+/// one list in each of eight minutes, and ten for the submit and the
+/// pass it moves, which take three to six as they fall. A list of each
+/// branch in each minute spends the allowance before the submit, at its
+/// eighteenth list, and the submit exits 3.
+const ALLOWED: usize = 18;
 
 /// reader-tick, "A branch that takes pull requests between discoveries":
 /// none open and the host's interval a minute, six passes of `sluice run`

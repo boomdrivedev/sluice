@@ -32,8 +32,8 @@ Each branch that takes pull requests SHALL read its open pull requests from the 
 - **THEN** the repository's open pull requests were asked for once, and no list of one branch was asked for
 
 #### Scenario: Idle branches leave the allowance for a submit
-- **WHEN** main and two bolts take pull requests, the allowance holds seven calls, and forty passes go in two minutes with no move
-- **THEN** the passes ask for two lists, and a `sluice submit main --no-wait` opens its pull request and exits 0
+- **WHEN** main and two bolts take pull requests, the allowance holds 18 calls, and 160 passes go in eight minutes with no move
+- **THEN** the passes ask for eight lists, and a `sluice submit main --no-wait` opens its pull request and exits 0
 
 ### Requirement: A branch's list changed only where its requests moved
 A branch SHALL read its list as changed only where GitHub sent the list afresh and the branch's requests differ from its last reading. sluice SHALL compare their numbers, heads, last changes and draft marks (136, rule core.32).
