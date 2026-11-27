@@ -9,7 +9,7 @@ Each check runs through sluice: `sluice exec main -- <command>`.
 
 ## 2. The worktree's own submission
 
-- [x] 2.1 Add `submitted_here` and `lookup_here` to `crates/sluice/src/lib.rs`, and use them in `wait`, `status`, `amend` and `withdraw` where more than one branch holds the number and no `--branch` is given (D2). Check: `sluice exec main -- cargo test -p sluice --test cli number_on_two_branches`.
+- [x] 2.1 Add `submitted_here` and `lookup_here` to `crates/sluice/src/lib.rs`, which read the worktree's own submission by `Sluice::made`, and use them in `wait`, `status`, `amend` and `withdraw` where more than one branch holds the number and no `--branch` is given (D2). Check: `sluice exec main -- cargo test -p sluice --test cli number_on_two_branches`.
 - [x] 2.2 In `crates/sluice/src/host_process/reads.rs` and `changes.rs`, run a status, an amend and a withdrawal with the request's folder as the worktree (D3). Check: `sluice exec main -- cargo test -p sluice --lib runs_as_from`.
 
 ## 3. The record, the claim and the skill
