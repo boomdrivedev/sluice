@@ -52,6 +52,11 @@ pub struct FileForge {
     at: Mutex<Option<DateTime<Utc>>>,
     /// What it answers an error for, as GitHub may.
     failing: Mutex<Failing>,
+    /// How many times the app's login was asked.
+    logins: std::sync::atomic::AtomicUsize,
+    /// Each branch of the repository as last pushed, by name, where a
+    /// test pushes through it.
+    branches: Mutex<BTreeMap<String, String>>,
 }
 
 /// What a [`FileForge`] answers an error for.
@@ -81,7 +86,36 @@ impl FileForge {
             lock: Mutex::new(()),
             at: Mutex::new(None),
             failing: Mutex::new(Failing::default()),
+            logins: std::sync::atomic::AtomicUsize::new(0),
+            branches: Mutex::new(BTreeMap::new()),
         }
+    }
+
+    /// The repository's `branch` pushed at `head`: each open pull request
+    /// from it moves to that head, as GitHub moves it, and one opened from
+    /// it later starts there.
+    pub fn pushed(&self, branch: &str, head: &str) -> Result<()> {
+        self.branches
+            .lock()
+            .unwrap()
+            .insert(branch.into(), head.into());
+        let repo = self.repo.clone();
+        let moving: Vec<u64> = self
+            .held()?
+            .pulls
+            .iter()
+            .filter(|p| p.open && p.head_ref == branch && p.head_repo == repo && p.head != head)
+            .map(|p| p.number)
+            .collect();
+        for n in moving {
+            self.push(n, head)?;
+        }
+        Ok(())
+    }
+
+    /// How many times the app's login was asked.
+    pub fn logins(&self) -> usize {
+        self.logins.load(std::sync::atomic::Ordering::SeqCst)
     }
 
     /// Answer an error for pull request `n`'s reviews, or give them again:
@@ -279,6 +313,8 @@ impl FileForge {
 
 impl Forge for FileForge {
     fn login(&self, _: &Repo) -> Result<String> {
+        self.logins
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
         Ok(LOGIN.into())
     }
 
@@ -432,9 +468,16 @@ impl Forge for FileForge {
         body: &str,
         draft: bool,
     ) -> Result<Pull> {
-        // GitHub reads the head from the branch as pushed; the test's push
-        // is to a bare remote this fake cannot see, so it is named after.
-        let number = self.open_by(LOGIN, base, head_ref, "", draft, None)?;
+        // GitHub reads the head from the branch as pushed; a test's push to
+        // a bare remote this fake cannot see names it after.
+        let head = self
+            .branches
+            .lock()
+            .unwrap()
+            .get(head_ref)
+            .cloned()
+            .unwrap_or_default();
+        let number = self.open_by(LOGIN, base, head_ref, &head, draft, None)?;
         self.with_pull(number, |p| {
             p.title = title.into();
             p.body = body.into();

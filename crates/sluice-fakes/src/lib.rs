@@ -613,6 +613,11 @@ impl World {
     /// A session's work: a commit on `on` changing `changes` (`None`
     /// deletes).
     pub fn work(&self, on: &Rev, changes: &[(&str, Option<&str>)]) -> Rev {
+        self.work_saying(on, changes, &format!("work {changes:?}"))
+    }
+
+    /// [`World::work`], its commit's message `message`.
+    pub fn work_saying(&self, on: &Rev, changes: &[(&str, Option<&str>)], message: &str) -> Rev {
         let mut inner = self.0.borrow_mut();
         let mut tree = inner.commits[on].tree.clone();
         for (p, c) in changes {
@@ -621,8 +626,7 @@ impl World {
                 None => tree.remove(*p),
             };
         }
-        let msg = format!("work {changes:?}");
-        Self::put_commit(&mut inner, tree, vec![on.clone()], &msg)
+        Self::put_commit(&mut inner, tree, vec![on.clone()], message)
     }
 
     /// Someone moves the branch by hand with a commit of their own.
