@@ -8,19 +8,24 @@
 //! the repository, it installs the hook where none stands (1, 124). No
 //! command puts back the hook in its own process. The hooks folder of a
 //! request's folder is found once, by git, and kept for the host
-//! process's life, so a request after the first runs no git for it.
+//! process's life, so a request after the first runs no git for it, and
+//! a request that comes while it is found waits for that finding.
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 
 use super::protocol::{FollowKind, Request};
 use super::Hosting;
 
-/// The hooks folder of each folder a request named, as git found it.
+/// The hooks folder of each folder a request named, as git found it. A
+/// request that names a folder while its finding goes waits for that
+/// finding and starts no git of its own, so no git of a finding starts
+/// after the requests that name its folder are answered (reader-tick, "A
+/// folder's hooks folder is found once").
 #[derive(Default)]
 pub(crate) struct Hooks {
-    folders: Mutex<BTreeMap<PathBuf, PathBuf>>,
+    folders: Mutex<BTreeMap<PathBuf, Arc<tokio::sync::Mutex<Option<PathBuf>>>>>,
 }
 
 /// What a request has `sluice host` do with the hook of its folder.
@@ -102,15 +107,10 @@ pub(crate) async fn put(hosting: &Hosting, request: &Request) {
         return;
     };
     for (folder, put) in asked {
-        let hooks = match hosting.hooks.of(&folder) {
-            Some(hooks) => Ok(hooks),
-            None => {
-                let finding = folder.clone();
-                tokio::task::spawn_blocking(move || crate::protect::hooks_of(&finding))
-                    .await
-                    .unwrap_or_else(|e| Err(anyhow::anyhow!("finding the hooks folder: {e}")))
-            }
-        };
+        let hooks = hosting
+            .hooks
+            .found(&folder, |folder| crate::protect::hooks_of(&folder))
+            .await;
         let hooks = match hooks {
             Ok(hooks) => hooks,
             // A folder in no repository is the request's to report, and a
@@ -126,7 +126,6 @@ pub(crate) async fn put(hosting: &Hosting, request: &Request) {
                 continue;
             }
         };
-        hosting.hooks.keep(&folder, &hooks);
         let (writing, naming) = (hooks.clone(), program.clone());
         let written = tokio::task::spawn_blocking(move || match put {
             Put::Install => crate::protect::install_at(&writing, &naming),
@@ -150,27 +149,85 @@ pub(crate) async fn put(hosting: &Hosting, request: &Request) {
 }
 
 impl Hooks {
-    /// The hooks folder kept for `folder`.
-    fn of(&self, folder: &Path) -> Option<PathBuf> {
-        self.folders
+    /// `folder`'s hooks folder: the one kept, or the one `find` finds,
+    /// on tokio's pool for blocking work, kept where it is found. One
+    /// finding of a folder goes at a time, and a request that comes while
+    /// it goes takes what it found.
+    async fn found<F>(&self, folder: &Path, find: F) -> anyhow::Result<PathBuf>
+    where
+        F: FnOnce(PathBuf) -> anyhow::Result<PathBuf> + Send + 'static,
+    {
+        let slot = self
+            .folders
             .lock()
             .unwrap_or_else(|e| e.into_inner())
-            .get(folder)
-            .cloned()
-    }
-
-    /// Keep `hooks` as `folder`'s hooks folder.
-    fn keep(&self, folder: &Path, hooks: &Path) {
-        self.folders
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .insert(folder.to_path_buf(), hooks.to_path_buf());
+            .entry(folder.to_path_buf())
+            .or_default()
+            .clone();
+        let mut kept = slot.lock().await;
+        if let Some(hooks) = kept.as_ref() {
+            return Ok(hooks.clone());
+        }
+        let finding = folder.to_path_buf();
+        let hooks = tokio::task::spawn_blocking(move || find(finding))
+            .await
+            .unwrap_or_else(|e| Err(anyhow::anyhow!("finding the hooks folder: {e}")))?;
+        *kept = Some(hooks.clone());
+        Ok(hooks)
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    /// reader-tick, "A folder's hooks folder is found once": two requests
+    /// that name one folder at once find its hooks folder by one finding,
+    /// the second waiting for the first's, so no git of the finding starts
+    /// after either is answered.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn two_requests_for_one_folder_find_its_hooks_once() {
+        let hooks = Hooks::default();
+        let finds = Arc::new(AtomicUsize::new(0));
+        let find = |finds: Arc<AtomicUsize>| {
+            move |folder: PathBuf| {
+                finds.fetch_add(1, Ordering::SeqCst);
+                // The finding's two gits, slow under load.
+                std::thread::sleep(std::time::Duration::from_millis(200));
+                Ok(folder.join(".git/hooks"))
+            }
+        };
+        let folder = Path::new("/w/x");
+        let (a, b) = tokio::join!(
+            hooks.found(folder, find(finds.clone())),
+            hooks.found(folder, find(finds.clone())),
+        );
+        assert_eq!(a.unwrap(), Path::new("/w/x/.git/hooks"));
+        assert_eq!(b.unwrap(), Path::new("/w/x/.git/hooks"));
+        assert_eq!(finds.load(Ordering::SeqCst), 1, "found once");
+        // A request after both finds nothing.
+        hooks.found(folder, find(finds.clone())).await.unwrap();
+        assert_eq!(finds.load(Ordering::SeqCst), 1, "kept");
+    }
+
+    /// A finding that fails is not kept: the next request finds it again,
+    /// since the folder may become a repository, or its hooks folder an
+    /// untracked one.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_finding_that_fails_is_found_again() {
+        let hooks = Hooks::default();
+        let folder = Path::new("/w/x");
+        let failed = hooks
+            .found(folder, |_| Err(anyhow::anyhow!("not a git repository")))
+            .await;
+        assert!(failed.is_err());
+        let found = hooks
+            .found(folder, |f| Ok(f.join(".git/hooks")))
+            .await
+            .unwrap();
+        assert_eq!(found, Path::new("/w/x/.git/hooks"));
+    }
 
     /// design D4: a submit, a wait, a step and `sluice run` install the
     /// hook; a read puts it back; `sluice protect`, the hook's own request
