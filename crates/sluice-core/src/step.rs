@@ -2777,33 +2777,54 @@ impl Sluice<'_> {
         // report holding none of them is no pass.
         if c.every_check && !checks.is_empty() && report.tasks.is_empty() {
             v.passed = false;
+            // 115: a group of checks, where the report names no check at
+            // all, has no outcome, as a check by name has (record 0122,
+            // design D8).
+            let unnamed = report.not_run.is_empty()
+                && v.unjudged.is_empty()
+                && v.none.is_empty()
+                && v.failed.is_empty();
+            for check in checks.iter().filter(|c| unnamed && c.starts_with('#')) {
+                v.none.push(NotRun {
+                    task: check.clone(),
+                    reason: verdict::NO_OUTCOME.into(),
+                    key: None,
+                });
+            }
         }
         // The decision `a-key-the-tree-does-not-bear-out-holds-the-branch`:
         // a check whose key names a file the tree does not hold has no
         // outcome, saying so; the hold, not a run again, decides when it is
         // formed again.
+        let mut none: Vec<NotRun> = Vec::new();
         for r in &lacking {
             v.none.retain(|n| n.task != r.task);
-            v.none.push(NotRun {
+            none.push(NotRun {
                 task: r.task.clone(),
                 reason: key_held_why(&r.why),
                 key: Some(r.key.clone()),
             });
             v.passed = false;
         }
-        // 60, 114, record 0122 (design D8): a check the report holds nothing
-        // for has no outcome, counting toward nothing.
-        let mut none: Vec<NotRun> = v.none.clone();
-        if let Some(n) = none.first() {
+        if let Some(n) = v.none.first().or(none.first()) {
             why.get_or_insert_with(|| n.reason.clone());
         }
         // 149, 114: a check every task it was failed by reads passed was
         // judged by nothing, and is read as one the run did not judge;
         // under the bound, with none failed on its own result, the run ends
-        // with no outcome for it (record 0122; design D7).
-        let not_run: Vec<NotRun> = report.not_run.iter().chain(&v.unjudged).cloned().collect();
+        // with no outcome for it (record 0122; design D7). 60, 115 (record
+        // 0122, design D8; the change
+        // `a-run-with-no-outcome-stops-rerunning`): so is a check the report
+        // holds nothing for, which counts toward the runs in a row, so its
+        // follow-ups stop at the bound; beside a check that failed on its
+        // own result it keeps no outcome, and nobody is blamed for it.
+        let judged = !v.failed.is_empty() || v.timed_out;
+        let mut not_run: Vec<NotRun> = report.not_run.iter().chain(&v.unjudged).cloned().collect();
+        match judged {
+            true => none.append(&mut v.none),
+            false => not_run.append(&mut v.none),
+        }
         if !not_run.is_empty() {
-            let judged = !v.failed.is_empty() || v.timed_out;
             let host = &self.peer.name;
             match read_not_run(line, c, i, &not_run, judged, system, host, now) {
                 Some(named) => {

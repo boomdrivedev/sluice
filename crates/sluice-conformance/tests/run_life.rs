@@ -639,6 +639,33 @@ fn a_check_the_report_holds_no_outcome_for_is_never_failed() {
     assert_eq!(h.sub(one).state, State::Landed);
 }
 
+/// satisfies: 60, 114, 115; record 0122 (design D8);
+/// `a-candidate-with-no-outcome-in-runs-in-a-row-reads-not-passed`; the
+/// run-life spec's "A check the report holds no outcome for has none",
+/// three runs in a row
+#[test]
+fn a_check_no_report_holds_three_runs_in_a_row_is_blamed_with_why() {
+    let h = local();
+    h.w().skips("b:test");
+    h.work("unit/a", "agent-a", &[("a/lib", Some("a2"))]);
+    let one = h.submit("unit/a");
+    h.settle();
+    assert_eq!(h.sub(one).state, State::Failed);
+    assert_eq!(h.w().started().len(), 3, "a run and two follow-ups");
+    // The first run passed `a:test`; the second alone decided nothing.
+    assert_eq!(h.sub(one).runs_with_no_outcome, 1);
+    let failed = &h.sub(one).failed;
+    assert_eq!(failed.len(), 1, "{failed:?}");
+    assert_eq!(failed[0].task, "b:test");
+    assert!(failed[0].hash.is_empty(), "no key: it has no result");
+    assert_eq!(
+        failed[0].not_run.as_deref(),
+        Some("the run's report holds no outcome for it")
+    );
+    assert!(h.results().iter().all(|r| r.task != "b:test"));
+    assert!(h.results().iter().any(|r| r.task == "a:test"));
+}
+
 /// satisfies: record 0122; 66; the run-life spec's "A run's time limit
 /// counts from its own running", a follow-up run's limit
 #[test]
