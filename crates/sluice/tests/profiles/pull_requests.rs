@@ -5477,6 +5477,10 @@ fn idle_branches_leave_the_allowance_for_a_submit() {
     let out = g.skipping(g.repo.dir(), &["run", "--rounds", "40"]);
     assert!(out.status.success(), "{}", text(&out));
     let idle = g.repo_calls() - before;
+    // The run's host process ends, so no pass of its own, a real minute
+    // on, takes a call before the submit's: the submit's host process
+    // starts afresh and reads the last asking the host keeps.
+    support::kill_host_process(&mut g.command(env!("CARGO_BIN_EXE_sluice"), g.repo.dir()));
     let out = g
         .command(env!("CARGO_BIN_EXE_sluice"), &w)
         .args(["submit", "main", "--no-wait"])
