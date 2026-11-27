@@ -212,6 +212,17 @@ fn stalls(e: &notify_debouncer_full::notify::Error) -> bool {
     matches!(e.kind, notify_debouncer_full::notify::ErrorKind::Generic(_))
 }
 
+/// Whether an event of `kind` only says that a file was opened, read or
+/// closed after a read, which changes nothing. On Linux, inotify reports
+/// each open and read, and `sluice host`'s own read of a repository opens
+/// its refs and records: such an event read as a change has the host read
+/// the repository again, which opens them again, with no end (macOS's
+/// FSEvents reports no read). A close after a write is a change.
+fn reads_only(kind: &notify_debouncer_full::notify::EventKind) -> bool {
+    use notify_debouncer_full::notify::event::{AccessKind, AccessMode, EventKind};
+    matches!(kind, EventKind::Access(a) if *a != AccessKind::Close(AccessMode::Write))
+}
+
 /// One debouncer and the paths it watches.
 struct Stream {
     debouncer: Debouncer<RecommendedWatcher, NoCache>,
@@ -230,6 +241,15 @@ impl Stream {
             DEBOUNCE,
             None,
             move |result: DebounceEventResult| {
+                let result = result.map(|events| {
+                    events
+                        .into_iter()
+                        .filter(|e| !reads_only(&e.event.kind))
+                        .collect::<Vec<_>>()
+                });
+                if result.as_ref().is_ok_and(Vec::is_empty) {
+                    return;
+                }
                 let _ = seen.send(result);
             },
             NoCache,
@@ -631,6 +651,30 @@ impl Watch {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// An open, a read and a close after a read change nothing; a close
+    /// after a write, a write, a create and a rename do.
+    #[test]
+    fn a_read_is_no_change() {
+        use notify_debouncer_full::notify::event::{
+            AccessKind, AccessMode, CreateKind, DataChange, EventKind, ModifyKind, RenameMode,
+        };
+        for kind in [
+            EventKind::Access(AccessKind::Open(AccessMode::Any)),
+            EventKind::Access(AccessKind::Read),
+            EventKind::Access(AccessKind::Close(AccessMode::Read)),
+        ] {
+            assert!(reads_only(&kind), "{kind:?}");
+        }
+        for kind in [
+            EventKind::Access(AccessKind::Close(AccessMode::Write)),
+            EventKind::Modify(ModifyKind::Data(DataChange::Any)),
+            EventKind::Create(CreateKind::File),
+            EventKind::Modify(ModifyKind::Name(RenameMode::Both)),
+        ] {
+            assert!(!reads_only(&kind), "{kind:?}");
+        }
+    }
 
     /// A folder of the test's own, removed as it ends.
     struct Scratch(PathBuf);
