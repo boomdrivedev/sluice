@@ -7,10 +7,12 @@ A lookup by number reads every branch and refuses a number that more
 than one branch holds. The command must then take `--branch`.
 
 The usual case is a session that submits, then waits. The submit knows
-the branch. The worktree that waits knows which submission it made:
-each record holds `from.worktree`, the branch of the worktree that made
-it. `sluice wait <branch>` already finds the worktree's last submission
-by that field.
+the branch. The worktree that waits knows which submission it made.
+`Sluice::made` is the one reading of a worktree's own submission, and
+the inbox and a wait's delivery use it (rule core.50). A worktree's own
+submission names the worktree's branch in `from.worktree`. A pull
+request's submission names `pull/<n>` there, and the branch that the
+request was opened from in `from.head`.
 
 `wait`, `status`, `amend` and `withdraw` run in `sluice host` (rule
 core.25). The client sends its folder with each request. A wait also
@@ -34,8 +36,11 @@ already (record 0130), and it does not change.
 
 More than one branch can hold a number that a command gives with no
 branch. Then sluice reads the submission of the number on each of those
-branches. It keeps the branches where `from.worktree` is the branch of
-the folder that the command runs in, as the driver reads it. Where one
+branches. It keeps the branches where `Sluice::made` reads the
+submission as the worktree's own. The worktree is the folder that the
+command runs in, by its branch, as the driver reads it. So a pull
+request's submission is the worktree's own where the request was opened
+from the worktree's branch, and sluice lands on that branch nowhere. Where one
 branch only is kept, the command acts on that branch, as if it had
 `--branch` with that branch. Its lines and its `next` then name that
 branch.

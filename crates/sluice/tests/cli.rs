@@ -9512,6 +9512,39 @@ mod number_on_two_branches {
         );
     }
 
+    /// Record 0114 as amended 2026-11-26: on a branch that takes pull
+    /// requests, the worktree's own submission is the request's opened
+    /// from its branch, as the inbox reads it (rule core.50): a wait and a
+    /// status in that worktree take it, and in another worktree are
+    /// refused naming both branches.
+    #[test]
+    fn a_pull_requests_submission_is_the_worktree_it_was_opened_from() {
+        let f = setup();
+        branch(&f, A);
+        branch(&f, B);
+        submit_as(&f, 26, A, "unit/a");
+        let head = f
+            .world
+            .work(&f.world.tip(B), &[("plugin/pull-9", Some("n"))]);
+        f.world.session("pull/9", "agent-unit/b", &head);
+        f.world.opened_from("pull/9", "unit/b");
+        let head = f.world.tip(B);
+        f.world.session("unit/b", "agent-unit/b", &head);
+        f.world.numbers_from(26);
+        let (code, out) = sluice(&f, &["submit", B, "--worktree", "pull/9", "--no-wait"]);
+        assert_eq!(code, 0, "{out}");
+
+        let (code, out) = sluice_in(&f, "unit/b", &["status", N, "--json"]);
+        assert_eq!(code, 0, "{out}");
+        assert_eq!(json(&out)["branch"], B, "{out}");
+        let (code, out) = sluice_in(&f, "unit/c", &["status", N]);
+        assert_eq!(code, 2, "{out}");
+        assert_eq!(out, format!("{}\n", refusal("sluice status")));
+        let (code, out) = sluice(&f, &["wait", N, "--worktree", "unit/b", "--json"]);
+        assert_eq!(code, LANDED, "{out}");
+        assert_eq!(json(&out)["branch"], B, "{out}");
+    }
+
     /// Record 0114 as amended 2026-11-26: a worktree's own submission
     /// names a refusal's branch where it holds a number it changes; the
     /// refusal names that branch in each command it gives.

@@ -73,6 +73,16 @@ folder that its client sent (record 0114 as amended 2026-11-26).
   and exits 0
   (`a_wait_in_the_worktree_follows_its_own_submission`)
 
+#### Scenario: A pull request's submission is the worktree's that opened it
+
+- **GIVEN** submission 26 queued on `bolt/a` from `unit/a`, and on
+  `bolt/b` from the pull request `pull/9`, opened from `unit/b`
+- **WHEN** `sluice status 26` and `sluice wait 26` run in `unit/b`, and
+  `sluice status 26` runs in `unit/c`
+- **THEN** in `unit/b` both take `bolt/b`'s 26, and in `unit/c` the
+  status is refused naming `bolt/a` and `bolt/b`
+  (`a_pull_requests_submission_is_the_worktree_it_was_opened_from`)
+
 #### Scenario: What the command gives names the worktree's branch
 
 - **GIVEN** submission 26 queued on `bolt/a` from `unit/a`, and on
