@@ -20,4 +20,4 @@ Each check runs through sluice: `sluice exec main -- <command>`. A test that sta
 
 - [x] 4.1 Amend record 0093 with this change's decisions, each with Before and Now. Add to the details of core.31 and core.51 what they do not rule out. Check: `sluice exec main -- moon run root:changes`.
 - [x] 4.2 On the site's page of the host's settings, say what `[daemon] managed` does. On the page of commands, say that a command then starts no host process. No gate task reads a page's words, so the review of the diff checks it.
-- [ ] 4.3 Run the projects' tasks, then submit. Check: `sluice exec main -- moon run cli:test nix:test root:changes root:specs`.
+- [x] 4.3 Run the projects' tasks, then submit. Check: `sluice exec main -- moon run cli:test nix:test root:changes root:specs`.
