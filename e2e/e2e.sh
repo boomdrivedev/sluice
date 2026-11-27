@@ -240,6 +240,9 @@ fi
 # --- sluice: S1 to S4 for real -------------------------------------------------------------------------------------
 # The host's held ports and session runs, kept with the scratch repository.
 export XDG_STATE_HOME=$ROOT/state
+# The host's settings, none: the host's own `~/.config/sluice/config.toml` is never read here, so a host whose service
+# manager keeps `sluice daemon` (`[daemon] managed`) still lets these commands start a host process of their own.
+export XDG_CONFIG_HOME=$ROOT/config
 # The directory standing for the user's, where each place's scratch is made (35), kept there too: under the gate's
 # sandbox, which lets a check write no other, /tmp/sluice-<uid> cannot be made.
 export SLUICE_USER_SCRATCH=$ROOT/u

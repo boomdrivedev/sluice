@@ -47,13 +47,18 @@ pub fn test_user_scratch() -> PathBuf {
 /// It is started under no caller's trace context, so a suite run under
 /// `sluice exec` while it sends traces nests none of its sluices in its
 /// own trace or keeps it on their records (153; design D9 of
-/// `a-sluice-command-shows-inside-its-callers-trace`).
+/// `a-sluice-command-shows-inside-its-callers-trace`). It reads none of
+/// the host's settings, `~/.config/sluice/config.toml`, but those a test
+/// gives it by an `XDG_CONFIG_HOME` of its own: a host whose service
+/// manager keeps `sluice daemon` (`[daemon] managed`) would otherwise
+/// have its commands start no host process.
 pub fn isolated(c: &mut Command) -> &mut Command {
     for v in HERDR {
         c.env_remove(v);
     }
     c.env_remove("TRACEPARENT").env_remove("TRACESTATE");
     c.env("SLUICE_RETRY_SLEEP", "record")
+        .env("XDG_CONFIG_HOME", no_host_settings())
         .env(
             sluice::profiles::places::USER_SCRATCH_VAR,
             test_user_scratch(),
@@ -64,6 +69,17 @@ pub fn isolated(c: &mut Command) -> &mut Command {
         .env("GCM_INTERACTIVE", "never")
         .env_remove("GIT_ASKPASS")
         .env_remove("SSH_ASKPASS")
+}
+
+/// An empty settings folder, standing for the host's in every command
+/// [`isolated`] runs that names none of its own.
+pub fn no_host_settings() -> PathBuf {
+    let path = std::env::temp_dir().join(format!(
+        "sluice-test-{}-no-settings",
+        nix::unistd::geteuid()
+    ));
+    std::fs::create_dir_all(&path).expect("the tests' empty settings folder");
+    path
 }
 
 /// The global git configuration of every git a test runs, sluice's own
