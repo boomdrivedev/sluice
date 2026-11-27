@@ -122,7 +122,8 @@ impl FileForge {
     /// requests; `query/<base>`, a branch's pull requests whole;
     /// `pull/<n>`, `reviews/<n>`, `readied/<n>` and `comments/<n>`, of a
     /// pull request; `checks/<rev>` and `posted/<rev>`, other systems' and
-    /// sluice's checks on a revision.
+    /// sluice's checks on a revision; `draft/<n>` and `ready/<n>`, a pull
+    /// request marked a draft or ready for review through the forge.
     pub fn calls(&self, what: &str) -> usize {
         self.calls.lock().unwrap().get(what).copied().unwrap_or(0)
     }
@@ -541,6 +542,10 @@ impl Forge for FileForge {
         if self.failing.lock().unwrap().drafts {
             bail!("{NOT_ACCESSIBLE}");
         }
+        self.called(format!(
+            "{}/{number}",
+            if draft { "draft" } else { "ready" }
+        ));
         FileForge::set_draft(self, number, draft)
     }
 }
