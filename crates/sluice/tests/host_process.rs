@@ -4646,6 +4646,37 @@ fn a_gone_repository_leaves_the_subscription() {
     assert!(later.iter().all(|(f, _)| *f != gone), "{later:?}");
 }
 
+/// resident-subscriptions, "A repository removed as a round writes in it"
+/// (the change `a-gone-repository-is-told-as-gone`): the repository's
+/// git folder goes, and a round that was in flight writes its records in
+/// a new git folder at the same path, which holds no repository. The
+/// subscription gets the document that says the repository is gone.
+#[test]
+fn a_repository_gone_as_a_round_writes_in_it_is_gone() {
+    let d = OnDisk::new("host-sub-gone-written", POLICY);
+    let b = d.another("host-sub-gone-written-a", POLICY);
+    let theirs = session_of(&d, &b, "theirs");
+    let gone = folder(b.dir());
+    let mut sub = subscribed(&d, &[b.dir(), d.repo.dir()], FollowKind::Watch);
+    documents_until(&mut sub, 30, |got| got.len() >= 2);
+    queued_live(&d, &theirs);
+    let removed = support::Scratch::new("host-sub-gone-written-removed");
+    std::fs::rename(b.dir().join(".git"), removed.path().join("git")).unwrap();
+    // The timing a loaded host gives: the round writes its records after
+    // the git folder went.
+    std::fs::create_dir_all(b.dir().join(".git/sluice/main")).unwrap();
+    std::fs::write(b.dir().join(".git/sluice/main/branch.lock"), "").unwrap();
+    let said = documents_until(&mut sub, 30, |got| {
+        got.iter().any(|(f, doc)| *f == gone && doc["gone"] == true)
+    });
+    assert!(
+        said.iter()
+            .any(|(f, doc)| *f == gone && doc["gone"] == true),
+        "no gone document: {said:?}\n{}",
+        host_logs(&d)
+    );
+}
+
 /// resident-subscriptions, "sluice run prints the passes of its
 /// subscription" (design D8): with `main` holding one submission queued
 /// and a live `sluice host`, `sluice run --rounds 1` with no git on its

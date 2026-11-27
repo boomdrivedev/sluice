@@ -505,10 +505,13 @@ fn holds_policy(local: &local_refs::LocalRefs, tips: &[Rev]) -> Result<bool> {
     Ok(false)
 }
 
-/// Whether the directory `dir` is gone, as a repository's git directory
-/// removed or moved away is (129).
-fn gone(dir: &Path) -> bool {
-    !dir.is_dir()
+/// Whether the repository whose git directory is `dir` is gone (129): the
+/// directory holds no `HEAD` file or no `objects` folder, as git reads a git
+/// directory. A git directory removed or moved away is gone, and so is a
+/// directory made again at its path that holds no repository, as a round in
+/// flight makes when it writes its records there after the directory went.
+pub fn repository_gone(dir: &Path) -> bool {
+    !dir.join("HEAD").is_file() || !dir.join("objects").is_dir()
 }
 
 /// The top of the git worktree holding `dir`, as git prints it; `None`
@@ -656,7 +659,7 @@ impl crate::exec::Host for Bound {
     }
 
     fn repository_gone(&self, repository: &str) -> bool {
-        gone(Path::new(repository))
+        repository_gone(Path::new(repository))
     }
 
     fn tips(&self) -> Result<Vec<Rev>> {
@@ -685,13 +688,19 @@ impl crate::exec::Host for Bound {
 mod tests {
     use super::*;
 
-    /// 129: a git directory is there until it is removed.
+    /// 129: a repository is there until its git directory is removed, and
+    /// a directory made again at its path that holds no repository is gone
+    /// too (the change `a-gone-repository-is-told-as-gone`).
     #[test]
-    fn a_directory_is_gone_once_removed() {
+    fn a_repository_is_gone_once_its_git_directory_holds_none() {
         let dir = std::env::temp_dir().join(format!("sluice-gone-{}", std::process::id()));
-        std::fs::create_dir_all(&dir).unwrap();
-        assert!(!gone(&dir));
+        std::fs::create_dir_all(dir.join("objects")).unwrap();
+        std::fs::write(dir.join("HEAD"), "ref: refs/heads/main\n").unwrap();
+        assert!(!repository_gone(&dir));
         std::fs::remove_dir_all(&dir).unwrap();
-        assert!(gone(&dir));
+        assert!(repository_gone(&dir));
+        std::fs::create_dir_all(dir.join("sluice/main")).unwrap();
+        assert!(repository_gone(&dir), "a folder of records alone");
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 }
