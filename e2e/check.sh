@@ -5,8 +5,11 @@
 set -euo pipefail
 
 cd "$(dirname "$0")/.."
+# Its own target folder, which its task names, so no other task's build
+# writes the sluice it runs (crates/sluice/moon.yml).
+target="${CARGO_TARGET_DIR:?the e2e task names its target folder}"
 cargo build -p sluice --bins
-PATH="$PWD/target/debug:$PATH"
+PATH="$PWD/$target/debug:$PATH"
 export PATH
 scratch=$(mktemp -d "${TMPDIR:-/tmp}/e2e.XXXXXX")
 if ! bash e2e/e2e.sh "$scratch/repo" sluice; then
