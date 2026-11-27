@@ -36,25 +36,50 @@ fn a_counting_git_counts_what_status_starts() {
 
 /// reader-tick, "sluice run in a set-up repository with nothing
 /// queued": its passes after the first start no git (129). One `sluice
-/// host`, kept by a watch, answers both runs, so its first reading and the
-/// hooks folder it put the hook back in come before the second (the
-/// change `the-git-hook-asks-sluice-host`, design D4), whose six passes
-/// start none.
+/// host`, kept by a watch, answers both runs. The watch's first document
+/// comes once the host put back the hook in the hooks folder it found (the
+/// change `the-git-hook-asks-sluice-host`, design D4), so that finding's
+/// gits come before the first run, whose first reading comes before the
+/// second, whose six passes start none. A subscription is sent with no
+/// wait for its answer, and a run whose host passes only when asked ends
+/// on its pass, so the finding is waited for here, by the watch's first
+/// document, and never counted as a later pass's.
 #[test]
 fn sluice_run_with_nothing_queued_starts_git_at_its_first_pass_alone() {
     let d = OnDisk::new("idle-run", POLICY);
     d.land("a");
-    let _kept = d
+    let mut kept = d
         .client(d.repo.dir())
         .subscribe(vec![sluice::host_process::protocol::Added {
             folder: d.repo.dir().to_path_buf(),
             kind: sluice::host_process::protocol::FollowKind::Watch,
         }])
         .expect("sluice host");
+    let first = kept.line(Some(std::time::Duration::from_secs(60))).unwrap();
+    assert!(
+        matches!(
+            first,
+            Some(sluice::host_process::protocol::SubscriptionLine::Document(
+                _
+            ))
+        ),
+        "{first:?}"
+    );
     starts(&d, &["run", "--rounds", "1"]);
     let before = d.git.starts().len();
     let six = starts(&d, &["run", "--rounds", "6"]);
-    assert_eq!(six, 0, "{:?}", &d.git.starts()[before..]);
+    let paths = d.client(d.repo.dir()).paths().clone();
+    let logs: String = [paths.previous_log(), paths.log()]
+        .iter()
+        .map(|p| std::fs::read_to_string(p).unwrap_or_default())
+        .collect();
+    assert_eq!(
+        six,
+        0,
+        "{:?}\nevery start, by its parent: {:#?}\n{logs}",
+        &d.git.starts()[before..],
+        d.git.parented()
+    );
 }
 
 /// refused-landing, "Refused every round" and design D3 of the change

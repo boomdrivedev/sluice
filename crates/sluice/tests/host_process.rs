@@ -598,6 +598,73 @@ fn a_newer_client_has_an_older_host_process_hand_over() {
     assert!(follow.next(Some(Duration::from_secs(5))).is_err());
 }
 
+/// 135 (design D3 of `sluice-host-owns-its-workers`): a host process that
+/// starts afresh in place hands the host's lock to its new image, so no
+/// other process takes the lock between the two images. Another process
+/// that asks for the lock all through the hand-over never gets it, and
+/// the new image keeps the pid.
+#[test]
+fn a_host_process_starting_afresh_in_place_keeps_the_hosts_lock() {
+    let d = OnDisk::new("host-keeps-lock", POLICY);
+    let older = d
+        .client(d.repo.dir())
+        .reach()
+        .expect("the host process")
+        .named
+        .clone();
+    keeps_the_hosts_lock(&d, &older);
+}
+
+/// host-daemon, "A newer command reaches an older daemon": a daemon that
+/// starts afresh in place hands the host's lock to its new image as a host
+/// process does, so no other process takes the lock between the two
+/// images.
+#[test]
+fn a_daemon_starting_afresh_in_place_keeps_the_hosts_lock() {
+    let d = OnDisk::new("daemon-keeps-lock", POLICY);
+    let daemon = Daemon::start(&d, d.repo.dir());
+    answers(&d, &daemon);
+    let older = named(&d).expect("it answers");
+    keeps_the_hosts_lock(&d, &older);
+}
+
+/// A newer command reaches `older`, the host process of `d`, which starts
+/// afresh in place, while another process asks for the host's lock all
+/// through: that process never gets it, and the image started afresh has
+/// `older`'s pid and a later `since`.
+fn keeps_the_hosts_lock(d: &OnDisk, older: &sluice::host_process::protocol::Named) {
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::Arc;
+    let client = d.client(d.repo.dir());
+    let lock = client.paths().lock();
+    let stop = Arc::new(AtomicBool::new(false));
+    let asking = {
+        let stop = stop.clone();
+        std::thread::spawn(move || {
+            let mut took = 0u32;
+            while !stop.load(Ordering::SeqCst) {
+                let file = std::fs::OpenOptions::new().write(true).open(&lock).unwrap();
+                if file.try_lock().is_ok() {
+                    took += 1;
+                }
+            }
+            took
+        })
+    };
+    let reached = client.clone().with_version("0.72.0").reach();
+    stop.store(true, Ordering::SeqCst);
+    let took = asking.join().unwrap();
+    assert_eq!(
+        took,
+        0,
+        "another process took the host's lock\n{}",
+        host_logs(d)
+    );
+    let reached = reached.expect("the newer command's own");
+    assert_eq!(reached.named.pid, older.pid, "{}", host_logs(d));
+    assert_ne!(reached.named.since, older.since);
+}
+
 /// 135 (design D8): an older host process whose tasks take longer than a
 /// start's ten seconds to finish their rounds is waited out, its lock
 /// held until it ends, and the newer command's own process then answers.
@@ -2839,6 +2906,14 @@ fn an_upgrade_keeps_its_runs_as_children() {
         .expect("the newer command's own");
     assert_eq!(reached.named.pid, first.pid, "{}", host_logs(&d));
     assert_ne!(reached.named.since, first.since);
+    // Read now: each host process that starts keeps only the log of the
+    // one before it, and one that ends once idle after the landing is
+    // followed by another.
+    let logs = host_logs(&d);
+    assert!(
+        logs.contains("it starts afresh in its own process, keeping its pid"),
+        "{logs}"
+    );
     drop(reached);
     assert!(alive(check), "the check goes on");
     let supervisor = sluice::workers::parent(check as i32).unwrap();
@@ -2847,12 +2922,6 @@ fn an_upgrade_keeps_its_runs_as_children() {
     lands(&d, id);
     let ran = std::fs::read_to_string(marks.path().join("began")).unwrap();
     assert_eq!(ran.lines().count(), 1, "no check ran again: {ran}");
-    // A stop of the image started afresh ends what it took over.
-    let logs = host_logs(&d);
-    assert!(
-        logs.contains("it starts afresh in its own process, keeping its pid"),
-        "{logs}"
-    );
 }
 
 /// daemon-service, "A new package" (D5 of `sluice-host-owns-its-workers`):

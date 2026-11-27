@@ -15,7 +15,9 @@
 //! line, the next document, the next report and its token. While the task
 //! waits for a write, it does not poll the documents. A `watch` channel
 //! holds one value, so a slow client gets only the newest document of each
-//! folder.
+//! folder. A report that is ready goes before a document that is ready: a
+//! folder's document is read after the pass whose report it follows, so a
+//! client that reads a document reads every report before it.
 //!
 //! This module names no type of sluice. It uses only tokio, tokio-util,
 //! tokio-stream, futures-util and serde.
@@ -150,7 +152,11 @@ where
         }
     }
     loop {
+        // In this order: a pass's report goes before the document read
+        // after it, so a wait that ends on a document has read what each
+        // pass before it said.
         tokio::select! {
+            biased;
             () = token.cancelled() => return Ok(()),
             line = lines.next() => {
                 let Some(Ok(line)) = line else {
@@ -171,6 +177,9 @@ where
                     }
                 }
             }
+            Some((folder, report)) = held.passes.next(), if !held.passes.is_empty() => {
+                send::<S, _>(&mut sink, &Sent::Pass(Pass { folder, report })).await?;
+            }
             Some((folder, document)) = held.documents.next(), if !held.documents.is_empty() => {
                 // A document not yet made: the first reading's follows.
                 let Some(document) = document else {
@@ -182,9 +191,6 @@ where
                 if ends {
                     held.remove(&folder);
                 }
-            }
-            Some((folder, report)) = held.passes.next(), if !held.passes.is_empty() => {
-                send::<S, _>(&mut sink, &Sent::Pass(Pass { folder, report })).await?;
             }
         }
     }
@@ -387,6 +393,26 @@ mod tests {
             c.next().await.unwrap()["document"]["overview"],
             serde_json::json!("b1")
         );
+    }
+
+    /// A pass's report and the document read after it, both ready when
+    /// the loop next looks: the report goes first, every time, so a wait
+    /// that ends on the document has read the report (122, 123).
+    #[tokio::test]
+    async fn a_report_goes_before_the_document_read_after_it() {
+        let fake = Arc::new(Fake::default());
+        fake.document("/a", "a0");
+        let mut c = Client::start(fake.clone(), CancellationToken::new());
+        c.say(r#"{"add":"/a","as":"run"}"#).await;
+        assert!(c.next().await.is_some());
+        for n in 1..=32 {
+            assert!(fake.report("/a", &format!("pass {n}")));
+            fake.document("/a", &format!("a{n}"));
+            let first = c.next().await.unwrap();
+            assert_eq!(first["pass"]["report"], format!("pass {n}"), "{first}");
+            let second = c.next().await.unwrap();
+            assert_eq!(second["document"]["overview"], format!("a{n}"), "{second}");
+        }
     }
 
     #[tokio::test]

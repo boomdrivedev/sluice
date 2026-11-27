@@ -364,10 +364,11 @@ mod bound {
             .args(["status", branch, "--json", "--all"])
             .output()
             .unwrap();
+        assert!(out.status.success(), "{}", text(&out));
         let status: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
         status["submissions"]
             .as_array()
-            .unwrap()
+            .unwrap_or_else(|| panic!("{status}"))
             .iter()
             .map(|x| x["state"].as_str().unwrap().to_string())
             .collect()

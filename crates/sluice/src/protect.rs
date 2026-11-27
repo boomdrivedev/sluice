@@ -55,6 +55,19 @@ const MARKER: &str =
 const HOOK: &str = "reference-transaction";
 const CHAINED: &str = "reference-transaction.pre-sluice";
 
+/// One write of a hooks folder at a time in this process. `sluice host`
+/// puts back or installs the hook for each request, and for a `sluice
+/// protect` beside them, on its pool for blocking work: two at once would
+/// write one temporary file, which the first moves into place and the
+/// second then cannot find, or both move the hook found there aside, so
+/// the second moves sluice's over the hook the first kept (124).
+static WRITING: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+/// This process's turn to write a hooks folder.
+fn writing() -> std::sync::MutexGuard<'static, ()> {
+    WRITING.lock().unwrap_or_else(|e| e.into_inner())
+}
+
 fn git(dir: &Path, args: &[&str]) -> Result<String> {
     let out = crate::workers::command("git", "git")
         .arg("-C")
@@ -156,6 +169,7 @@ pub fn install(dir: &Path, program: &Path) -> Result<bool> {
 
 /// [`install`], in the hooks folder `hooks`.
 pub fn install_at(hooks: &Path, program: &Path) -> Result<bool> {
+    let _turn = writing();
     std::fs::create_dir_all(hooks)?;
     let hook = hooks.join(HOOK);
     let want = shim(program);
@@ -198,6 +212,7 @@ pub fn reinstall(dir: &Path, program: &Path) -> Result<bool> {
 
 /// [`reinstall`], in the hooks folder `hooks`.
 pub fn reinstall_at(hooks: &Path, program: &Path) -> Result<bool> {
+    let _turn = writing();
     let hook = hooks.join(HOOK);
     let want = shim(program);
     match std::fs::read_to_string(&hook) {
@@ -224,6 +239,7 @@ fn write(hooks: &Path, shim: &str) -> Result<()> {
 /// it was not in.
 pub fn remove(dir: &Path) -> Result<bool> {
     let hooks = hookdir(dir)?;
+    let _turn = writing();
     let hook = hooks.join(HOOK);
     match std::fs::read_to_string(&hook) {
         Ok(have) if have.lines().nth(1) == Some(MARKER) => {
@@ -638,4 +654,49 @@ fn judge(s: &Sluice<'_>, host: &dyn Host, text: &str) -> Result<Vec<Refused>> {
         });
     }
     Ok(refused)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// 124: installs of one hooks folder at once, as `sluice host` makes
+    /// for a subscription and a `sluice protect` beside it, each end well,
+    /// and the hook that was there before is kept, chained.
+    #[test]
+    fn installs_at_once_each_end_and_keep_the_hook_there() {
+        let base = std::env::temp_dir().join(format!(
+            "sluice-hooks-{}-{:?}",
+            std::process::id(),
+            std::time::SystemTime::now()
+        ));
+        let program = Path::new("/bin/sluice");
+        for round in 0..20 {
+            let hooks = base.join(round.to_string());
+            std::fs::create_dir_all(&hooks).unwrap();
+            std::fs::write(hooks.join(HOOK), "#!/bin/sh\n# the person's\n").unwrap();
+            let start = std::sync::Arc::new(std::sync::Barrier::new(8));
+            let installs: Vec<_> = (0..8)
+                .map(|_| {
+                    let (hooks, start) = (hooks.clone(), start.clone());
+                    std::thread::spawn(move || {
+                        start.wait();
+                        install_at(&hooks, program).map_err(|e| format!("{e:#}"))
+                    })
+                })
+                .collect();
+            for install in installs {
+                install.join().unwrap().unwrap();
+            }
+            assert_eq!(
+                std::fs::read_to_string(hooks.join(HOOK)).unwrap(),
+                shim(program)
+            );
+            assert_eq!(
+                std::fs::read_to_string(hooks.join(CHAINED)).unwrap(),
+                "#!/bin/sh\n# the person's\n"
+            );
+        }
+        let _ = std::fs::remove_dir_all(&base);
+    }
 }

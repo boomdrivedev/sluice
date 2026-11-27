@@ -1042,10 +1042,15 @@ fn a_wait_follows_the_new_head_its_submit_withdrew_it_for() {
 /// 67, 120; record 0100 D2, D3: a pull request closed on the new head that
 /// carries a withdrawn submission's work, before that head lands, ends the
 /// withdrawn submission's wait withdrawn, exit 4, its own record naming the
-/// request closed in `carried_by`.
+/// request closed in `carried_by`. What the submit read of the request
+/// stays the wait's for a quarter of the host's interval, here the whole
+/// test, and is read again once the request's entry moved (rule core.32):
+/// the closing that withdrew the new head decides the wait, never the
+/// submit's read of the request open.
 #[test]
 fn a_wait_exits_withdrawn_when_the_request_carrying_its_work_closes() {
     let g = OnGitHub::new("pr-follow-closed", "");
+    g.discovery("1h");
     let w = g.session("follow-closed", &[("slow", "x\n")]);
     let out = g.wt_submit(&w, &["--no-wait"]);
     assert_eq!(out.status.code(), Some(0), "{}", text(&out));
@@ -1071,7 +1076,9 @@ fn a_wait_exits_withdrawn_when_the_request_carrying_its_work_closes() {
     assert_eq!(
         doc["carried_by"],
         serde_json::json!({ "pull_request": n, "state": "closed" }),
-        "{doc}"
+        "{}\n{}",
+        text(&out),
+        g.host_log()
     );
 }
 
