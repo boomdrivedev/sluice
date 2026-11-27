@@ -1740,6 +1740,10 @@ does.
 - Its service manager stops it with its whole process group. A new
   sluice is no reason to restart it: `sluice hand-over` has it start
   afresh as the new sluice and keep its tests.
+- Where a service manager keeps it running, the host's settings say
+  [`[daemon] managed = true`](/sluice/reference/configuration/#daemon).
+  No command then starts a host process of its own: a command that
+  finds none answering fails at once, naming the service manager.
 
 Once it holds the host, what it says goes to `host/log` in
 [sluice's state](/sluice/reference/state/), as the host process's does.

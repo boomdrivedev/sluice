@@ -505,6 +505,7 @@ fn telemetry_is_off_unless_asked() {
             expire_after: sluice_core::EXPIRE_AFTER,
             telemetry: None,
             aws: Default::default(),
+            managed: false,
         },
     )
     .with_running(repo.dir().join(".git/host-running"));

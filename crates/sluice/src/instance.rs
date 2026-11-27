@@ -45,6 +45,9 @@
 //! [deliveries]
 //! expire_after = "168h"
 //!
+//! [daemon]
+//! managed = true
+//!
 //! [[caches]]                       # a compile server's cache
 //! dir = "~/.cache/sccache"
 //! socket = "~/.cache/sccache/server.sock"
@@ -71,7 +74,12 @@
 //! and its SSH key (78); `[peers]` the lease and the bound on a host's
 //! sign of life, the host's and never a branch's (74); `[deliveries]
 //! expire_after` how long an outcome its rounds record is owed before it
-//! expires, a week where unset (51; weir 104; record 0102).
+//! expires, a week where unset (51; weir 104; record 0102); `[daemon]
+//! managed` that the host's service manager keeps `sluice daemon` running
+//! for this user, so no command starts a host process of its own, false
+//! where unset (`the-service-manager-starts-each-resident@d0e66e466414`;
+//! the change `a-sluice-client-starts-no-host-under-a-service-manager`,
+//! design D1).
 //!
 //! `[[caches]]` are the host's shared caches, as its keeper declares them
 //! (35, 71; ADR 0049): each a directory outside every checkout, `dir`,
@@ -154,6 +162,10 @@ pub struct Instance {
     pub telemetry: Option<HostTelemetry>,
     /// How this host reaches AWS, `[aws]` (record 0119).
     pub aws: Aws,
+    /// Whether the host's service manager keeps `sluice daemon` running,
+    /// `[daemon] managed`: no command then starts a host process (design
+    /// D1 of `a-sluice-client-starts-no-host-under-a-service-manager`).
+    pub managed: bool,
 }
 
 /// The host's `[aws]` table (record 0119; design D9 of the change
@@ -303,6 +315,29 @@ struct ConfigForm {
     #[serde(default, deserialize_with = "telemetry_form")]
     telemetry: Option<TelemetryForm>,
     aws: Option<AwsForm>,
+    #[serde(default)]
+    daemon: DaemonForm,
+}
+
+/// `[daemon]` as the file writes it (design D1 of
+/// `a-sluice-client-starts-no-host-under-a-service-manager`).
+#[derive(Deserialize, Default)]
+#[serde(deny_unknown_fields)]
+struct DaemonForm {
+    managed: Option<bool>,
+}
+
+/// What [`managed`] reads, every other table passed over (design D3).
+#[derive(Deserialize, Default)]
+struct ManagedForm {
+    #[serde(default)]
+    daemon: ManagedDaemonForm,
+}
+
+/// `[daemon]` as [`managed`] reads it, any other field of it passed over.
+#[derive(Deserialize, Default)]
+struct ManagedDaemonForm {
+    managed: Option<bool>,
 }
 
 /// `[aws]` as the file writes it (record 0119).
@@ -545,6 +580,7 @@ impl Instance {
             expire_after,
             telemetry,
             aws,
+            managed: form.daemon.managed.unwrap_or(false),
         })
     }
 
@@ -583,6 +619,7 @@ impl Instance {
             expire_after: sluice_core::EXPIRE_AFTER,
             telemetry: None,
             aws: Aws::default(),
+            managed: false,
         })
     }
 
@@ -619,6 +656,7 @@ impl Instance {
             ("[deliveries]", self.expire_after != other.expire_after),
             ("[telemetry]", self.telemetry != other.telemetry),
             ("[aws]", self.aws != other.aws),
+            ("[daemon]", self.managed != other.managed),
             ("[[caches]]", self.caches != other.caches),
         ]
         .into_iter()
@@ -955,11 +993,31 @@ pub fn state_dir() -> Result<PathBuf> {
 /// The host's settings file, `$XDG_CONFIG_HOME/sluice/config.toml` (default
 /// `~/.config`); none where the host has no home to name it in.
 pub(crate) fn config_path() -> Option<PathBuf> {
-    let base = match std::env::var_os("XDG_CONFIG_HOME") {
+    config_path_in(|k| std::env::var_os(k))
+}
+
+/// [`config_path`] in an environment whose variables `var` reads: a
+/// command's, which a test gives apart from its own.
+pub(crate) fn config_path_in(var: impl Fn(&str) -> Option<std::ffi::OsString>) -> Option<PathBuf> {
+    let base = match var("XDG_CONFIG_HOME") {
         Some(d) if !d.is_empty() => PathBuf::from(d),
-        _ => home()?.join(".config"),
+        _ => PathBuf::from(var("HOME").filter(|h| !h.is_empty())?).join(".config"),
     };
     Some(base.join("sluice").join("config.toml"))
+}
+
+/// `[daemon] managed` of the settings at `path`, read alone, every other
+/// table passed over: whether the host's service manager keeps `sluice
+/// daemon` running, so a command starts no host process. False where the
+/// file is not there, cannot be read or is no TOML; the host process a
+/// command then starts refuses the file in its own words (design D3 of
+/// `a-sluice-client-starts-no-host-under-a-service-manager`).
+pub fn managed(path: Option<&Path>) -> bool {
+    settings_text(path)
+        .ok()
+        .and_then(|t| toml::from_str::<ManagedForm>(&t).ok())
+        .and_then(|f| f.daemon.managed)
+        .unwrap_or(false)
 }
 
 #[cfg(test)]
@@ -982,6 +1040,71 @@ mod tests {
         let out = Instance::from_host(Some(&path), given, all);
         let _ = std::fs::remove_file(&path);
         out
+    }
+
+    /// Design D1 of `a-sluice-client-starts-no-host-under-a-service-manager`:
+    /// `[daemon] managed` reads as a boolean, false where unset; a value
+    /// that is no boolean, and a key `[daemon]` does not know, are refused;
+    /// and a change of it is a change of `[daemon]`.
+    #[test]
+    fn the_daemon_table_says_whether_the_service_manager_keeps_it() {
+        assert!(!with("", 4).unwrap().managed);
+        let managed = with("[daemon]\nmanaged = true\n", 4).unwrap();
+        assert!(managed.managed);
+        assert!(!with("[daemon]\nmanaged = false\n", 4).unwrap().managed);
+        let e = format!(
+            "{:#}",
+            with("[daemon]\nmanaged = \"yes\"\n", 4).unwrap_err()
+        );
+        assert!(e.contains("managed"), "{e}");
+        let e = format!("{:#}", with("[daemon]\nkept = true\n", 4).unwrap_err());
+        assert!(e.contains("kept"), "{e}");
+        assert_eq!(
+            managed.changed_tables(&with("", 4).unwrap()),
+            vec!["[daemon]"]
+        );
+    }
+
+    /// Design D3 of `a-sluice-client-starts-no-host-under-a-service-manager`:
+    /// a command reads `[daemon] managed` alone, every other table passed
+    /// over, known or not; and a file that is not there, or that is no
+    /// TOML, or whose `managed` is no boolean, gives false.
+    #[test]
+    fn a_command_reads_daemon_managed_alone() {
+        let dir = std::env::temp_dir().join(format!("sluice-managed-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let at = |name: &str, text: &str| {
+            let path = dir.join(name);
+            std::fs::write(&path, text).unwrap();
+            managed(Some(&path))
+        };
+        assert!(at(
+            "others.toml",
+            "[runs]\nmax = 0\n\n[unknown]\nkey = 1\n\n[daemon]\nmanaged = true\nother = 2\n"
+        ));
+        assert!(!at("none.toml", "[runs]\nmax = 2\n"));
+        assert!(!at("broken.toml", "[daemon\nmanaged = true\n"));
+        assert!(!at("word.toml", "[daemon]\nmanaged = \"yes\"\n"));
+        assert!(!managed(Some(&dir.join("absent.toml"))));
+        assert!(!managed(None));
+        let _ = std::fs::remove_dir_all(&dir);
+        let env = |pairs: &'static [(&'static str, &'static str)]| {
+            move |k: &str| {
+                pairs
+                    .iter()
+                    .find(|(n, _)| *n == k)
+                    .map(|(_, v)| std::ffi::OsString::from(v))
+            }
+        };
+        assert_eq!(
+            config_path_in(env(&[("XDG_CONFIG_HOME", "/c"), ("HOME", "/h")])),
+            Some(PathBuf::from("/c/sluice/config.toml"))
+        );
+        assert_eq!(
+            config_path_in(env(&[("XDG_CONFIG_HOME", ""), ("HOME", "/h")])),
+            Some(PathBuf::from("/h/.config/sluice/config.toml"))
+        );
+        assert_eq!(config_path_in(env(&[])), None);
     }
 
     /// Record 0119 (design D9 of the change
@@ -1698,6 +1821,7 @@ dir = "/caches/moon"
                     attributes: variables(&[("deployment.environment", "prod")]),
                 }),
                 aws: Aws::default(),
+                managed: true,
             }
         );
     }

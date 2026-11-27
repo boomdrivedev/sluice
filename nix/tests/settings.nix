@@ -29,6 +29,7 @@
       alive = "2m";
       name = "host-a";
     };
+    daemon.managed = true;
     deliveries.expire_after = "72h";
     caches = [
       {

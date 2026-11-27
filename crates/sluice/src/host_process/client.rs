@@ -1,9 +1,14 @@
 //! How a command reaches sluice's host process (135; design D2, D8): it
 //! connects to the socket and says `hello` with its version. Where nothing
-//! answers, it takes `host/start.lock`, tries once more, and starts the
-//! process detached: in a session of its own, working in `/`, reading
-//! nothing, its output in `host/log` and the previous process's kept as
-//! `log.1`, with the host's own environment (D3). It waits up to ten
+//! answers and the host's settings say `[daemon] managed`, the host's
+//! service manager keeps `sluice daemon`, and the command starts nothing
+//! and fails at once (`the-service-manager-starts-each-resident@d0e66e466414`;
+//! design D2 of `a-sluice-client-starts-no-host-under-a-service-manager`).
+//! Otherwise it takes `host/start.lock`, tries once more, and starts the
+//! process through process-wrap in a session of its own, working in `/`,
+//! reading nothing, its output in `host/log` and the previous process's
+//! kept as `log.1`, with the host's own environment (D3; design D4 of
+//! `a-sluice-client-starts-no-host-under-a-service-manager`). It waits up to ten
 //! seconds for it to answer, and otherwise fails naming the log. Ten
 //! commands at once take the start lock in turn: the first starts the
 //! process, and the others find it answering. A command newer than the
@@ -18,12 +23,12 @@ use std::ffi::OsString;
 use std::fs::{File, OpenOptions};
 use std::io::{BufReader, ErrorKind};
 use std::os::unix::net::UnixStream;
-use std::os::unix::process::CommandExt as _;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
 
 use anyhow::{anyhow, bail, Context, Result};
+use process_wrap::std::{CommandWrap, ProcessSession};
 
 use super::pass::Report;
 use super::protocol::{receive, send, Answer, Hello, Named, Output, Request};
@@ -329,12 +334,35 @@ impl Client {
         }
     }
 
+    /// The host's settings file, in the command's own environment.
+    fn settings(&self) -> Option<PathBuf> {
+        crate::instance::config_path_in(|k| {
+            self.env
+                .iter()
+                .find(|(n, _)| n == k)
+                .map(|(_, v)| v.clone())
+        })
+    }
+
     /// Start the host process under the start lock, unless one answers
     /// once the lock is this command's, and wait for it to answer. A
     /// command older than the newest sluice that has run as the host
     /// process starts none, and fails saying why (design D2 of
-    /// `an-older-client-starts-no-older-host`).
+    /// `an-older-client-starts-no-older-host`). Where the host's settings
+    /// say `[daemon] managed`, the host's service manager keeps `sluice
+    /// daemon`, and the command starts none and fails at once
+    /// (`the-service-manager-starts-each-resident@d0e66e466414`; design D2
+    /// of `a-sluice-client-starts-no-host-under-a-service-manager`).
     fn start(&self) -> Result<Connection> {
+        let settings = self.settings();
+        if crate::instance::managed(settings.as_deref()) {
+            bail!(
+                "sluice's host process answers on no socket at {}; the host's service manager runs sluice daemon ([daemon] managed in {}); see {}",
+                self.paths.socket.display(),
+                settings.as_deref().unwrap_or(Path::new("")).display(),
+                self.paths.log().display()
+            );
+        }
         let lock = self.start_lock()?;
         if let Some(c) = self.answering()? {
             return Ok(c);
@@ -359,13 +387,10 @@ impl Client {
             .stderr(out)
             .env_clear()
             .envs(environment::kept(self.env.clone()));
-        // SAFETY: setsid is async-signal-safe; nothing else runs here.
-        unsafe {
-            command.pre_exec(|| {
-                nix::unistd::setsid().map_err(std::io::Error::from)?;
-                Ok(())
-            });
-        }
+        // A session of its own, so no signal to this command's terminal or
+        // group reaches it (`each-worker-starts-through-process-wrap@025fae162990`).
+        let mut command = CommandWrap::from(command);
+        command.wrap(ProcessSession);
         // What the log holds before it, so what the process says as it
         // fails at its start is read apart from what came before.
         let before = std::fs::metadata(&log).map_or(0, |m| m.len());
