@@ -328,10 +328,15 @@ struct Running {
 
 struct Inner {
     repos: Mutex<BTreeMap<PathBuf, Repo>>,
-    /// Repositories whose worker could not start, with the words it logged
-    /// once: events and the backstop pass them by until a command asks for
-    /// them again.
+    /// Repositories whose worker could not start, with the words it
+    /// could not start with: events and the backstop pass them by until a
+    /// command asks for them again.
     refused: Mutex<BTreeMap<PathBuf, String>>,
+    /// The words last logged of each repository whose worker could not
+    /// start, which a command's ask leaves as they are: a binding refused
+    /// again for the same cause logs nothing more, until a worker binds
+    /// the repository.
+    said: Mutex<BTreeMap<PathBuf, String>>,
     bind: Bind,
     look: InPlay,
     /// Passes are taken only when asked (D14): a freed part wakes nothing,
@@ -373,6 +378,7 @@ impl Tasks {
         Tasks(Arc::new(Inner {
             repos: Mutex::new(BTreeMap::new()),
             refused: Mutex::new(BTreeMap::new()),
+            said: Mutex::new(BTreeMap::new()),
             bind,
             look,
             asked_only: AtomicBool::new(false),
@@ -1437,6 +1443,7 @@ impl Scheduler {
             Landed::Bound(Ok(in_play), link) => {
                 self.worker = Some(link);
                 locked(&self.tasks.0.refused).remove(&self.repository);
+                locked(&self.tasks.0.said).remove(&self.repository);
                 // 129 as amended 2026-11-19: a binding that has asked
                 // nothing lists the branches on a remote by asking it, so
                 // its first pass asks.
@@ -1457,12 +1464,13 @@ impl Scheduler {
             Landed::Bound(Err(words), _) => {
                 self.wants_worker = false;
                 {
-                    let mut refused = locked(&self.tasks.0.refused);
-                    if refused.get(&self.repository) != Some(&words) {
+                    let mut said = locked(&self.tasks.0.said);
+                    if said.get(&self.repository) != Some(&words) {
                         log(&words);
-                        refused.insert(self.repository.clone(), words);
+                        said.insert(self.repository.clone(), words.clone());
                     }
                 }
+                locked(&self.tasks.0.refused).insert(self.repository.clone(), words);
                 for command in self.commands.drain(..) {
                     let ended = "the repository's task ended".to_string();
                     match command {
@@ -2327,8 +2335,9 @@ mod tests {
     /// reader-tick, "An idle tick starts no process" (129, 135; design
     /// D4): the host process's look binds no worker for a repository with
     /// nothing in play, binds one for a repository with work, and passes by
-    /// one whose worker could not start, saying why once, until a command
-    /// asks for it.
+    /// one whose worker could not start, saying why once for each cause,
+    /// until a command asks for it, which binds it again and says nothing
+    /// more where the cause is the same.
     #[tokio::test(start_paused = true)]
     async fn a_look_binds_a_worker_only_where_work_is_in_play() {
         let (idle, busy, refused) = (
@@ -2385,12 +2394,17 @@ mod tests {
             locked(&tasks.0.refused).get(&refused).map(String::as_str),
             Some("its host's systems are not this host's")
         );
-        // A command's ask binds it again.
+        // A command's ask binds it again; the words said stay said.
         tasks.handle(&refused);
         soon("a command's ask binds it", || {
             fakes.seen.binds(&refused) == 2
         })
         .await;
+        settle().await;
+        assert_eq!(
+            locked(&tasks.0.said).get(&refused).map(String::as_str),
+            Some("its host's systems are not this host's")
+        );
         assert_eq!(fakes.seen.binds(&idle), 0);
         busy_work.store(false, Ordering::SeqCst);
     }

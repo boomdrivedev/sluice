@@ -367,7 +367,9 @@ fn the_host_process_ends_once_its_queues_are_empty() {
 /// task for one with nothing in play. On a host whose config names a
 /// system it is not, a task's start is refused and logged: nothing is
 /// logged while the repository is idle, and once work is in play there
-/// the refusal is logged once, however many looks pass the repository by.
+/// the refusal is logged once, however many looks pass the repository by
+/// and however many commands ask for it again, a `--no-wait` submit's two
+/// asks among them.
 #[test]
 fn the_host_processs_look_at_an_idle_repository_starts_nothing() {
     let policy = format!("{POLICY}\n[systems.elsewhere]\nos = \"windows\"\narch = \"x86_64\"\n");
@@ -402,6 +404,15 @@ fn the_host_processs_look_at_an_idle_repository_starts_nothing() {
     within(30, "the start refused", || refused() == 1);
     std::thread::sleep(Duration::from_secs(7));
     assert_eq!(refused(), 1, "two looks pass it by: {}", host_logs(&d));
+    // A command's ask binds it again, refused for the same cause; the step
+    // is answered once that binding is refused.
+    let out = d
+        .command(d.repo.dir())
+        .args(["step", "main"])
+        .output()
+        .unwrap();
+    assert!(!out.status.success(), "{}", text(&out));
+    assert_eq!(refused(), 1, "a command's ask: {}", host_logs(&d));
     drop(held);
 }
 
