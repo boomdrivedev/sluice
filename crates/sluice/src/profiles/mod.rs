@@ -20,6 +20,7 @@ pub mod refusals;
 pub mod remote_refs;
 pub mod worktrunk;
 
+use crate::workers::Run as _;
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
@@ -526,7 +527,7 @@ pub fn worktree_top(dir: &Path) -> Result<Option<String>> {
         .env_remove("GIT_WORK_TREE")
         .stdin(Stdio::null())
         .stderr(Stdio::null())
-        .output()?;
+        .worker_output()?;
     let top = String::from_utf8_lossy(&out.stdout).trim().to_string();
     if !out.status.success() || top.is_empty() {
         return Ok(None);
@@ -536,11 +537,11 @@ pub fn worktree_top(dir: &Path) -> Result<Option<String>> {
 
 /// The branch checked out in `dir`.
 fn checked_out(dir: &Path) -> Result<String> {
-    let out = Command::new("git")
+    let out = crate::workers::command("git", "git")
         .current_dir(dir)
         .args(["symbolic-ref", "--short", "-q", "HEAD"])
         .stdin(Stdio::null())
-        .output()?;
+        .worker_output()?;
     let name = String::from_utf8_lossy(&out.stdout).trim().to_string();
     if !out.status.success() || name.is_empty() {
         anyhow::bail!("no branch is checked out here: name one");
@@ -647,7 +648,7 @@ impl crate::exec::Host for Bound {
             .env_remove("GIT_WORK_TREE")
             .stdin(Stdio::null())
             .stderr(Stdio::null())
-            .output()?;
+            .worker_output()?;
         let full = String::from_utf8_lossy(&out.stdout).trim().to_string();
         Ok((out.status.success() && !full.is_empty()).then_some(full))
     }

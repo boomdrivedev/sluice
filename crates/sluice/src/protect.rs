@@ -39,6 +39,7 @@
 //! moves never reach the hook. Everything that runs git does. This guards
 //! against sessions running git; it is no security boundary.
 
+use crate::workers::Run as _;
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::time::{Duration, Instant};
@@ -78,7 +79,7 @@ fn git(dir: &Path, args: &[&str]) -> Result<String> {
         .env_remove("GIT_INDEX_FILE")
         .env_remove("GIT_COMMON_DIR")
         .stdin(Stdio::null())
-        .output()
+        .worker_output()
         .context("running git")?;
     if !out.status.success() {
         bail!(

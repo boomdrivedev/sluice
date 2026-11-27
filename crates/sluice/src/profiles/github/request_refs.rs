@@ -17,6 +17,7 @@ use crate::identity::Identity;
 use crate::profiles::local_refs::LocalRefs;
 use crate::profiles::pushed_refs::PushedRefs;
 use crate::retry;
+use crate::workers::Run as _;
 
 /// The repository as the pull request driver reads and writes it.
 pub trait RequestRefs {
@@ -126,7 +127,7 @@ impl RequestRefs for GitRefs {
             .env_remove("GIT_DIR")
             .env_remove("GIT_WORK_TREE")
             .stdin(Stdio::null())
-            .output()
+            .worker_output()
             .context("running git log")?;
         if !out.status.success() {
             bail!("git log: {}", String::from_utf8_lossy(&out.stderr).trim());

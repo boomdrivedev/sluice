@@ -23,11 +23,11 @@
 //! the records seam that routes the branch here, and a run's tasks are
 //! kept only while that lock is held (rule core.14).
 
+use crate::workers::Run as _;
 use std::cell::RefCell;
 use std::collections::{BTreeMap, BTreeSet};
-use std::io::Write as _;
 use std::path::{Path, PathBuf};
-use std::process::{Output, Stdio};
+use std::process::Output;
 use std::rc::Rc;
 
 use anyhow::{anyhow, bail, Context, Result};
@@ -378,7 +378,7 @@ impl RemoteRefs {
 
     fn git(&self, args: &[&str]) -> Result<Output> {
         command(self.pushed.git_dir(), args)
-            .output()
+            .worker_output()
             .with_context(|| format!("running git {}", args.join(" ")))
     }
 
@@ -453,13 +453,9 @@ impl RemoteRefs {
 
     /// A blob of `bytes` in the repository.
     fn blob(&self, bytes: &[u8]) -> Result<String> {
-        let mut child = command(self.pushed.git_dir(), &["hash-object", "-w", "--stdin"])
-            .stdin(Stdio::piped())
-            .stdout(Stdio::piped())
-            .spawn()
+        let out = command(self.pushed.git_dir(), &["hash-object", "-w", "--stdin"])
+            .worker_output_with(bytes.to_vec())
             .context("running git hash-object")?;
-        child.stdin.take().expect("piped").write_all(bytes)?;
-        let out = child.wait_with_output()?;
         if !out.status.success() {
             bail!("git hash-object failed");
         }
@@ -484,26 +480,20 @@ impl RemoteRefs {
         for (path, oid) in files {
             info.push_str(&format!("100644 {oid}\t{path}\n"));
         }
-        let mut child = command(
+        let indexed = command(
             self.pushed.git_dir(),
             &["update-index", "--add", "--index-info"],
         )
         .env("GIT_INDEX_FILE", &index)
-        .stdin(Stdio::piped())
-        .spawn()
+        .worker_output_with(info.into_bytes())
         .context("running git update-index")?;
-        child
-            .stdin
-            .take()
-            .expect("piped")
-            .write_all(info.as_bytes())?;
-        if !child.wait()?.success() {
+        if !indexed.status.success() {
             let _ = std::fs::remove_file(&index);
             bail!("git update-index failed");
         }
         let tree = command(self.pushed.git_dir(), &["write-tree"])
             .env("GIT_INDEX_FILE", &index)
-            .output()?;
+            .worker_output()?;
         let _ = std::fs::remove_file(&index);
         if !tree.status.success() {
             bail!("git write-tree failed");
@@ -518,7 +508,7 @@ impl RemoteRefs {
             .env("GIT_AUTHOR_EMAIL", &author.email)
             .env("GIT_COMMITTER_NAME", &author.name)
             .env("GIT_COMMITTER_EMAIL", &author.email)
-            .output()?;
+            .worker_output()?;
         if !out.status.success() {
             bail!(
                 "git commit-tree: {}",

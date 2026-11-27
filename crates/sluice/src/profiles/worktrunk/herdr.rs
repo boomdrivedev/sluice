@@ -6,11 +6,9 @@
 //! the pane as a prompt to its agent by `herdr agent prompt`, whose
 //! acceptance is the delivery.
 
-use std::io::Read as _;
-use std::process::Stdio;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
-use anyhow::{Context as _, Result};
+use anyhow::Result;
 
 /// How long herdr has to take a prompt before the push is given up.
 pub const BOUND: Duration = Duration::from_secs(10);
@@ -52,37 +50,14 @@ pub enum Answer {
 /// a round run from another pane reaches the recorded server; one that
 /// does not answer within `bound` is ended.
 pub fn prompt(pane: &str, socket: &str, line: &str, bound: Duration) -> Result<Answer> {
-    let child = prompt_command(pane, socket, line, std::env::vars_os().map(|(k, _)| k))
-        .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::piped())
-        .spawn();
-    let mut child = match child {
-        Ok(c) => c,
+    let mut c = prompt_command(pane, socket, line, std::env::vars_os().map(|(k, _)| k));
+    let out = match crate::workers::output_within(&mut c, bound) {
+        Ok(out) => out,
         Err(e) => return Ok(Answer::Refused(format!("running herdr: {e}"))),
     };
-    let mut stderr = child.stderr.take().context("herdr's stderr")?;
-    let said = std::thread::spawn(move || {
-        let mut v = Vec::new();
-        let _ = stderr.read_to_end(&mut v);
-        v
-    });
-    let until = Instant::now() + bound;
-    let status = loop {
-        if let Some(s) = child.try_wait()? {
-            break Some(s);
-        }
-        if Instant::now() >= until {
-            let _ = child.kill();
-            let _ = child.wait();
-            break None;
-        }
-        std::thread::sleep(Duration::from_millis(20));
-    };
-    let said = said.join().unwrap_or_default();
-    Ok(match status {
-        Some(s) if s.success() => Answer::Took,
-        Some(_) => Answer::Refused(refusal(&said)),
+    Ok(match out {
+        Some(o) if o.status.success() => Answer::Took,
+        Some(o) => Answer::Refused(refusal(&o.stderr)),
         None => Answer::Refused(format!("herdr did not answer within {}s", bound.as_secs())),
     })
 }
