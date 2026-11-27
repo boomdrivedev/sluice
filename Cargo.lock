@@ -4557,7 +4557,7 @@ checksum = "0c790de23124f9ab44544d7ac05d60440adc586479ce501c1d6d7da3cd8c9cf5"
 
 [[package]]
 name = "sluice"
-version = "0.0.0"
+version = "0.111.0"
 dependencies = [
  "anyhow",
  "aws-config",
@@ -4617,7 +4617,7 @@ dependencies = [
 
 [[package]]
 name = "sluice-conformance"
-version = "0.0.0"
+version = "0.111.0"
 dependencies = [
  "anyhow",
  "chrono",
@@ -4630,7 +4630,7 @@ dependencies = [
 
 [[package]]
 name = "sluice-core"
-version = "0.0.0"
+version = "0.111.0"
 dependencies = [
  "anyhow",
  "base64 0.22.1",
@@ -4647,7 +4647,7 @@ dependencies = [
 
 [[package]]
 name = "sluice-fakes"
-version = "0.0.0"
+version = "0.111.0"
 dependencies = [
  "anyhow",
  "chrono",
@@ -4658,7 +4658,7 @@ dependencies = [
 
 [[package]]
 name = "sluice-seams"
-version = "0.0.0"
+version = "0.111.0"
 dependencies = [
  "anyhow",
  "serde",
