@@ -304,6 +304,14 @@ impl OnGitHub {
         self.forge.held().unwrap().posts.len()
     }
 
+    /// The host's interval passes, so what it last read of a request it
+    /// follows is read again (136, design D4).
+    fn interval_passes(&self) {
+        self.f
+            .world
+            .advance(chrono::Duration::from_std(DISCOVERY).unwrap());
+    }
+
     /// A second passes, so what is done next is later, to the second
     /// GitHub and the records keep, than what was done before.
     fn a_second_passes(&self) {
@@ -439,6 +447,15 @@ impl OnGitHub {
             .by_ref(head_ref)
             .unwrap()
             .unwrap_or_else(|| panic!("no pull request from {head_ref}"))
+    }
+
+    /// A commit of `changes` in the worktree `w`, pushed to GitHub by git
+    /// alone, as a fix another submission lands on its branch would be: no
+    /// submit pushes it. Returns the new head.
+    fn push_from(&self, w: &str, changes: &[(&str, &str)]) -> Rev {
+        let head = self.commit_in(w, changes);
+        self.gh().pushed(w, &head.0).unwrap();
+        head
     }
 
     /// The revision last pushed to GitHub's `branch`.
@@ -1410,4 +1427,348 @@ fn submitted_again_at_the_same_head_edits_nothing() {
     let after = g.pull_from("unit/same");
     assert_eq!(after.updated_at, before.updated_at, "edited");
     assert_eq!(after.body, before.body);
+}
+
+/// The crew #127/#128 case (120, S56): a pull request a submit opened is
+/// queued, and a commit no submit pushed moves its head. Its submission is
+/// withdrawn, sluice marks it a draft, and no round submits it in its
+/// agent's name, whatever its conditions.
+#[test]
+fn a_new_head_no_submit_pushed() {
+    let g = OnGitHub::new("");
+    g.f.world.hold_runs(true);
+    let w = g.session("held", &[("h.txt", "x\n")]);
+    g.submitted(&w, &["--no-wait"]);
+    let n = g.pull_from("unit/held").number;
+    assert_eq!(g.of(n).len(), 1, "queued: {:?}", g.subs());
+    let main = g.f.world.tip("main");
+    let new = g.push_from(&w, &[("fix.txt", "a fix\n")]);
+    let subs = g.of_after(n, 4);
+    assert_eq!(subs.len(), 1, "never submitted again: {subs:?}");
+    assert_eq!(subs[0]["state"], "withdrawn", "{subs:?}");
+    let pull = g.pull_from("unit/held");
+    assert!(pull.open && pull.draft, "{pull:?}");
+    assert_eq!(pull.head, new.0);
+    assert_eq!(g.f.world.tip("main"), main, "nothing landed");
+    assert_eq!(
+        g.posted(&new).map(|p| (p.0, p.1)),
+        Some((Status::Queued, "waiting: the next submit".into()))
+    );
+}
+
+/// Withdrawn by the operator: a pull request a submit opened, its
+/// submission withdrawn with `sluice withdraw`, is marked a draft, and no
+/// later round submits it.
+#[test]
+fn withdrawn_by_the_operator() {
+    let g = OnGitHub::new("");
+    g.f.world.hold_runs(true);
+    let w = g.session("pulled", &[("p.txt", "x\n")]);
+    g.submitted(&w, &["--no-wait"]);
+    let pull = g.pull_from("unit/pulled");
+    let id = g.of(pull.number)[0]["id"].as_u64().unwrap().to_string();
+    let (code, said) = g.sluice(&["withdraw", &id, "--as", "operator"]);
+    assert_eq!(code, 0, "{said}");
+    let subs = g.of_after(pull.number, 3);
+    assert_eq!(subs.len(), 1, "never submitted again: {subs:?}");
+    assert_eq!(subs[0]["state"], "withdrawn");
+    assert!(g.pull_from("unit/pulled").draft);
+    assert_eq!(
+        g.posted(&Rev::new(pull.head.clone())).unwrap().1,
+        "waiting: the next submit"
+    );
+}
+
+/// Marked ready by a person: a pull request a submit opened, held and
+/// marked a draft after its head moved, is submitted at its new head once
+/// a person marks it ready for review on GitHub, later to the second than
+/// the withdrawal.
+#[test]
+fn held_then_marked_ready_by_a_person() {
+    let g = OnGitHub::new("");
+    g.f.world.hold_runs(true);
+    let w = g.session("readied", &[("r.txt", "x\n")]);
+    g.submitted(&w, &["--no-wait"]);
+    let n = g.pull_from("unit/readied").number;
+    let new = g.push_from(&w, &[("fix.txt", "a fix\n")]);
+    assert_eq!(g.of_after(n, 2).len(), 1);
+    assert!(g.pull_from("unit/readied").draft);
+    g.a_second_passes();
+    g.gh().set_draft(n, false).unwrap();
+    let subs = g.of_after(n, 1);
+    assert_eq!(subs.len(), 2, "{subs:?}");
+    assert_eq!(subs[1]["head"], new.0.as_str());
+    assert_ne!(subs[1]["state"], "withdrawn", "{subs:?}");
+}
+
+/// Held when it cannot be marked a draft: GitHub refuses the draft, and no
+/// round submits the pull request; each round says it waits for the next
+/// submit and that GitHub would not mark it a draft, in GitHub's words
+/// (128, design D26), its check says it waits for the next submit, and
+/// each asking tries the draft again, until one is taken.
+#[test]
+fn held_when_github_refuses_the_draft() {
+    let g = OnGitHub::new("");
+    g.f.world.hold_runs(true);
+    let w = g.session("refused", &[("r.txt", "x\n")]);
+    g.submitted(&w, &["--no-wait"]);
+    let n = g.pull_from("unit/refused").number;
+    g.forge.refuse_drafts(true);
+    let new = g.push_from(&w, &[("fix.txt", "a fix\n")]);
+    for _ in 0..3 {
+        let warned = g.round();
+        assert!(
+            warned.iter().any(|w| w.contains(&format!(
+                "taking in main's pull requests: pull/{n}: it waits for the next submit, and \
+                 GitHub would not mark it a draft"
+            )) && w.contains(sluice::profiles::github::fake::NOT_ACCESSIBLE)),
+            "{warned:?}"
+        );
+    }
+    let subs = g.of(n);
+    assert_eq!(subs.len(), 1, "never submitted again: {subs:?}");
+    assert_eq!(subs[0]["state"], "withdrawn");
+    assert!(!g.pull_from("unit/refused").draft);
+    assert_eq!(g.posted(&new).unwrap().1, "waiting: the next submit");
+    g.forge.refuse_drafts(false);
+    g.step();
+    assert!(g.pull_from("unit/refused").draft);
+    assert_eq!(g.of(n).len(), 1, "{:?}", g.subs());
+}
+
+/// A worktree holding more than its commits is refused, naming what it
+/// holds, and nothing is pushed or opened.
+#[test]
+fn submit_refuses_a_dirty_worktree() {
+    let g = OnGitHub::new("");
+    let w = g.session("dirty", &[("d.txt", "d\n")]);
+    g.f.world.dirty(&w, &["d.txt"]);
+    let (code, said) = g.submit(&w, &[]);
+    assert_eq!(code, 2, "{said}");
+    assert!(said.contains("d.txt"), "{said}");
+    assert_eq!(g.pushed("unit/dirty"), None);
+    assert!(g.forge.held().unwrap().pulls.is_empty());
+}
+
+/// `--no-wait` returns once the pull request is open; `--status` later
+/// reports its state.
+#[test]
+fn no_wait_then_status() {
+    let g = OnGitHub::new("reviews = 1");
+    let w = g.session("later", &[("l.txt", "l\n")]);
+    g.submitted(&w, &["--no-wait"]);
+    let said = g.submitted(&w, &["--status"]);
+    assert!(said.contains("waiting: needs 1 review"), "{said}");
+}
+
+/// Waiting for a review: `--status --json` names the pull request's head,
+/// that it is no draft, what a submit from the worktree would send and the
+/// wait that follows it (record 0130), beside its number, branch and state.
+#[test]
+fn status_names_the_head_waiting_for_a_review() {
+    let g = OnGitHub::new("reviews = 1");
+    let w = g.session("headed", &[("h.txt", "h\n")]);
+    g.submitted(&w, &["--no-wait"]);
+    let pull = g.pull_from("unit/headed");
+    let doc: Value = serde_json::from_str(&g.submitted(&w, &["--status", "--json"])).unwrap();
+    assert_eq!(
+        doc,
+        serde_json::json!({
+            "pull_request": pull.number, "branch": "main",
+            "state": "waiting: needs 1 review", "head": pull.head, "draft": false,
+            "sends": pull.head,
+            "wait": format!("sluice wait main --pull-request {}", pull.number),
+        })
+    );
+}
+
+/// A draft: `--status --json` names its head and that it is a draft.
+#[test]
+fn status_names_a_draft() {
+    let g = OnGitHub::new("reviews = 1");
+    let w = g.session("drafted", &[("d.txt", "d\n")]);
+    g.submitted(&w, &["--no-wait"]);
+    let pull = g.pull_from("unit/drafted");
+    g.gh().set_draft(pull.number, true).unwrap();
+    g.interval_passes();
+    let doc: Value = serde_json::from_str(&g.submitted(&w, &["--status", "--json"])).unwrap();
+    assert_eq!(doc["pull_request"], pull.number, "{doc}");
+    assert_eq!(doc["head"], pull.head.as_str(), "{doc}");
+    assert_eq!(doc["draft"], true, "{doc}");
+}
+
+/// Record 0065: a pull request sent back as a draft stands no more, so a
+/// submit again with nothing committed marks the request ready for review
+/// at that head, and intake takes that head again.
+#[test]
+fn run_again_marks_a_draft_ready() {
+    let g = OnGitHub::new("");
+    let w = g.session("drafted", &[("broken", "x\n")]);
+    g.submitted(&w, &["--no-wait"]);
+    let pull = g.pull_from("unit/drafted");
+    g.step_until("sent back", |g| g.pull_from("unit/drafted").draft);
+    let said = g.submitted(&w, &["--no-wait"]);
+    assert!(
+        said.contains(&format!("updated #{}", pull.number))
+            && said.contains("marked ready for review"),
+        "{said}"
+    );
+    let subs = g.of(pull.number);
+    assert_eq!(subs.len(), 2, "{subs:?}");
+    assert_eq!(subs[1]["head"], pull.head.as_str());
+}
+
+/// No wait, its conditions hold: the submit answers with the submission
+/// sluice took the pull request in as, from its checkout `pull/<n>` at the
+/// head pushed, with the pull request and the wait that follows it beside
+/// it (record 0130); `sluice wait <id>` follows that submission to its
+/// landing.
+#[test]
+fn no_wait_answers_with_its_submission() {
+    let g = OnGitHub::new("");
+    let w = g.session("ready", &[("ready.txt", "ready\n")]);
+    let doc: Value = serde_json::from_str(&g.submitted(&w, &["--no-wait", "--json"])).unwrap();
+    let n = g.pull_from("unit/ready").number;
+    assert_eq!(doc["pull_request"], n, "{doc}");
+    assert_eq!(doc["branch"], "main", "{doc}");
+    assert_eq!(doc["ahead"], serde_json::json!([]), "{doc}");
+    assert_eq!(
+        doc["wait"],
+        format!("sluice wait main --pull-request {n}").as_str(),
+        "{doc}"
+    );
+    let id = doc["id"]
+        .as_u64()
+        .unwrap_or_else(|| panic!("{doc}"))
+        .to_string();
+    let (code, out) = g.sluice(&["status", &id, "--json"]);
+    assert_eq!(code, 0, "{out}");
+    let record: Value = serde_json::from_str(&out).unwrap();
+    assert_eq!(record["from"]["worktree"], format!("pull/{n}").as_str());
+    assert_eq!(
+        Some(Rev::new(record["head"].as_str().unwrap())),
+        g.pushed("unit/ready")
+    );
+    let (code, out) = g.sluice(&["wait", &id, "--json"]);
+    assert_eq!(code, sluice::LANDED, "{out}");
+    let doc: Value = serde_json::from_str(&out).unwrap();
+    assert_eq!(doc["state"], "landed");
+}
+
+/// No wait, waiting for a review: the submit answers with the pull request,
+/// what it waits for and the wait that follows it (record 0130), and
+/// nothing of it is queued.
+#[test]
+fn no_wait_waiting_for_a_review_answers_with_the_pull_request() {
+    let g = OnGitHub::new("reviews = 1");
+    let w = g.session("unreviewed", &[("u.txt", "u\n")]);
+    let doc: Value = serde_json::from_str(&g.submitted(&w, &["--no-wait", "--json"])).unwrap();
+    let n = g.pull_from("unit/unreviewed").number;
+    assert_eq!(
+        doc,
+        serde_json::json!({
+            "pull_request": n, "branch": "main", "state": "waiting: needs 1 review",
+            "wait": format!("sluice wait main --pull-request {n}"),
+        })
+    );
+    assert!(g.of(n).is_empty(), "{:?}", g.subs());
+}
+
+/// pull-request-submit, "No wait, in words, waiting for a review": after
+/// the pull request's state, the submit says the wait that follows it, on
+/// the last line, and exits 0 (record 0130 D4).
+#[test]
+fn no_wait_waiting_for_a_review_names_its_wait_in_words() {
+    let g = OnGitHub::new("reviews = 1");
+    let w = g.session("review", &[("r.txt", "r\n")]);
+    let said = g.submitted(&w, &["--no-wait"]);
+    let n = g.pull_from("unit/review").number;
+    let lines: Vec<&str> = said.lines().filter(|l| !l.trim().is_empty()).collect();
+    let state = lines
+        .iter()
+        .position(|l| *l == "waiting: needs 1 review")
+        .expect(&said);
+    let wait = format!("wait: sluice wait main --pull-request {n}");
+    assert_eq!(lines.last().copied(), Some(wait.as_str()), "{said}");
+    assert!(state < lines.len() - 1, "{said}");
+}
+
+/// No wait, in words: after the line naming the pull request opened, the
+/// submission it was taken in as and what is queued ahead of it, then the
+/// wait that follows the pull request (record 0130).
+#[test]
+fn no_wait_says_its_submission() {
+    let g = OnGitHub::new("");
+    g.f.world.hold_runs(true);
+    let w = g.session("worded", &[("worded.txt", "w\n")]);
+    let said = g.submitted(&w, &["--no-wait"]);
+    let n = g.pull_from("unit/worded").number;
+    let id = g.of(n)[0]["id"].as_u64().unwrap();
+    let lines: Vec<&str> = said.lines().collect();
+    let opened = format!("pushed unit/worded · opened #{n}: unit/worded");
+    let at = lines.iter().position(|l| *l == opened).expect(&said);
+    assert_eq!(
+        lines.get(at + 1).copied(),
+        Some(format!("submission {id} to main from #{n} · nothing queued ahead").as_str()),
+        "{said}"
+    );
+    assert_eq!(
+        lines.get(at + 2).copied(),
+        Some(format!("wait: sluice wait main --pull-request {n}").as_str()),
+        "{said}"
+    );
+}
+
+/// ADR 0041: `sluice wait <branch>` follows this worktree's pull request,
+/// out of time with the document `--status` prints; `sluice wait <n>`
+/// takes the pull requests in before each round, and lands it.
+#[test]
+fn wait_follows_a_pull_request() {
+    let g = OnGitHub::new("reviews = 1");
+    let w = g.session("waits", &[("v.txt", "v\n")]);
+    g.submitted(&w, &["--no-wait"]);
+    let (code, out) = g.sluice(&[
+        "wait",
+        "main",
+        "--worktree",
+        &w,
+        "--timeout",
+        "2s",
+        "--json",
+    ]);
+    assert_eq!(code, sluice::WAITING, "{out}");
+    let pull = g.pull_from("unit/waits");
+    let doc: Value = serde_json::from_str(&out).unwrap();
+    assert_eq!(doc["pull_request"], pull.number);
+    assert_eq!(doc["state"], "waiting: needs 1 review");
+    g.gh()
+        .review(pull.number, "reviewer", "APPROVED", &pull.head)
+        .unwrap();
+    g.step();
+    let id = g.of(pull.number)[0]["id"].as_u64().unwrap();
+    let (code, out) = g.sluice(&["wait", &id.to_string(), "--json"]);
+    assert_eq!(code, sluice::LANDED, "{out}");
+    let doc: Value = serde_json::from_str(&out).unwrap();
+    assert_eq!(doc["state"], "landed");
+}
+
+/// submission-wait, "Out of time, waiting for a review, in words": the
+/// agent's pull request waits for a review, and `sluice wait main
+/// --timeout 2s` for its worktree exits 5, its last line naming the wait
+/// that follows the request by its number, never one that reads the
+/// folder it runs in (record 0130).
+#[test]
+fn out_of_time_waiting_for_a_review_names_its_wait() {
+    let g = OnGitHub::new("reviews = 1");
+    let w = g.session("reviewed", &[("r.txt", "r\n")]);
+    g.submitted(&w, &["--no-wait"]);
+    let n = g.pull_from("unit/reviewed").number;
+    let (code, out) = g.sluice(&["wait", "main", "--worktree", &w, "--timeout", "2s"]);
+    assert_eq!(code, sluice::WAITING, "{out}");
+    let last = out.lines().rfind(|l| !l.trim().is_empty());
+    assert_eq!(
+        last,
+        Some(format!("still open: #{n}; sluice wait main --pull-request {n}").as_str()),
+        "{out}"
+    );
 }
