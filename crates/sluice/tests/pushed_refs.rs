@@ -347,33 +347,6 @@ fn a_fetch_from_a_remote_not_there_is_a_refused_read() {
     );
 }
 
-/// A push the remote refuses names the remote's reason, which git's own
-/// error leaves out: a forge refusing an app's change to its workflows
-/// says so only there.
-#[test]
-fn a_refused_push_names_the_remotes_reason() {
-    use std::os::unix::fs::PermissionsExt;
-    let repo = Repo::new("refused");
-    let bare = repo.bare_origin();
-    let hook = bare.path().join("hooks/pre-receive");
-    std::fs::create_dir_all(hook.parent().unwrap()).unwrap();
-    std::fs::write(&hook, "#!/bin/sh\nexit 1\n").unwrap();
-    std::fs::set_permissions(&hook, std::fs::Permissions::from_mode(0o755)).unwrap();
-    let head = rev(repo.branch("unit/u", "main", &[("a", Some("1"))]));
-    let p = open(&repo);
-    let base = p.read("main").unwrap().unwrap();
-    let err = p.push_branch(&head, "unit/u").unwrap_err().to_string();
-    assert!(err.contains("pre-receive hook declined"), "{err}");
-    let to = landing(&p, &base, &head);
-    // 152, record 0124 (design D10): the branch where the landing expected
-    // it, the forge refused the landing, in its words.
-    match p.move_to("main", &base, &to).unwrap() {
-        Moved::Refused(words) => assert!(words.contains("pre-receive hook declined"), "{words}"),
-        other => panic!("{other:?}"),
-    }
-    assert_eq!(repo.rev("main"), base.as_str());
-}
-
 /// A `pre-receive` hook at the bare remote `bare` running `script`.
 fn pre_receive(bare: &std::path::Path, script: &str) {
     use std::os::unix::fs::PermissionsExt;
@@ -386,7 +359,11 @@ fn pre_receive(bare: &std::path::Path, script: &str) {
 /// 152, rule core.5, record 0124 (design D10): a push the forge declines,
 /// a ruleset's or push protection's, with the branch where the landing
 /// expected it, reads as refused by the forge, with the forge's words
-/// whole, and moves nothing.
+/// whole, and moves nothing; a session's branch it refuses names the
+/// remote's reason, which git's own error leaves out (a forge refusing an
+/// app's change to its workflows says so only there). The contract with
+/// git's porcelain; how sluice reads each answer is
+/// `pushed_refs::tests::a_refusal_for_the_ref_is_read_against_the_branch`.
 #[test]
 fn a_push_the_forge_declines_reads_as_refused_by_the_forge() {
     let repo = Repo::new("forge-declines");
@@ -398,6 +375,8 @@ fn a_push_the_forge_declines_reads_as_refused_by_the_forge() {
     let head = rev(repo.branch("unit/u", "main", &[("a", Some("1"))]));
     let p = open(&repo);
     let base = p.read("main").unwrap().unwrap();
+    let err = p.push_branch(&head, "unit/u").unwrap_err().to_string();
+    assert!(err.contains("pre-receive hook declined"), "{err}");
     let to = landing(&p, &base, &head);
     match p.move_to("main", &base, &to).unwrap() {
         Moved::Refused(words) => {
@@ -410,31 +389,6 @@ fn a_push_the_forge_declines_reads_as_refused_by_the_forge() {
         other => panic!("{other:?}"),
     }
     assert_eq!(p.read("main").unwrap(), Some(base));
-}
-
-/// 45, 152, rule core.5, record 0124 (design D10): a push the forge
-/// declines while the branch was moved meanwhile reads as elsewhere, with
-/// what the branch holds, as any refusal at the ref does.
-#[test]
-fn a_refused_push_with_the_branch_moved_reads_as_elsewhere() {
-    let repo = Repo::new("declined-moved");
-    let bare = repo.bare_origin();
-    let side = rev(repo.branch("side", "main", &[("s", Some("1"))]));
-    repo.git(&["push", "-q", "origin", "side"]);
-    // The hook moves main, as a landing another host made meanwhile would,
-    // and declines the push.
-    pre_receive(
-        bare.path(),
-        "unset GIT_QUARANTINE_PATH\ngit update-ref refs/heads/main refs/heads/side\nexit 1\n",
-    );
-    let head = rev(repo.branch("unit/u", "main", &[("a", Some("1"))]));
-    let p = open(&repo);
-    let base = p.read("main").unwrap().unwrap();
-    let to = landing(&p, &base, &head);
-    assert_eq!(
-        p.move_to("main", &base, &to).unwrap(),
-        Moved::Elsewhere(Some(side))
-    );
 }
 
 /// 124: the host's copy is its own `refs/heads/<branch>`, read with no
