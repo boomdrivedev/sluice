@@ -44,12 +44,17 @@ fi
 # state folder in the test's TMPDIR, and writes the mark when it has.
 # Then it exits 0, or runs `sleep <then>` where given. The host is perl
 # named `/leaks-cases/<seconds>/sluice host`, as `sluice host` is named
-# by its program, and it sleeps <seconds>.
+# by its program, and it sleeps <seconds>. The test goes on once perl
+# has taken that name and its own group, which it says in a file: a
+# guard that looked before then found perl under its own command line,
+# in the test's group.
 host=$(mktemp)
 cat >"$host" <<'EOS'
 mkdir -p "$TMPDIR/host-state/sluice/host"
 program=/leaks-cases/$1/sluice
-perl -e '$0 = "$ARGV[0] host"; open(STDIN, "</dev/null"); open(STDOUT, ">/dev/null"); open(STDERR, ">/dev/null"); setpgrp(0, 0); sleep $ARGV[1]' "$program" "$1" &
+ready=$TMPDIR/host-state/ready
+perl -e '$0 = "$ARGV[0] host"; open(STDIN, "</dev/null"); open(STDOUT, ">/dev/null"); open(STDERR, ">/dev/null"); setpgrp(0, 0); open(my $r, ">", $ARGV[2]); close($r); sleep $ARGV[1]' "$program" "$1" "$ready" &
+while [ ! -e "$ready" ]; do sleep 0.01; done
 printf '{"pid":%s,"since":"now","program":"%s"}\n' $! "$program" >"$TMPDIR/host-state/sluice/host/version"
 echo started >"$MARK"
 if [ -n "${2:-}" ]; then
