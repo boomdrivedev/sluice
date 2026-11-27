@@ -49,6 +49,9 @@ process-wrap = { version = "11", default-features = false, features = [
   "process-group",
   "kill-on-drop",
 ] }
+# A command's standard input, written whole before it starts, in a
+# process with no runtime: no thread writes it beside the read.
+tempfile = "3"
 nix = { version = "0.31", default-features = false, features = [
   "signal",
   "process",

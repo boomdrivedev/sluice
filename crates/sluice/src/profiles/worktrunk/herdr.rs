@@ -51,7 +51,7 @@ pub enum Answer {
 /// does not answer within `bound` is ended.
 pub fn prompt(pane: &str, socket: &str, line: &str, bound: Duration) -> Result<Answer> {
     let mut c = prompt_command(pane, socket, line, std::env::vars_os().map(|(k, _)| k));
-    let out = match crate::workers::output_within(&mut c, bound) {
+    let out = match crate::workers::output_within(&mut c, bound, weir_bounded::GRACE) {
         Ok(out) => out,
         Err(e) => return Ok(Answer::Refused(format!("running herdr: {e}"))),
     };

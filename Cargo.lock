@@ -4981,6 +4981,7 @@ dependencies = [
  "sluice-seams",
  "ssh-key",
  "sysinfo",
+ "tempfile",
  "tokio",
  "tokio-stream",
  "tokio-util",

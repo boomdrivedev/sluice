@@ -329,7 +329,7 @@ impl Runs {
                 cmd.process_group(0);
             }
         }
-        let mut supervisor = crate::workers::start(&mut cmd, None, crate::workers::STOP_GRACE)
+        let mut supervisor = crate::workers::start(&mut cmd, crate::workers::STOP_GRACE)
             .with_context(|| format!("starting {} supervise", self.program.display()))?;
         let began = self.began(name, &dir, &mut supervisor);
         // Every supervisor is waited on, one that never started or whose
@@ -610,27 +610,33 @@ impl Runs {
             None => &request.cwd,
         };
         let log = dir.join("release.log");
-        let out = File::create(&log)?;
         let mut command = Command::new(program);
         command
             .args(args)
             .current_dir(cwd)
             .env_clear()
             .envs(&request.env)
-            .stdin(Stdio::null())
-            .stdout(out.try_clone()?)
-            .stderr(out)
             .process_group(0);
         crate::workers::take(&mut command, "release");
         let limit = Duration::from_secs(request.limit.unwrap_or(600));
-        let status = crate::workers::start(
-            &mut command,
-            Some(limit),
-            Duration::from_secs(request.grace),
-        )
-        .with_context(|| format!("starting the release command {program}"))?
-        .wait()?
-        .status;
+        let ran =
+            crate::workers::output_within(&mut command, limit, Duration::from_secs(request.grace))
+                .with_context(|| format!("starting the release command {program}"))?;
+        let (said, status) = match &ran {
+            Some(out) => (
+                [&out.stdout[..], &out.stderr[..]].concat(),
+                Some(out.status),
+            ),
+            None => (Vec::new(), None),
+        };
+        std::fs::write(&log, &said).with_context(|| format!("writing {}", log.display()))?;
+        let Some(status) = status else {
+            bail!(
+                "the release command of {} did not end within {} s",
+                request.cwd.display(),
+                limit.as_secs()
+            );
+        };
         if !status.success() {
             let tail = log_end(&log);
             bail!(
