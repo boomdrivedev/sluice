@@ -332,6 +332,37 @@ impl OnGitHub {
     /// [`OnGitHub::with_lines`], main's records naming no host yet as
     /// keeping it.
     fn unled(conditions: &str, lines: &str) -> OnGitHub {
+        OnGitHub::built(conditions, lines, "1h", "")
+    }
+
+    /// `main` whose runs its time limit `timeout` ends, kept by this host.
+    fn timed(timeout: &str) -> OnGitHub {
+        let g = OnGitHub::built("", "", timeout, "");
+        g.f.sluice().as_peer(peer("a")).step("main").unwrap();
+        g
+    }
+
+    /// `main`, kept by this host, and `bolt/x` beside it, a branch on
+    /// GitHub sluice lands on, made from `main` and taking no pull
+    /// requests.
+    fn with_bolt() -> OnGitHub {
+        let g = OnGitHub::built(
+            "",
+            "",
+            "1h",
+            "\n[branches.\"bolt/*\"]\nrequired = [\"#gate\"]\ntrust = [\"a\", \"b\"]\n\
+             remote = \"origin\"\n",
+        );
+        g.f.world.set_branch("bolt/x", &g.f.world.tip("main"));
+        g.f.world.on_remote("bolt/x");
+        g.f.sluice().as_peer(peer("a")).step("main").unwrap();
+        g
+    }
+
+    /// `main` under the policy whose `main` table holds `lines` and its
+    /// time limit `timeout`, whose `pull_requests` table holds
+    /// `conditions`, and `extra` after them.
+    fn built(conditions: &str, lines: &str, timeout: &str, extra: &str) -> OnGitHub {
         let f = Fakes::new();
         f.world.init(
             "main",
@@ -342,8 +373,8 @@ impl OnGitHub {
                      [signers.a]\nssh = \"a ssh-ed25519 AAAA\"\n\n\
                      [signers.b]\nssh = \"b ssh-ed25519 BBBB\"\n\n\
                      [branches.main]\nrequired = [\"#gate\"]\ntrust = [\"a\", \"b\"]\n\
-                     remote = \"origin\"\ntimeout = \"1h\"\n{lines}\n\
-                     [branches.main.pull_requests]\n{conditions}\n"
+                     remote = \"origin\"\ntimeout = \"{timeout}\"\n{lines}\n\
+                     [branches.main.pull_requests]\n{conditions}\n{extra}"
                 ),
             )],
         );
@@ -4174,4 +4205,473 @@ fn the_queue_block_follows_the_queues_order() {
             serde_json::json!([entry(first, a), entry(second, b)])
         )
     );
+}
+
+// ---------------------------------------------------------------------------
+// a submission's wait and its submit again (record 0130; 120)
+// ---------------------------------------------------------------------------
+
+/// A pull request taken in, out of time: `sluice wait <branch>` follows its
+/// submission, and ends with that submission's record, as `sluice wait
+/// <id>` does.
+#[test]
+fn wait_follows_a_pull_requests_submission() {
+    let g = OnGitHub::new("");
+    g.f.world.hold_runs(true);
+    let w = g.session("taken", &[("t.txt", "x\n")]);
+    let doc: Value = serde_json::from_str(&g.submitted(&w, &["--no-wait", "--json"])).unwrap();
+    let id = doc["id"].as_u64().unwrap_or_else(|| panic!("{doc}"));
+    let (code, out) = g.sluice(&[
+        "wait",
+        "main",
+        "--worktree",
+        &w,
+        "--timeout",
+        "2s",
+        "--json",
+    ]);
+    assert_eq!(code, sluice::WAITING, "{out}");
+    let record: Value = serde_json::from_str(&out).unwrap();
+    assert_eq!(record["id"], id, "{record}");
+    assert!(
+        record["state"] == "queued" || record["state"] == "testing",
+        "{record}"
+    );
+    assert!(record.get("pull_request").is_none(), "{record}");
+}
+
+/// submission-wait, "Taken in here, out of time": this host took the
+/// agent's pull request in as submission `<id>`, under test. `sluice wait
+/// main --timeout 2s --json` for the agent's worktree exits 5 with `<id>`'s
+/// record, which gains no `wait`; in words it says `still waiting: sluice
+/// wait <id>` (record 0130 D5).
+#[test]
+fn a_wait_on_a_request_taken_in_here_out_of_time_prints_its_record() {
+    let g = OnGitHub::new("");
+    g.f.world.hold_runs(true);
+    let w = g.session("record", &[("r.txt", "x\n")]);
+    let doc: Value = serde_json::from_str(&g.submitted(&w, &["--no-wait", "--json"])).unwrap();
+    let id = doc["id"].as_u64().unwrap_or_else(|| panic!("{doc}"));
+    let wait = |rest: &[&str]| {
+        g.sluice(
+            &[
+                &["wait", "main", "--worktree", &w, "--timeout", "2s"][..],
+                rest,
+            ]
+            .concat(),
+        )
+    };
+    let (code, out) = wait(&["--json"]);
+    assert_eq!(code, sluice::WAITING, "{out}");
+    let record: Value = serde_json::from_str(&out).unwrap();
+    assert_eq!(record["id"], id, "{record}");
+    assert!(
+        record["state"] == "queued" || record["state"] == "testing",
+        "{record}"
+    );
+    assert!(record.get("wait").is_none(), "{record}");
+    let (code, out) = wait(&[]);
+    assert_eq!(code, sluice::WAITING, "{out}");
+    let last = out.lines().rfind(|l| !l.trim().is_empty());
+    assert_eq!(
+        last,
+        Some(format!("still waiting: sluice wait {id}").as_str()),
+        "{out}"
+    );
+}
+
+/// submission-wait, "Into another branch" and "A branch that takes no
+/// pull requests": pull request `#n` is into `bolt/x`, which takes none.
+/// `sluice wait main --pull-request <n> --json` prints the not-found
+/// document, `no pull request #<n> into main`, and `sluice wait bolt/x
+/// --pull-request <n>` says `no pull request #<n> into bolt/x`; each exits
+/// 1 and follows nothing (record 0130 D3).
+#[test]
+fn a_wait_by_pull_request_into_another_branch_is_not_found() {
+    let g = OnGitHub::with_bolt();
+    let head = g.branch(&[("x.txt", Some("x\n"))]);
+    let n = g
+        .gh()
+        .open_by("person", "bolt/x", "unit/into-bolt", &head.0, false, None)
+        .unwrap();
+    let number = n.to_string();
+    let (code, out) = g.sluice(&["wait", "main", "--pull-request", &number, "--json"]);
+    assert_eq!(code, sluice::FAILED, "{out}");
+    let doc: Value = serde_json::from_str(&out).unwrap();
+    assert_eq!(doc["error"]["kind"], "not_found", "{doc}");
+    assert_eq!(
+        doc["error"]["message"],
+        format!("no pull request #{n} into main").as_str(),
+        "{doc}"
+    );
+    let (code, out) = g.sluice(&["wait", "bolt/x", "--pull-request", &number]);
+    assert_eq!(code, sluice::FAILED, "{out}");
+    assert_eq!(out, format!("no pull request #{n} into bolt/x\n"));
+    assert!(g.subs().is_empty(), "{:?}", g.subs());
+}
+
+/// submission-wait, "Taken in here, out of time", by its number: this host
+/// took the agent's pull request in as submission `<id>`, under test, and
+/// `sluice wait main --pull-request <n> --timeout 2s --json` from no
+/// worktree exits 5 with `<id>`'s record, as `sluice wait <id> --timeout 2s
+/// --json` prints it (record 0130 D2, D5).
+#[test]
+fn a_wait_by_pull_request_taken_in_here_prints_its_record() {
+    let g = OnGitHub::new("");
+    g.f.world.hold_runs(true);
+    let w = g.session("here", &[("h.txt", "x\n")]);
+    let doc: Value = serde_json::from_str(&g.submitted(&w, &["--no-wait", "--json"])).unwrap();
+    let id = doc["id"].as_u64().unwrap_or_else(|| panic!("{doc}"));
+    let n = doc["pull_request"]
+        .as_u64()
+        .unwrap_or_else(|| panic!("{doc}"));
+    g.step();
+    let wait = |target: &str, rest: &[&str]| {
+        let (code, out) =
+            g.sluice(&[&["wait", target, "--timeout", "2s", "--json"][..], rest].concat());
+        assert_eq!(code, sluice::WAITING, "{out}");
+        serde_json::from_str::<Value>(&out).unwrap()
+    };
+    let record = wait("main", &["--pull-request", &n.to_string()]);
+    assert_eq!(record["id"], id, "{record}");
+    assert_eq!(record["state"], "testing", "{record}");
+    assert!(record.get("wait").is_none(), "{record}");
+    let by_id = wait(&id.to_string(), &[]);
+    assert_eq!(record, by_id);
+}
+
+/// submission-wait, "Another worktree's pull request": worktree `unit/a`
+/// opened one pull request and `unit/b` another, this host took both in,
+/// and GitHub refuses every post of their outcomes, so neither is
+/// confirmed on the request. `sluice wait main --pull-request <a's>` for
+/// `unit/b` reports `unit/a`'s submission landed, never `unit/b`'s, and
+/// hands it over to no one; `sluice inbox` in `unit/a` then hands that
+/// landing over (51; rule core.52; record 0130 D2).
+#[test]
+fn a_wait_by_another_worktrees_pull_request_hands_nothing_over() {
+    let g = OnGitHub::new("");
+    g.f.world.hold_runs(true);
+    let submitted = |name: &str| {
+        let w = g.session(name, &[(&format!("{name}.txt"), "x\n")]);
+        let doc: Value = serde_json::from_str(&g.submitted(&w, &["--no-wait", "--json"])).unwrap();
+        let id = doc["id"].as_u64().unwrap_or_else(|| panic!("{doc}"));
+        (w, id, doc["pull_request"].clone())
+    };
+    let (a, a_id, a_n) = submitted("a");
+    let (b, b_id, _) = submitted("b");
+    g.forge.refuse_posts(true);
+    g.f.world.hold_runs(false);
+    g.f.world.complete_all();
+    let (code, out) = g.sluice(&[
+        "wait",
+        "main",
+        "--worktree",
+        &b,
+        "--pull-request",
+        &a_n.to_string(),
+        "--timeout",
+        "1m",
+        "--json",
+    ]);
+    assert_eq!(code, sluice::LANDED, "{out}");
+    let record: Value = serde_json::from_str(&out).unwrap();
+    assert_eq!(record["id"], a_id, "{record}");
+    assert_ne!(record["id"], b_id, "{record}");
+    assert_eq!(record["state"], "landed", "{record}");
+    let id = Value::from(a_id);
+    assert_eq!(g.delivery(&id)["state"], "owed", "{}", g.delivery(&id));
+    assert_eq!(g.delivery(&id)["handed"], serde_json::json!([]));
+    let (code, out) = g.sluice(&["inbox", "--worktree", &a, "--json"]);
+    assert_eq!(code, 0, "{out}");
+    let doc: Value = serde_json::from_str(&out).unwrap();
+    let outcomes = doc["outcomes"]
+        .as_array()
+        .unwrap_or_else(|| panic!("{doc}"));
+    assert_eq!(outcomes.len(), 1, "{doc}");
+    assert_eq!(outcomes[0]["id"], a_id, "{doc}");
+    assert_eq!(outcomes[0]["state"], "landed", "{doc}");
+}
+
+/// 122, 123: a waiting submit whose pull request's submission lands, and
+/// whose round then fails to release the combination's checkout, says the
+/// failed try, reports it landed and exits 0: the round went on, so
+/// nothing failed after the landing.
+#[test]
+fn a_landing_stands_when_its_release_then_fails() {
+    let g = OnGitHub::new("");
+    let w = g.session("release", &[("r.txt", "r\n")]);
+    g.f.world.fail_next_release();
+    let (code, said) = g.submit(&w, &[]);
+    assert_eq!(code, sluice::LANDED, "{said}");
+    let n = g.pull_from("unit/release").number;
+    assert!(said.contains(&format!("testing main + #{n} ·")), "{said}");
+    let main = g.f.world.tip("main");
+    assert!(
+        said.lines()
+            .any(|l| l.starts_with("could not release sluice/try/main/")),
+        "{said}"
+    );
+    assert!(
+        said.ends_with(&format!("passed · landed as {}\n", &main.0[..7])),
+        "{said}"
+    );
+    assert!(!said.contains("sluice: after the landing: "), "{said}");
+}
+
+/// Blamed, then submitted again on the same head (120): the submit marks
+/// the pull request ready for review, intake takes the same head, and its
+/// checks run again; the submit follows that test to its outcome, names
+/// who fixes it, and the request is held for the next submit again.
+#[test]
+fn blamed_then_submitted_again_on_the_same_head() {
+    let g = OnGitHub::new("");
+    let w = g.session("again", &[("broken", "x\n")]);
+    let (code, said) = g.submit(&w, &[]);
+    assert_eq!(code, sluice::FAILED, "{said}");
+    let pull = g.pull_from("unit/again");
+    let n = pull.number;
+    assert!(pull.draft, "{pull:?}");
+    let (code, said) = g.submit(&w, &[]);
+    assert_eq!(code, sluice::FAILED, "{said}");
+    assert!(
+        said.contains(&format!("updated #{n}")) && said.contains("marked ready for review"),
+        "{said}"
+    );
+    assert!(!said.contains("nothing was queued or run again"), "{said}");
+    assert!(said.contains(&format!("testing main + #{n} ·")), "{said}");
+    assert!(said.contains("failed: app:test"), "{said}");
+    assert!(
+        said.lines().last().is_some_and(
+            |l| l == "the agent working in unit/again fixes it there and submits again"
+        ),
+        "{said}"
+    );
+    let subs = g.of(n);
+    assert_eq!(subs.len(), 2, "{subs:?}");
+    assert_eq!(subs[1]["head"], pull.head.as_str());
+    assert_eq!(subs[1]["state"], "failed", "{subs:?}");
+    assert!(g.pull_from("unit/again").draft);
+    assert_eq!(g.of_after(n, 2).len(), 2, "{:?}", g.subs());
+}
+
+/// Timed out, then submitted again on the same head: the advice to submit
+/// the same head again is one sluice takes, never "nothing was queued or
+/// run again".
+#[test]
+fn timed_out_then_submitted_again_on_the_same_head() {
+    let g = OnGitHub::timed("2s");
+    g.f.world.hangs("app:test");
+    let w = g.session("slowly", &[("s.txt", "x\n")]);
+    let (code, said) = g.submit(&w, &[]);
+    assert_eq!(code, sluice::FAILED, "{said}");
+    assert!(
+        said.contains(
+            "if the host was slow, the agent working in unit/slowly submits the same head again"
+        ),
+        "{said}"
+    );
+    assert!(!said.contains("draft"), "{said}");
+    let n = g.pull_from("unit/slowly").number;
+    let (code, said) = g.submit(&w, &[]);
+    assert_eq!(code, sluice::FAILED, "{said}");
+    assert!(!said.contains("nothing was queued or run again"), "{said}");
+    assert!(said.contains(&format!("testing main + #{n} ·")), "{said}");
+    assert!(said.contains("timed out"), "{said}");
+    let subs = g.of(n);
+    assert_eq!(subs.len(), 2, "{subs:?}");
+    assert_eq!(subs[1]["result"], "timed out", "{subs:?}");
+}
+
+/// A submit on a queued pull request replaces its submission: the submit
+/// withdraws the old head's submission itself, and the new head is taken
+/// with no draft and no hold.
+#[test]
+fn a_new_head_submitted_while_queued() {
+    let g = OnGitHub::new("");
+    g.f.world.hold_runs(true);
+    let w = g.session("replaced", &[("r.txt", "x\n")]);
+    g.submitted(&w, &["--no-wait"]);
+    let n = g.pull_from("unit/replaced").number;
+    let first = g.of(n);
+    assert_eq!(first.len(), 1, "{first:?}");
+    let new = g.commit_in(&w, &[("more.txt", "more\n")]);
+    let said = g.submitted(&w, &["--no-wait"]);
+    assert!(
+        said.contains(&format!("withdrew its submission {}", first[0]["id"])),
+        "{said}"
+    );
+    let pull = g.pull_from("unit/replaced");
+    assert!(!pull.draft && pull.head == new.0, "{pull:?}");
+    let subs = g.of_after(n, 1);
+    assert_eq!(subs.len(), 2, "{subs:?}");
+    assert_eq!(subs[0]["state"], "withdrawn");
+    assert_eq!(subs[0]["withdrawn"]["by"], "unit/replaced");
+    assert_eq!(subs[1]["head"], new.0.as_str());
+    assert_ne!(subs[1]["state"], "withdrawn", "{subs:?}");
+    assert_ne!(
+        g.posted(&new).map(|p| p.1),
+        Some("waiting: the next submit".into())
+    );
+}
+
+/// Submitted by the operator's ops: an agent's pull request, sent back, is
+/// submitted from a worktree on the same branch with ops's fix and ops as
+/// its agent. It is ready for review at the head pushed, names ops as its
+/// agent, and lands.
+#[test]
+fn submitted_by_the_operators_ops() {
+    let g = OnGitHub::new("");
+    let w = g.session("unit-1", &[("broken", "x\n")]);
+    let (code, said) = g.submit(&w, &[]);
+    assert_eq!(code, sluice::FAILED, "{said}");
+    let n = g.pull_from("unit/unit-1").number;
+    assert!(g.pull_from("unit/unit-1").draft);
+    let at = g.f.seams().driver.session(&w).unwrap().head;
+    let fixed = g.f.world.work_saying(&at, &[("broken", None)], "ops's fix");
+    g.f.world.session(&w, "madswan-ops", &fixed);
+    let said = g.submitted(&w, &["--no-wait"]);
+    assert!(said.contains("marked ready for review"), "{said}");
+    let pull = g.pull_from("unit/unit-1");
+    assert!(!pull.draft && pull.head == fixed.0, "{pull:?}");
+    assert!(
+        pull.body.contains("<!-- sluice: agent=madswan-ops -->")
+            && !pull.body.contains("agent=unit/unit-1"),
+        "{}",
+        pull.body
+    );
+    g.step_until("landed", |g| g.of(n).iter().any(|s| s["state"] == "landed"));
+    let subs = g.of(n);
+    let landed = subs.iter().find(|s| s["state"] == "landed").unwrap();
+    assert_eq!(landed["from"]["agent"], "madswan-ops", "{subs:?}");
+    assert_eq!(landed["head"], fixed.0.as_str());
+}
+
+impl OnGitHub {
+    /// S56 (120): the request from `unit/first`, changing `plan.py`, landed,
+    /// so a request made off `main` before it that changes `plan.py` too
+    /// conflicts.
+    fn s56_land_first(&self) {
+        let (first, head) = self.by_hand("unit/first", &[("plan.py", Some("first\n"))], false);
+        self.gh()
+            .review(first, "reviewer", "APPROVED", &head.0)
+            .unwrap();
+        self.step_until("the first landed", |g| {
+            g.of(first).iter().any(|s| s["state"] == "landed")
+        });
+    }
+
+    /// S56: a fix of pull request `n`'s branch onto `main`: a merge keeping
+    /// the branch's files, which merges onto `main` without conflict,
+    /// pushed to GitHub. Returns the new head.
+    fn s56_fix_onto_main(&self, n: u64) -> Rev {
+        let pull = self.forge.pull(&repo(), n).unwrap().unwrap();
+        let fixed = self.f.world.merge_ours(
+            &Rev::new(pull.head),
+            &self.f.world.tip("main"),
+            "Fix onto main",
+        );
+        self.gh().pushed(&pull.head_ref, &fixed.0).unwrap();
+        fixed
+    }
+}
+
+/// S56 (120): an agent's pull request, refused for a conflict, waits for
+/// its submitter. A fix pushed to its branch, standing for one another
+/// submission landed there, moves its head; over several rounds it is a
+/// draft, and nothing is submitted or landed in the agent's name, though
+/// its review holds. The agent's next submit marks it ready at the new
+/// head, and it lands.
+#[test]
+fn s56_a_refused_request_waits_for_its_submitter() {
+    let g = OnGitHub::new("reviews = 1");
+    let w = g.session("s56", &[("plan.py", "agent\n")]);
+    g.s56_land_first();
+    g.submitted(&w, &["--no-wait"]);
+    let pull = g.pull_from("unit/s56");
+    let n = pull.number;
+    g.gh()
+        .review(n, "reviewer", "APPROVED", &pull.head)
+        .unwrap();
+    g.step_until("conflict", |g| {
+        g.of(n).iter().any(|s| s["state"] == "conflict")
+    });
+    let main = g.f.world.tip("main");
+    let fixed = g.s56_fix_onto_main(n);
+    g.f.world.session(&w, &w, &fixed);
+    g.gh().review(n, "reviewer", "APPROVED", &fixed.0).unwrap();
+    let subs = g.of_after(n, 3);
+    assert_eq!(subs.len(), 1, "nothing submitted in its name: {subs:?}");
+    assert_eq!(subs[0]["state"], "conflict");
+    let pull = g.pull_from("unit/s56");
+    assert!(pull.draft && pull.head == fixed.0, "{pull:?}");
+    assert_eq!(g.f.world.tip("main"), main, "nothing landed in its name");
+    assert_eq!(g.posted(&fixed).unwrap().1, "waiting: the next submit");
+    let (code, said) = g.submit(&w, &[]);
+    assert_eq!(code, sluice::LANDED, "{said}");
+    assert!(said.contains("marked ready for review"), "{said}");
+    assert!(said.contains("landed as"), "{said}");
+    let subs = g.of(n);
+    assert_eq!(subs.len(), 2, "{subs:?}");
+    assert_eq!(subs[1]["head"], fixed.0.as_str());
+    assert_eq!(subs[1]["state"], "landed");
+    assert_eq!(subs[1]["from"]["agent"], "unit/s56");
+}
+
+/// S56 (120): a pull request opened by hand, refused for a conflict, whose
+/// head moves as an agent's would, is submitted again once its review
+/// holds on the new head.
+#[test]
+fn s56_a_refused_request_opened_by_hand_is_taken_again_once_reviewed() {
+    let g = OnGitHub::new("reviews = 1");
+    let (hand, hand_head) = g.by_hand("unit/hand", &[("plan.py", Some("hand\n"))], false);
+    g.s56_land_first();
+    g.gh()
+        .review(hand, "reviewer", "APPROVED", &hand_head.0)
+        .unwrap();
+    g.step_until("the hand-opened conflict", |g| {
+        g.of(hand).iter().any(|s| s["state"] == "conflict")
+    });
+    let moved = g.s56_fix_onto_main(hand);
+    let subs = g.of_after(hand, 2);
+    assert_eq!(subs.len(), 1, "waits for its review: {subs:?}");
+    assert!(!g.pull_from("unit/hand").draft);
+    assert_eq!(g.posted(&moved).unwrap().1, "waiting: needs 1 review");
+    g.gh()
+        .review(hand, "reviewer", "APPROVED", &moved.0)
+        .unwrap();
+    g.step_until("the hand-opened landed", |g| {
+        g.of(hand)
+            .iter()
+            .any(|s| s["state"] == "landed" && s["head"] == moved.0.as_str())
+    });
+}
+
+/// S56 (120): a pull request opened by hand and withdrawn by the operator
+/// rests, its review holding, until its author pushes a new head.
+#[test]
+fn s56_a_request_the_operator_withdrew_waits_for_a_new_head() {
+    let g = OnGitHub::new("reviews = 1");
+    g.f.world.hold_runs(true);
+    let (rest, rest_head) = g.by_hand("unit/rest", &[("r.txt", Some("x\n"))], false);
+    g.gh()
+        .review(rest, "reviewer", "APPROVED", &rest_head.0)
+        .unwrap();
+    g.step_until("the withdrawn one submitted", |g| !g.of(rest).is_empty());
+    let id = g.of(rest)[0]["id"].as_u64().unwrap().to_string();
+    let (code, said) = g.sluice(&["withdraw", &id, "--as", "operator"]);
+    assert_eq!(code, 0, "{said}");
+    let subs = g.of_after(rest, 3);
+    assert_eq!(subs.len(), 1, "never submitted again: {subs:?}");
+    assert_eq!(subs[0]["state"], "withdrawn");
+    assert_eq!(
+        g.posted(&rest_head).unwrap().1,
+        "waiting: withdrawn by the operator"
+    );
+    let pushed = g.push_more(rest, "rest.txt");
+    g.gh()
+        .review(rest, "reviewer", "APPROVED", &pushed.0)
+        .unwrap();
+    g.step_until("the withdrawn one submitted again", |g| {
+        g.of(rest).iter().any(|s| s["head"] == pushed.0.as_str())
+    });
 }

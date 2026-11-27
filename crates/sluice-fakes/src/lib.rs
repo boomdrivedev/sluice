@@ -629,6 +629,14 @@ impl World {
         Self::put_commit(&mut inner, tree, vec![on.clone()], message)
     }
 
+    /// A merge of `other` into `on` keeping `on`'s files, as `git merge
+    /// -s ours` makes it, saying `message`. Returns the merge.
+    pub fn merge_ours(&self, on: &Rev, other: &Rev, message: &str) -> Rev {
+        let mut inner = self.0.borrow_mut();
+        let tree = inner.commits[on].tree.clone();
+        Self::put_commit(&mut inner, tree, vec![on.clone(), other.clone()], message)
+    }
+
     /// Another queue lands `head` on `branch` by hand: a merge commit of
     /// the two, `head`'s files over the branch's, saying `message`, which
     /// the branch moves to. Returns the merge.
