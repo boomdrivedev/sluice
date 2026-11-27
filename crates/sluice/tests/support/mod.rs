@@ -155,9 +155,17 @@ impl Scratch {
             std::process::id(),
             N.fetch_add(1, Ordering::SeqCst)
         ));
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).expect("scratch dir");
-        Scratch(std::fs::canonicalize(&dir).expect("canonical scratch dir"))
+        Scratch::made(&dir)
+    }
+
+    /// `dir` made afresh, a live folder of the test (design D1 of the
+    /// change `a-test-stops-the-hosts-it-starts`).
+    fn made(dir: &Path) -> Scratch {
+        let _ = std::fs::remove_dir_all(dir);
+        std::fs::create_dir_all(dir).expect("scratch dir");
+        let path = std::fs::canonicalize(dir).expect("canonical scratch dir");
+        guard::hold(&path);
+        Scratch(path)
     }
 
     /// A scratch directory with as short a path as the host's temporary
@@ -170,9 +178,7 @@ impl Scratch {
             std::process::id(),
             N.fetch_add(1, Ordering::SeqCst)
         ));
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).expect("scratch dir");
-        Scratch(std::fs::canonicalize(&dir).expect("canonical scratch dir"))
+        Scratch::made(&dir)
     }
 
     pub fn path(&self) -> &Path {
@@ -186,6 +192,7 @@ impl Drop for Scratch {
     fn drop(&mut self) {
         guard::Guard::new(&[&self.0]).judge();
         let _ = std::fs::remove_dir_all(&self.0);
+        guard::let_go(&self.0);
     }
 }
 

@@ -9,24 +9,30 @@ dependsOn: [seams, core, fakes]
 # writes it finds no file there (#183, 2026-11-27). sccache, which a run's
 # environment names, keeps each folder's build cheap. `test` keeps cargo's
 # `target`; `tests/gate_targets.rs` holds the tasks to this.
+#
+# Each task that runs the crate's tests runs them under tests/leaks.sh, as
+# `e2e` does: a test process that a signal ended ran no drop, and a host
+# process it started runs on in a session of its own. The script stops it
+# and fails the task (the change `a-test-stops-the-hosts-it-starts`,
+# design D3).
 tasks:
   # Everything but the tests that start a sandbox (`sandbox` task) and the
   # bounds on speed (`speed` task).
   test:
-    command: "cargo nextest run -p sluice -E 'not test(sandbox) and not test(speed)'"
+    command: "sh tests/leaks.sh cargo nextest run -p sluice -E 'not test(sandbox) and not test(speed)'"
     # The flake module's rendered files, which a unit test reads as sluice
     # reads the host's settings (record 0098), and the module's options,
     # whose `prefixes` a unit test holds to the scrub's GitHub token
     # prefixes (record 0108), among them.
-    inputs: ['/crates/sluice/**/*', '/crates/sluice-seams/**/*', '/crates/sluice-core/**/*', '/crates/sluice-fakes/**/*', '/plugins/sluice/skills/**/*', '/e2e/check.sh', '/nix/tests/files/**/*', '/nix/modules/options.nix', '/Cargo.toml', '/Cargo.lock', '/.config/nextest.toml', '/devenv.nix', '/devenv.lock']
+    inputs: ['/tests/leaks.sh', '/crates/sluice/**/*', '/crates/sluice-seams/**/*', '/crates/sluice-core/**/*', '/crates/sluice-fakes/**/*', '/plugins/sluice/skills/**/*', '/e2e/check.sh', '/nix/tests/files/**/*', '/nix/modules/options.nix', '/Cargo.toml', '/Cargo.lock', '/.config/nextest.toml', '/devenv.nix', '/devenv.lock']
     tags: [cargo-test, check-fast]
     options: {runFromWorkspaceRoot: true}
   # The profiles against real tools (git, moon, wt, a container engine,
   # Playwright), and the conformance scenarios that need no fault on them:
   # the check-tools tier.
   tools:
-    command: 'cargo nextest run -p sluice --features tools --test instance --test local_refs --test pushed_refs --test remote_refs --test peers --test forge --test pull_requests --test remote_branch --test moon --test places --test worktrunk --test protect --test conformance --test stack --test exec --test previews_tools --test equip_tools --test landed --test overview_watch -E "not test(sandbox)"'
-    inputs: ['/crates/sluice/**/*', '/crates/sluice-seams/**/*', '/crates/sluice-core/**/*', '/crates/sluice-fakes/**/*', '/crates/sluice-conformance/src/**/*', '/crates/sluice-conformance/Cargo.toml', '/Cargo.toml', '/Cargo.lock', '/.config/nextest.toml', '/devenv.nix', '/devenv.lock']
+    command: 'sh tests/leaks.sh cargo nextest run -p sluice --features tools --test instance --test local_refs --test pushed_refs --test remote_refs --test peers --test forge --test pull_requests --test remote_branch --test moon --test places --test worktrunk --test protect --test conformance --test stack --test exec --test previews_tools --test equip_tools --test landed --test overview_watch -E "not test(sandbox)"'
+    inputs: ['/tests/leaks.sh', '/crates/sluice/**/*', '/crates/sluice-seams/**/*', '/crates/sluice-core/**/*', '/crates/sluice-fakes/**/*', '/crates/sluice-conformance/src/**/*', '/crates/sluice-conformance/Cargo.toml', '/Cargo.toml', '/Cargo.lock', '/.config/nextest.toml', '/devenv.nix', '/devenv.lock']
     tags: [check-tools]
     env: {CARGO_TARGET_DIR: 'target/tools'}
     options: {runFromWorkspaceRoot: true}
@@ -36,8 +42,8 @@ tasks:
   # Every test whose name holds `sandbox` is here and nowhere else, the
   # sandbox scenarios of `sluice exec` (`--test exec`) among them.
   sandbox:
-    command: "cargo nextest run -p sluice --features tools --test checks --test moon --test stack --test exec -E 'test(sandbox)'"
-    inputs: ['/crates/sluice/**/*', '/crates/sluice-seams/**/*', '/crates/sluice-core/**/*', '/crates/sluice-fakes/**/*', '/Cargo.toml', '/Cargo.lock', '/.config/nextest.toml', '/devenv.nix', '/devenv.lock']
+    command: "sh tests/leaks.sh cargo nextest run -p sluice --features tools --test checks --test moon --test stack --test exec -E 'test(sandbox)'"
+    inputs: ['/tests/leaks.sh', '/crates/sluice/**/*', '/crates/sluice-seams/**/*', '/crates/sluice-core/**/*', '/crates/sluice-fakes/**/*', '/Cargo.toml', '/Cargo.lock', '/.config/nextest.toml', '/devenv.nix', '/devenv.lock']
     tags: [cargo-test, starts-a-sandbox, needs-localhost]
     env: {CARGO_TARGET_DIR: 'target/sandbox'}
     options: {runFromWorkspaceRoot: true}
@@ -47,8 +53,8 @@ tasks:
   # tag runs them: `moon run cli:speed` runs them on a quiet host, before a
   # change to the host process's edge lands.
   speed:
-    command: "cargo nextest run -p sluice --test host_process -E 'test(speed)'"
-    inputs: ['/crates/sluice/**/*', '/crates/sluice-seams/**/*', '/crates/sluice-core/**/*', '/crates/sluice-fakes/**/*', '/Cargo.toml', '/Cargo.lock', '/.config/nextest.toml', '/devenv.nix', '/devenv.lock']
+    command: "sh tests/leaks.sh cargo nextest run -p sluice --test host_process -E 'test(speed)'"
+    inputs: ['/tests/leaks.sh', '/crates/sluice/**/*', '/crates/sluice-seams/**/*', '/crates/sluice-core/**/*', '/crates/sluice-fakes/**/*', '/Cargo.toml', '/Cargo.lock', '/.config/nextest.toml', '/devenv.nix', '/devenv.lock']
     env: {CARGO_TARGET_DIR: 'target/speed'}
     options: {runFromWorkspaceRoot: true}
   # S1 to S4 through wt submit on scratch repositories: the check-e2e tier.
