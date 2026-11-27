@@ -64,6 +64,7 @@ pub(crate) async fn answer(
                         "the judgment ended: {e}"
                     ))],
                     code: 0,
+                    pass: None,
                 })
         }
     };
@@ -107,6 +108,7 @@ fn judge(hosting: &Hosting, dir: &Path, by: &str, lines: &str) -> Output {
         stdout: String::new(),
         stderr,
         code,
+        pass: None,
     }
 }
 

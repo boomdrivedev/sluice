@@ -362,6 +362,7 @@ fn run(
             stdout: String::new(),
             stderr: Vec::new(),
             code,
+            pass: None,
         },
         Err(e) => failed(&format!("{e:#}"), json),
     }

@@ -1134,15 +1134,21 @@ fn a_run_is_ended_at_its_limit_after_the_step_that_started_it() {
         std::thread::sleep(Duration::from_millis(50));
     }
     // The group gone is not yet the run's end: the supervisor writes how
-    // the run ended after it, the last of its ending, and a step before
-    // that reads the run still going and records nothing.
-    while sluice::runs::ended(&dir).unwrap().is_none() {
+    // the run ended after it, then lets go of the run, the last of its
+    // ending, and a step before that reads the run still going and records
+    // nothing (record 0122, design D8).
+    let runs = r.tests.inner.runs();
+    while !matches!(
+        runs.state(&run.0).unwrap(),
+        sluice::runs::RunState::Finished(_)
+    ) {
         assert!(
             Instant::now() < ended_by,
-            "the run's group is gone, and its supervisor wrote no end within its limit and grace"
+            "the run's group is gone, and its supervisor did not end the run within its limit and grace"
         );
         std::thread::sleep(Duration::from_millis(20));
     }
+    assert!(sluice::runs::ended(&dir).unwrap().is_some());
 
     assert_eq!(r.step(), Step::Stepped);
     let events = r.events();

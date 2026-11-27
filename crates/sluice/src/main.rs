@@ -643,6 +643,19 @@ fn change(cli: &Cli) -> Option<i32> {
             Err(e) => did_not(e),
         };
     }
+    // 122, 123: a submit that waits follows `sluice host` before it
+    // submits, so each pass that its submission starts reports to it,
+    // what the pass released among it, however soon the pass ends.
+    let waits = matches!(
+        &request,
+        sluice::host_process::protocol::Request::Submit { submit, .. }
+            if !submit.no_wait && !submit.status
+    );
+    let process = sluice::host_process::Socketed::default();
+    let mut waiter = sluice::subscriber::Waiter::new(&process, None, folder.clone());
+    if waits {
+        waiter.served(sluice::host_process::read_for());
+    }
     let submitted = match client.submitted(&request) {
         Ok(s) => s,
         Err(e) => return did_not(e),
@@ -659,9 +672,9 @@ fn change(cli: &Cli) -> Option<i32> {
         Ok("record") => (&skipped, &skipped),
         _ => (&SystemClock, &Sleep(every)),
     };
-    let process = sluice::host_process::Socketed::default();
     let followed = sluice::stop_on_interrupt().and_then(|()| {
-        sluice::follow_wait(
+        sluice::follow_waiting(
+            waiter,
             &process,
             None,
             folder,

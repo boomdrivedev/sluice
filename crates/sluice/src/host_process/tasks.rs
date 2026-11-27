@@ -198,6 +198,10 @@ pub struct Marks {
     held: bool,
     /// A look is in flight.
     looking: bool,
+    /// The number of the last pass whose report went to the followers,
+    /// counted from one for each repository: a wait's step that ends the
+    /// wait names it, so the wait says that report first (122, 123).
+    passes: u64,
 }
 
 impl Marks {
@@ -641,6 +645,36 @@ impl Tasks {
     /// (the change `sluice-host-answers-every-read`, design D6).
     pub fn last_reading(&self, repository: &Path) -> Reading {
         self.marks(repository).answer(true)
+    }
+
+    /// The number of `repository`'s last pass whose report went to its
+    /// followers, once no reading of it is in flight, waited for up to
+    /// `within`: a pass in flight as a wait's step read the records has
+    /// sent its report by then (122, 123). `None` where the repository has
+    /// no task.
+    pub async fn settled(&self, repository: &Path, within: Duration) -> Option<u64> {
+        let repo = self.repo(repository)?;
+        let mut marks = repo.marks.subscribe();
+        let until = tokio::time::Instant::now() + within;
+        loop {
+            {
+                let m = marks.borrow_and_update();
+                let going = match (m.began, m.ended_began) {
+                    (Some(b), Some(e)) => b.n > e.n,
+                    (Some(_), None) => true,
+                    _ => false,
+                };
+                if !going {
+                    return Some(m.passes);
+                }
+            }
+            if tokio::time::timeout_at(until, marks.changed())
+                .await
+                .is_err()
+            {
+                return Some(marks.borrow().passes);
+            }
+        }
     }
 
     /// Whether a look at `repository` is in flight.
@@ -1487,8 +1521,24 @@ impl Scheduler {
                         Err("the repository's task ended before its pass".to_string())
                     }
                 };
+                let mut report = report;
                 self.in_play = report.as_ref().map_or(true, |r| r.in_play && !r.no_sluice);
                 self.held = report.as_ref().is_ok_and(|r| r.held);
+                // 122, 123: the report, numbered, goes to the followers
+                // before the reading's end is marked, so a step that waits
+                // for the reading's end finds the report sent.
+                let mut sent = None;
+                if let Ok(r) = report.as_mut() {
+                    let n = self.marks.borrow().passes + 1;
+                    r.pass = n;
+                    locked(&self.followers).retain(|s| {
+                        !s.armed || s.tx.as_ref().is_none_or(|tx| tx.send(r.clone()).is_ok())
+                    });
+                    sent = Some(n);
+                }
+                if let Some(n) = sent {
+                    self.marks.send_modify(|m| m.passes = n);
+                }
                 self.end_reading(
                     asks,
                     report.as_ref().ok().and_then(|r| r.refused.clone()),
@@ -1497,11 +1547,6 @@ impl Scheduler {
                     false,
                 );
                 self.last_pass = Some(Instant::now());
-                if let Ok(r) = &report {
-                    locked(&self.followers).retain(|s| {
-                        !s.armed || s.tx.as_ref().is_none_or(|tx| tx.send(r.clone()).is_ok())
-                    });
-                }
                 for reply in replies {
                     let _ = reply.send(report.clone());
                 }

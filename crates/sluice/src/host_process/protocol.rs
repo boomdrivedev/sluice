@@ -678,6 +678,12 @@ pub struct Output {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub stderr: Vec<String>,
     pub code: i32,
+    /// A wait's step that ends the wait: the number of the repository's
+    /// last pass whose report went to its followers once the passes in
+    /// flight as it read had ended, which the wait says before it prints
+    /// this (122, 123).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pass: Option<u64>,
 }
 
 /// An answer.
@@ -856,6 +862,7 @@ mod tests {
             stdout: "{}\n".into(),
             stderr: vec!["sluice: warning: late".into()],
             code: 0,
+            pass: None,
         });
         let line = serde_json::to_string(&output).unwrap();
         assert_eq!(
@@ -1014,6 +1021,7 @@ mod tests {
                 stdout: "submission 4 to main · nothing queued ahead\n".into(),
                 stderr: vec![],
                 code: 0,
+                pass: None,
             },
             wait: Some(WaitAsk {
                 target: "4".into(),

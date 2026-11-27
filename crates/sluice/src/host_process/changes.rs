@@ -284,6 +284,7 @@ fn make(
             stdout,
             stderr,
             code,
+            pass: None,
         }),
         Made::Submitted(crate::Submitted::Done(code)) => answered(
             true,
@@ -291,6 +292,7 @@ fn make(
                 stdout,
                 stderr,
                 code,
+                pass: None,
             },
         ),
         Made::Submitted(crate::Submitted::Wait { ask, queued }) => Answer::Submitted(Submitted {
@@ -298,6 +300,7 @@ fn make(
                 stdout,
                 stderr,
                 code: 0,
+                pass: None,
             },
             wait: Some(ask),
             queued,
