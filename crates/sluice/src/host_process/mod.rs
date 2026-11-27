@@ -1889,7 +1889,7 @@ fn scan(hosting: &Hosting) {
 /// blocking work, so the edge never waits on a remote.
 fn scan_with(hosting: &Hosting, watch: Option<&mut watch::Watch>) {
     let index = hosting.index();
-    match index.prune(|r| !r.is_dir()) {
+    match index.prune(crate::profiles::repository_gone) {
         Ok(gone) => {
             for r in gone {
                 log(&format!("{}: gone; out of the index", r.display()));

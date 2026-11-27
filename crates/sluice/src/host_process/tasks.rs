@@ -80,6 +80,9 @@ pub struct Looked {
     /// The branches it read as last fetched, each with the remote's
     /// refusal (the change `sluice-host-answers-every-read`, design D3).
     pub stale: BTreeMap<String, sluice_seams::ReadRefused>,
+    /// The repository is gone (129; the change
+    /// `a-gone-repository-is-told-as-gone`).
+    pub gone: bool,
 }
 
 /// How the host process looks at a repository that no worker holds, and
@@ -1068,7 +1071,7 @@ impl Scheduler {
         }
         // A repository gone, whatever ended its scheduler: its followers
         // get the document that says so (design D6).
-        if !self.repository.is_dir() {
+        if crate::profiles::repository_gone(&self.repository) {
             self.gone();
         }
         locked(&self.followers).clear();
@@ -1496,7 +1499,9 @@ impl Scheduler {
                     self.reading_due = true;
                 }
             }
-            Landed::Bound(Err(_), _) if self.followed() && !self.repository.is_dir() => {
+            Landed::Bound(Err(_), _)
+                if self.followed() && crate::profiles::repository_gone(&self.repository) =>
+            {
                 // The repository is gone: held no longer (design D6).
                 self.wants_worker = false;
                 self.ended = true;
@@ -1571,6 +1576,13 @@ impl Scheduler {
                     ));
                 }
             },
+            Landed::Looked(looked, _) if looked.gone => {
+                // A look that found the repository gone: held no longer,
+                // whatever reading went before it (design D6).
+                self.wants_worker = false;
+                self.ended = true;
+                self.gone();
+            }
             Landed::Looked(looked, asks) => {
                 self.end_reading(
                     asks,
@@ -2534,6 +2546,40 @@ mod tests {
         let doc = documents.borrow_and_update().clone().unwrap();
         assert_eq!(doc["branches"], serde_json::json!(["main", "bolt/x"]));
         assert_eq!(doc["tick"], 1, "a watch follows: its tick is a second");
+    }
+
+    /// resident-subscriptions, "A repository removed as a round writes in
+    /// it" (the change `a-gone-repository-is-told-as-gone`): no worker
+    /// holds a repository, and its look finds it gone: its documents say it
+    /// is gone, and nothing binds it.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_look_that_finds_the_repository_gone_says_so() {
+        let repo = PathBuf::from("/host/looked-gone.git");
+        let fakes = Fakes::default();
+        let tasks = Tasks::new(
+            fakes.bind(),
+            Arc::new(|_: &Path, _: bool| Looked {
+                gone: true,
+                ..Looked::default()
+            }),
+        );
+        let mut documents = tasks.documents(&repo).expect("its channel");
+        tasks.look(&repo);
+        tokio::time::timeout(Duration::from_secs(30), async {
+            loop {
+                documents.changed().await.expect("a document");
+                if documents
+                    .borrow_and_update()
+                    .as_ref()
+                    .is_some_and(|d| d["gone"] == true)
+                {
+                    break;
+                }
+            }
+        })
+        .await
+        .expect("the document that says it is gone");
+        assert!(locked(&fakes.seen.binds).is_empty(), "nothing bound it");
     }
 
     /// resident-subscriptions, "A client that reads nothing for ten

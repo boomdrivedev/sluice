@@ -1703,7 +1703,12 @@ fn a_status_beside_a_slow_look_reads_as_held_and_says_so() {
     assert!(out.status.success(), "{}", text(&out));
     assert!(!asked, "the status asked origin");
     let bound = sluice::host_process::read_for();
-    assert!(took >= bound, "answered in {took:?}, within {bound:?}");
+    assert!(
+        took >= bound,
+        "answered in {took:?}, within {bound:?}: {}\n{}",
+        text(&out),
+        host_logs(&d)
+    );
     let err = String::from_utf8_lossy(&out.stderr);
     assert!(
         err.contains("sluice's host process last read it at"),
@@ -4644,6 +4649,37 @@ fn a_gone_repository_leaves_the_subscription() {
         "{later:?}"
     );
     assert!(later.iter().all(|(f, _)| *f != gone), "{later:?}");
+}
+
+/// resident-subscriptions, "A repository removed as a round writes in it"
+/// (the change `a-gone-repository-is-told-as-gone`): the repository's
+/// git folder goes, and a round that was in flight writes its records in
+/// a new git folder at the same path, which holds no repository. The
+/// subscription gets the document that says the repository is gone.
+#[test]
+fn a_repository_gone_as_a_round_writes_in_it_is_gone() {
+    let d = OnDisk::new("host-sub-gone-written", POLICY);
+    let b = d.another("host-sub-gone-written-a", POLICY);
+    let theirs = session_of(&d, &b, "theirs");
+    let gone = folder(b.dir());
+    let mut sub = subscribed(&d, &[b.dir(), d.repo.dir()], FollowKind::Watch);
+    documents_until(&mut sub, 30, |got| got.len() >= 2);
+    queued_live(&d, &theirs);
+    let removed = support::Scratch::new("host-sub-gone-written-removed");
+    std::fs::rename(b.dir().join(".git"), removed.path().join("git")).unwrap();
+    // The timing a loaded host gives: the round writes its records after
+    // the git folder went.
+    std::fs::create_dir_all(b.dir().join(".git/sluice/main")).unwrap();
+    std::fs::write(b.dir().join(".git/sluice/main/branch.lock"), "").unwrap();
+    let said = documents_until(&mut sub, 30, |got| {
+        got.iter().any(|(f, doc)| *f == gone && doc["gone"] == true)
+    });
+    assert!(
+        said.iter()
+            .any(|(f, doc)| *f == gone && doc["gone"] == true),
+        "no gone document: {said:?}\n{}",
+        host_logs(&d)
+    );
 }
 
 /// resident-subscriptions, "sluice run prints the passes of its

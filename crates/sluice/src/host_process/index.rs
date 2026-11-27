@@ -128,13 +128,13 @@ impl Index {
 }
 
 /// Whether the repository at the common git directory `repository` still
-/// has sluice: its directory is there, and its records list a branch, or a
+/// has sluice: it is not gone, and its records list a branch, or a
 /// revision the host holds, its own branches' or a remote's tracking
 /// branches' as last fetched, has the policy (129). Nothing is fetched and
 /// no remote asked: a remote's branches are listed as last fetched (129 as
 /// amended 2026-11-19).
 pub fn has_sluice(repository: &Path) -> Result<bool> {
-    if !repository.is_dir() {
+    if crate::profiles::repository_gone(repository) {
         return Ok(false);
     }
     let bound = Bound::open_with(
@@ -158,8 +158,8 @@ pub fn has_sluice(repository: &Path) -> Result<bool> {
 /// ask fetched it (129 as amended 2026-11-19); then its branches' records
 /// and its previews, with no other process started. Records in the host's
 /// own files cost no process at all, and a remote that refuses leaves its
-/// branches read as last fetched. A repository whose directory is gone has
-/// none. The ask is a round's, which passes a spent allowance by rather
+/// branches read as last fetched. A repository that is gone has none, and
+/// the look says it is gone. The ask is a round's, which passes a spent allowance by rather
 /// than waiting it out (rule core.29).
 pub fn in_play(
     repository: &Path,
@@ -167,8 +167,11 @@ pub fn in_play(
     tokens: &crate::profiles::Tokens,
     asks: bool,
 ) -> Result<super::tasks::Looked> {
-    if !repository.is_dir() {
-        return Ok(super::tasks::Looked::default());
+    if crate::profiles::repository_gone(repository) {
+        return Ok(super::tasks::Looked {
+            gone: true,
+            ..Default::default()
+        });
     }
     let bound = Bound::open_holding(
         repository,
@@ -219,6 +222,7 @@ pub fn in_play(
         held: super::pass::held(&s),
         refused,
         stale: bound.state.stale_all(),
+        gone: false,
     })
 }
 
