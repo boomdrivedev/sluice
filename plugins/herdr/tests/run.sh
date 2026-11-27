@@ -312,12 +312,15 @@ needs_children() {
 }
 
 # The processes whose parent is pid $1, one a line: its pid, then its
-# command line.
+# whole command line. ps cuts a line to COLUMNS where it is set, as a
+# terminal's bash sets it, and -ww keeps it whole; procps's pgrep names a
+# process by its name alone unless -a, which on macOS also lets pgrep's
+# ancestors match.
 children_of() {
   if [ "$lists" = ps ]; then
-    ps -A -o pid=,ppid=,args= | awk -v p="$1" '$2 == p { c = $1; sub(/^ *[0-9]+ +[0-9]+ +/, ""); print c, $0 }'
+    ps -ww -A -o pid=,ppid=,args= | awk -v p="$1" '$2 == p { c = $1; sub(/^ *[0-9]+ +[0-9]+ +/, ""); print c, $0 }'
   else
-    pgrep -lf -P "$1"
+    pgrep -alf -P "$1"
   fi
 }
 

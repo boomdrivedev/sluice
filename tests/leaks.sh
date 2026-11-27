@@ -86,7 +86,9 @@ if [ -z "$pids" ]; then
 fi
 echo "leaks.sh: the test left these processes running; they are ended now:" >&2
 listed=" $(printf '%s\n' "$pids" | paste -s -d ' ' -) "
-pgrep -lf . 2>/dev/null | awk -v pids="$listed" \
+# Each by its whole command line: procps's pgrep gives the name alone
+# unless -a, which on macOS also lets pgrep's ancestors match.
+pgrep -alf . 2>/dev/null | awk -v pids="$listed" \
   'index(pids, " " $1 " ") { print "  pid " $0 }' >&2
 for pid in $pids; do
   kill -TERM "$pid" 2>/dev/null || true

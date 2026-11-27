@@ -2365,7 +2365,12 @@ fn a_stopped_sluice_host_ends_a_sessions_checks() {
 /// resident-workers, "A worktree's release" (the change
 /// `sluice-host-runs-a-sessions-checks`, design D1): a release command
 /// that writes a file runs as a worker of `sluice host`, the file is
-/// written, and the place is released.
+/// written, and the place is released. The release is a list, so
+/// `sluice host` starts the script itself: the script's parent is read
+/// after the release ended, and only a parent that still runs has a
+/// parent to read. A string runs under `/bin/sh -c`, and dash, the
+/// `/bin/sh` of Debian and Ubuntu, starts the script as its own child,
+/// which ends with the release.
 #[test]
 fn a_worktrees_release_runs_in_sluice_host() {
     let s = Setup::new("exec-release-in-host");
@@ -2375,7 +2380,7 @@ fn a_worktrees_release_runs_in_sluice_host() {
     std::fs::write(&release, format!("echo $PPID > '{}'\n", parent.display())).unwrap();
     s.policy(&POLICY.replace(
         "[tests]\n",
-        &format!("[tests]\nrelease = \"sh {}\"\n", release.display()),
+        &format!("[tests]\nrelease = [\"sh\", \"{}\"]\n", release.display()),
     ));
     let out = s.sluice(&["exec", "bolt/x", "--", "true"]);
     assert!(out.status.success(), "{}", text(&out));
