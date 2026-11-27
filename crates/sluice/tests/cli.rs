@@ -6809,8 +6809,8 @@ fn status_and_overview_show_a_hold_while_it_lasts() {
             // D13 (51; record 0102): #1's landing, which nobody confirmed.
             "OWED".to_string(),
             "  unit/a · never confirmed".to_string(),
-            "    1:landed #1  owed until 2026-10-18T09:00:19Z · handed over by notice at \
-             2026-10-11T09:00:23Z, wait at 2026-10-11T09:00:28Z"
+            "    1:landed #1  owed until 2026-10-18T09:00:20Z · handed over by notice at \
+             2026-10-11T09:00:24Z, wait at 2026-10-11T09:00:30Z"
                 .to_string(),
             "confirm one with: sluice confirm <key>, in its worktree, or sluice confirm <key> \
              --as operator"

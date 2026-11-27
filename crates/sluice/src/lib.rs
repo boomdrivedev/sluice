@@ -4207,7 +4207,15 @@ pub fn follow_waiting<'a>(
         tell_released(&waiter.came(), &own.branch, ask.json, out)?;
     }
     let mut said_before = said_before;
-    let mut stepped = wait_ask(process, here, &folder, &ask, Some(&mut waiter), out)?;
+    let mut stepped = wait_ask(
+        process,
+        here,
+        &folder,
+        &mut ask,
+        clock,
+        Some(&mut waiter),
+        out,
+    )?;
     loop {
         stepped = match stepped {
             Stepped::Ended(code) => return Ok(code),
@@ -4271,11 +4279,14 @@ fn wait_ask(
     process: &dyn host_process::HostProcess,
     here: Option<&host_process::Here<'_, '_>>,
     folder: &std::path::Path,
-    ask: &host_process::protocol::WaitAsk,
+    ask: &mut host_process::protocol::WaitAsk,
+    clock: &dyn Clock,
     waiter: Option<&mut subscriber::Waiter<'_>>,
     out: &mut dyn Write,
 ) -> Result<Stepped> {
     use host_process::protocol::WaitStep;
+    // Design D14: each step at the wait's own time.
+    ask.at = clock.now();
     Ok(match process.wait(here, folder, ask)? {
         WaitStep::Ended(o) => {
             if let (Some(waiter), Some(pass)) = (waiter, o.pass) {
@@ -4350,7 +4361,7 @@ fn follow_pull(
     let mut said_hold = None;
     let stop = |code: i32, ask: &mut host_process::protocol::WaitAsk, out: &mut dyn Write| {
         ask.stopped = Some(code);
-        wait_ask(process, here, folder, ask, None, out)
+        wait_ask(process, here, folder, ask, clock, None, out)
     };
     if INTERRUPTED.load(Ordering::SeqCst) {
         return stop(STOPPED, ask, out);
@@ -4374,7 +4385,7 @@ fn follow_pull(
     if INTERRUPTED.load(Ordering::SeqCst) || !pause.pause() {
         return stop(STOPPED, ask, out);
     }
-    wait_ask(process, here, folder, ask, Some(waiter), out)
+    wait_ask(process, here, folder, ask, clock, Some(waiter), out)
 }
 
 /// Follow the submission a step named, `followed`'s second, for its own,
@@ -4481,7 +4492,7 @@ fn follow_submission(
                 }
                 _ if lacked.as_ref() != Some(&doc) => {
                     lacked = Some(doc);
-                    let stepped = wait_ask(process, here, folder, ask, Some(waiter), out)?;
+                    let stepped = wait_ask(process, here, folder, ask, clock, Some(waiter), out)?;
                     if let Some(other) = next(stepped, &mut own, &mut follows, &mut said, ask) {
                         return Ok(other);
                     }
@@ -4521,7 +4532,7 @@ fn follow_submission(
          -> Result<Stepped> {
             if ask.group.is_some() {
                 ask.stopped = Some(code);
-                return wait_ask(process, here, folder, ask, None, out);
+                return wait_ask(process, here, folder, ask, clock, None, out);
             }
             if json {
                 let doc = with_copy(serde_json::to_value(&own)?, ask.copy.as_ref())?;
@@ -4561,7 +4572,7 @@ fn follow_submission(
         if let Some(words) = failed {
             // 122: the branch may have taken the work it follows, and what
             // failed came after: a step says.
-            let stepped = wait_ask(process, here, folder, ask, Some(waiter), out)?;
+            let stepped = wait_ask(process, here, folder, ask, clock, Some(waiter), out)?;
             if let Some(other) = next(stepped, &mut own, &mut follows, &mut said, ask) {
                 return Ok(other);
             }

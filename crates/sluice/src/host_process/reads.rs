@@ -473,6 +473,9 @@ pub(crate) async fn wait(
             let left = (d - chrono::Utc::now()).to_std().unwrap_or_default();
             std::time::Instant::now() + left
         });
+    // Design D14: where passes are taken only when asked, the step is at
+    // the wait's own time, as its passes are.
+    let at = super::asked_only().then_some(ask.at);
     let stepped = tokio::task::spawn_blocking(move || {
         let (ran, stderr) = crate::telemetry::capturing(|| {
             let within = Some(folder.clone());
@@ -486,8 +489,16 @@ pub(crate) async fn wait(
                     // 136: the requests the waits on the repository follow,
                     // as the last step left what GitHub said of them.
                     bound.pulls.remember(held.followed(&repository));
-                    let clock = super::clock::TokioClock::new();
-                    let s = sluice_core::Sluice::new(bound.seams(), &clock)
+                    let real = super::clock::TokioClock::new();
+                    let asked = crate::Skipped::new(std::time::Duration::ZERO);
+                    let clock: &dyn sluice_core::Clock = match at {
+                        Some(at) => {
+                            asked.set(at);
+                            &asked
+                        }
+                        None => &real,
+                    };
+                    let s = sluice_core::Sluice::new(bound.seams(), clock)
                         .as_peer(crate::exec::Host::peer(&bound))
                         .holding();
                     let mut out = Vec::new();
@@ -498,9 +509,9 @@ pub(crate) async fn wait(
                         .as_ref()
                         .and_then(|p| p.told)
                         .or(ask.pulls.as_ref().and_then(|p| p.told));
-                    let ask = past_its_time(ask, chrono::Utc::now());
+                    let ask = past_its_time(ask, clock.now());
                     let (stepped, told) = crate::caller::telling(told, || {
-                        crate::wait_step(&s, &bound, &*bound.pulls, &clock, &ask, &mut out)
+                        crate::wait_step(&s, &bound, &*bound.pulls, clock, &ask, &mut out)
                     });
                     held.keep_followed(&repository, bound.pulls.remembered());
                     let stepped = match stepped? {
