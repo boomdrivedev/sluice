@@ -161,22 +161,6 @@ impl OnGitHub {
         OnGitHub::kept_as(name, policy, files, true)
     }
 
-    /// `main` on GitHub taking pull requests under a policy that names no
-    /// signers, so its records are each host's own and main is refused
-    /// alone (137; design D22).
-    fn unkept(name: &str, extra: &str) -> OnGitHub {
-        OnGitHub::kept_as(
-            name,
-            &format!(
-                "[tests]\nrunner = \"command\"\ncommand = \"sh check.sh\"\n\n\
-                 [branches.main]\nremote = \"origin\"\ntimeout = \"1m\"\n\n\
-                 [branches.main.pull_requests]\n{extra}"
-            ),
-            &[("check.sh", CHECK)],
-            false,
-        )
-    }
-
     /// [`OnGitHub::with`], the policy naming signers where `signers` says.
     fn kept_as(name: &str, policy: &str, files: &[(&str, &str)], signers: bool) -> OnGitHub {
         use ssh_key::{Algorithm, PrivateKey};
@@ -521,35 +505,6 @@ fn text(out: &Output) -> String {
 // pull-request-intake
 // ---------------------------------------------------------------------------
 
-/// C.7: a policy with `pull_requests` and no `remote` is refused, naming
-/// the branch and `remote`.
-#[test]
-fn pull_requests_need_a_remote() {
-    let repo = Repo::new("pr-no-remote");
-    repo.write(
-        ".config/sluice.toml",
-        "[tests]\nrunner = \"command\"\ncommand = \"true\"\n\n\
-         [branches.main]\n[branches.main.pull_requests]\nreviews = 1\n",
-    );
-    repo.git(&["add", "-A"]);
-    repo.git(&["commit", "-q", "-m", "policy"]);
-    let config = Scratch::new("pr-no-remote-config");
-    let out = support::isolated(&mut Command::new(env!("CARGO_BIN_EXE_sluice")))
-        .current_dir(repo.dir())
-        .args(["step", "main"])
-        .env("XDG_CONFIG_HOME", config.path())
-        .env("XDG_STATE_HOME", config.path())
-        .env_remove("GIT_DIR")
-        .stdin(Stdio::null())
-        .output()
-        .unwrap();
-    let said = text(&out);
-    assert!(
-        said.contains("main") && said.contains("needs remote"),
-        "{said}"
-    );
-}
-
 /// Another queue of `main` lands `head`: a merge commit onto main on
 /// GitHub, as a second copy of the repository on the host lands it, which
 /// GitHub reads as the pull request merged. Returns the landing.
@@ -645,45 +600,6 @@ fn a_standing_intake_failure_is_said_once_for_each_cause_and_host() {
     assert_eq!(logged(&g), 1);
 }
 
-/// 133 (design D27): while this host's passes cannot take in one of
-/// main's pull requests, `sluice status main` says so above the queue, and
-/// `--json` carries it as `intake_refused`; once a pass asks GitHub and
-/// meets nothing, it says nothing of it.
-#[test]
-fn status_shows_this_hosts_standing_intake_refusal() {
-    let g = OnGitHub::new("pr-intake-status", "");
-    g.named("a", "");
-    let (n, _) = g.by_hand("unit/headless", &[("h.txt", Some("h\n"))], false);
-    g.no_head(n);
-    g.on_main();
-    for _ in 0..2 {
-        g.discovery_passes();
-        let out = g.skipping(g.repo.dir(), &["run", "--rounds", "1"]);
-        assert!(out.status.success(), "{}", text(&out));
-    }
-    let words = g.status_words();
-    let line = "this host could not take in main's pull requests since ";
-    assert!(words.contains(line), "{words}");
-    assert!(
-        words.contains(&format!(": pull/{n}: pull/{n} has no head")),
-        "{words}"
-    );
-    let doc = g.status_document();
-    let refused = &doc["intake_refused"];
-    assert_eq!(refused["remote"], "origin", "{doc}");
-    assert_eq!(refused["asked"], format!("pull/{n}").as_str(), "{doc}");
-    assert!(refused["since"].is_string(), "{doc}");
-    assert!(refused["rounds"].as_u64().is_some_and(|r| r >= 2), "{doc}");
-    // Closed, it is asked for no more, and the next pass meets nothing.
-    g.gh.forge.close(n).unwrap();
-    g.discovery_passes();
-    let out = g.skipping(g.repo.dir(), &["run", "--rounds", "1"]);
-    assert!(out.status.success(), "{}", text(&out));
-    let doc = g.status_document();
-    assert!(doc.get("intake_refused").is_none(), "{doc}");
-    assert!(!g.status_words().contains(line));
-}
-
 /// 128 (design D26): GitHub serves no head for a pull request; `sluice
 /// step` says on stderr what its intake met, `sluice: warning: taking in
 /// main's pull requests: pull/<n>: ...`, every step, its own intake
@@ -703,45 +619,6 @@ fn a_step_prints_what_its_intake_met() {
         assert_eq!(said.len(), 1, "{err}");
         assert!(said[0].contains(&format!("pull/{n} has no head")), "{err}");
     }
-}
-
-/// A failure that is no one pull request's: GitHub answers an error for the
-/// list of `main`'s pull requests on every try the retry policy makes (134).
-/// Each round warns that taking in `main`'s pull requests failed, after how
-/// many tries, nothing is submitted or withdrawn, and the submission
-/// already queued is tested and lands.
-#[test]
-fn a_failed_list_ends_intake_and_the_queue_still_lands() {
-    let g = OnGitHub::new("pr-no-list", "");
-    let (n, head) = g.by_hand("unit/listed", &[("slow", Some("x\n"))], false);
-    g.step();
-    assert_eq!(g.of(n).len(), 1, "{:?}", g.subs());
-    g.gh.fail_pulls(true);
-    let until = Instant::now() + Duration::from_secs(60);
-    loop {
-        let said = g.round();
-        assert!(
-            said.contains(
-                "sluice: warning: taking in main's pull requests: main's pull requests: tried "
-            ) && said.contains(": GET /repos/o/r/pulls?state=open")
-                && said.contains("500 Server Error")
-                && !said.contains(&format!("pull/{n}: ")),
-            "{said}"
-        );
-        let subs = g.of(n);
-        assert_eq!(subs.len(), 1, "{subs:?}");
-        assert_ne!(subs[0]["state"], "withdrawn", "{subs:?}");
-        if subs[0]["state"] == "landed" {
-            break;
-        }
-        assert!(Instant::now() < until, "never landed: {subs:?}");
-        std::thread::sleep(Duration::from_millis(50));
-    }
-    let landed = g.main_on_github();
-    assert_eq!(
-        github::rev(g.bare.path(), &format!("{landed}^2")).unwrap(),
-        head
-    );
 }
 
 /// forge-identity, "The host process gets a repository's token once for
@@ -1876,43 +1753,6 @@ impl Other<'_> {
     }
 }
 
-/// pull-request-intake, "Records each host keeps" (137, 56, S64; design
-/// D22): main takes pull requests and the policy names no signers, so main
-/// is refused alone, in the refusal's words: a submit to it exits 2 with
-/// nothing pushed and nothing opened, a step and a status say it, and
-/// GitHub is asked nothing of main's pull requests. Main has no records
-/// here, so the overview lists nothing of it.
-#[test]
-fn pull_requests_need_records_on_the_remote() {
-    let g = OnGitHub::unkept("intake-unkept", "");
-    let words = "main takes pull requests, which only the host that keeps it on origin takes \
-                 in, and its state is each host's own: name [signers] in .config/sluice.toml so \
-                 its state is kept on origin, as `sluice init actions` names a pool's signer (137)";
-    g.by_hand("unit/each", &[("e.txt", Some("e\n"))], false);
-    let w = g.session("refused", &[("r.txt", "r\n")]);
-    let out = g
-        .command(env!("CARGO_BIN_EXE_sluice"), &w)
-        .args(["submit", "main", "--no-wait"])
-        .output()
-        .unwrap();
-    assert_eq!(out.status.code(), Some(sluice::CONFLICT), "{}", text(&out));
-    assert!(text(&out).contains(words), "{}", text(&out));
-    assert!(
-        g.gh.forge.by_ref("unit/refused").unwrap().is_none(),
-        "nothing opened"
-    );
-    assert_eq!(
-        github::rev(g.bare.path(), "refs/heads/unit/refused"),
-        None,
-        "nothing pushed"
-    );
-    let said = g.sluice(&["step", "main"]);
-    assert!(text(&said).contains(words), "{}", text(&said));
-    let status = g.sluice(&["status", "main"]);
-    assert!(text(&status).contains(words), "{}", text(&status));
-    assert_eq!(g.lists(), 0, "GitHub was asked nothing of main's list");
-}
-
 /// request-intake-host, "The host that keeps it takes them in": main's
 /// records name no host, and host A's pass keeps main and takes its pull
 /// requests in (137; design D21).
@@ -2148,36 +1988,6 @@ fn a_host_that_stopped_passes_main_on_after_its_lease() {
     assert_eq!(b.of(m).len(), 1, "B takes main's pull requests in: {said}");
 }
 
-/// pull-request-intake, "A refused main" (137, 56, S64; design D22): main
-/// is refused for taking pull requests on records each host keeps, and a
-/// worktree's submission to `bolt/x`, which takes none, lands as before.
-#[test]
-fn a_refused_main_leaves_a_bolt_landing() {
-    let g = OnGitHub::unkept("intake-bolt", BOLTS);
-    g.repo.git(&["branch", "bolt/x", "main"]);
-    g.repo
-        .git(&["push", "-q", "origin", "bolt/x:refs/heads/bolt/x"]);
-    let w = g.session("bolted", &[("b.txt", "b\n")]);
-    let out = g
-        .command(env!("CARGO_BIN_EXE_sluice"), &w)
-        .args(["submit", "bolt/x", "--no-wait", "--json"])
-        .output()
-        .unwrap();
-    assert!(out.status.success(), "{}", text(&out));
-    let until = Instant::now() + Duration::from_secs(60);
-    loop {
-        let out = g.sluice(&["step", "bolt/x"]);
-        assert!(out.status.success(), "{}", text(&out));
-        let out = g.sluice(&["status", "bolt/x", "--json", "--all"]);
-        let v: Value = serde_json::from_slice(&out.stdout).unwrap();
-        if v["submissions"][0]["state"] == "landed" {
-            break;
-        }
-        assert!(Instant::now() < until, "never landed: {v}");
-        std::thread::sleep(Duration::from_millis(50));
-    }
-}
-
 impl OnGitHub {
     /// The host main's records on the remote name as keeping it (72, 137;
     /// design D25); `None` where none does.
@@ -2330,13 +2140,6 @@ impl OnGitHub {
         assert!(out.status.success(), "{}", text(&out));
         serde_json::from_slice(&out.stdout).unwrap_or_else(|e| panic!("{e}: {}", text(&out)))
     }
-
-    /// `sluice status main` on this host, which succeeds: what it says.
-    fn status_words(&self) -> String {
-        let out = self.sluice(&["status", "main"]);
-        assert!(out.status.success(), "{}", text(&out));
-        text(&out)
-    }
 }
 
 /// The one `pull_requests` row of a status document, pull request `n`'s.
@@ -2353,70 +2156,6 @@ fn row_of(doc: &Value, n: u64) -> &Value {
 // overview: a branch lists the pull requests another host takes in that
 // this host follows (137, design D5)
 // ---------------------------------------------------------------------------
-
-/// `main`'s part of an overview document.
-fn main_of(doc: &Value) -> &Value {
-    doc["branches"]
-        .as_array()
-        .and_then(|b| b.iter().find(|b| b["branch"] == "main"))
-        .unwrap_or_else(|| panic!("{doc}"))
-}
-
-/// overview, "A one-shot overview": host B's `sluice run` holds main's
-/// mark and holds host A's pull request as submission 1406, and `sluice
-/// overview --json` on A, which follows it, gives main `taken_in_by`
-/// naming B and a row for the request whose queue names 1406, read from
-/// GitHub as status reads it, with its `read_at`; its words list the same
-/// row under main.
-#[test]
-fn a_one_shot_overview_lists_requests_taken_in_elsewhere() {
-    let g = OnGitHub::new("overview-there", "");
-    let (_w, pull) = g.opened_here_held_by_b("listed");
-    let n = pull.number;
-    g.held_there(n, &pull.head, 1406);
-    let out = g.sluice(&["overview", "--json"]);
-    assert!(out.status.success(), "{}", text(&out));
-    let doc: Value =
-        serde_json::from_slice(&out.stdout).unwrap_or_else(|e| panic!("{e}: {}", text(&out)));
-    let main = main_of(&doc);
-    assert_eq!(
-        main["taken_in_by"],
-        serde_json::json!({ "host": "b" }),
-        "{doc}"
-    );
-    let row = row_of(main, n);
-    assert_eq!(
-        (&row["queue"]["host"], &row["queue"]["submission"]),
-        (&"b".into(), &1406.into()),
-        "{doc}"
-    );
-    assert_eq!(
-        (&row["state"], &row["from"], &row["head"]),
-        (
-            &"queued: next on main".into(),
-            &"unit/listed".into(),
-            &pull.head.as_str().into()
-        ),
-        "{doc}"
-    );
-    assert!(row["read_at"].is_string(), "{doc}");
-    let out = g.sluice(&["overview"]);
-    assert!(out.status.success(), "{}", text(&out));
-    // Under main's line, `main at …` or `main · no records` where this
-    // host has no records of it.
-    let said = String::from_utf8_lossy(&out.stdout).to_string();
-    let under: Vec<&str> = said
-        .lines()
-        .skip_while(|l| !l.starts_with("main "))
-        .collect();
-    let rows = format!(
-        "\n  pull requests b takes in:\n    \
-         #{n} {} · submission 1406 there · queued: next on main",
-        pull.title
-    );
-    assert!(under.join("\n").contains(&rows), "{said}");
-    assert!(g.of(n).is_empty(), "A took nothing in");
-}
 
 /// overview, "A watch reads none of them itself": `sluice overview --json
 /// --watch` is host A's reader while A follows its pull request, which
