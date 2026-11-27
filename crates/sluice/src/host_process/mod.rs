@@ -1105,6 +1105,12 @@ fn run_holding(runtime: &tokio::runtime::Runtime, holder: Holder) -> Result<i32>
                 swept.kept
             ));
         }
+        if !swept.reaped.is_empty() {
+            log(&format!(
+                "sluice host: it reaped the children {:?} of its last image, which had ended",
+                swept.reaped
+            ));
+        }
         // 135 (design D4): the repositories it holds, found again; a gone
         // one, or one with no sluice, leaves the index.
         let index = hosting.index();

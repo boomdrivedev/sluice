@@ -161,6 +161,9 @@ pub struct Runs {
     root: PathBuf,
     /// The `sluice` executable that supervises.
     program: PathBuf,
+    /// How long a supervisor has to take its run's lock once it is
+    /// started.
+    start_within: Duration,
 }
 
 impl Runs {
@@ -168,6 +171,9 @@ impl Runs {
         Runs {
             root: common.join("sluice").join(".runs"),
             program,
+            // Long, because a loaded host may hold a program for many
+            // seconds before it runs a line of it.
+            start_within: Duration::from_secs(60),
         }
     }
 
@@ -327,22 +333,41 @@ impl Runs {
         let mut child = cmd
             .spawn()
             .with_context(|| format!("starting {} supervise", self.program.display()))?;
+        let began = self.began(name, &dir, &mut child);
+        // Every supervisor is waited on, one that never started or whose
+        // start could not be read among them, so none is left a zombie
+        // (`nothing-detached@f807c7f5fcea`). A worker is waited on by its
+        // owner, which a hand-over in place keeps. Any other supervisor is
+        // reaped by this thread.
+        match owner {
+            Some(_) => crate::workers::wait(child),
+            None => {
+                std::thread::spawn(move || {
+                    let _ = child.wait();
+                });
+            }
+        }
+        began
+    }
+
+    /// Wait until the supervisor `child` of the run in `dir` holds it, or
+    /// has ended it. One that does not start within its time is killed.
+    fn began(&self, name: &str, dir: &Path, child: &mut std::process::Child) -> Result<()> {
         // The run is under way once its supervisor holds the lock, so no
         // later read takes a supervisor still starting for a lost one. One
         // that fails exits and is caught at once; the deadline is for one
-        // that never runs, and is long because a loaded host may hold a
-        // program for many seconds before it runs a line of it.
-        let until = Instant::now() + Duration::from_secs(60);
+        // that never runs.
+        let until = Instant::now() + self.start_within;
         loop {
-            if self.supervised(&dir)? || read_ended(&dir)?.is_some() {
-                break;
+            if self.supervised(dir)? || read_ended(dir)?.is_some() {
+                return Ok(());
             }
             if let Some(status) = child.try_wait()? {
                 // A run whose command could not start ends between the
                 // read above and this one: its supervisor wrote the end
                 // and exited, which is the run's end, not a lost start.
-                if read_ended(&dir)?.is_some() {
-                    break;
+                if read_ended(dir)?.is_some() {
+                    return Ok(());
                 }
                 bail!("the supervisor of {name} exited at once: {status}");
             }
@@ -352,17 +377,6 @@ impl Runs {
             }
             std::thread::sleep(Duration::from_millis(10));
         }
-        // A worker is waited on by its owner, which a hand-over in place
-        // keeps. Any other supervisor is reaped by this thread.
-        match owner {
-            Some(_) => crate::workers::wait(child),
-            None => {
-                std::thread::spawn(move || {
-                    let _ = child.wait();
-                });
-            }
-        }
-        Ok(())
     }
 
     /// A new run directory for the place `name`, for what its profile
@@ -1246,6 +1260,55 @@ mod tests {
         .unwrap();
         let ended = r#"{"exit":0,"signal":null,"timed_out":false,"started":"","ended":""}"#;
         write_atomic(&dir.join("result.json"), ended.as_bytes()).unwrap();
+    }
+
+    /// `nothing-detached@f807c7f5fcea`: a supervisor that does not start
+    /// in its time is killed and reaped, never left a zombie of the
+    /// process that started it.
+    #[test]
+    fn a_supervisor_that_never_starts_is_reaped() {
+        use std::os::unix::fs::PermissionsExt;
+        let root = scratch("never-starts");
+        let pid_file = root.join("pid");
+        let program = root.join("supervisor");
+        std::fs::write(
+            &program,
+            format!(
+                "#!/bin/sh\necho $$ > {}\nexec sleep 30\n",
+                pid_file.display()
+            ),
+        )
+        .unwrap();
+        std::fs::set_permissions(&program, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let mut runs = Runs::new(&root, program);
+        runs.start_within = std::time::Duration::from_secs(2);
+        let request = Request {
+            argv: vec!["/usr/bin/true".into()],
+            cwd: root.join("place"),
+            env: Default::default(),
+            limit: Some(10),
+            grace: 1,
+            meta: serde_json::Value::Null,
+            release: None,
+            watch: None,
+        };
+        let e = runs.start("sluice/try/main/1", &request).unwrap_err();
+        assert!(format!("{e:#}").contains("did not start"), "{e:#}");
+        let pid: i32 = std::fs::read_to_string(&pid_file)
+            .unwrap()
+            .trim()
+            .parse()
+            .unwrap();
+        let pid = nix::unistd::Pid::from_raw(pid);
+        let until = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        while nix::sys::signal::kill(pid, None) != Err(nix::errno::Errno::ESRCH) {
+            assert!(
+                std::time::Instant::now() < until,
+                "the supervisor {pid} is left a zombie"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+        std::fs::remove_dir_all(&root).unwrap();
     }
 
     fn scratch(what: &str) -> std::path::PathBuf {
