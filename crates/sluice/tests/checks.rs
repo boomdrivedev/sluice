@@ -42,6 +42,7 @@ fn caching(repo: &Repo, caches: Vec<HostCache>) -> Checks {
             expire_after: sluice_core::EXPIRE_AFTER,
             telemetry: None,
             aws: Default::default(),
+            managed: false,
         },
     )
     .with_running(repo.dir().join(".git/host-running"))
@@ -471,6 +472,7 @@ fn a_second_repositorys_start_waits_for_the_hosts_bound() {
                 expire_after: sluice_core::EXPIRE_AFTER,
                 telemetry: None,
                 aws: Default::default(),
+                managed: false,
             },
         )
         .with_running(host.path().to_path_buf())

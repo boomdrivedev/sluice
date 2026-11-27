@@ -88,6 +88,28 @@ in
       !(base.config.launchd.user.agents ? sluice)
     ) "launchd.user.agents names sluice with the daemon unset";
 
+  # daemon-service, "The daemon on" and "The daemon off" (design D1 of
+  # `a-sluice-client-starts-no-host-under-a-service-manager`): with the
+  # daemon on, the file says `[daemon] managed = true`, which the host may
+  # set false; with it off, the file holds no `[daemon]`.
+  "The daemon says it is managed" =
+    let
+      textOf = evaluated: evaluated.config.services.sluice.text;
+      own = t.darwinSystem {
+        services.sluice = {
+          daemon.enable = true;
+          settings.daemon.managed = false;
+        };
+      };
+    in
+    t.expect (
+      textOf daemon == builtins.readFile ./files/managed.toml
+    ) "the file with the daemon on is not nix/tests/files/managed.toml: ${textOf daemon}"
+    ++ t.expect (
+      !lib.hasInfix "[daemon]" (textOf base)
+    ) "the file with the daemon off holds [daemon]: ${textOf base}"
+    ++ t.expect (lib.hasInfix "[daemon]\nmanaged = false\n" (textOf own)) "the host's own managed = false is not kept: ${textOf own}";
+
   # daemon-service, "The agent" (137; record 0093 as amended 2026-11-18;
   # design D9, D11 of `sluice-runs-as-a-daemon`).
   "The daemon on nix-darwin" =

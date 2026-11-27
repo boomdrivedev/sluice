@@ -85,6 +85,28 @@ in
       (lingerOf base).alice == (lingerOf off).alice
     ) "alice's linger changes with the module, the daemon unset";
 
+  # daemon-service, "The daemon on" and "The daemon off" (design D1 of
+  # `a-sluice-client-starts-no-host-under-a-service-manager`): with the
+  # daemon on, the file says `[daemon] managed = true`, which the host may
+  # set false; with it off, the file holds no `[daemon]`.
+  "The daemon says it is managed" =
+    let
+      textOf = evaluated: evaluated.config.services.sluice.text;
+      own = t.nixosSystem {
+        services.sluice = {
+          daemon.enable = true;
+          settings.daemon.managed = false;
+        };
+      };
+    in
+    t.expect (
+      textOf daemon == builtins.readFile ./files/managed.toml
+    ) "the file with the daemon on is not nix/tests/files/managed.toml: ${textOf daemon}"
+    ++ t.expect (
+      !lib.hasInfix "[daemon]" (textOf base)
+    ) "the file with the daemon off holds [daemon]: ${textOf base}"
+    ++ t.expect (lib.hasInfix "[daemon]\nmanaged = false\n" (textOf own)) "the host's own managed = false is not kept: ${textOf own}";
+
   # daemon-service, "The unit", and the user's activation keeping it (137;
   # record 0093 as amended 2026-11-18; design D10, D11 of
   # `sluice-runs-as-a-daemon`).
@@ -115,7 +137,7 @@ in
     ) "the unit is wanted by ${toString unit.wantedBy}"
     ++ t.expect daemon.config.users.users.alice.linger "alice does not linger"
     ++ t.expect (lib.hasInfix (plain keeps) (activationOf daemon)) "alice's activation runs no `${plain keeps}`: ${activationOf daemon}"
-    ++ links daemon (lib.removeSuffix "; fi" (linkOf daemon (builtins.readFile ./files/empty.toml)));
+    ++ links daemon (lib.removeSuffix "; fi" (linkOf daemon (builtins.readFile ./files/managed.toml)));
 
   # daemon-service, "A new package" (D5 of `sluice-host-owns-its-workers`):
   # the unit names no package, so a new package changes no unit; the

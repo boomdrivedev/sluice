@@ -38,6 +38,12 @@ chrono = { version = "0.4", default-features = false, features = [
   "std",
 ] }
 clap = { version = "4", features = ["derive", "env"] }
+# A command starts sluice's host process in a session of its own through
+# process-wrap (`each-worker-starts-through-process-wrap@025fae162990`).
+process-wrap = { version = "11", default-features = false, features = [
+  "std",
+  "process-session",
+] }
 nix = { version = "0.31", default-features = false, features = [
   "signal",
   "process",

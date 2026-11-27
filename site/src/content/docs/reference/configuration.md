@@ -654,6 +654,9 @@ alive = "2m"   # how often this host shows it is alive
 [deliveries]
 expire_after = "168h"  # default: 168h; how long an outcome is owed before it shows expired
 
+[daemon]
+managed = true         # default: false; the service manager keeps sluice daemon running
+
 [[caches]]                       # a cache every run on the host shares
 dir = "~/.cache/sccache"
 
@@ -674,6 +677,7 @@ collector = "http://localhost:4318"  # a receiver on the host; needed where send
 | [`[aws]`](#aws) | The AWS profile sluice reaches a CodeBuild pool as. | It may run the queue of a branch whose runs go to a CodeBuild pool. |
 | [`[peers]`](#peers) | How long a quiet host keeps a branch, how often this host shows it is alive, and its name among the hosts. | It shares a branch's remote with other hosts. |
 | [`[deliveries]`](#deliveries) | How long an outcome is owed to its worktree before it shows as expired. | Its agents confirm their outcomes sooner or later than in a week. |
+| [`[daemon]`](#daemon) | Whether the host's service manager keeps `sluice daemon` running, so no command starts sluice's host process. | A service manager keeps `sluice daemon` running for the user. |
 | [`[[caches]]`](#caches) | The caches every run on the host shares. | Its builds share a cache, a compile server's or the task runner's. |
 | [`[telemetry]`](#telemetry) | Whether sluice sends its telemetry, where, as what, which signals and how much of a failure. | It sends sluice's telemetry. |
 
@@ -955,6 +959,25 @@ outcome.
 | key | meaning |
 |---|---|
 | `expire_after` | A duration such as `"168h"`, `"72h"` or `"90m"`, at least a second. The default is `"168h"`, a week. A value that is no such duration is refused, naming `[deliveries] expire_after`. |
+
+### `[daemon]`
+
+Whether the host's service manager, launchd or systemd, keeps
+[`sluice daemon`](/sluice/reference/commands/#sluice-daemon) running
+for the user who runs sluice. Where it does, no sluice command starts
+the host process of its own. A command that finds no host process
+answering fails at once, and says that the service manager runs
+`sluice daemon`, naming the socket, this setting and the host
+process's log. Where it does not, the first command that needs the
+host process starts it.
+
+sluice's own nix-darwin and NixOS modules set `managed = true` where
+the host sets `services.sluice.daemon.enable`. A host that keeps
+`sluice daemon` running under a service of its own sets it here.
+
+| key | meaning |
+|---|---|
+| `managed` | `true` where the host's service manager keeps `sluice daemon` running. The default is `false`. A value that is no boolean is refused, naming `[daemon] managed`. |
 
 ### `[telemetry]`
 

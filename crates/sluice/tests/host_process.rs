@@ -240,6 +240,94 @@ fn a_host_process_that_cannot_start_names_its_log() {
     assert!(err.contains(&log.display().to_string()), "{err}");
 }
 
+/// `the-service-manager-starts-each-resident@d0e66e466414` (design D2 of
+/// `a-sluice-client-starts-no-host-under-a-service-manager`): where the
+/// host's settings say the service manager keeps `sluice daemon` and no
+/// host process answers, a command starts none and fails at once, naming
+/// the socket, the setting and the log; a command of the CLI the same.
+#[test]
+fn a_command_starts_no_host_process_where_the_service_manager_keeps_the_daemon() {
+    let d = OnDisk::new("host-managed", POLICY);
+    let path = settings(&d, "[runs]\nmax = 2\n\n[daemon]\nmanaged = true\n");
+    let client = d.client(d.repo.dir());
+    let err = match client.reach() {
+        Ok(c) => panic!("a host process answers: {}", c.named.pid),
+        Err(e) => format!("{e:#}"),
+    };
+    for said in [
+        client.paths().socket.display().to_string(),
+        "service manager runs sluice daemon".to_string(),
+        format!("[daemon] managed in {}", path.display()),
+        client.paths().log().display().to_string(),
+    ] {
+        assert!(err.contains(&said), "{said:?} not in {err}");
+    }
+    assert!(
+        client.answering().unwrap().is_none(),
+        "a host process answers"
+    );
+    let out = d
+        .command(d.repo.dir())
+        .args(["status", "main"])
+        .output()
+        .unwrap();
+    assert!(!out.status.success(), "{}", text(&out));
+    assert!(
+        text(&out).contains("service manager runs sluice daemon"),
+        "{}",
+        text(&out)
+    );
+    assert!(
+        client.answering().unwrap().is_none(),
+        "a host process answers"
+    );
+}
+
+/// `the-service-manager-starts-each-resident@d0e66e466414` (design D2 of
+/// `a-sluice-client-starts-no-host-under-a-service-manager`): where the
+/// service manager keeps the daemon, a host process that answers is
+/// reached as before.
+#[test]
+fn a_command_reaches_a_managed_daemon_that_answers() {
+    let d = OnDisk::new("host-managed-answers", POLICY);
+    let client = d.client(d.repo.dir());
+    let repository = d.repository(d.repo.dir());
+    let follow = client
+        .subscribe(vec![sluice::host_process::protocol::Added {
+            folder: std::path::PathBuf::from(&repository),
+            kind: FollowKind::Wait,
+        }])
+        .expect("the host process starts");
+    settings(&d, "[daemon]\nmanaged = true\n");
+    let reached = client.reach().expect("the host process that answers");
+    assert_eq!(reached.named.pid, follow.named.pid);
+}
+
+/// `each-worker-starts-through-process-wrap@025fae162990` (design D4 of
+/// `a-sluice-client-starts-no-host-under-a-service-manager`): a command
+/// that starts the host process starts it in a session of its own, apart
+/// from the command's.
+#[test]
+fn a_started_host_process_leads_a_session_of_its_own() {
+    let d = OnDisk::new("host-session", POLICY);
+    settings(&d, "[runs]\nmax = 2\n");
+    let client = d.client(d.repo.dir());
+    let repository = d.repository(d.repo.dir());
+    let follow = client
+        .subscribe(vec![sluice::host_process::protocol::Added {
+            folder: std::path::PathBuf::from(&repository),
+            kind: FollowKind::Wait,
+        }])
+        .expect("the host process starts");
+    let pid = nix::unistd::Pid::from_raw(i32::try_from(follow.named.pid).unwrap());
+    assert_eq!(nix::unistd::getsid(Some(pid)).unwrap(), pid);
+    assert_ne!(
+        nix::unistd::getsid(None).unwrap(),
+        pid,
+        "the test's own session"
+    );
+}
+
 /// The worktree `dir` submitted to `main` without waiting, the host
 /// process it starts or reaches passing at its own tick: its number.
 fn queued_live(d: &OnDisk, dir: &Path) -> u64 {
@@ -1175,6 +1263,7 @@ fn a_profile_beside_the_host_process_holds_no_part() {
             expire_after: sluice_core::EXPIRE_AFTER,
             telemetry: None,
             aws: Default::default(),
+            managed: false,
         },
     );
     for kind in [RunKind::Queue, RunKind::Session] {

@@ -17,7 +17,10 @@
 # (record 0108, core.51). `daemon.enable`, off unless the host sets it,
 # has each platform's module keep `sluice daemon` running for the user
 # who runs sluice, which nothing needs (137; record 0093 as amended
-# 2026-11-18; design D12 of `sluice-runs-as-a-daemon`).
+# 2026-11-18; design D12 of `sluice-runs-as-a-daemon`), and sets
+# `[daemon] managed` in the file, so no command starts a host process
+# beside it (design D1 of
+# `a-sluice-client-starts-no-host-under-a-service-manager`).
 { packages }:
 {
   config,
@@ -163,6 +166,13 @@ in
           default = { };
           description = "`[peers]`: how long a quiet host keeps a branch, how often this host shows it is alive, and its name among the hosts (74).";
         };
+        daemon = mkOption {
+          type = table {
+            managed = unset types.bool "Whether the host's service manager keeps `sluice daemon` running for the user who runs sluice: no sluice command then starts a host process of its own, and a command that finds none answering fails at once, naming the service manager. Where unset, `false`, and the first command starts the host process. With `services.sluice.daemon.enable`, `true` unless the host sets it.";
+          };
+          default = { };
+          description = "`[daemon]`: whether the host's service manager keeps `sluice daemon` running, so no command starts a host process.";
+        };
         deliveries = mkOption {
           type = table {
             expire_after = unset types.str "How long an outcome this host's rounds record is owed to its submitter's work before it shows as expired, still owed, a duration such as `\"168h\"` or `\"90m\"`, at least a second. Where unset, `\"168h\"` (51).";
@@ -207,5 +217,12 @@ in
   config = lib.mkMerge [
     { services.sluice.text = render (prune cfg.settings); }
     (lib.mkIf cfg.enable { assertions = outside "forge" ++ outside "signing" ++ noToken; })
+    # With the daemon's service on, the file says that the service manager
+    # keeps `sluice daemon`, so no command starts a host process beside it
+    # (the-service-manager-starts-each-resident@d0e66e466414; design D1 of
+    # `a-sluice-client-starts-no-host-under-a-service-manager`).
+    (lib.mkIf (cfg.enable && cfg.daemon.enable) {
+      services.sluice.settings.daemon.managed = lib.mkDefault true;
+    })
   ];
 }

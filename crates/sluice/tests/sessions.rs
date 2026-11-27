@@ -260,6 +260,7 @@ fn the_check_seam_counts_the_hosts_running_checks() {
             expire_after: sluice_core::EXPIRE_AFTER,
             telemetry: None,
             aws: Default::default(),
+            managed: false,
         },
     )
     .with_sessions(dir.path().join("sessions"))

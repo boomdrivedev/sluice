@@ -518,6 +518,7 @@ impl Real {
                 expire_after: sluice_core::EXPIRE_AFTER,
                 telemetry: None,
                 aws: Default::default(),
+                managed: false,
             },
             std::rc::Rc::new(sluice::retry::Policy::command().recording()),
         )

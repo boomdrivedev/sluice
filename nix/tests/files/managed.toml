@@ -1,0 +1,4 @@
+# Written by sluice's flake module from services.sluice.settings; a change goes there.
+
+[daemon]
+managed = true
