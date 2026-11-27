@@ -11,5 +11,5 @@ Each check runs through sluice: `sluice exec main -- <command>`.
 
 ## 2. The change
 
-- [ ] 2.1 Run `openspec validate a-gone-repository-is-told-as-gone --strict`. Check: `sluice exec main -- moon run root:specs root:changes`.
-- [ ] 2.2 Archive the change with `openspec archive a-gone-repository-is-told-as-gone`.
+- [x] 2.1 Run `openspec validate a-gone-repository-is-told-as-gone --strict`. Check: `sluice exec main -- moon run root:specs root:changes`.
+- [x] 2.2 Archive the change with `openspec archive a-gone-repository-is-told-as-gone`.
