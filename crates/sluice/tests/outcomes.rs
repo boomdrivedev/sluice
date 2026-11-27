@@ -8,6 +8,7 @@
 mod support;
 
 use std::cell::Cell;
+use std::time::Duration;
 
 use clap::Parser;
 use serde_json::Value;
@@ -18,6 +19,17 @@ use sluice_fakes::Fakes;
 const BRANCH: &str = "bolt/x";
 
 const POLICY: &str = "[branches.\"bolt/*\"]\nrequired = [\"#gate\"]\ntrust = [\"open\"]\n";
+
+thread_local! {
+    /// How long this test's host owes an outcome once recorded, the host's
+    /// `[deliveries] expire_after` (weir 104).
+    static SPAN: Cell<Duration> = const { Cell::new(sluice_core::EXPIRE_AFTER) };
+}
+
+/// From now, this test's host owes an outcome for `span` once recorded.
+fn owing_for(span: Duration) {
+    SPAN.with(|s| s.set(span));
+}
 
 struct Rounds(Cell<usize>);
 
@@ -48,7 +60,7 @@ fn sluice(f: &Fakes, args: &[&str]) -> (i32, String) {
     let code = run(
         cli,
         f.seams(),
-        &support::FakeHost::new(f.world.clone(), 0),
+        &support::FakeHost::new(f.world.clone(), 0).owing_for(SPAN.with(Cell::get)),
         &(),
         &(),
         &f.clock,
@@ -790,4 +802,617 @@ fn a_wait_leaves_the_resubmissions_landing_pending() {
     let (_, out) = inbox(&f, &a, &["--json"]);
     assert_eq!(json(&out)["outcomes"][0]["id"], second, "{out}");
     assert_eq!(handed(&f, second), ["inbox"]);
+}
+
+/// 3: a worktree on no branch names no session's work, and its submit is
+/// refused, saying so.
+#[test]
+fn a_detached_worktree_is_refused() {
+    let f = setup();
+    let a = session(&f, "a", "a");
+    f.world.detach(&a);
+    let (code, out) = sluice(&f, &["submit", BRANCH, "--worktree", &a, "--no-wait"]);
+    assert_eq!(code, CONFLICT, "{out}");
+    assert!(out.contains("detached"), "{out}");
+}
+
+/// 3, 135: a worktree on no branch has submitted nothing, and collects
+/// nothing, its own landing among it.
+#[test]
+fn inbox_in_a_detached_worktree_delivers_nothing() {
+    let f = setup();
+    let a = session(&f, "a", "a");
+    let n = submit(&f, &a);
+    decide(&f, n);
+    f.world.detach(&a);
+    let (code, out) = inbox(&f, &a, &[]);
+    assert_eq!((code, out.as_str()), (0, ""));
+    assert!(handed(&f, n).is_empty());
+}
+
+/// 51, 104; outcome-deliveries spec, "A day's span": on a host whose span
+/// is a day, a landing's delivery expires a day after it is recorded
+/// (weir 104; record 0102, D9).
+#[test]
+fn a_hosts_span_of_a_day_owes_a_landing_for_a_day() {
+    owing_for(Duration::from_secs(24 * 60 * 60));
+    let f = setup();
+    let a = session(&f, "a", "a");
+    let n = submit(&f, &a);
+    let d = decide(&f, n)["delivery"].clone();
+    let at = |field: &str| {
+        chrono::DateTime::parse_from_rfc3339(d[field].as_str().unwrap_or_default())
+            .unwrap_or_else(|e| panic!("{field}: {e}: {d}"))
+    };
+    assert_eq!(
+        at("expires_at") - at("recorded_at"),
+        chrono::Duration::hours(24),
+        "{d}"
+    );
+}
+
+/// 51, 104; inbox spec, "An expired outcome says so": on a host whose
+/// span is a second, a blame no carrier handed over expires still owed,
+/// and `sluice inbox` in its worktree hands it over all the same, its
+/// last line saying when it expired and naming its key (weir 104, 105;
+/// record 0102, D8).
+#[test]
+fn inbox_says_an_expired_outcome_is_still_owed() {
+    owing_for(Duration::from_secs(1));
+    let f = setup();
+    let b = session(&f, "b", "broken");
+    let n = submit(&f, &b);
+    assert_eq!(decide(&f, n)["state"], "failed");
+    f.world.advance(chrono::Duration::seconds(2));
+    let record = status(&f, n);
+    assert_eq!(record["delivery"]["state"], "expired", "{record}");
+    let expires_at = record["delivery"]["expires_at"].as_str().unwrap();
+    let (code, said) = inbox(&f, &b, &[]);
+    assert_eq!(code, 0, "{said}");
+    assert!(
+        said.lines()
+            .next()
+            .unwrap_or_default()
+            .contains(&format!("#{n} failed")),
+        "{said}"
+    );
+    assert_eq!(
+        said.lines().last(),
+        Some(
+            format!(
+                "Expired at {expires_at}, still owed. Confirm it once you have acted on it: \
+                 sluice confirm {n}:failed"
+            )
+            .as_str()
+        ),
+        "{said}"
+    );
+    assert_eq!(handed(&f, n), ["inbox"]);
+    assert_eq!(status(&f, n)["delivery"]["state"], "expired");
+}
+
+/// 51, S77; owed-outcomes spec, "An expired blame of a removed worktree"
+/// and "One owed landing": a branch's status shows, after its queue, what
+/// its readers are owed. On a host whose span is a second, a blame the
+/// round handed to its pane, of a worktree removed before it confirmed
+/// anything, is shown under its reader marked `never confirmed`, expired,
+/// with its hand-over by `notice`; under `--json`, a landing handed over
+/// by `inbox` to a worktree that confirmed an earlier outcome is its
+/// reader's one delivery, owed, and the reader known; nothing owed shows
+/// no section (weir 104 to 106; record 0102).
+#[test]
+fn status_shows_an_expired_blame_with_its_reader_never_confirmed() {
+    owing_for(Duration::from_secs(1));
+    let f = setup();
+    let b = in_a_pane(&f, "b", "broken");
+    let n = submit(&f, &b);
+    assert_eq!(decide(&f, n)["state"], "failed");
+    assert_eq!(handed(&f, n), ["notice"]);
+    f.world.remove_worktree(&b);
+    f.world.advance(chrono::Duration::seconds(2));
+    let (code, said) = sluice(&f, &["status", BRANCH]);
+    assert_eq!(code, 0, "{said}");
+    let owed = said
+        .split_once("OWED\n")
+        .unwrap_or_else(|| panic!("no OWED section: {said}"))
+        .1;
+    let mut lines = owed.lines();
+    assert_eq!(lines.next(), Some("  unit/b · never confirmed"), "{said}");
+    let row = lines.next().unwrap_or_default();
+    let expires_at = status(&f, n)["delivery"]["expires_at"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    for word in [
+        format!("{n}:failed"),
+        format!("#{n}"),
+        format!("expired at {expires_at}"),
+        "notice at".to_string(),
+    ] {
+        assert!(row.contains(&word), "{word} not in {said}");
+    }
+    assert_eq!(status(&f, n)["delivery"]["state"], "expired");
+
+    // One owed landing, to a reader that confirmed an earlier outcome.
+    owing_for(sluice_core::EXPIRE_AFTER);
+    let f = setup();
+    let a = session(&f, "a", "a");
+    let first = submit(&f, &a);
+    decide(&f, first);
+    let (code, out) = confirm(&f, &a, &[&format!("{first}:landed")]);
+    assert_eq!(code, 0, "{out}");
+    let (_, out) = sluice(&f, &["status", BRANCH]);
+    assert!(!out.contains("OWED"), "{out}");
+    let (_, out) = sluice(&f, &["status", BRANCH, "--json"]);
+    assert_eq!(json(&out)["owed"], serde_json::json!([]), "{out}");
+
+    let head = f.world.work(&f.world.tip(BRANCH), &[("src/a", Some("a2"))]);
+    f.world.session(&a, &a, &head);
+    f.world.not_delivering(&a);
+    let n = submit(&f, &a);
+    decide(&f, n);
+    let (code, out) = inbox(&f, &a, &[]);
+    assert_eq!(code, 0, "{out}");
+    for all in [false, true] {
+        let mut args = vec!["status", BRANCH, "--json"];
+        if all {
+            args.push("--all");
+        }
+        let (_, out) = sluice(&f, &args);
+        let v = json(&out);
+        let owed = v["owed"].as_array().unwrap();
+        assert_eq!(owed.len(), 1, "{v}");
+        assert_eq!(owed[0]["reader"], "unit/a", "{v}");
+        assert_eq!(owed[0]["known"], true, "{v}");
+        let d = &owed[0]["deliveries"];
+        assert_eq!(d.as_array().unwrap().len(), 1, "{v}");
+        assert_eq!(d[0]["key"], format!("{n}:landed").as_str(), "{v}");
+        assert_eq!(d[0]["id"], n, "{v}");
+        assert_eq!(d[0]["state"], "owed", "{v}");
+        assert!(d[0]["expires_at"].is_string(), "{v}");
+        assert_eq!(d[0]["handed"][0]["by"], "inbox", "{v}");
+    }
+}
+
+/// `sluice inbox --json` with `args` in `worktree`, which hands over one
+/// outcome: that outcome, holding the fields every element holds whatever
+/// its state (the contract a caller reads, which only gains fields).
+fn collected_one(f: &Fakes, worktree: &str, args: &[&str]) -> Value {
+    let (code, out) = inbox(f, worktree, args);
+    assert_eq!(code, 0, "{out}");
+    let v = json(&out);
+    assert!(v.get("unread").is_none(), "{v}");
+    let outcomes = v["outcomes"].as_array().unwrap();
+    assert_eq!(outcomes.len(), 1, "{v}");
+    let e = outcomes[0].clone();
+    assert!(e["id"].is_u64(), "{e}");
+    assert_eq!(e["branch"], BRANCH, "{e}");
+    assert!(e.get("delivered").is_none(), "{e}");
+    let delivery = &e["delivery"];
+    assert_eq!(
+        delivery["key"],
+        format!("{}:{}", e["id"], e["state"].as_str().unwrap()).as_str(),
+        "{e}"
+    );
+    assert_eq!(delivery["reader"], e["from"]["worktree"], "{e}");
+    let handed = delivery["handed"].as_array().unwrap();
+    assert_eq!(handed.last().unwrap()["by"], "inbox", "{e}");
+    let notice = e["notice"].as_str().unwrap();
+    assert!(
+        notice.starts_with(&format!("[sluice] #{} ", e["id"])),
+        "{e}"
+    );
+    assert_eq!(notice.lines().count(), 1, "{e}");
+    e
+}
+
+/// 51, 135; inbox spec, "The JSON document is a contract": a landing, a
+/// blame and a conflict, each collected as its record with `notice`, and
+/// by its state `landed_as`; `result` and `failed[].task`;
+/// `conflict.paths` and `conflict.with[].id`.
+#[test]
+fn inbox_json_holds_the_contracts_fields_for_each_outcome() {
+    let f = setup();
+    let a = session(&f, "a", "a");
+    let b = session(&f, "b", "broken");
+    let d = session(&f, "d", "same");
+    let c = "unit/c".to_string();
+    let head = f
+        .world
+        .work(&f.world.tip(BRANCH), &[("src/same", Some("c"))]);
+    f.world.session(&c, &c, &head);
+    f.world.not_delivering(&c);
+    let ids: Vec<u64> = [&a, &b, &d, &c].iter().map(|w| submit(&f, w)).collect();
+    let (na, nb, nd, nc) = (ids[0], ids[1], ids[2], ids[3]);
+    for n in &ids {
+        decide(&f, *n);
+    }
+
+    let e = collected_one(&f, &a, &["--json"]);
+    assert_eq!(
+        (e["id"].as_u64(), &e["state"]),
+        (Some(na), &"landed".into())
+    );
+    assert_eq!(e["landed_as"], status(&f, na)["landed_as"], "{e}");
+    assert!(e["notice"].as_str().unwrap().contains("landed"), "{e}");
+
+    let e = collected_one(&f, &b, &["--json"]);
+    assert_eq!(
+        (e["id"].as_u64(), &e["state"]),
+        (Some(nb), &"failed".into())
+    );
+    assert_eq!(e["result"], "failed", "{e}");
+    assert_eq!(e["failed"][0]["task"], "src:test", "{e}");
+    assert!(e["notice"].as_str().unwrap().contains("failed"), "{e}");
+
+    let e = collected_one(&f, &c, &["--json"]);
+    assert_eq!(
+        (e["id"].as_u64(), &e["state"]),
+        (Some(nc), &"conflict".into())
+    );
+    assert_eq!(
+        e["conflict"]["paths"],
+        serde_json::json!(["src/same"]),
+        "{e}"
+    );
+    assert_eq!(e["conflict"]["with"][0]["id"], nd, "{e}");
+    assert!(e["notice"].as_str().unwrap().contains("conflicts"), "{e}");
+}
+
+/// 51, 135; inbox spec, "The round does not push what the command
+/// delivered": a session whose push was refused collects its outcome by
+/// `sluice inbox`, and no later round pushes it; its delivery holds that
+/// one hand-over (record 0102).
+#[test]
+fn inbox_delivers_what_a_refused_push_left_and_no_round_pushes_it() {
+    let f = setup();
+    let a = session(&f, "a", "a");
+    let n = submit(&f, &a);
+    let v = decide(&f, n);
+    assert_eq!(v["state"], "landed", "{v}");
+    assert!(handed(&f, n).is_empty(), "{v}");
+    let refused = f.world.undelivered().len();
+    assert_eq!(refused, 1, "the refused push");
+    let (code, out) = inbox(&f, &a, &[]);
+    assert_eq!(code, 0, "{out}");
+    assert!(out.starts_with(&format!("[sluice] #{n} landed")), "{out}");
+    for _ in 0..2 {
+        sluice(&f, &["step", BRANCH]);
+    }
+    assert_eq!(f.world.undelivered().len(), refused, "no round pushed it");
+    assert!(f.world.delivered().is_empty());
+    assert_eq!(handed(&f, n), ["inbox"]);
+}
+
+/// 51, 135; inbox spec, "A caller that never waits collects a failure" and
+/// "A caller that never waits collects a landing": a caller in no pane
+/// that never waits collects its blame by `sluice inbox --json` twice,
+/// owed each time, then `--confirm` confirms it, and the next collect
+/// gives nothing; its push is tried once whatever rounds follow; a landing
+/// the same (record 0102).
+#[test]
+fn a_caller_that_never_waits_collects_a_failure_and_a_landing_by_inbox() {
+    let f = setup();
+    let none = |w: &str| {
+        let (code, out) = inbox(&f, w, &["--json"]);
+        assert_eq!(code, 0, "{out}");
+        assert_eq!(json(&out), serde_json::json!({ "outcomes": [] }));
+    };
+    let tries = |n: u64| {
+        f.world
+            .undelivered()
+            .iter()
+            .filter(|x| x.submission == n)
+            .count()
+    };
+
+    let b = session(&f, "b", "broken");
+    let n = submit(&f, &b);
+    assert!(status(&f, n)["from"].get("session").is_none());
+    assert_eq!(decide(&f, n)["state"], "failed");
+    assert_eq!(tries(n), 1);
+    for _ in 0..2 {
+        sluice(&f, &["step", BRANCH]);
+    }
+    assert_eq!(tries(n), 1, "no further attempt");
+    for _ in 0..2 {
+        let e = collected_one(&f, &b, &["--json"]);
+        assert_eq!(e["id"], n, "{e}");
+        assert_eq!(e["state"], "failed", "{e}");
+        assert_eq!(e["failed"][0]["task"], "src:test", "{e}");
+        assert_eq!(e["delivery"]["state"], "owed", "{e}");
+        assert_eq!(e["delivery"]["confirmed"], Value::Null, "{e}");
+    }
+    let e = collected_one(&f, &b, &["--confirm", "--json"]);
+    assert_eq!(e["delivery"]["state"], "done", "{e}");
+    assert!(e["delivery"]["confirmed"].is_string(), "{e}");
+    none(&b);
+
+    let a = session(&f, "a", "a");
+    let n = submit(&f, &a);
+    assert_eq!(decide(&f, n)["state"], "landed");
+    let e = collected_one(&f, &a, &["--json"]);
+    assert_eq!(e["state"], "landed", "{e}");
+    assert_eq!(e["landed_as"], f.world.tip(BRANCH).0.as_str(), "{e}");
+    assert_eq!(e["delivery"]["state"], "owed", "{e}");
+    let e = collected_one(&f, &a, &["--confirm", "--json"]);
+    assert_eq!(e["delivery"]["state"], "done", "{e}");
+    none(&a);
+}
+
+/// 124: `bolt/w`, a branch sluice lands on, with one commit writing
+/// `src/<file>` off `bolt/x`: its head.
+fn bolt_w(f: &Fakes, file: &str, content: &str) -> sluice_seams::Rev {
+    let head = f.world.work(
+        &f.world.tip(BRANCH),
+        &[(&format!("src/{file}"), Some(content))],
+    );
+    f.world.set_branch("bolt/w", &head);
+    head
+}
+
+/// `bolt/x`'s submissions of `bolt/w` by name.
+fn by_name(f: &Fakes) -> Vec<Value> {
+    let (_, out) = sluice(f, &["status", BRANCH, "--json", "--all"]);
+    json(&out)["submissions"]
+        .as_array()
+        .cloned()
+        .unwrap_or_default()
+        .into_iter()
+        .filter(|x| x["from"]["head"] == "bolt/w" && x["from"]["worktree"] == "bolt/w")
+        .collect()
+}
+
+/// 124: a branch submitted by name, wherever the command runs, answers as
+/// any submit that does not wait, its head the branch's revision, and its
+/// record the branch as its agent, its work and its head, and this host,
+/// with no path and no session (design D1, D2, D3; record 0090; rule
+/// core.50).
+#[test]
+fn a_branch_by_name_is_its_revision_and_no_worktrees() {
+    let f = setup();
+    let head = bolt_w(&f, "w", "w");
+    let (code, out) = sluice(
+        &f,
+        &["submit", BRANCH, "--head", "bolt/w", "--no-wait", "--json"],
+    );
+    assert_eq!(code, 0, "{out}");
+    let v = json(&out);
+    let n = v["id"].as_u64().unwrap();
+    assert_eq!(
+        v,
+        serde_json::json!({
+            "id": n, "branch": BRANCH, "ahead": [],
+            "wait": format!("sluice wait {n} --branch {BRANCH}"),
+        })
+    );
+    let record = status(&f, n);
+    assert_eq!(record["head"], head.0.as_str(), "{record}");
+    let from = &record["from"];
+    assert_eq!(from["worktree"], "bolt/w", "{from}");
+    assert_eq!(from["head"], "bolt/w", "{from}");
+    assert_eq!(from["agent"], "bolt/w", "{from}");
+    assert!(from.get("path").is_none(), "{from}");
+    assert!(from.get("session").is_none(), "{from}");
+}
+
+/// 64, 67: a forecast of `bolt/w` and its submit by name read one head
+/// and one work: the forecast's `head` is the revision the submit then
+/// sends, and it leaves out the earlier submission by name, which the
+/// submit withdraws as a resubmission.
+#[test]
+fn the_forecast_names_what_the_submit_sends() {
+    let f = setup();
+    bolt_w(&f, "w", "w");
+    let (_, out) = sluice(
+        &f,
+        &["submit", BRANCH, "--head", "bolt/w", "--no-wait", "--json"],
+    );
+    let first = json(&out)["id"].as_u64().unwrap();
+    let fix = f
+        .world
+        .work(&f.world.tip("bolt/w"), &[("src/w", Some("fixed"))]);
+    f.world.set_branch("bolt/w", &fix);
+    let (code, out) = sluice(
+        &f,
+        &["submit", BRANCH, "--check", "--head", "bolt/w", "--json"],
+    );
+    assert_eq!(code, 0, "{out}");
+    let forecast = json(&out);
+    assert_eq!(forecast["head"], fix.0.as_str(), "{forecast}");
+    assert_eq!(forecast["ahead"], serde_json::json!([]), "{forecast}");
+    let (code, out) = sluice(
+        &f,
+        &["submit", BRANCH, "--head", "bolt/w", "--no-wait", "--json"],
+    );
+    assert_eq!(code, 0, "{out}");
+    let v = json(&out);
+    assert_eq!(v["ahead"], serde_json::json!([]), "{v}");
+    let n = v["id"].as_u64().unwrap();
+    assert_eq!(status(&f, n)["head"], forecast["head"]);
+    let withdrawn = status(&f, first);
+    assert_eq!(withdrawn["state"], "withdrawn", "{withdrawn}");
+    assert_eq!(withdrawn["withdrawn"]["by"], "resubmission", "{withdrawn}");
+}
+
+/// D9, 135: a submit by name that waits runs the rounds while it waits,
+/// says `submission <n> to <target> from <branch>`, reports the landing
+/// and exits 0. It hands over nothing: no notice is tried, and the
+/// submission gives no `delivery`.
+#[test]
+fn a_waiting_submit_by_name_lands() {
+    let f = setup();
+    bolt_w(&f, "w", "w");
+    let (code, said) = sluice(&f, &["submit", BRANCH, "--head", "bolt/w"]);
+    assert_eq!(code, LANDED, "{said}");
+    let n: u64 = said
+        .lines()
+        .next()
+        .unwrap_or_default()
+        .strip_prefix("submission ")
+        .and_then(|l| l.strip_suffix(&format!(" to {BRANCH} from bolt/w · nothing queued ahead")))
+        .unwrap_or_else(|| panic!("{said}"))
+        .parse()
+        .unwrap();
+    let record = status(&f, n);
+    assert_eq!(record["state"], "landed", "{record}");
+    let landed = record["landed_as"].as_str().unwrap();
+    assert!(
+        said.contains(&format!("passed · landed as {}", &landed[..7])),
+        "{said}"
+    );
+    assert_eq!(f.world.tip(BRANCH).0, landed);
+    assert!(record.get("delivery").is_none(), "{record}");
+    assert!(f.world.delivered().is_empty() && f.world.undelivered().is_empty());
+}
+
+/// 26, core.43: a submit by name with `--subject` lands with the subject
+/// as its landing commit's first line, never the branch's own commit
+/// message; the record keeps the subject.
+#[test]
+fn a_subject_names_the_landing_by_name() {
+    let f = setup();
+    bolt_w(&f, "w", "w");
+    let (code, out) = sluice(
+        &f,
+        &[
+            "submit",
+            BRANCH,
+            "--head",
+            "bolt/w",
+            "--subject",
+            "The w work",
+        ],
+    );
+    assert_eq!(code, LANDED, "{out}");
+    let record = status(&f, 1);
+    assert_eq!(record["subject"], "The w work", "{record}");
+    let landed = sluice_seams::Rev::new(record["landed_as"].as_str().unwrap());
+    let first = f.world.message(&landed);
+    assert_eq!(
+        first.lines().next(),
+        Some("chore(land): #1 The w work"),
+        "{first}"
+    );
+}
+
+/// 124, D10: a check failing on `bolt/w`'s work: the waiting submit by name
+/// exits 1 and names a fix landed on `bolt/w`, then the submit by name
+/// again, never an agent working in it; `sluice status <n>` names the same.
+#[test]
+fn a_failure_by_name_names_its_way_on() {
+    let f = setup();
+    bolt_w(&f, "broken", "broken");
+    let (code, said) = sluice(&f, &["submit", BRANCH, "--head", "bolt/w"]);
+    assert_eq!(code, FAILED, "{said}");
+    let way = format!(
+        "once a fix lands on bolt/w, sluice submit {BRANCH} --head bolt/w submits it again"
+    );
+    assert!(said.contains(&way), "{said}");
+    assert!(!said.contains("agent working"), "{said}");
+    let n = by_name(&f)[0]["id"].as_u64().unwrap();
+    let (code, said) = sluice(&f, &["status", &n.to_string()]);
+    assert_eq!(code, 0, "{said}");
+    assert!(said.contains(&way), "{said}");
+    assert!(!said.contains("agent working"), "{said}");
+}
+
+/// 124, D10: `bolt/w`, cut before a landing on `bolt/x` that changed the
+/// same file: the waiting submit by name exits 2, and its way on merges
+/// `bolt/x` at its revision before the submit by name again; its status
+/// gives the inbox's notice and its `conflict.paths`, and the session's
+/// landing its notice too.
+#[test]
+fn a_conflict_by_name_names_its_way_on() {
+    let f = setup();
+    bolt_w(&f, "same", "w");
+    let a = session(&f, "a", "same");
+    let (code, out) = sluice(&f, &["submit", BRANCH, "--worktree", &a]);
+    assert_eq!(code, LANDED, "{out}");
+    let tip = f.world.tip(BRANCH);
+    let (code, said) = sluice(&f, &["submit", BRANCH, "--head", "bolt/w"]);
+    assert_eq!(code, CONFLICT, "{said}");
+    assert!(said.contains("conflict: src/same"), "{said}");
+    let way = format!(
+        "once a fix that merges {BRANCH} at {} lands on bolt/w, sluice submit {BRANCH} --head \
+         bolt/w submits it again",
+        &tip.0[..7]
+    );
+    assert!(said.contains(&way), "{said}");
+    assert!(!said.contains("agent working"), "{said}");
+    let n = by_name(&f)[0]["id"].as_u64().unwrap();
+    let (_, said) = sluice(&f, &["status", &n.to_string()]);
+    assert!(said.contains(&way), "{said}");
+    let e = status(&f, n);
+    assert_eq!(
+        e["conflict"]["paths"],
+        serde_json::json!(["src/same"]),
+        "{e}"
+    );
+    let notice = e["notice"]
+        .as_str()
+        .unwrap_or_else(|| panic!("no notice: {e}"));
+    assert!(
+        notice.starts_with(&format!("[sluice] #{n} conflicts on {BRANCH}")),
+        "{e}"
+    );
+    assert!(notice.contains("in src/same"), "{e}");
+    let landed = status(&f, 1);
+    assert!(
+        landed["notice"]
+            .as_str()
+            .is_some_and(|w| w.starts_with(&format!("[sluice] #1 landed on {BRANCH} as "))),
+        "{landed}"
+    );
+}
+
+/// 51, 124, D8: `bolt/w` by name, blamed: queued, it has no notice;
+/// decided, a branch's status and its own give it the inbox's notice, its
+/// `failed` and the revision of `bolt/x` it was tested on; it gives no
+/// `delivery`, no notice is tried, no inbox takes it, and `sluice confirm`
+/// finds nothing owed under its key, as its reader or as the operator
+/// (record 0102; rule core.50).
+#[test]
+fn a_failure_by_name_is_told_by_status_and_owed_to_no_one() {
+    let f = setup();
+    bolt_w(&f, "broken", "broken");
+    let tip = f.world.tip(BRANCH);
+    let (code, out) = sluice(
+        &f,
+        &["submit", BRANCH, "--head", "bolt/w", "--no-wait", "--json"],
+    );
+    assert_eq!(code, 0, "{out}");
+    let n = json(&out)["id"].as_u64().unwrap();
+    let queued = status(&f, n);
+    assert!(queued.get("notice").is_none(), "{queued}");
+    decide(&f, n);
+    let notice = format!("[sluice] #{n} failed on {BRANCH}: src:test. sluice wait {n} shows why.");
+    let e = by_name(&f).into_iter().find(|x| x["id"] == n).unwrap();
+    assert_eq!(e["state"], "failed", "{e}");
+    assert_eq!(e["notice"], notice.as_str(), "{e}");
+    assert_eq!(e["failed"][0]["task"], "src:test", "{e}");
+    assert_eq!(e["tested"]["on"], tip.0.as_str(), "{e}");
+    let one = status(&f, n);
+    assert_eq!(one["notice"], notice.as_str(), "{one}");
+    assert!(one.get("delivery").is_none(), "{one}");
+    assert!(f.world.delivered().is_empty() && f.world.undelivered().is_empty());
+    // A worktree on bolt/w.
+    f.world.session("bolt/w", "bolt/w", &f.world.tip("bolt/w"));
+    let (_, out) = inbox(&f, "bolt/w", &["--json"]);
+    assert_eq!(json(&out), serde_json::json!({ "outcomes": [] }));
+    let key = format!("{n}:failed");
+    for (worktree, args) in [
+        (Some("bolt/w"), vec![key.as_str()]),
+        (None, vec![key.as_str(), "--as", "operator"]),
+    ] {
+        let (code, out) = match worktree {
+            Some(w) => confirm(&f, w, &args),
+            None => sluice(&f, &[&["confirm"][..], &args].concat()),
+        };
+        assert_eq!(code, FAILED, "{out}");
+        assert!(
+            out.contains(&format!("no outcome is owed under {key}")),
+            "{out}"
+        );
+    }
 }

@@ -647,6 +647,9 @@ pub struct FakeHost {
     pub world: sluice_fakes::World,
     pub reserved: usize,
     pub process: FakeProcess,
+    /// This host as its peers name it, the span an outcome stays owed
+    /// among it (the host's `[deliveries] expire_after`).
+    pub peer: sluice_core::Peer,
 }
 
 impl FakeHost {
@@ -658,7 +661,14 @@ impl FakeHost {
                 reserved,
                 ..FakeProcess::default()
             },
+            peer: sluice_core::Peer::default(),
         }
+    }
+
+    /// This host, its outcomes owed for `span` once recorded (weir 104).
+    pub fn owing_for(mut self, span: std::time::Duration) -> FakeHost {
+        self.peer.expire_after = span;
+        self
     }
 }
 
@@ -1138,6 +1148,10 @@ impl Drop for FakeHolding<'_> {
 impl sluice::exec::Host for FakeHost {
     fn reserved(&self) -> usize {
         self.reserved
+    }
+
+    fn peer(&self) -> sluice_core::Peer {
+        self.peer.clone()
     }
 
     fn host_process(&self) -> &dyn sluice::host_process::HostProcess {

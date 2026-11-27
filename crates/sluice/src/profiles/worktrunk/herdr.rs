@@ -52,15 +52,7 @@ pub enum Answer {
 /// a round run from another pane reaches the recorded server; one that
 /// does not answer within `bound` is ended.
 pub fn prompt(pane: &str, socket: &str, line: &str, bound: Duration) -> Result<Answer> {
-    let mut c = crate::workers::command("herdr", "notify");
-    for (k, _) in std::env::vars_os() {
-        if k.to_str().is_some_and(|k| k.starts_with("HERDR_")) {
-            c.env_remove(&k);
-        }
-    }
-    let child = c
-        .args(["agent", "prompt", pane, line])
-        .env(SOCKET, socket)
+    let child = prompt_command(pane, socket, line, std::env::vars_os().map(|(k, _)| k))
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::piped())
@@ -95,6 +87,26 @@ pub fn prompt(pane: &str, socket: &str, line: &str, bound: Duration) -> Result<A
     })
 }
 
+/// The herdr command that types `line` into `pane` at `socket`: none of
+/// `held`, the names of this process's own variables, that is herdr's
+/// reaches it, so a round run from another pane reaches the recorded
+/// server.
+fn prompt_command(
+    pane: &str,
+    socket: &str,
+    line: &str,
+    held: impl Iterator<Item = std::ffi::OsString>,
+) -> std::process::Command {
+    let mut c = crate::workers::command("herdr", "notify");
+    for k in held {
+        if k.to_str().is_some_and(|k| k.starts_with("HERDR_")) {
+            c.env_remove(&k);
+        }
+    }
+    c.args(["agent", "prompt", pane, line]).env(SOCKET, socket);
+    c
+}
+
 /// herdr's words for a refusal: the message of the JSON error it writes,
 /// or its stderr as written when that is not one.
 fn refusal(stderr: &[u8]) -> String {
@@ -111,6 +123,41 @@ mod tests {
 
     /// 51: a pane is named by its ID and its server's socket, and only
     /// where both are set.
+    /// 51: a prompt types its line into the recorded pane, on the
+    /// recorded server, and carries none of this process's own herdr
+    /// variables, so a round run from another pane reaches the pane the
+    /// submit recorded (`a_round_in_another_pane_reaches_the_recorded_server`).
+    #[test]
+    fn a_prompt_carries_none_of_this_panes_variables() {
+        let held = [
+            "HERDR_PANE_ID",
+            "HERDR_SOCKET_PATH",
+            "HERDR_SESSION",
+            "PATH",
+        ]
+        .into_iter()
+        .map(std::ffi::OsString::from);
+        let c = prompt_command("w1:p2", "/run/a.sock", "[sluice] #1 landed", held);
+        let args: Vec<_> = c
+            .get_args()
+            .map(|a| a.to_string_lossy().into_owned())
+            .collect();
+        assert_eq!(args, ["agent", "prompt", "w1:p2", "[sluice] #1 landed"]);
+        let envs: std::collections::BTreeMap<_, _> = c
+            .get_envs()
+            .map(|(k, v)| {
+                (
+                    k.to_string_lossy().into_owned(),
+                    v.map(|v| v.to_string_lossy().into_owned()),
+                )
+            })
+            .collect();
+        assert_eq!(envs.get(SOCKET), Some(&Some("/run/a.sock".to_string())));
+        assert_eq!(envs.get(PANE), Some(&None));
+        assert_eq!(envs.get("HERDR_SESSION"), Some(&None));
+        assert!(!envs.contains_key("PATH"), "{envs:?}");
+    }
+
     #[test]
     fn a_session_is_its_pane_on_its_server() {
         let env = |pane: Option<&str>, socket: Option<&str>| {
