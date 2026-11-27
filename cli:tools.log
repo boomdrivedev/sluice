@@ -1,0 +1,697 @@
+--- stderr ---
+   Compiling proc-macro2 v1.0.107
+   Compiling unicode-ident v1.0.24
+   Compiling quote v1.0.47
+   Compiling libc v0.2.189
+   Compiling cfg-if v1.0.4
+   Compiling memchr v2.8.3
+   Compiling itoa v1.0.18
+   Compiling once_cell v1.21.4
+   Compiling autocfg v1.5.1
+   Compiling serde_core v1.0.229
+   Compiling smallvec v1.16.3
+   Compiling allocator-api2 v0.2.21
+   Compiling foldhash v0.2.0
+   Compiling equivalent v1.0.2
+   Compiling regex-syntax v0.8.11
+   Compiling errno v0.3.14
+   Compiling syn v2.0.119
+   Compiling syn v3.0.5
+   Compiling aho-corasick v1.1.5
+   Compiling zeroize_derive v1.5.0
+   Compiling regex-automata v0.4.18
+   Compiling hashbrown v0.17.1
+   Compiling pin-project-lite v0.2.17
+   Compiling bytes v1.12.1
+   Compiling scopeguard v1.2.0
+   Compiling typenum v1.20.1
+   Compiling parking_lot_core v0.9.12
+   Compiling stable_deref_trait v1.2.1
+   Compiling bitflags v2.13.2
+   Compiling futures-io v0.3.34
+   Compiling fastrand v2.5.0
+   Compiling futures-core v0.3.34
+   Compiling lock_api v0.4.14
+   Compiling bstr v1.13.1
+   Compiling num-traits v0.2.19
+   Compiling futures-sink v0.3.34
+   Compiling gix-error v0.5.1
+   Compiling futures-macro v0.3.34
+   Compiling zeroize v1.9.1
+   Compiling parking_lot v0.12.5
+   Compiling tokio-macros v2.7.2
+   Compiling signal-hook-registry v1.4.8
+   Compiling mio v1.2.4
+   Compiling socket2 v0.6.5
+   Compiling version_check v0.9.5
+   Compiling futures-task v0.3.34
+   Compiling slab v0.4.12
+   Compiling num-integer v0.1.47
+   Compiling getrandom v0.4.3
+   Compiling tracing-core v0.1.36
+   Compiling percent-encoding v2.3.2
+   Compiling tracing-attributes v0.1.31
+   Compiling futures-util v0.3.34
+   Compiling tokio v1.53.2
+   Compiling http v1.5.0
+   Compiling tinyvec v1.13.3
+   Compiling num-conv v0.2.2
+   Compiling time-core v0.1.9
+   Compiling time-macros v0.2.32
+   Compiling unicode-normalization v0.1.25
+   Compiling prodash v31.0.1
+   Compiling powerfmt v0.2.1
+   Compiling deranged v0.5.9
+   Compiling tracing v0.1.44
+   Compiling gix-utils v0.5.1
+   Compiling tokio-util v0.7.20
+   Compiling http-body v1.1.0
+   Compiling outref v0.5.2
+   Compiling vsimd v0.8.0
+   Compiling const-oid v0.9.6
+   Compiling indexmap v2.14.2
+   Compiling crossbeam-utils v0.8.23
+   Compiling gix-trace v0.3.0
+   Compiling gix-validate v0.13.0
+   Compiling serde v1.0.229
+   Compiling serde_derive v1.0.229
+   Compiling subtle v2.6.1
+   Compiling gix-path v0.14.0
+   Compiling generic-array v0.14.7
+   Compiling time v0.3.55
+   Compiling http-body-util v0.1.5
+   Compiling jiff-core v0.1.1
+   Compiling same-file v1.0.6
+   Compiling jiff v0.2.38
+   Compiling walkdir v2.5.0
+   Compiling byteorder v1.5.0
+   Compiling heapless v0.8.0
+   Compiling hash32 v0.3.1
+   Compiling jobserver v0.1.35
+   Compiling crossbeam-channel v0.5.17
+   Compiling synstructure v0.14.0
+   Compiling faster-hex v0.10.1
+   Compiling zmij v1.0.23
+   Compiling find-msvc-tools v0.1.12
+   Compiling shlex v2.0.1
+   Compiling either v1.19.0
+   Compiling bytes-utils v0.1.4
+   Compiling cc v1.4.5
+   Compiling gix-parallel v0.50.0
+   Compiling base64-simd v0.8.0
+   Compiling serde_json v1.0.151
+   Compiling ryu v1.0.23
+   Compiling aws-smithy-types v1.9.0
+   Compiling gix-fs v0.24.0
+   Compiling zerofrom-derive v0.1.8
+   Compiling getrandom v0.2.17
+   Compiling rustix v1.1.5
+   Compiling zerocopy v0.8.62
+   Compiling yoke-derive v0.8.4
+   Compiling aws-smithy-async v1.3.1
+   Compiling hybrid-array v0.4.15
+   Compiling zerocopy-derive v0.8.62
+   Compiling zerofrom v0.1.8
+   Compiling aws-smithy-runtime-api-macros v1.1.0
+   Compiling crypto-common v0.1.7
+   Compiling thiserror v2.0.21
+   Compiling aws-smithy-runtime-api v1.19.1
+   Compiling yoke v0.8.3
+   Compiling cmov v0.5.4
+   Compiling sha1dc v0.1.5
+   Compiling ctutils v0.4.8
+   Compiling gix-hash v0.28.0
+   Compiling tempfile v3.27.0
+   Compiling block-buffer v0.12.1
+   Compiling crypto-common v0.2.2
+   Compiling block-buffer v0.10.4
+   Compiling gix-quote v0.10.0
+   Compiling zerovec-derive v0.11.6
+   Compiling thiserror-impl v2.0.21
+   Compiling const-oid v0.10.2
+   Compiling hashbrown v0.14.5
+   Compiling base64ct v1.8.3
+   Compiling pem-rfc7468 v0.7.0
+   Compiling dashmap v6.2.1
+   Compiling digest v0.11.3
+   Compiling digest v0.10.7
+   Compiling displaydoc v0.2.7
+   Compiling zerovec v0.11.8
+   Compiling crc32fast v1.5.2
+   Compiling gix-tempfile v26.0.0
+   Compiling hex v0.4.3
+   Compiling base64 v0.23.1
+   Compiling rustversion v1.0.23
+   Compiling gix-command v0.12.0
+   Compiling gix-date v0.18.0
+   Compiling form_urlencoded v1.2.2
+   Compiling der_derive v0.7.3
+   Compiling cpufeatures v0.3.1
+   Compiling getrandom v0.3.4
+   Compiling semver v1.0.28
+   Compiling flagset v0.4.7
+   Compiling rustc_version v0.4.1
+   Compiling gix-actor v0.44.0
+   Compiling tinystr v0.8.4
+   Compiling gix-hashtable v0.18.0
+   Compiling litemap v0.8.3
+   Compiling writeable v0.6.4
+   Compiling icu_locale_core v2.3.0
+   Compiling gix-object v0.66.0
+   Compiling sha2 v0.11.1
+   Compiling potential_utf v0.1.6
+   Compiling zerotrie v0.2.5
+   Compiling num-bigint v0.4.8
+   Compiling rustls-pki-types v1.15.1
+   Compiling memmap2 v0.9.11
+   Compiling icu_properties_data v2.3.0
+   Compiling utf8_iter v1.0.4
+   Compiling icu_normalizer_data v2.3.0
+   Compiling icu_collections v2.3.0
+   Compiling icu_provider v2.3.1
+   Compiling fnv v1.0.7
+   Compiling der v0.7.10
+   Compiling aws-smithy-schema v1.1.0
+   Compiling ring v0.17.14
+   Compiling core-foundation-sys v0.8.7
+   Compiling icu_properties v2.3.0
+   Compiling icu_normalizer v2.3.0
+   Compiling spki v0.7.3
+   Compiling num-rational v0.4.2
+   Compiling aws-smithy-eventstream v0.61.6
+   Compiling aws-smithy-http v0.64.2
+   Compiling rand_core v0.6.4
+   Compiling cmake v0.1.58
+   Compiling untrusted v0.9.0
+   Compiling pkg-config v0.3.34
+   Compiling httparse v1.10.1
+   Compiling idna_adapter v1.2.2
+   Compiling log v0.4.34
+   Compiling fs_extra v1.3.0
+   Compiling dunce v1.0.5
+   Compiling uuid v1.29.2
+   Compiling aws-lc-sys v0.47.0
+   Compiling idna v1.1.0
+   Compiling aws-types v1.7.0
+   Compiling gix-lock v26.0.0
+   Compiling aws-credential-types v1.3.1
+   Compiling ahash v0.8.12
+   Compiling gix-chunk v0.10.0
+   Compiling regex-lite v0.1.9
+   Compiling heck v0.5.0
+   Compiling ref-cast v1.0.27
+   Compiling nonempty v0.12.0
+   Compiling anyhow v1.0.104
+   Compiling url v2.5.8
+   Compiling arc-swap v1.9.2
+   Compiling pem v4.0.0
+   Compiling hmac v0.13.0
+   Compiling aws-smithy-observability v0.3.0
+   Compiling gix-glob v0.29.0
+   Compiling num-iter v0.1.46
+   Compiling num-complex v0.4.6
+   Compiling futures-channel v0.3.34
+   Compiling ref-cast-impl v1.0.27
+   Compiling tls_codec_derive v0.4.2
+   Compiling data-encoding v2.11.1
+   Compiling unicode-bom v2.0.3
+   Compiling num v0.4.3
+   Compiling aws-smithy-runtime v1.16.1
+   Compiling aws-sigv4 v1.6.3
+   Compiling cpufeatures v0.2.17
+   Compiling jsonschema-value v0.60.2
+   Compiling borrow-or-share v0.2.4
+   Compiling atomic-waker v1.1.2
+   Compiling bit-vec v0.8.0
+   Compiling try-lock v0.2.5
+   Compiling xmlparser v0.13.6
+   Compiling tower-service v0.3.3
+   Compiling winnow v0.7.14
+   Compiling unicode-general-category v1.1.0
+   Compiling tls_codec v0.4.2
+   Compiling aws-lc-rs v1.19.0
+   Compiling x509-cert v0.2.5
+   Compiling toml_parser v1.0.9+spec-1.1.0
+   Compiling want v0.3.2
+   Compiling bit-set v0.8.0
+   Compiling h2 v0.4.20
+   Compiling fluent-uri v0.4.1
+   Compiling aws-runtime v1.10.2
+   Compiling fraction v0.17.0
+   Compiling rustls-webpki v0.103.15
+   Compiling sigstore-types v0.15.1
+   Compiling gix-commitgraph v0.41.0
+   Compiling strum_macros v0.28.0
+   Compiling iana-time-zone v0.1.65
+   Compiling aws-smithy-json v0.65.0
+   Compiling serde_spanned v1.0.4
+   Compiling toml_writer v1.0.6+spec-1.1.0
+   Compiling bytecount v0.6.9
+   Compiling num-cmp v0.1.0
+   Compiling untrusted v0.7.1
+   Compiling micromap v0.3.0
+   Compiling referencing v0.60.2
+   Compiling chrono v0.4.45
+   Compiling gix-revwalk v0.37.0
+   Compiling hyper v1.12.0
+   Compiling fancy-regex v0.19.2
+   Compiling gix-attributes v0.37.0
+   Compiling encoding_rs v0.8.42
+   Compiling opentelemetry v0.33.1
+   Compiling email_address v0.2.9
+   Compiling uuid-simd v0.8.0
+   Compiling sync_wrapper v1.0.2
+   Compiling gix-sec v0.16.0
+   Compiling toml_datetime v1.1.3+spec-1.1.0
+   Compiling regex v1.13.1
+   Compiling jsonschema-regex v0.60.2
+   Compiling hashbrown v0.16.1
+   Compiling crossbeam-epoch v0.9.21
+   Compiling tower-layer v0.3.3
+   Compiling ipnet v2.12.2
+   Compiling base16ct v0.2.0
+   Compiling zlib-rs v0.6.8
+   Compiling rustls v0.23.46
+   Compiling strum v0.28.0
+   Compiling sec1 v0.7.3
+   Compiling jsonschema v0.60.2
+   Compiling hyper-util v0.1.21
+   Compiling tower v0.5.3
+   Compiling toml v1.0.6+spec-1.1.0
+   Compiling sha2 v0.10.9
+   Compiling gix-ref v0.69.0
+   Compiling signature v2.2.0
+   Compiling ff v0.13.1
+   Compiling rand_core v0.9.5
+   Compiling ppv-lite86 v0.2.21
+   Compiling half v2.7.1
+   Compiling gix-packetline v0.24.0
+   Compiling objc2-core-foundation v0.3.2
+   Compiling simdutf8 v0.1.5
+   Compiling crossbeam-deque v0.8.8
+   Compiling multiversion_no_op v1.0.0
+   Compiling base64 v0.22.1
+   Compiling weir-capture v0.0.0 (https://github.com/agentplot/weir?rev=9cba69196e9269a36b02024861340355bdbe6d4b#9cba6919)
+   Compiling itertools v0.14.0
+   Compiling rand_chacha v0.9.0
+   Compiling group v0.13.0
+   Compiling gix-traverse v0.63.0
+   Compiling aws-smithy-xml v0.64.0
+   Compiling crypto-bigint v0.5.5
+   Compiling pkcs8 v0.10.2
+   Compiling core-foundation v0.10.1
+   Compiling security-framework-sys v2.17.0
+   Compiling curve25519-dalek v4.1.3
+   Compiling gix-url v0.40.0
+   Compiling gix-config-value v0.21.0
+   Compiling gix-bitmap v0.6.0
+   Compiling toml_datetime v0.7.5+spec-1.1.0
+   Compiling filetime v0.2.29
+   Compiling lazy_static v1.5.1
+   Compiling minimal-lexical v0.2.1
+   Compiling utf8parse v0.2.2
+   Compiling cfg_aliases v0.2.2
+   Compiling ciborium-io v0.2.2
+   Compiling arrayvec v0.7.8
+   Compiling ciborium-ll v0.2.2
+   Compiling uluru v3.1.0
+   Compiling nix v0.31.3
+   Compiling anstyle-parse v1.0.0
+   Compiling nom v7.1.3
+   Compiling sharded-slab v0.1.7
+   Compiling gix-index v0.57.0
+   Compiling toml v0.9.12+spec-1.1.0
+   Compiling security-framework v3.7.0
+   Compiling elliptic-curve v0.13.8
+   Compiling rand v0.9.5
+   Compiling weir-delivery v0.0.0 (https://github.com/agentplot/weir?rev=9cba69196e9269a36b02024861340355bdbe6d4b#9cba6919)
+   Compiling prost-derive v0.14.4
+   Compiling tower-http v0.6.11
+   Compiling gix-zlib v0.3.0
+   Compiling clru v0.6.3
+   Compiling sluice-seams v0.0.0 (/Users/chuck/.local/share/boomdrive/repositories/boomdrivedev/sluice/sluice.git/sluice/.places/sluice+2Ftry+2Fmain+2F100/crates/sluice-seams)
+   Compiling gix-ignore v0.24.0
+   Compiling hmac v0.12.1
+   Compiling inout v0.1.4
+   Compiling futures-executor v0.3.34
+   Compiling thread_local v1.1.10
+   Compiling separator v0.4.1
+   Compiling spin v0.10.1
+   Compiling bs58 v0.5.1
+   Compiling diff v0.1.13
+   Compiling anstyle v1.0.14
+   Compiling yansi v1.0.1
+   Compiling anstyle-query v1.1.5
+   Compiling colorchoice v1.0.5
+   Compiling is_terminal_polyfill v1.70.2
+   Compiling urlencoding v2.1.3
+   Compiling anstream v1.0.0
+   Compiling aws-smithy-query v0.64.0
+   Compiling sluice-core v0.0.0 (/Users/chuck/.local/share/boomdrive/repositories/boomdrivedev/sluice/sluice.git/sluice/.places/sluice+2Ftry+2Fmain+2F100/crates/sluice-core)
+   Compiling pretty_assertions v1.4.1
+   Compiling cbor-diag v0.1.12
+   Compiling prost v0.14.4
+   Compiling crc-fast v1.10.0
+   Compiling tracing-subscriber v0.3.23
+   Compiling opentelemetry_sdk v0.33.1
+   Compiling cipher v0.4.4
+   Compiling rfc6979 v0.4.0
+   Compiling gix-worktree v0.58.0
+   Compiling gix-pack v0.76.0
+   Compiling reqwest v0.13.5
+   Compiling rustls-native-certs v0.8.5
+   Compiling ciborium v0.2.2
+   Compiling gix-transport v0.61.0
+   Compiling gix-config v0.62.0
+   Compiling gix-pathspec v0.22.0
+   Compiling gix-filter v0.36.0
+   Compiling tokio-rustls v0.26.6
+   Compiling objc2-core-services v0.3.2
+   Compiling ed25519 v2.2.3
+   Compiling ssh-encoding v0.2.0
+   Compiling cms v0.2.3
+   Compiling roxmltree v0.14.1
+   Compiling gix-shallow v0.15.0
+   Compiling http v0.2.12
+   Compiling sha1 v0.11.0
+   Compiling md-5 v0.11.0
+   Compiling gix-refspec v0.47.0
+   Compiling assert-json-diff v2.0.2
+   Compiling gix-imara-diff v0.3.1
+   Compiling notify-types v2.3.1
+   Compiling async-trait v0.1.92
+   Compiling gix-macros v0.2.0
+   Compiling rlimit v0.11.0
+   Compiling clap_lex v1.1.0
+   Compiling ryu-js v1.0.3
+   Compiling strsim v0.11.1
+   Compiling serde_json_canonicalizer v0.4.1
+   Compiling clap_builder v4.6.6
+   Compiling opentelemetry-http v0.33.1
+   Compiling gix-protocol v0.67.0
+   Compiling notify v8.2.2
+   Compiling aws-smithy-protocol-test v0.64.0
+   Compiling gix-diff v0.69.0
+   Compiling gix-submodule v0.36.0
+   Compiling aws-smithy-checksums v0.65.0
+   Compiling ssh-cipher v0.2.0
+   Compiling ed25519-dalek v2.2.0
+   Compiling hyper-rustls v0.27.10
+   Compiling gix-odb v0.86.0
+   Compiling opentelemetry-proto v0.33.1
+   Compiling ecdsa v0.16.9
+   Compiling aws-sdk-sts v1.122.0
+   Compiling primeorder v0.13.6
+   Compiling pem v3.0.6
+   Compiling gix-discover v0.57.0
+   Compiling flate2 v1.1.11
+   Compiling hashlink v0.11.1
+   Compiling gix-revision v0.51.0
+   Compiling sigstore-bundle v0.15.1
+   Compiling aws-sdk-ssooidc v1.119.0
+   Compiling aws-sdk-sso v1.117.0
+   Compiling sha1 v0.10.7
+   Compiling ureq-proto v0.6.4
+   Compiling clap_derive v4.6.4
+   Compiling webpki-roots v1.0.9
+   Compiling simple_asn1 v0.6.4
+   Compiling lru v0.18.5
+   Compiling arraydeque v0.5.1
+   Compiling file-id v0.2.3
+   Compiling httpdate v1.0.3
+   Compiling utf8-zero v0.8.1
+   Compiling typed-path v0.13.0
+   Compiling ureq v3.4.2
+   Compiling zip v9.2.1
+   Compiling opentelemetry-otlp v0.33.1
+   Compiling clap v4.6.6
+   Compiling jsonwebtoken v9.3.1
+   Compiling notify-debouncer-full v0.6.0
+   Compiling yaml-rust2 v0.11.1
+   Compiling aws-sdk-s3 v1.155.0
+   Compiling aws-config v1.13.0
+   Compiling gix v0.89.0
+   Compiling p256 v0.13.2
+   Compiling aws-smithy-http-client v1.5.1
+   Compiling ssh-key v0.6.7
+   Compiling tracing-opentelemetry v0.34.0
+   Compiling opentelemetry-appender-tracing v0.33.1
+   Compiling aws-sdk-kms v1.126.0
+   Compiling aws-sdk-codebuild v1.143.0
+   Compiling sigstore-crypto v0.15.1
+   Compiling sigstore-merkle v0.15.1
+   Compiling sigstore-rekor v0.15.1
+   Compiling sigstore-tsa v0.15.1
+   Compiling sigstore-trust-root v0.15.1
+   Compiling weir-bounded v0.0.0 (https://github.com/agentplot/weir?rev=9cba69196e9269a36b02024861340355bdbe6d4b#9cba6919)
+   Compiling sigstore-verify v0.15.1
+   Compiling tokio-stream v0.1.19
+   Compiling backon v1.6.0
+   Compiling sluice-fakes v0.0.0 (/Users/chuck/.local/share/boomdrive/repositories/boomdrivedev/sluice/sluice.git/sluice/.places/sluice+2Ftry+2Fmain+2F100/crates/sluice-fakes)
+   Compiling objc2-io-kit v0.3.2
+   Compiling yasna v0.6.0
+   Compiling rcgen v0.14.10
+   Compiling sysinfo v0.37.2
+   Compiling sluice-conformance v0.0.0 (/Users/chuck/.local/share/boomdrive/repositories/boomdrivedev/sluice/sluice.git/sluice/.places/sluice+2Ftry+2Fmain+2F100/crates/sluice-conformance)
+   Compiling sluice v0.0.0 (/Users/chuck/.local/share/boomdrive/repositories/boomdrivedev/sluice/sluice.git/sluice/.places/sluice+2Ftry+2Fmain+2F100/crates/sluice)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 4m 17s
+────────────
+ Nextest run ID d1dc65e9-08e8-4b49-a5e9-7901e17cc353 with nextest profile: default
+    Starting 769 tests across 19 binaries (7 tests skipped)
+        PASS [   1.463s] (  1/769) sluice::conformance a_branch_is_held_as_the_host_last_read_it
+        PASS [   1.719s] (  2/769) sluice::conformance a_place_holding_more_than_its_commits_is_refused_and_named
+        PASS [   2.440s] (  3/769) sluice::conformance a_branch_is_forecast_with_no_place_of_it
+        PASS [   7.163s] (  4/769) sluice::conformance a_run_is_ended_at_its_limit_after_the_step_that_started_it
+        PASS [   7.307s] (  5/769) sluice::conformance a_failed_release_is_held_with_what_failed
+        PASS [   7.842s] (  6/769) sluice::conformance a_release_that_succeeds_on_a_retry_is_listed_no_more
+        PASS [   7.843s] (  7/769) sluice::conformance a_failed_release_is_held_after_the_retries_its_branch_names
+        PASS [   8.257s] (  8/769) sluice::conformance a_refusal_names_the_revision_this_host_holds
+        PASS [   8.291s] (  9/769) sluice::conformance a_failed_release_is_tried_a_bounded_number_of_times
+        PASS [   8.345s] ( 10/769) sluice::conformance a_removed_worktrees_failing_release_is_freed_and_never_run_again
+        PASS [   8.489s] ( 11/769) sluice::conformance a_removed_worktrees_place_is_freed_by_the_next_round
+        PASS [   8.692s] ( 12/769) sluice::conformance a_read_of_a_mended_branch_leaves_its_state_as_it_was
+        PASS [   8.725s] ( 13/769) sluice::conformance a_quiet_branch_mended_outside_sluice_is_read_whole
+        PASS [   7.197s] ( 14/769) sluice::conformance a_submission_names_its_after_priority_and_submitter_and_does_nothing_more
+        PASS [   9.203s] ( 15/769) sluice::conformance a_last_result_decides_nothing
+        PASS [  11.576s] ( 16/769) sluice::conformance a_landed_change_to_the_gate_runs_every_check_it_now_requires
+        PASS [  11.742s] ( 17/769) sluice::conformance a_resubmission_withdraws_the_earlier_submission_which_stays_readable
+        PASS [  11.845s] ( 18/769) sluice::conformance a_held_checkout_never_holds_its_branch
+        PASS [  10.435s] ( 19/769) sluice::conformance a_session_runs_last_result_says_whether_it_was_recorded
+        PASS [  12.072s] ( 20/769) sluice::conformance a_conflict_names_every_submission_it_is_contested_with
+        PASS [   5.483s] ( 21/769) sluice::conformance a_withdrawn_combinations_failed_release_holds_its_checkout
+        PASS [  10.291s] ( 22/769) sluice::conformance a_submission_waits_for_its_after_and_holds_no_one
+        PASS [   4.944s] ( 23/769) sluice::conformance a_withdrawn_combinations_passed_run_is_read_for_nothing
+        PASS [   4.284s] ( 24/769) sluice::conformance peers_held
+        PASS [   5.415s] ( 25/769) sluice::conformance every_observed_result_records_what_its_executor_enforced
+        PASS [   5.286s] ( 26/769) sluice::conformance every_run_is_recorded_before_its_verdict_a_fail_exactly_as_a_pass
+        PASS [   6.716s] ( 27/769) sluice::conformance a_worktree_that_changes_while_its_run_runs_records_nothing
+        PASS [   7.375s] ( 28/769) sluice::conformance deepest_first_the_longest_passes_and_all_land_on_its_verdict
+        PASS [   8.641s] ( 29/769) sluice::conformance a_withdrawn_combinations_run_is_ended_and_its_checkout_released
+        PASS [   3.468s] ( 30/769) sluice::conformance records_held_after_a_refresh_are_the_records_read
+        PASS [   3.937s] ( 31/769) sluice::conformance s11_a_landing_names_its_verdict_and_leaves_the_session_place
+        PASS [   9.369s] ( 32/769) sluice::conformance every_submission_is_tested_on_top_of_every_one_ahead
+        PASS [  11.236s] ( 33/769) sluice::conformance a_withdrawn_combinations_failed_run_blames_no_one
+        PASS [   3.692s] ( 34/769) sluice::conformance s12_a_submission_cannot_loosen_the_gate_it_is_judged_by
+        PASS [  10.743s] ( 35/769) sluice::conformance every_record_written_is_the_real_format_and_names_its_schema
+        PASS [   3.551s] ( 36/769) sluice::conformance s28_a_dirty_session_run_records_nothing
+        PASS [   7.056s] ( 37/769) sluice::conformance s1_two_heads_pass_and_land_in_order
+        PASS [   7.940s] ( 38/769) sluice::conformance s16_a_forecast_names_the_file_and_the_work_and_writes_nothing
+        PASS [   2.023s] ( 39/769) sluice::conformance s32_asking_again_gives_back_the_same_preview
+        PASS [   5.249s] ( 40/769) sluice::conformance s2_a_conflict_is_told_before_any_check_runs
+        PASS [  12.390s] ( 41/769) sluice::conformance peers_recorded
+        PASS [   7.023s] ( 42/769) sluice::conformance s26_a_clean_session_run_is_replayed_by_its_submission
+        PASS [   5.604s] ( 43/769) sluice::conformance s30_a_landed_revision_is_previewed_at_its_addresses
+        PASS [   6.424s] ( 44/769) sluice::conformance s31_the_next_landings_preview_replaces_the_last
+        PASS [  14.175s] ( 45/769) sluice::conformance peers_records_held
+        PASS [   2.239s] ( 46/769) sluice::conformance work_another_landing_took_is_landed_as_the_commit_that_landed_it
+        PASS [   9.271s] ( 47/769) sluice::conformance s27_a_sessions_place_stays_until_it_is_released
+        PASS [   2.815s] ( 48/769) sluice::equip_tools equip_adopts_nothing
+        PASS [   2.063s] ( 49/769) sluice::equip_tools equip_refuses_a_folder_in_no_worktree
+        PASS [   2.657s] ( 50/769) sluice::equip_tools equip_installs_the_pins_before_moon_runs
+        PASS [   5.306s] ( 51/769) sluice::equip_tools a_preview_is_equipped_before_its_command
+        PASS [   5.931s] ( 52/769) sluice::conformance state_and_status_read_the_records_with_no_step_running
+        PASS [   2.789s] ( 53/769) sluice::equip_tools equip_refuses_a_revision_it_cannot_read
+        PASS [  17.246s] ( 54/769) sluice::conformance peers_state_read
+        PASS [   2.744s] ( 55/769) sluice::equip_tools equip_runs_at_the_top_of_the_worktree
+        PASS [   7.197s] ( 56/769) sluice::conformance status_of_a_submission_on_a_mended_branch_answers_for_it
+        PASS [   3.469s] ( 57/769) sluice::equip_tools sluice_equip_with_no_tools_of_its_own
+        PASS [   4.040s] ( 58/769) sluice::equip_tools exec_equips_before_its_command
+        PASS [  10.126s] ( 59/769) sluice::conformance s4_the_first_fails_and_the_second_is_formed_again_without_it
+        PASS [   1.365s] ( 60/769) sluice::exec a_command_whose_host_process_ends_before_it_answers_exits_3
+        PASS [  25.124s] ( 61/769) sluice::conformance peers_a_finished_try_is_released_while_another_run_tests
+        PASS [   5.366s] ( 62/769) sluice::exec a_check_that_fails_after_the_engine_went_is_not_run_and_a_pass_is_recorded
+        PASS [   5.284s] ( 63/769) sluice::exec a_check_that_fails_after_the_hosts_system_was_switched_is_not_run_and_a_pass_is_recorded
+        PASS [   2.924s] ( 64/769) sluice::exec a_command_runs_under_the_raised_limit_on_open_files
+        PASS [   4.139s] ( 65/769) sluice::exec a_clean_run_of_the_checks_is_recorded_and_a_dirty_one_is_not
+        PASS [   4.035s] ( 66/769) sluice::exec a_command_gets_the_worktrees_environment_and_its_exit
+        PASS [   5.625s] ( 67/769) sluice::exec a_check_that_says_the_engine_is_down_while_it_answers_is_recorded_as_failed
+        PASS [   2.075s] ( 68/769) sluice::exec a_killed_client_ends_its_checks
+        PASS [  24.693s] ( 69/769) sluice::conformance peers_s1
+        PASS [  25.248s] ( 70/769) sluice::conformance peers_push_only_the_branch_and_refs_sluice
+        PASS [   6.135s] ( 71/769) sluice::exec a_check_that_says_the_system_was_switched_while_it_stood_is_recorded_as_failed
+        PASS [  25.183s] ( 72/769) sluice::conformance peers_read_the_last_fetched_state_when_the_remote_is_unreachable
+        PASS [   2.816s] ( 73/769) sluice::exec a_session_run_takes_its_callers_path
+        PASS [   2.421s] ( 74/769) sluice::exec a_stopped_sluice_host_ends_a_sessions_checks
+        PASS [  14.133s] ( 75/769) sluice::conformance s9_deepest_first_finds_the_culprit_by_testing_what_it_skipped
+        PASS [   2.846s] ( 76/769) sluice::exec a_sessions_checks_are_a_worker_of_sluice_host
+        PASS [  14.577s] ( 77/769) sluice::conformance s3_the_second_fails_and_only_its_session_hears
+        PASS [   2.915s] ( 78/769) sluice::exec a_worktree_at_its_branchs_revision_runs_no_check
+        PASS [   1.365s] ( 79/769) sluice::exec an_unheld_release_with_nothing_to_free_makes_nothing
+        PASS [   2.682s] ( 80/769) sluice::exec a_worktrees_release_runs_in_sluice_host
+        PASS [   1.973s] ( 81/769) sluice::exec an_exec_hands_its_checks_its_own_span_in_the_caller_s_trace
+        PASS [   6.392s] ( 82/769) sluice::exec a_second_run_on_the_same_files_replays_and_records_nothing
+        PASS [   3.628s] ( 83/769) sluice::exec a_worktrees_toolchain_runs_every_check
+        PASS [   3.622s] ( 84/769) sluice::exec a_worktrees_unstaged_edit_runs_the_checks_it_affects
+        PASS [   5.190s] ( 85/769) sluice::exec a_worktrees_checks_leave_out_what_its_branch_landed_since
+        PASS [   2.412s] ( 86/769) sluice::exec an_unheld_worktrees_release_runs_its_release_command
+        PASS [   3.300s] ( 87/769) sluice::exec a_worktrees_untracked_file_runs_the_checks_it_affects
+        PASS [   4.486s] ( 88/769) sluice::exec a_worktrees_own_moon_yml_runs_its_project
+        PASS [   2.464s] ( 89/769) sluice::exec ctrl_c_ends_a_sessions_checks
+        PASS [   4.412s] ( 90/769) sluice::exec an_exec_waits_for_another_repositorys_run_on_the_host
+        PASS [   7.149s] ( 91/769) sluice::exec a_sessions_checks_take_a_slot_of_the_bound
+        PASS [   1.592s] ( 92/769) sluice::exec sluice_exec_gets_the_hosts_cache_environment
+        PASS [   0.027s] ( 93/769) sluice::forge a_bundle_from_a_pull_requests_ref_counts_for_nothing
+        PASS [   8.723s] ( 94/769) sluice::exec a_pass_sluice_never_recorded_runs_again_and_is_recorded
+        PASS [   0.017s] ( 95/769) sluice::forge a_bundle_from_the_signers_workflow_counts
+        PASS [   0.020s] ( 96/769) sluice::forge a_bundle_no_carried_root_verifies_counts_for_nothing
+        PASS [   2.214s] ( 97/769) sluice::exec exec_records_the_open_executors_grant
+        PASS [   2.170s] ( 98/769) sluice::exec exec_refuses_the_tests_of_a_branch_whose_engine_does_not_answer
+        PASS [   0.025s] ( 99/769) sluice::forge a_bundle_of_githubs_own_instance_counts
+        PASS [   0.035s] (100/769) sluice::forge a_call_refused_its_token_is_made_on_a_fresh_one
+        PASS [   0.575s] (101/769) sluice::forge a_429_waits_as_long_as_github_says
+        PASS [   0.174s] (102/769) sluice::forge a_command_that_gives_no_token_fails_the_call
+        PASS [   0.222s] (103/769) sluice::forge a_commands_credentials_say_what_their_token_is
+        PASS [   0.273s] (104/769) sluice::forge a_command_that_gives_the_refused_token_back_gives_none_afresh
+        PASS [   0.357s] (105/769) sluice::forge a_call_refused_a_commands_token_is_made_on_one_got_afresh
+        PASS [   0.255s] (106/769) sluice::forge a_commands_token_for_another_repository_is_refused
+        PASS [   0.264s] (107/769) sluice::forge a_commands_token_honours_the_pause
+        PASS [   0.136s] (108/769) sluice::forge a_comment_whose_first_try_cannot_connect_is_posted_once
+        PASS [   0.251s] (109/769) sluice::forge a_commands_token_with_no_end_is_held_until_refused
+        PASS [   3.495s] (110/769) sluice::exec exec_looks_for_the_engine_at_a_tcp_address
+        PASS [   0.081s] (111/769) sluice::forge a_read_answered_503_until_the_bound_fails_unanswered
+        PASS [   0.189s] (112/769) sluice::forge a_dispatch_answered_502_is_made_once
+        PASS [   0.024s] (113/769) sluice::forge a_redirect_is_githubs_answer_and_says_what_to_do
+        PASS [   0.139s] (114/769) sluice::forge a_kept_author_stands_while_github_cannot_be_read
+        PASS [   0.018s] (115/769) sluice::forge a_refused_token_says_why
+        PASS [   0.083s] (116/769) sluice::forge a_read_github_could_not_answer_is_made_again
+        PASS [   0.021s] (117/769) sluice::forge a_token_for_another_repository_is_refused
+        PASS [  30.620s] (118/769) sluice::conformance peers_s4
+        PASS [   0.033s] (119/769) sluice::forge a_token_is_bought_once_an_hour
+        PASS [   0.093s] (120/769) sluice::forge a_refused_query_fails_in_githubs_words
+        PASS [   7.588s] (121/769) sluice::exec a_worktrees_last_result_says_its_head_outcome_and_whether_it_was_recorded
+        PASS [   0.441s] (122/769) sluice::forge a_commands_token_is_got_once_before_each_end
+        PASS [   0.028s] (123/769) sluice::forge credentials_say_what_their_token_is_and_renew_buys_one
+        PASS [   0.167s] (124/769) sluice::forge a_write_that_sets_a_state_is_made_again
+        PASS [   0.209s] (125/769) sluice::forge a_write_that_makes_something_is_read_back_before_it_is_made_again
+        PASS [   0.266s] (126/769) sluice::forge a_spent_allowance_is_waited_out_to_its_reset
+        PASS [   0.267s] (127/769) sluice::forge a_secondary_limit_naming_no_time_doubles
+        PASS [   0.027s] (128/769) sluice::forge forge_check_all_set
+        PASS [   0.066s] (129/769) sluice::forge forge_check_names_a_pools_missing_workflow
+        PASS [   0.029s] (130/769) sluice::forge forge_check_names_an_extra_bypass
+        PASS [   0.087s] (131/769) sluice::forge forge_check_names_an_environment_any_branch_may_use
+        PASS [   0.239s] (132/769) sluice::forge every_process_on_the_host_honours_the_pause
+        PASS [   0.363s] (133/769) sluice::forge a_token_got_afresh_is_the_one_another_refused_takes
+        PASS [   0.298s] (134/769) sluice::forge apps_holding_one_store_get_a_repositorys_token_once
+        PASS [   0.036s] (135/769) sluice::forge forge_check_reads_a_workflow_with_the_repositorys_own_steps
+        PASS [   0.039s] (136/769) sluice::forge forge_check_names_own_steps_that_leave_the_run_job
+        PASS [   0.345s] (137/769) sluice::forge an_author_github_did_not_give_is_kept_nowhere
+        PASS [   0.110s] (138/769) sluice::forge forge_check_names_each_failure
+        PASS [   0.284s] (139/769) sluice::forge every_read_is_conditional
+        PASS [   0.015s] (140/769) sluice::forge live_pull_request_calls
+        PASS [   0.024s] (141/769) sluice::forge no_installation_withholds_the_credentials_and_says_what_to_do
+        PASS [   0.228s] (142/769) sluice::forge forge_check_with_a_command_names_each_failure
+        PASS [   0.240s] (143/769) sluice::forge forge_check_with_a_command_all_set
+        PASS [   0.202s] (144/769) sluice::forge no_token_is_kept_on_the_host
+        PASS [   0.120s] (145/769) sluice::forge one_query_reads_the_open_pull_requests_whole
+        PASS [   0.095s] (146/769) sluice::forge the_apps_author_is_its_bot_kept_on_the_host
+        PASS [   0.395s] (147/769) sluice::forge graphqls_allowance_is_its_own
+        PASS [   0.016s] (148/769) sluice::forge the_apps_login_is_read_once
+        PASS [   0.175s] (149/769) sluice::forge the_apps_author_under_a_command_is_the_viewers_bot
+        PASS [   2.335s] (150/769) sluice::exec the_output_reaches_the_client_as_it_comes
+        PASS [   0.147s] (151/769) sluice::forge the_apps_pull_request_calls
+        PASS [   0.188s] (152/769) sluice::forge the_bot_under_a_command_is_the_viewers
+        PASS [   0.184s] (153/769) sluice::forge the_last_call_of_an_allowance_starts_the_pause
+        PASS [   0.175s] (154/769) sluice::forge the_list_says_whether_it_changed
+        PASS [   0.191s] (155/769) sluice::forge the_pause_outlives_the_process
+        PASS [   0.266s] (156/769) sluice::forge the_pools_calls
+        PASS [   0.952s] (157/769) sluice::forge forge_check_tells_a_commands_words_without_its_token
+        PASS [   0.974s] (158/769) sluice::forge forge_check_runs_the_hosts_command
+        PASS [   0.281s] (159/769) sluice::forge the_query_reads_fifty_to_a_page
+        PASS [   0.247s] (160/769) sluice::instance a_reserve_that_leaves_no_run_is_refused
+        PASS [   3.950s] (161/769) sluice::exec exec_runs_from_a_worktree_at_a_long_path
+        PASS [   0.900s] (162/769) sluice::forge status_says_who_pushes_the_branch
+        PASS [   4.154s] (163/769) sluice::exec exec_tells_a_conflict_before_it_runs_and_runs_anyway
+        PASS [   7.298s] (164/769) sluice::exec after_a_fix_exec_runs_the_fixed_check_and_replays_the_rest
+        PASS [   0.059s] (165/769) sluice::instance guarding_reads_only_the_forge
+        PASS [   0.072s] (166/769) sluice::instance the_reserve_is_none_by_default
+        PASS [   0.136s] (167/769) sluice::instance the_reserve_is_read_beside_the_bound
+        PASS [   0.518s] (168/769) sluice::instance discovery_is_read_from_the_forge
+        PASS [   1.971s] (169/769) sluice::forge forge_check_exits_by_what_it_finds
+        PASS [   5.277s] (170/769) sluice::exec the_next_exec_runs_a_removed_worktrees_stored_release_once
+        PASS [   4.780s] (171/769) sluice::exec the_overview_counts_another_repositorys_combination_in_its_room
+        PASS [   3.657s] (172/769) sluice::forge forge_check_reads_the_pool_the_policy_names
+        PASS [   0.939s] (173/769) sluice::local_refs a_branch_in_this_hosts_refs_has_no_copy_apart
+        PASS [   7.974s] (174/769) sluice::exec exec_json_gives_since_and_each_tasks_replayed
+        PASS [   2.009s] (175/769) sluice::local_refs a_bare_repositorys_default_branch_is_its_own_heads
+        PASS [   0.855s] (176/769) sluice::local_refs a_landing_beside_reads_as_passed_to_git
+        PASS [   1.015s] (177/769) sluice::local_refs a_refusing_hook_does_not_stop_move_to
+        PASS [   1.003s] (178/769) sluice::local_refs a_repository_is_named_by_the_origin_it_configures
+        PASS [   0.998s] (179/769) sluice::local_refs commit_as_names_its_author
+        PASS [   1.328s] (180/769) sluice::local_refs a_merge_base_is_where_two_revisions_part
+        PASS [   0.676s] (181/769) sluice::local_refs contains_answers_no_for_a_commit_this_host_lacks
+        PASS [   1.387s] (182/769) sluice::local_refs commit_writes_the_landing
+        PASS [   0.978s] (183/769) sluice::local_refs form_clean_is_gits_merge_with_both_parents
+        PASS [   1.442s] (184/769) sluice::local_refs contains_answers_ancestry
+        PASS [   1.440s] (185/769) sluice::local_refs form_a_chain_of_three
+        PASS [   0.797s] (186/769) sluice::local_refs form_errors_are_not_conflicts
+        PASS [  10.114s] (187/769) sluice::exec exec_opens_with_where_the_worktree_left_its_branch
+        PASS [   0.873s] (188/769) sluice::local_refs the_common_dir_is_one_from_every_worktree
+        PASS [   1.084s] (189/769) sluice::local_refs read_existing_missing_and_packed
+        PASS [   1.192s] (190/769) sluice::local_refs read_file_reads_the_revision_not_the_worktree
+        PASS [   1.739s] (191/769) sluice::local_refs move_to_from_expected_only
+        PASS [   2.556s] (192/769) sluice::local_refs the_default_branch_and_the_branches_read_as_git_names_them
+        FAIL [   9.621s] (193/769) sluice::instance bound::a_daemon_takes_up_a_changed_telemetry_table_in_place
+  stdout ───
+
+    running 1 test
+    test bound::a_daemon_takes_up_a_changed_telemetry_table_in_place ... FAILED
+
+    failures:
+
+    failures:
+        bound::a_daemon_takes_up_a_changed_telemetry_table_in_place
+
+    test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 12 filtered out; finished in 9.60s
+
+  stderr ───
+
+    thread 'bound::a_daemon_takes_up_a_changed_telemetry_table_in_place' (751835116) panicked at crates/sluice/tests/instance.rs:400:9:
+    {"error":{"kind":"internal","message":"sluice's host process did not answer: sluice's host process, sluice 0.0.0 (pid 82306), ended before it answered: the host process closed the connection","next":[]}}
+    sluice: sluice's host process did not answer: sluice's host process, sluice 0.0.0 (pid 82306), ended before it answered: the host process closed the connection
+
+    note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+  Cancelling due to test failure: 17 tests still running
+        PASS [   8.737s] (194/769) sluice::landed a_waiting_submit_held_past_its_pass_says_what_the_pass_released
+        PASS [   3.678s] (195/769) sluice::local_refs two_moves_from_one_revision_one_wins
+        PASS [   6.582s] (196/769) sluice::local_refs form_conflicts_name_every_path
+        PASS [  10.873s] (197/769) sluice::landed a_release_failing_after_the_landing_leaves_the_submit_landed
+        PASS [   5.977s] (198/769) sluice::moon a_cleanup_dependency_that_fails_fails_no_check
+        PASS [   5.767s] (199/769) sluice::moon a_failed_task_whose_manifest_is_gone_is_not_unkept
+        PASS [   6.329s] (200/769) sluice::moon a_cold_test_gets_no_cache
+        PASS [   7.391s] (201/769) sluice::moon a_failure_and_its_dependent
+        PASS [  49.354s] (202/769) sluice::conformance peers_s3
+        PASS [  50.624s] (203/769) sluice::conformance peers_s9
+        PASS [  39.642s] (204/769) sluice::instance bound::the_host_process_keeps_its_settings_when_a_change_it_hands_over_for_does_not_bind
+        PASS [  40.730s] (205/769) sluice::instance bound::the_host_process_takes_up_a_changed_bound_at_its_next_pass
+        PASS [  41.660s] (206/769) sluice::instance bound::the_host_process_hands_a_changed_telemetry_table_to_a_fresh_one
+        PASS [  42.622s] (207/769) sluice::instance bound::the_host_process_keeps_its_settings_when_the_new_ones_do_not_bind
+        PASS [  48.040s] (208/769) sluice::instance bound::the_keepers_cores_set_each_runs_share
+        PASS [  55.536s] (209/769) sluice::instance bound::three_repositories_share_the_hosts_bound
+        SLOW [> 60.000s] (───────) sluice::instance bound::one_run_holds_three_branches_to_its_bound
+        PASS [  74.360s] (210/769) sluice::instance bound::one_run_holds_three_branches_to_its_bound
+────────────
+     Summary [ 118.985s] 210/769 tests run: 209 passed (1 slow), 1 failed, 7 skipped
+        FAIL [   9.621s] (193/769) sluice::instance bound::a_daemon_takes_up_a_changed_telemetry_table_in_place
+warning: 559/769 tests were not run due to test failure (run with --no-fail-fast to run all tests, or run with --max-fail)
+error: test run failed

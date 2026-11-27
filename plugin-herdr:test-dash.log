@@ -1,0 +1,175 @@
+--- stdout ---
+== group 0 of 4
+scripts run under /private/tmp/sluice-501/8b9fa53964/ab7bed3ede/sluice-herdr.HkwHWh/sh/sh -> /nix/store/l4rpnbmrh0m8nqrh0ra00svl515rzwpc-dash-0.5.13.5/bin/dash
+ok   manifest: a broken one refused
+ok   watch: watcher gone
+skip: watch: a killed watcher's sources are ended: ps can't run here (/private/tmp/sluice-501/8b9fa53964/ab7bed3ede/sluice-herdr-group.2nqkuA/run.sh: line 289: /bin/ps: Operation not permitted)
+ok   watch: without ps, one source and it is ended
+ok   watch: a plugin put back stops the host's watcher
+ok   watch: another herdr server in its place
+ok   watch: no configuration
+ok   watch: panes of two servers in one repository
+ok   watch: ten repositories, four processes
+ok   watch: a repository's first submission shows at its next document
+ok   watch: the former key runs no source
+ok   watch: read by every server
+ok   watch: source exits
+ok   document: a conflict in the second repository is told from the document
+ok   status: a document that names no subjects names numbers
+ok   status: rows are links
+ok   status: no control characters from a link or a document
+ok   status: close
+ok   status: a tall frame fits the terminal
+ok   status: a pane outside git shows every repository
+ok   status: the segment names what waits and the last event
+ok   status: the band says when checks hold the queue back
+ok   status: a held checkout
+ok   status: a checkout still being tried
+ok   status: one tab-bar line for every host
+ok   toasts: blamed
+ok   toasts: an event on a long branch, or of many submissions
+ok   toasts: landed, looking elsewhere
+ok   toasts: a repository no pane is in
+ok   jump: no pane
+ok   sidebar: checking a command
+ok   sidebar: blamed, a command runner's task
+ok   sidebar: clean
+ok   sidebar: nothing changed
+ok   sidebar: a blame comes before a named branch
+ok   sidebar: a named branch with more than one under test
+ok   sidebar: queued
+ok   sidebar: a shown token is set again once a minute
+FAIL sidebar: named just after it opens: the pane's named branch was not read within a tick: herdr.sock: pane list
+herdr.sock: pane list
+herdr.sock: pane list
+herdr.sock: pane list
+
+1 failed of 38, 1 skipped
+== group 1 of 4
+scripts run under /private/tmp/sluice-501/8b9fa53964/ab7bed3ede/sluice-herdr.RXeapl/sh/sh -> /nix/store/l4rpnbmrh0m8nqrh0ra00svl515rzwpc-dash-0.5.13.5/bin/dash
+ok   stand-ins: herdr answers from its socket, jq and git are logged
+ok   watch: a lock left by a watcher that died
+skip: watch: a source is known without ps's start times: ps can't run here (/private/tmp/sluice-501/8b9fa53964/ab7bed3ede/sluice-herdr-group.C1TdXS/run.sh: line 289: /bin/ps: Operation not permitted)
+ok   watch: without ps, an ended watcher's sources are left alone
+ok   watch: herdr gone
+ok   watch: idle ticks run nothing
+ok   watch: one source serves three repositories
+ok   watch: the last pane leaves
+ok   watch: a repository with records is read from its subscription
+ok   watch: a source of the user's
+ok   watch: configuration it cannot read
+ok   watch: a document missing fields
+skip: watch: a killed watcher's source ends: ps can't run here (/private/tmp/sluice-501/8b9fa53964/ab7bed3ede/sluice-herdr-group.C1TdXS/run.sh: line 289: /bin/ps: Operation not permitted)
+ok   status: testing
+ok   status: a subject with control characters stays on its line
+ok   status: links to paths that are not ASCII
+ok   status: a number does what a click does
+ok   status: all repositories
+ok   status: a tall frame scrolls
+ok   status: without sluice
+ok   status: another repository's document leaves the segment alone
+ok   status: branches keep the overview's order
+ok   status: a held worktree
+ok   status: a document from before held places
+ok   status: the segment is the server's
+ok   toasts: a number another branch holds
+ok   toasts: none when what was told cannot be kept
+ok   toasts: landed, looking at it
+ok   toasts: landed in two servers
+ok   sidebar: testing
+ok   sidebar: a submission comes before a check
+ok   sidebar: a conflict
+ok   sidebar: ahead again after a landing
+ok   sidebar: forecasts off
+ok   sidebar: a named branch with nothing queued
+ok   sidebar: no forecast for a named pane
+ok   sidebar: queued and held
+ok   sidebar: a commit is forecast within a tick
+ok   sidebar: named later
+
+all 37 passed, 2 skipped
+== group 2 of 4
+scripts run under /private/tmp/sluice-501/8b9fa53964/ab7bed3ede/sluice-herdr.cauREp/sh/sh -> /nix/store/l4rpnbmrh0m8nqrh0ra00svl515rzwpc-dash-0.5.13.5/bin/dash
+ok   watch: started twice
+ok   watch: a lock with no owner
+ok   watch: a watcher stopped in its source's first second ends it
+ok   watch: a pid used again by another process is left alone
+ok   watch: herdr stops
+ok   watch: a change wakes it
+ok   watch: two worktrees of one repository add one folder
+ok   watch: a pane closes in one of two repositories
+ok   watch: a repository with no sluice has no records
+ok   watch: a source of the user's that names its folders
+ok   watch: two documents
+ok   watch: a document it cannot read
+ok   watch: the watcher only reads
+ok   status: a combination names its submissions
+ok   status: tasks redraw with the version unmoved
+ok   status: a link focuses, opens, or is left alone
+ok   status: two hosts
+ok   status: the focused pane from herdr's context
+ok   status: a branch with nothing queued is left out
+ok   status: the dashboard
+ok   status: agents' checks are load on the host
+ok   status: the focused pane's named branch comes first
+ok   status: another host's held checkout
+ok   status: the segment counts held places
+ok   status: the segment is the same in every server
+ok   toasts: watcher restarted
+ok   toasts: first sight of a repository
+ok   toasts: landed, no pane
+ok   jump: jump
+ok   sidebar: testing, with tasks
+ok   sidebar: a blame comes before a check
+ok   sidebar: landed, then gone
+ok   sidebar: conflicts
+ok   sidebar: a named branch
+ok   sidebar: a named branch with no records
+ok   sidebar: two servers forecast once
+ok   sidebar: held alone
+ok   sidebar: two servers, one worktree
+ok   sidebar: tokens fade without the watcher
+
+all 39 passed, 0 skipped
+== group 3 of 4
+scripts run under /private/tmp/sluice-501/8b9fa53964/ab7bed3ede/sluice-herdr.JA7vq7/sh/sh -> /nix/store/l4rpnbmrh0m8nqrh0ra00svl515rzwpc-dash-0.5.13.5/bin/dash
+ok   watch: two servers, one watcher
+skip: watch: a watcher stops only its own sources: ps can't run here (/private/tmp/sluice-501/8b9fa53964/ab7bed3ede/sluice-herdr-group.J73G5g/run.sh: line 289: /bin/ps: Operation not permitted)
+ok   watch: a pid kept alone and used again is left alone
+ok   watch: a reinstalled plugin replaces its watcher
+ok   watch: one of two servers stops
+ok   watch: a former version's watchers give way
+ok   watch: a pane in a new repository adds it on the same input
+ok   watch: three servers, two repositories, four processes
+ok   watch: a repository with no sluice is added again five minutes on
+ok   watch: a source with no folders has its input closed
+ok   watch: a large document costs what a small one does
+ok   watch: what a held place failed is kept to its last line
+ok   document: a blame the watcher did not see queued is told from the document
+ok   status: a landing of two names both
+ok   status: a task list it cannot read is left out
+ok   status: the log split
+ok   status: redraws on change
+ok   status: a plain directory
+ok   status: an idle branch is shown a quarter of an hour after its last event
+ok   status: segment
+ok   status: a finished check says what it is worth
+ok   status: a named branch with no records
+ok   status: an idle branch with a held place
+ok   status: setup shows, never edits
+ok   status: fields it does not know change nothing
+ok   toasts: what is told is kept only while it is recent
+ok   toasts: a conflict
+ok   toasts: three servers
+ok   jump: a number another branch holds
+ok   sidebar: checking
+ok   sidebar: blamed
+ok   sidebar: nothing to say
+ok   sidebar: conflicts with what landed
+ok   sidebar: a submission comes before a named branch
+ok   sidebar: a named branch counts its checks
+ok   sidebar: named in one server, not in another
+ok   sidebar: a checkout two hosts list is counted once
+ok   sidebar: a server stops
+
+all 37 passed, 1 skipped
