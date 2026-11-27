@@ -1302,6 +1302,36 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
+    /// forge-reads, "The host sets the interval" (136): `[forge]
+    /// discovery` sets how often a branch's open pull requests are asked
+    /// for, a minute where it is unset; one shorter than ten seconds is
+    /// refused, naming it and the least it takes.
+    #[test]
+    fn the_host_sets_the_discovery_interval_ten_seconds_at_least() {
+        let home = std::env::temp_dir().join(format!("sluice-discovery-{}", std::process::id()));
+        let read = |line: &str| {
+            Instance::from_text(
+                &format!("[forge]\napp_id = 42\ncredential = [\"/bin/token\"]\n{line}"),
+                None,
+                4,
+                4,
+                Some(&home),
+            )
+        };
+        let every = |line: &str| read(line).unwrap().forge.unwrap().discovery;
+        assert_eq!(every(""), DISCOVERY);
+        assert_eq!(DISCOVERY, std::time::Duration::from_secs(60));
+        assert_eq!(
+            every("discovery = \"2m\"\n"),
+            std::time::Duration::from_secs(120)
+        );
+        let err = format!("{:#}", read("discovery = \"5s\"\n").unwrap_err());
+        assert!(
+            err.contains("[forge] discovery = \"5s\" is shorter than ten seconds"),
+            "{err}"
+        );
+    }
+
     /// The forge-identity spec's "A command in place of a key", "Both a key
     /// and a command" and "A command written as a shell line": `[forge]`
     /// names a key or a command, never both or neither, and a command is a

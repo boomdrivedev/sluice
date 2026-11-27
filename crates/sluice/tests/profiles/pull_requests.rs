@@ -19,7 +19,7 @@ use std::process::{Command, Output, Stdio};
 use std::time::{Duration, Instant};
 
 use serde_json::Value;
-use sluice::profiles::github::forge::{Forge as _, Posting, Standing, Status};
+use sluice::profiles::github::forge::{Forge as _, Posting, Status};
 use support::{Repo, Scratch};
 
 const KEY: &[u8] = include_bytes!("forge/test-key.pem");
@@ -403,10 +403,6 @@ impl OnGitHub {
         self.comments(n)
             .into_iter()
             .find(|c| c.starts_with("<!-- sluice-report: main -->"))
-    }
-
-    fn posts(&self) -> usize {
-        self.gh.forge.held().unwrap().posts.len()
     }
 
     fn comments(&self, n: u64) -> Vec<String> {
@@ -1871,44 +1867,6 @@ impl OnGitHub {
     }
 }
 
-/// forge-reads, "Nothing moved" and "A restart asks nothing new": twenty
-/// passes of `sluice run` over a minute ask for main's open pull requests
-/// once, and a step started again then asks nothing; the one waiting for a
-/// review is read again only at that asking, by the one query.
-#[test]
-fn nothing_moved_asks_once_a_minute() {
-    let g = OnGitHub::new("pr-discovery", "reviews = 1");
-    let (n, head) = g.by_hand("unit/review", &[("r.txt", Some("r\n"))], false);
-    g.settle();
-    g.on_main();
-    g.discovery_passes();
-    let (lists, beside, queries) = (g.lists(), g.beside_reads(n, &head), g.gh.queries());
-    let out = g.skipping(g.repo.dir(), &["run", "--rounds", "20"]);
-    assert!(out.status.success(), "{}", text(&out));
-    assert_eq!(g.lists(), lists + 1, "{}", text(&out));
-    assert_eq!(g.gh.queries(), queries + 1, "its reviews, at the asking");
-    assert_eq!(g.beside_reads(n, &head), beside, "nothing read alone");
-    assert_eq!(
-        g.posted(&head).unwrap().1,
-        "waiting: needs 1 review",
-        "{}",
-        text(&out)
-    );
-    let posts = g.posts();
-    for _ in 0..3 {
-        let out = g.sluice(&["step", "main"]);
-        assert!(out.status.success(), "{}", text(&out));
-    }
-    assert_eq!(
-        g.lists(),
-        lists + 1,
-        "a restart asks nothing within the minute"
-    );
-    assert_eq!(g.gh.queries(), queries + 1);
-    assert_eq!(g.beside_reads(n, &head), beside);
-    assert_eq!(g.posts(), posts);
-}
-
 impl OnGitHub {
     /// `main` on GitHub taking pull requests, and `bolt/x` and `bolt/y`
     /// beside it, branches on GitHub that take pull requests too, each
@@ -1934,27 +1892,6 @@ impl OnGitHub {
         }
         g
     }
-}
-
-/// forge-reads, "Three branches, one list": main and two bolts take pull
-/// requests. Twenty passes of `sluice run` over a minute, with nothing on
-/// the host moving, ask GitHub for the repository's open pull requests
-/// once, in one list that serves all three branches
-/// (`one-forge-read-per-repository-per-interval@b3b6757cea2d`).
-#[test]
-fn a_repositorys_branches_share_one_list_each_interval() {
-    let g = OnGitHub::with_bolts_taking_requests("pr-one-list");
-    g.on_main();
-    g.discovery_passes();
-    let lists = g.lists();
-    let out = g.skipping(g.repo.dir(), &["run", "--rounds", "20"]);
-    assert!(out.status.success(), "{}", text(&out));
-    assert_eq!(g.lists(), lists + 1, "{}", text(&out));
-    assert_eq!(
-        g.gh.calls("GET", "/repos/o/r/pulls?state=open&base="),
-        0,
-        "no list of one branch"
-    );
 }
 
 /// The fault "A `sluice submit --no-wait` exits 3 when the GitHub App's
@@ -2067,234 +2004,6 @@ fn passes_between_discoveries_start_no_git_and_ask_github_nothing() {
         );
     }
     assert!(asked_six.len() <= asked_one.len(), "{asked_six:?}");
-}
-
-/// forge-reads, "The host sets the interval": under `discovery = "2m"`,
-/// forty passes over two minutes less three seconds ask once; the next
-/// pass, two minutes after, asks again. Too short a `discovery` is
-/// refused, naming it and ten seconds.
-#[test]
-fn the_host_sets_the_interval() {
-    let g = OnGitHub::new("pr-discovery-2m", "reviews = 1");
-    g.discovery("2m");
-    g.by_hand("unit/slowly", &[("s.txt", Some("s\n"))], false);
-    g.on_main();
-    let out = g.skipping(g.repo.dir(), &["run", "--rounds", "40"]);
-    assert!(out.status.success(), "{}", text(&out));
-    assert_eq!(g.lists(), 1, "{}", text(&out));
-    g.discovery_passes();
-    let out = g.skipping(g.repo.dir(), &["run", "--rounds", "41"]);
-    assert!(out.status.success(), "{}", text(&out));
-    assert_eq!(g.lists(), 3, "asked at once, and two minutes on");
-
-    let short = OnGitHub::new("pr-discovery-5s", "");
-    short.discovery("5s");
-    let out = short.sluice(&["step", "main"]);
-    assert_eq!(out.status.code(), Some(3), "{}", text(&out));
-    assert!(
-        text(&out).contains("[forge] discovery = \"5s\" is shorter than ten seconds"),
-        "{}",
-        text(&out)
-    );
-}
-
-/// forge-reads, "A submit on the host asks at once": seconds after main's
-/// last asking, `sluice submit main --no-wait` opens a pull request, and
-/// its own pass asks for main's pull requests and takes it in.
-#[test]
-fn a_submit_on_the_host_asks_at_once() {
-    let g = OnGitHub::new("pr-discovery-submit", "");
-    g.step();
-    let asked = g.lists();
-    let w = g.session("prompt", &[("p.txt", "p\n")]);
-    let out = g
-        .command(env!("CARGO_BIN_EXE_sluice"), &w)
-        .args(["submit", "main", "--no-wait"])
-        .output()
-        .unwrap();
-    assert_eq!(out.status.code(), Some(0), "{}", text(&out));
-    let n = g.pull_from("unit/prompt").number;
-    assert!(
-        text(&out).contains(&format!("from #{n}")),
-        "taken in: {}",
-        text(&out)
-    );
-    assert_eq!(g.of(n).len(), 1, "{:?}", g.subs());
-    // The open's own list and the pass's.
-    assert_eq!(g.lists(), asked + 2);
-}
-
-/// forge-reads, "A landing asks at once": the pass after a round lands a
-/// submission asks for main's pull requests, and once nothing moves again
-/// the next asks nothing.
-#[test]
-fn a_landing_asks_at_once() {
-    let g = OnGitHub::new("pr-discovery-landing", "");
-    let (n, _) = g.by_hand("unit/lands", &[("l.txt", Some("l\n"))], false);
-    let until = Instant::now() + Duration::from_secs(60);
-    while g.of(n).first().is_none_or(|s| s["state"] != "landed") {
-        assert!(Instant::now() < until, "never landed: {:?}", g.subs());
-        let out = g.sluice(&["step", "main"]);
-        assert!(out.status.success(), "{}", text(&out));
-    }
-    let asked = g.lists();
-    let out = g.sluice(&["step", "main"]);
-    assert!(out.status.success(), "{}", text(&out));
-    assert_eq!(g.lists(), asked + 1, "the landing asks");
-    let out = g.sluice(&["step", "main"]);
-    assert!(out.status.success(), "{}", text(&out));
-    assert_eq!(g.lists(), asked + 1, "then nothing moved");
-}
-
-/// forge-reads, "A waiting pull request that stands" and "Nothing new to
-/// say": a pull request taken into the queue, asked for three times more
-/// with nothing moved, has nothing beside its list entry read again, and
-/// its check is neither read back nor posted again.
-#[test]
-fn a_queued_pull_request_that_stands_is_read_by_the_list_alone() {
-    let g = OnGitHub::new("pr-discovery-stands", "reviews = 1");
-    let w = g.session("stands", &[("slow", "x\n")]);
-    let out = g.wt_submit(&w, &["--no-wait"]);
-    assert_eq!(out.status.code(), Some(0), "{}", text(&out));
-    let pull = g.pull_from("unit/stands");
-    let n = pull.number;
-    g.gh.forge
-        .review(n, "reviewer", "APPROVED", &pull.head)
-        .unwrap();
-    let status = |g: &OnGitHub| {
-        g.discovery_passes();
-        let out = g
-            .command(env!("CARGO_BIN_EXE_sluice"), &w)
-            .args(["submit", "main", "--status"])
-            .output()
-            .unwrap();
-        assert_eq!(out.status.code(), Some(0), "{}", text(&out));
-        text(&out)
-    };
-    let said = status(&g);
-    assert_eq!(g.of(n).len(), 1, "taken in: {said}");
-    assert!(said.starts_with("queued"), "{said}");
-    let (lists, beside) = (g.lists(), g.beside_reads(n, &pull.head));
-    let (read_back, posts) = (g.posted_reads(&pull.head), g.posts());
-    for _ in 0..3 {
-        let said = status(&g);
-        assert!(said.starts_with("queued"), "{said}");
-    }
-    // Each finds its pull request in the list, and asks.
-    assert_eq!(g.lists(), lists + 6);
-    assert_eq!(
-        g.beside_reads(n, &pull.head),
-        beside,
-        "nothing beside the list"
-    );
-    assert_eq!(
-        g.posted_reads(&pull.head),
-        read_back,
-        "its check not read back"
-    );
-    assert_eq!(g.posts(), posts, "nor posted again");
-}
-
-/// forge-reads, "The state moves": the pull request's submission goes
-/// from queued to testing, and its check is posted once, saying testing,
-/// with no read of GitHub's copy first. Its check goes on until the test
-/// ends it, so it is under test at the second round however long a round
-/// takes on a loaded host. A check of five seconds left room for it to
-/// land between them: deneb, 2026-11-18, main at 15b5cf173, the second
-/// round posting its check as a success.
-#[test]
-fn the_state_moves_and_is_posted_unread() {
-    let g = OnGitHub::new("pr-discovery-moves", "");
-    let hang = Hang::in_repo(&g);
-    let (n, head) = g.by_hand("unit/moves", &[("hang", Some(&hang.file()))], false);
-    g.discovery_passes();
-    let out = g.sluice(&["step", "main"]);
-    assert!(out.status.success(), "{}", text(&out));
-    started(&hang.pid);
-    assert_eq!(g.of(n).len(), 1, "{:?}", g.subs());
-    let (read_back, posts) = (g.posted_reads(&head), g.posts());
-    // The round started its test: the records moved, and the next pass
-    // asks and shows it.
-    let out = g.sluice(&["step", "main"]);
-    assert!(out.status.success(), "{}", text(&out));
-    let (status, title, _) = g.posted(&head).unwrap();
-    assert_eq!(status, Status::InProgress, "{title}");
-    assert!(title.starts_with("testing main + #"), "{title}");
-    assert_eq!(g.posts(), posts + 1);
-    assert_eq!(g.posted_reads(&head), read_back);
-}
-
-/// forge-reads, "A draft": each asking reads a draft from the list alone.
-#[test]
-fn a_draft_is_read_from_the_list_alone() {
-    let g = OnGitHub::new(
-        "pr-discovery-draft",
-        "reviews = 1\nchecks = [\"qa/approved\"]",
-    );
-    let (n, head) = g.by_hand("unit/drafty", &[("d.txt", Some("d\n"))], true);
-    for _ in 0..3 {
-        g.step();
-    }
-    assert_eq!(g.lists(), 3);
-    assert_eq!(g.beside_reads(n, &head), 0);
-    assert_eq!(g.posted(&head).unwrap().1, "waiting: a draft");
-}
-
-/// forge-reads, "A pull request waiting on a check": out of draft, it
-/// waits for `qa/approved`, which another system passes on its head,
-/// moving nothing GitHub lists; the next asking reads its checks again,
-/// by the one query, and submits it. pull-request-intake: "the next
-/// asking submits it".
-#[test]
-fn a_pull_request_waiting_on_a_check_is_read_at_each_asking() {
-    let g = OnGitHub::new("pr-discovery-qa", "checks = [\"qa/approved\"]");
-    let (n, head) = g.by_hand("unit/qa", &[("q.txt", Some("q\n"))], false);
-    g.step();
-    assert!(g.of(n).is_empty(), "{:?}", g.subs());
-    let checks = |g: &OnGitHub| {
-        g.gh.calls(
-            "GET",
-            &format!("/repos/o/r/commits/{head}/check-runs?per_page"),
-        )
-    };
-    let (before, queries) = (checks(&g), g.gh.queries());
-    let updated = g.pull_from("unit/qa").updated_at;
-    g.gh.forge
-        .check(&head, "qa/approved", Standing::Passed)
-        .unwrap();
-    assert_eq!(g.pull_from("unit/qa").updated_at, updated);
-    g.step();
-    assert_eq!(g.gh.queries(), queries + 1);
-    assert_eq!(checks(&g), before, "nothing read alone");
-    assert_eq!(g.of(n).len(), 1, "{:?}", g.subs());
-}
-
-/// forge-reads, "A new head": a pull request's head moves, and its reviews
-/// and checks are read again at the next asking, against its new head, by
-/// the one query.
-#[test]
-fn a_new_head_is_read_again() {
-    let g = OnGitHub::new(
-        "pr-discovery-head",
-        "reviews = 1\nchecks = [\"qa/approved\"]",
-    );
-    let (n, old) = g.by_hand("unit/heads", &[("h.txt", Some("h\n"))], false);
-    g.step();
-    let reviews = g.gh.calls("GET", &format!("/repos/o/r/pulls/{n}/reviews"));
-    let queries = g.gh.queries();
-    let new = g.push_more("unit/heads", "h2.txt");
-    g.step();
-    assert_eq!(g.gh.queries(), queries + 1);
-    assert_eq!(
-        g.gh.calls("GET", &format!("/repos/o/r/pulls/{n}/reviews")),
-        reviews
-    );
-    assert_eq!(g.beside_reads(n, &new), 0);
-    assert_eq!(
-        g.posted(&new).unwrap().1,
-        "waiting: needs 1 review, qa/approved"
-    );
-    assert!(g.posted(&old).is_some());
 }
 
 /// 136: a waiting `sluice wait main` that follows its pull request for a

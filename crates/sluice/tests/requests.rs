@@ -58,7 +58,7 @@ struct Host {
     peer: sluice_core::Peer,
     refs: Rc<FakeRefs>,
     pulls: Pulls,
-    dir: Scratch,
+    dir: Rc<Scratch>,
 }
 
 /// The repository's git as the pull request driver reaches it, over the
@@ -308,6 +308,8 @@ struct OnGitHub {
     leases: RefCell<BTreeMap<String, (Duration, Duration)>>,
     /// The signer each host signs as, where a test gives one.
     signers: RefCell<BTreeMap<String, String>>,
+    /// Each host's state on disk, which outlives its processes.
+    dirs: RefCell<BTreeMap<String, Rc<Scratch>>>,
     _dir: Scratch,
 }
 
@@ -396,6 +398,7 @@ impl OnGitHub {
             discovery: Cell::new(DISCOVERY),
             leases: RefCell::default(),
             signers: RefCell::default(),
+            dirs: RefCell::default(),
             _dir: dir,
         }
     }
@@ -411,7 +414,12 @@ impl OnGitHub {
         if let Some((lease, alive)) = self.leases.borrow().get(&name) {
             (peer.lease, peer.alive) = (*lease, *alive);
         }
-        let dir = Scratch::new(&format!("requests-{name}"));
+        let dir = self
+            .dirs
+            .borrow_mut()
+            .entry(name.clone())
+            .or_insert_with(|| Rc::new(Scratch::new(&format!("requests-{name}"))))
+            .clone();
         let refs = Rc::new(FakeRefs {
             world: self.f.world.clone(),
             forge: self.forge.clone(),
@@ -438,6 +446,13 @@ impl OnGitHub {
         });
         self.hosts.borrow_mut().insert(name, host.clone());
         host
+    }
+
+    /// This host's process starts afresh: what it held in memory is gone,
+    /// and what it keeps on disk, the host's state, stands.
+    fn restart(&self) {
+        let name = self.here.borrow().clone();
+        self.hosts.borrow_mut().remove(&name);
     }
 
     /// The next commands run on host `name`, signing as its signer.
@@ -528,8 +543,8 @@ impl OnGitHub {
     /// The hosts' `[forge] discovery` is `every`, set before any host runs a
     /// command.
     fn discovery(&self, every: Duration) {
-        assert!(self.hosts.borrow().is_empty(), "set before any command");
         self.discovery.set(every);
+        self.hosts.borrow_mut().clear();
     }
 
     /// The host main's records name as keeping it (72, 137; design D25);
@@ -4674,4 +4689,312 @@ fn s56_a_request_the_operator_withdrew_waits_for_a_new_head() {
     g.step_until("the withdrawn one submitted again", |g| {
         g.of(rest).iter().any(|s| s["head"] == pushed.0.as_str())
     });
+}
+
+// ---------------------------------------------------------------------------
+// forge-reads: the open pull requests asked for at the host's interval, a
+// pull request read again only once it moved, and posted on only when what
+// sluice says changed (136). The fakes' clock moves a second at each read,
+// so a run of passes takes a span the test cannot set; an interval of an
+// hour stands for the host's minute, which those passes fall within.
+// ---------------------------------------------------------------------------
+
+/// An hour: an interval no run of passes in a test reaches.
+const HOUR: Duration = Duration::from_secs(3600);
+
+impl OnGitHub {
+    /// Two rounds of `main`: the first writes the branch's records, which
+    /// the second's asking reads as a move; after them nothing on the host
+    /// moves.
+    fn settle(&self) {
+        self.step();
+        self.step();
+    }
+
+    /// `sluice run --rounds <rounds>` on this host: its host process's
+    /// passes.
+    fn passes(&self, rounds: usize) {
+        let (code, out) = self.sluice(&["run", "--rounds", &rounds.to_string()]);
+        assert_eq!(code, 0, "{out}");
+    }
+
+    /// `sluice step main` on this host, the clock moved on by nothing.
+    fn steps(&self) {
+        let (code, out) = self.sluice(&["step", "main"]);
+        assert_eq!(code, 0, "{out}");
+    }
+
+    /// How many times what pull request `n` at `head` is beside its list
+    /// entry was read alone: its reviews, other systems' checks on its
+    /// head, its ready marks and its comments.
+    fn beside_reads(&self, n: u64, head: &Rev) -> usize {
+        [
+            format!("reviews/{n}"),
+            format!("checks/{head}"),
+            format!("readied/{n}"),
+            format!("comments/{n}"),
+        ]
+        .iter()
+        .map(|w| self.calls(w))
+        .sum()
+    }
+}
+
+/// forge-reads, "Nothing moved" and "A restart asks nothing new": twenty
+/// passes within the interval ask for main's open pull requests once, and
+/// steps of a process started again then ask nothing; the one waiting for
+/// a review is read again only at that asking, by the one query.
+#[test]
+fn nothing_moved_asks_once_a_minute() {
+    let g = OnGitHub::new("reviews = 1");
+    g.discovery(HOUR);
+    let (n, head) = g.by_hand("unit/review", &[("r.txt", Some("r\n"))], false);
+    g.settle();
+    g.interval_passes();
+    let (lists, beside, queries) = (
+        g.calls("list"),
+        g.beside_reads(n, &head),
+        g.calls("query/main"),
+    );
+    g.passes(20);
+    assert_eq!(g.calls("list"), lists + 1);
+    assert_eq!(
+        g.calls("query/main"),
+        queries + 1,
+        "its reviews, at the asking"
+    );
+    assert_eq!(g.beside_reads(n, &head), beside, "nothing read alone");
+    assert_eq!(g.posted(&head).unwrap().1, "waiting: needs 1 review");
+    let posts = g.posts();
+    g.restart();
+    for _ in 0..3 {
+        g.steps();
+    }
+    assert_eq!(
+        g.calls("list"),
+        lists + 1,
+        "a restart asks nothing within the interval"
+    );
+    assert_eq!(g.calls("query/main"), queries + 1);
+    assert_eq!(g.beside_reads(n, &head), beside);
+    assert_eq!(g.posts(), posts);
+}
+
+/// forge-reads, "Three branches, one list": main and two bolts take pull
+/// requests. Twenty passes within the interval, with nothing on the host
+/// moving, ask GitHub for the repository's open pull requests once, in one
+/// list that serves all three branches
+/// (`one-forge-read-per-repository-per-interval@b3b6757cea2d`).
+#[test]
+fn a_repositorys_branches_share_one_list_each_interval() {
+    let g = OnGitHub::built(
+        "",
+        "",
+        "1h",
+        "\n[branches.\"bolt/*\"]\nrequired = [\"#gate\"]\ntrust = [\"a\", \"b\"]\n\
+         remote = \"origin\"\n\n[branches.\"bolt/*\".pull_requests]\n",
+    );
+    g.discovery(HOUR);
+    for bolt in ["bolt/x", "bolt/y"] {
+        g.f.world.set_branch(bolt, &g.f.world.tip("main"));
+        g.f.world.on_remote(bolt);
+    }
+    for branch in ["main", "bolt/x", "bolt/y"] {
+        g.f.sluice().as_peer(peer("a")).step(branch).unwrap();
+    }
+    g.passes(2);
+    g.interval_passes();
+    let lists = g.calls("list");
+    g.passes(20);
+    assert_eq!(g.calls("list"), lists + 1);
+}
+
+/// forge-reads, "The host sets the interval": forty passes within the
+/// host's interval ask once; the next pass, the interval on, asks again.
+/// The interval's setting is `instance.rs`'s
+/// `the_host_sets_the_discovery_interval_ten_seconds_at_least`.
+#[test]
+fn the_host_sets_the_interval() {
+    let g = OnGitHub::new("reviews = 1");
+    g.discovery(2 * HOUR);
+    g.by_hand("unit/slowly", &[("s.txt", Some("s\n"))], false);
+    let lists = g.calls("list");
+    g.passes(40);
+    assert_eq!(g.calls("list"), lists + 1);
+    g.f.world.advance(chrono::Duration::hours(2));
+    g.passes(1);
+    assert_eq!(g.calls("list"), lists + 2, "asked again, the interval on");
+}
+
+/// forge-reads, "A submit on the host asks at once": seconds after main's
+/// last asking, a submit that does not wait opens a pull request, and its
+/// own pass asks for main's pull requests and takes it in.
+#[test]
+fn a_submit_on_the_host_asks_at_once() {
+    let g = OnGitHub::new("");
+    g.discovery(HOUR);
+    g.f.world.hold_runs(true);
+    g.step();
+    let asked = g.calls("list");
+    let w = g.session("prompt", &[("p.txt", "p\n")]);
+    let said = g.submitted(&w, &["--no-wait"]);
+    let n = g.pull_from("unit/prompt").number;
+    assert!(said.contains(&format!("from #{n}")), "taken in: {said}");
+    assert_eq!(g.of(n).len(), 1, "{:?}", g.subs());
+    assert_eq!(
+        g.calls("list"),
+        asked + 2,
+        "the open's own list and the pass's"
+    );
+}
+
+/// forge-reads, "A landing asks at once": the pass after a round lands a
+/// submission asks for main's pull requests, and once nothing moves again
+/// the next asks nothing.
+#[test]
+fn a_landing_asks_at_once() {
+    let g = OnGitHub::new("");
+    g.discovery(HOUR);
+    let (n, _) = g.by_hand("unit/lands", &[("l.txt", Some("l\n"))], false);
+    g.interval_passes();
+    for _ in 0..20 {
+        if g.of(n).first().is_some_and(|s| s["state"] == "landed") {
+            break;
+        }
+        g.steps();
+    }
+    assert_eq!(g.of(n)[0]["state"], "landed", "{:?}", g.subs());
+    let asked = g.calls("list");
+    g.steps();
+    assert_eq!(g.calls("list"), asked + 1, "the landing asks");
+    g.steps();
+    assert_eq!(g.calls("list"), asked + 1, "then nothing moved");
+}
+
+/// forge-reads, "A waiting pull request that stands" and "Nothing new to
+/// say": a pull request taken into the queue, asked for three times more
+/// with nothing moved, has nothing beside its list entry read again, and
+/// its check is neither read back nor posted again.
+#[test]
+fn a_queued_pull_request_that_stands_is_read_by_the_list_alone() {
+    let g = OnGitHub::new("reviews = 1");
+    g.discovery(HOUR);
+    g.f.world.hold_runs(true);
+    let w = g.session("stands", &[("s.txt", "x\n")]);
+    g.submitted(&w, &["--no-wait"]);
+    let pull = g.pull_from("unit/stands");
+    let n = pull.number;
+    let head = Rev::new(pull.head.clone());
+    g.gh()
+        .review(n, "reviewer", "APPROVED", &pull.head)
+        .unwrap();
+    let status = |g: &OnGitHub| {
+        g.interval_passes();
+        g.submitted(&w, &["--status"])
+    };
+    let said = status(&g);
+    assert_eq!(g.of(n).len(), 1, "taken in: {said}");
+    assert!(said.starts_with("queued"), "{said}");
+    let (lists, beside) = (g.calls("list"), g.beside_reads(n, &head));
+    let (read_back, posts) = (g.calls(&format!("posted/{head}")), g.posts());
+    for _ in 0..3 {
+        let said = status(&g);
+        assert!(said.starts_with("queued"), "{said}");
+    }
+    assert_eq!(
+        g.calls("list"),
+        lists + 6,
+        "each finds it in the list, and asks"
+    );
+    assert_eq!(g.beside_reads(n, &head), beside, "nothing beside the list");
+    assert_eq!(
+        g.calls(&format!("posted/{head}")),
+        read_back,
+        "its check not read back"
+    );
+    assert_eq!(g.posts(), posts, "nor posted again");
+}
+
+/// forge-reads, "The state moves": the pull request's submission goes
+/// from queued to testing, and its check is posted once, saying testing,
+/// with no read of GitHub's copy first.
+#[test]
+fn the_state_moves_and_is_posted_unread() {
+    let g = OnGitHub::new("");
+    g.discovery(HOUR);
+    g.f.world.hold_runs(true);
+    let (n, head) = g.by_hand("unit/moves", &[("m.txt", Some("m\n"))], false);
+    g.interval_passes();
+    g.steps();
+    assert_eq!(g.of(n).len(), 1, "{:?}", g.subs());
+    let (read_back, posts) = (g.calls(&format!("posted/{head}")), g.posts());
+    g.steps();
+    let (status, title, _) = g.posted(&head).unwrap();
+    assert_eq!(status, Status::InProgress, "{title}");
+    assert!(title.starts_with("testing main + #"), "{title}");
+    assert_eq!(g.posts(), posts + 1);
+    assert_eq!(g.calls(&format!("posted/{head}")), read_back);
+}
+
+/// forge-reads, "A draft": each asking reads a draft from the list alone.
+#[test]
+fn a_draft_is_read_from_the_list_alone() {
+    let g = OnGitHub::new("reviews = 1\nchecks = [\"qa/approved\"]");
+    let (n, head) = g.by_hand("unit/drafty", &[("d.txt", Some("d\n"))], true);
+    let lists = g.calls("list");
+    for _ in 0..3 {
+        g.step();
+    }
+    assert_eq!(g.calls("list"), lists + 3);
+    assert_eq!(g.beside_reads(n, &head), 0);
+    assert_eq!(g.posted(&head).unwrap().1, "waiting: a draft");
+}
+
+/// forge-reads, "A pull request waiting on a check": out of draft, it
+/// waits for `qa/approved`, which another system passes on its head,
+/// moving nothing GitHub lists; the next asking reads its checks again, by
+/// the one query, and submits it. pull-request-intake: "the next asking
+/// submits it".
+#[test]
+fn a_pull_request_waiting_on_a_check_is_read_at_each_asking() {
+    let g = OnGitHub::new("checks = [\"qa/approved\"]");
+    let (n, head) = g.by_hand("unit/qa", &[("q.txt", Some("q\n"))], false);
+    g.step();
+    assert!(g.of(n).is_empty(), "{:?}", g.subs());
+    let (before, queries) = (g.calls(&format!("checks/{head}")), g.calls("query/main"));
+    let updated = g.pull_from("unit/qa").updated_at;
+    g.gh()
+        .check(&head.0, "qa/approved", Standing::Passed)
+        .unwrap();
+    assert_eq!(g.pull_from("unit/qa").updated_at, updated);
+    g.step();
+    assert_eq!(g.calls("query/main"), queries + 1);
+    assert_eq!(
+        g.calls(&format!("checks/{head}")),
+        before,
+        "nothing read alone"
+    );
+    assert_eq!(g.of(n).len(), 1, "{:?}", g.subs());
+}
+
+/// forge-reads, "A new head": a pull request's head moves, and its reviews
+/// and checks are read again at the next asking, against its new head, by
+/// the one query.
+#[test]
+fn a_new_head_is_read_again() {
+    let g = OnGitHub::new("reviews = 1\nchecks = [\"qa/approved\"]");
+    let (n, old) = g.by_hand("unit/heads", &[("h.txt", Some("h\n"))], false);
+    g.step();
+    let reviews = g.calls(&format!("reviews/{n}"));
+    let queries = g.calls("query/main");
+    let new = g.push_more(n, "h2.txt");
+    g.step();
+    assert_eq!(g.calls("query/main"), queries + 1);
+    assert_eq!(g.calls(&format!("reviews/{n}")), reviews);
+    assert_eq!(g.beside_reads(n, &new), 0);
+    assert_eq!(
+        g.posted(&new).unwrap().1,
+        "waiting: needs 1 review, qa/approved"
+    );
+    assert!(g.posted(&old).is_some());
 }
