@@ -709,10 +709,16 @@ impl Tasks {
             .any(|r| r.marks.borrow().busy)
     }
 
-    /// `repository` left the host process's index: its scheduler ends
-    /// once its work in flight ends.
+    /// `repository`, gone, left the host process's index: its followers
+    /// get the document that says so, on the channel they follow, before
+    /// its scheduler is let go; its scheduler ends once its work in flight
+    /// ends (design D6). A look after this starts a scheduler of its own,
+    /// on a channel of its own, which none of them follows.
     pub fn forget(&self, repository: &Path) {
         let repo = locked(&self.0.repos).remove(repository);
+        if let Some(repo) = &repo {
+            send_gone(&repo.documents, &Mutex::default(), repository);
+        }
         drop(repo);
     }
 
@@ -1280,17 +1286,7 @@ impl Scheduler {
     /// so, in the words its last read failed with where it failed, and it
     /// is held no longer (design D6).
     fn gone(&self) {
-        let failed = self
-            .documents
-            .borrow()
-            .clone()
-            .filter(|d| d.get("error").is_some());
-        let mut doc = failed.unwrap_or_else(|| {
-            let words = format!("the repository at {} is gone", self.repository.display());
-            crate::told::document(crate::told::Kind::Internal, &words, &[])
-        });
-        doc["gone"] = true.into();
-        send_document(&self.documents, &self.sent, None, doc);
+        send_gone(&self.documents, &self.sent, &self.repository);
     }
 
     /// Start the next work, where none is in flight.
@@ -1634,6 +1630,26 @@ impl Scheduler {
 /// in any order, and its followers get them in the order of the state
 /// each read. A document with no read, the one that says the repository
 /// is gone, is always the newest.
+/// Send `repository`'s followers on `documents` the document that says it
+/// is gone: the error its last read sent, where one did, else words of its
+/// own, marked `gone` (design D6).
+fn send_gone(
+    documents: &watch::Sender<Option<serde_json::Value>>,
+    sent: &Mutex<Option<Moment>>,
+    repository: &Path,
+) {
+    let failed = documents
+        .borrow()
+        .clone()
+        .filter(|d| d.get("error").is_some());
+    let mut doc = failed.unwrap_or_else(|| {
+        let words = format!("the repository at {} is gone", repository.display());
+        crate::told::document(crate::told::Kind::Internal, &words, &[])
+    });
+    doc["gone"] = true.into();
+    send_document(documents, sent, None, doc);
+}
+
 fn send_document(
     documents: &watch::Sender<Option<serde_json::Value>>,
     sent: &Mutex<Option<Moment>>,
