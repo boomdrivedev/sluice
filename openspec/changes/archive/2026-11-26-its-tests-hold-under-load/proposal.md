@@ -5,7 +5,7 @@ tests. Each test passes when it runs alone. Each failure leaves a key
 that the gate then reads as flaky. So each landing waits for the next
 fix. We ran `cli:test` beside `cli:tools` many times on a busy host. We
 listed each test that failed at least once. Four causes are in sluice,
-and three are in the tests:
+and four are in the tests:
 
 1. A host process that starts afresh in place lets the host's lock go
    before it replaces its image. The new image takes the lock again. Between the two, another process can get the lock. It can be
@@ -46,6 +46,11 @@ and three are in the tests:
 7. A status that failed during a test gave no reason: the test helper
    of `instance.rs` read the submissions of a status it did not check.
 
+8. `a_waiting_submit_by_name_in_a_bare_clone_reports_another_queues_landing`
+   read the submission's record as soon as the wait ended. The wait
+   answers from the branch (rule core.48), before a round moves the
+   record, and this test's host runs a round only when asked.
+
 ## What Changes
 
 - A host process that starts afresh in place hands the host's lock to
@@ -59,7 +64,8 @@ and three are in the tests:
   report it follows. So a client that reads a document has each report
   before it.
 - `sluice host` writes a hooks folder for one request at a time.
-- The tests of 5, 6 and 7 read what they mean to read. The first waits
+- The tests of 5 to 8 read what they mean to read. The bare clone's
+  test runs a round before it reads the record. The first waits
   for the watch's first document before the first run. The second reads
   the host's log at the hand-over. The third gives a status's output
   where it failed.

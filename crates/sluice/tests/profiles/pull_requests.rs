@@ -4923,7 +4923,9 @@ fn a_waiting_submit_ends_with_its_own_submission_when_the_branch_moves_under_it(
 /// a waiting submit by name in the repository's git directory, whose
 /// request another queue of `main` lands once this host took it in, exits
 /// 0 and says `landed as <rev>`, never `withdrawn`, and its submission's
-/// record reads landed, `landed_elsewhere`.
+/// record reads landed, `landed_elsewhere`, once a round read the branch.
+/// The wait answers from the branch (rule core.48), so it can end before
+/// any round of a host that passes only when asked moved the record.
 #[test]
 fn a_waiting_submit_by_name_in_a_bare_clone_reports_another_queues_landing() {
     let (g, pid) = with_a_hanging_bolt("pr-by-name-elsewhere");
@@ -4942,6 +4944,7 @@ fn a_waiting_submit_by_name_in_a_bare_clone_reports_another_queues_landing() {
         "{said}"
     );
     assert!(!said.contains("withdrawn"), "{said}");
+    let _ = g.round();
     let sub = g
         .of(pull.number)
         .into_iter()

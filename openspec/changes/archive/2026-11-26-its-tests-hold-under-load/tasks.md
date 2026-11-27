@@ -24,6 +24,8 @@ Each check runs through sluice: `sluice exec main -- <command>`.
 - [x] 5.2 `an_upgrade_keeps_its_runs_as_children` reads the host's log at the hand-over (D5). Check: `sluice exec main -- cargo nextest run -p sluice --test host_process -E 'test(an_upgrade_keeps_its_runs_as_children)'`.
 - [x] 5.3 The `states` helper of `crates/sluice/tests/instance.rs` fails with the status's output (D5). Check: `sluice exec main -- cargo nextest run -p sluice --features tools --test instance`.
 
+- [x] 5.4 `a_waiting_submit_by_name_in_a_bare_clone_reports_another_queues_landing` runs a round before it reads the record (D5). Check: `sluice exec main -- cargo nextest run -p sluice --features tools --test pull_requests -E 'test(a_waiting_submit_by_name_in_a_bare_clone)'`.
+
 ## 6. The change
 
 - [x] 6.1 Run `openspec validate its-tests-hold-under-load --strict`. Check: `sluice exec main -- moon run root:specs root:changes`.
