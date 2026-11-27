@@ -2379,7 +2379,9 @@ impl Tests for Checks {
                     .flatten()
             })
         };
-        let tree = |p: &str| super::moon::file_at(&meta.place, &meta.revision, p);
+        let tree = super::moon::Tree::new(&meta.place, &meta.revision);
+        let read = |p: &str| tree.file(p);
+        let walk = super::moon::Walk::new(&blob, &read);
         // A task a check was failed by is no check of the run (149).
         let checks = report.tasks.iter().map(|t| (t, true));
         let dependencies = report.dependencies.iter().map(|t| (t, false));
@@ -2389,7 +2391,7 @@ impl Tests for Checks {
         // store, read once a pass is found unkept.
         let kept = std::cell::OnceCell::new();
         for (t, check) in checks.chain(dependencies) {
-            let e = match super::moon::check_key(&t.hash, &t.task, &blob, &tree) {
+            let e = match walk.check(&t.hash, &t.task) {
                 Ok(()) => {
                     proof.proven.push(t.task.clone());
                     continue;
@@ -2468,11 +2470,13 @@ impl Tests for Checks {
             read.borrow_mut().insert(k.to_string(), bytes.clone());
             Some(bytes)
         };
-        let tree = |p: &str| super::moon::file_at(&meta.place, &meta.revision, p);
+        let tree = super::moon::Tree::new(&meta.place, &meta.revision);
+        let file = |p: &str| tree.file(p);
+        let walk = super::moon::Walk::new(&blob, &file);
         for t in report.tasks.iter().chain(&report.dependencies) {
             // What the walk reads is kept whatever it finds; the sign job
             // judges each key again.
-            let _ = super::moon::check_key(&t.hash, &t.task, &blob, &tree);
+            let _ = walk.check(&t.hash, &t.task);
         }
         for (key, bytes) in read.into_inner() {
             let at = dir.join("blobs").join(&key[..2]);
@@ -2506,12 +2510,14 @@ impl Tests for Checks {
             });
         }
         let blob = |k: &str| super::moon::blob_in(dir, k);
-        let tree = |p: &str| super::moon::file_at(&self.common, revision.as_str(), p);
+        let tree = super::moon::Tree::new(&self.common, revision.as_str());
+        let read = |p: &str| tree.file(p);
+        let walk = super::moon::Walk::new(&blob, &read);
         let checks = report.tasks.iter().map(|t| (t, true));
         let dependencies = report.dependencies.iter().map(|t| (t, false));
         let mut proof = Proof::default();
         for (t, check) in checks.chain(dependencies) {
-            let e = match super::moon::check_key(&t.hash, &t.task, &blob, &tree) {
+            let e = match walk.check(&t.hash, &t.task) {
                 Ok(()) => {
                     proof.proven.push(t.task.clone());
                     continue;

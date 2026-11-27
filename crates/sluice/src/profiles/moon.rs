@@ -796,16 +796,94 @@ fn parse_version(text: &str) -> Option<(u64, u64)> {
     Some((parts.next()?.parse().ok()?, parts.next()?.parse().ok()?))
 }
 
-/// A file of `revision`'s tree, read by git in the place as moon reads a
-/// task's input to hash it: a tracked symlink by the content of the file
-/// it names, followed within the tree, as git's `--follow-symlinks` does
-/// (C.2 moon row, C.6). `None` when the tree has no such file, or the
-/// path, followed, is no file of the tree: a link out of it, one that
-/// names nothing, a loop or a directory, none of which the tree bears
-/// out.
+/// A file of `revision`'s tree, read as moon reads a task's input to hash
+/// it: a tracked symlink by the content of the file it names, followed
+/// within the tree, as git's `--follow-symlinks` does (C.2 moon row, C.6).
+/// `None` when the tree has no such file, or the path, followed, is no
+/// file of the tree: a link out of it, one that names nothing, a loop or a
+/// directory, none of which the tree bears out. A reader of many files
+/// reads them through one [`Tree`].
 pub fn file_at(place: &Path, revision: &str, path: &str) -> Option<Vec<u8>> {
+    Tree::new(place, revision).file(path)
+}
+
+/// `revision`'s tree in a place, each file read as [`file_at`] reads it.
+/// The repository is opened and the tree found once, by gix, and a file
+/// the tree holds as a plain blob is read by gix with no process started:
+/// a proof reads every input of every key it walks, and a git started for
+/// each was most of `sluice daemon`'s time on deneb on 2026-11-27. Any
+/// other path, a link or one through a link, which gix does not follow,
+/// a path the tree does not hold among them, is read by `git cat-file
+/// --follow-symlinks`, as git follows it.
+pub struct Tree {
+    git: std::ffi::OsString,
+    place: PathBuf,
+    revision: String,
+    found: std::cell::OnceCell<Option<(gix::Repository, gix::ObjectId)>>,
+}
+
+impl Tree {
+    pub fn new(place: &Path, revision: &str) -> Tree {
+        Tree::by("git", place, revision)
+    }
+
+    /// The tree as `git`, a program that runs as git does, reads what gix
+    /// does not.
+    fn by(git: impl Into<std::ffi::OsString>, place: &Path, revision: &str) -> Tree {
+        Tree {
+            git: git.into(),
+            place: place.to_path_buf(),
+            revision: revision.to_string(),
+            found: std::cell::OnceCell::new(),
+        }
+    }
+
+    /// The file at `path`, followed within the tree, as [`file_at`] says.
+    pub fn file(&self, path: &str) -> Option<Vec<u8>> {
+        match self.blob(path) {
+            Some(bytes) => Some(bytes),
+            None => file_by_git(&self.git, &self.place, &self.revision, path),
+        }
+    }
+
+    /// The blob the tree holds at `path` as a plain file, by gix; `None`
+    /// for anything else, which git reads.
+    fn blob(&self, path: &str) -> Option<Vec<u8>> {
+        let (repo, tree) = self
+            .found
+            .get_or_init(|| {
+                let repo = gix::open(&self.place).ok()?;
+                let tree = repo
+                    .rev_parse_single(self.revision.as_str())
+                    .ok()?
+                    .object()
+                    .ok()?
+                    .peel_to_tree()
+                    .ok()?
+                    .id;
+                Some((repo, tree))
+            })
+            .as_ref()?;
+        let entry = repo
+            .find_tree(*tree)
+            .ok()?
+            .lookup_entry_by_path(path)
+            .ok()??;
+        if !matches!(
+            entry.mode().kind(),
+            gix::object::tree::EntryKind::Blob | gix::object::tree::EntryKind::BlobExecutable
+        ) {
+            return None;
+        }
+        Some(entry.object().ok()?.detach().data)
+    }
+}
+
+/// A file of `revision`'s tree, read by `git cat-file --batch
+/// --follow-symlinks` in the place, as [`file_at`] says.
+fn file_by_git(git: &std::ffi::OsStr, place: &Path, revision: &str, path: &str) -> Option<Vec<u8>> {
     use std::io::Write;
-    let mut child = crate::workers::command("git", "git")
+    let mut child = crate::workers::command(git, "git")
         .current_dir(place)
         .args(["cat-file", "--batch", "--follow-symlinks", "-Z"])
         .env_remove("GIT_DIR")
@@ -1308,20 +1386,60 @@ pub fn check_key(
     blob: &dyn Fn(&str) -> Option<Vec<u8>>,
     tree: &dyn Fn(&str) -> Option<Vec<u8>>,
 ) -> Result<()> {
-    fn go(
-        key: &str,
-        task: &str,
-        blob: &dyn Fn(&str) -> Option<Vec<u8>>,
-        tree: &dyn Fn(&str) -> Option<Vec<u8>>,
-        depth: usize,
-    ) -> Result<()> {
+    Walk::new(blob, tree).check(key, task)
+}
+
+/// [`check_key`] for each key of one run, over one store and one tree:
+/// a manifest walked whole and borne out is not walked again for another
+/// key that depends on it, and each input of the tree is read and hashed
+/// once, however many manifests name it.
+pub struct Walk<'a> {
+    blob: &'a dyn Fn(&str) -> Option<Vec<u8>>,
+    tree: &'a dyn Fn(&str) -> Option<Vec<u8>>,
+    borne: std::cell::RefCell<BTreeSet<(String, String)>>,
+    sums: std::cell::RefCell<BTreeMap<String, Option<String>>>,
+}
+
+impl<'a> Walk<'a> {
+    pub fn new(
+        blob: &'a dyn Fn(&str) -> Option<Vec<u8>>,
+        tree: &'a dyn Fn(&str) -> Option<Vec<u8>>,
+    ) -> Walk<'a> {
+        Walk {
+            blob,
+            tree,
+            borne: Default::default(),
+            sums: Default::default(),
+        }
+    }
+
+    /// [`check_key`] of `key` for `task`.
+    pub fn check(&self, key: &str, task: &str) -> Result<()> {
+        self.go(key, task, 0)
+    }
+
+    /// The sha256 of the tree's file at `path`, read once.
+    fn sum(&self, path: &str) -> Option<String> {
+        if let Some(sum) = self.sums.borrow().get(path) {
+            return sum.clone();
+        }
+        let sum = (self.tree)(path).map(|held| sha256_hex(&held));
+        self.sums.borrow_mut().insert(path.to_string(), sum.clone());
+        sum
+    }
+
+    fn go(&self, key: &str, task: &str, depth: usize) -> Result<()> {
         if depth > 64 {
             bail!("{task}: dependencies deeper than any graph");
         }
         if key.len() != 64 || !key.bytes().all(|b| b.is_ascii_hexdigit()) {
             bail!("{task}: {key:?} is no key");
         }
-        let bytes = blob(key).ok_or_else(|| NoManifest {
+        let walked = (key.to_string(), task.to_string());
+        if self.borne.borrow().contains(&walked) {
+            return Ok(());
+        }
+        let bytes = (self.blob)(key).ok_or_else(|| NoManifest {
             task: task.to_string(),
             key: key.to_string(),
         })?;
@@ -1343,8 +1461,8 @@ pub fn check_key(
                 path: path.clone(),
                 differs,
             };
-            let held = tree(path).ok_or_else(|| not_held(false))?;
-            if Some(sha256_hex(&held).as_str()) != sum.as_str() {
+            let held = self.sum(path).ok_or_else(|| not_held(false))?;
+            if Some(held.as_str()) != sum.as_str() {
                 return Err(not_held(true).into());
             }
         }
@@ -1352,14 +1470,14 @@ pub fn check_key(
             for (dep, k) in deps {
                 match k.as_str() {
                     Some(mark) if DEPENDENCY_MARKS.contains(&mark) => {}
-                    Some(k) => go(k, dep, blob, tree, depth + 1)?,
+                    Some(k) => self.go(k, dep, depth + 1)?,
                     None => bail!("{task}: dependency {dep} has no key"),
                 }
             }
         }
+        self.borne.borrow_mut().insert(walked);
         Ok(())
     }
-    go(key, task, blob, tree, 0)
 }
 
 fn sha256_hex(bytes: &[u8]) -> String {
@@ -1723,6 +1841,36 @@ mod tests {
             check_key(&b, "b:test", &blob, &t).unwrap();
         }
 
+        /// A run's keys walked over one store and one tree read each
+        /// manifest they share and each input once, and a key the walk
+        /// bore out for one task is still refused for another.
+        #[test]
+        fn a_walk_reads_what_its_keys_share_once() {
+            let mut s = Store(BTreeMap::new());
+            let a = s.manifest("a:test", &[("a/x", "1")], &[]);
+            let b = s.manifest("b:test", &[("a/x", "1"), ("b/y", "2")], &[("a:test", &a)]);
+            let c = s.manifest("c:test", &[("b/y", "2")], &[("a:test", &a)]);
+            let blobs = std::cell::RefCell::new(BTreeMap::<String, usize>::new());
+            let files = std::cell::RefCell::new(BTreeMap::<String, usize>::new());
+            let blob = |k: &str| {
+                *blobs.borrow_mut().entry(k.to_string()).or_default() += 1;
+                s.0.get(k).cloned()
+            };
+            let t = tree(&[("a/x", "1"), ("b/y", "2")]);
+            let read = |p: &str| {
+                *files.borrow_mut().entry(p.to_string()).or_default() += 1;
+                t(p)
+            };
+            let walk = Walk::new(&blob, &read);
+            for (key, task) in [(&b, "b:test"), (&c, "c:test"), (&a, "a:test")] {
+                walk.check(key, task).unwrap();
+            }
+            assert!(blobs.borrow().values().all(|n| *n == 1), "{blobs:?}");
+            assert!(files.borrow().values().all(|n| *n == 1), "{files:?}");
+            let e = walk.check(&a, "b:test").unwrap_err();
+            assert!(e.to_string().contains("a:test"), "{e}");
+        }
+
         #[test]
         fn a_key_of_another_combination_is_refused() {
             let mut s = Store(BTreeMap::new());
@@ -1919,9 +2067,9 @@ mod tests {
         struct Links(PathBuf);
 
         impl Links {
-            fn new() -> Links {
+            fn new(name: &str) -> Links {
                 let dir =
-                    std::env::temp_dir().join(format!("sluice-moon-links-{}", std::process::id()));
+                    std::env::temp_dir().join(format!("sluice-moon-{name}-{}", std::process::id()));
                 let _ = std::fs::remove_dir_all(&dir);
                 std::fs::create_dir_all(dir.join("docs/arch")).unwrap();
                 std::fs::create_dir_all(dir.join(".claude/rules")).unwrap();
@@ -1980,7 +2128,7 @@ mod tests {
         /// file of the tree, and a key naming it is still refused.
         #[test]
         fn a_tracked_link_is_read_as_the_file_it_names() {
-            let r = Links::new();
+            let r = Links::new("links");
             let read = |p: &str| file_at(&r.0, "HEAD", p);
             assert_eq!(
                 read("docs/arch/core.md").as_deref(),
@@ -2029,6 +2177,55 @@ mod tests {
                     format!("root:format: {link} is not in the tree")
                 );
             }
+        }
+
+        /// A tree's plain files are read with no process started, however
+        /// many are read; a link, a path through one and a path the tree
+        /// does not hold are read by git, as [`file_at`] answers them
+        /// (deneb, 2026-11-27: a git started for each input of each key a
+        /// proof walked, most of `sluice daemon`'s time).
+        #[test]
+        fn a_trees_plain_files_are_read_with_no_git() {
+            let r = Links::new("no-git");
+            let starts = r.0.join("starts");
+            let git = r.0.join("counting-git");
+            std::fs::write(
+                &git,
+                format!(
+                    "#!/bin/sh\necho started >> '{}'\nexec git \"$@\"\n",
+                    starts.display()
+                ),
+            )
+            .unwrap();
+            std::fs::set_permissions(&git, std::os::unix::fs::PermissionsExt::from_mode(0o755))
+                .unwrap();
+            let started = || {
+                std::fs::read_to_string(&starts)
+                    .unwrap_or_default()
+                    .lines()
+                    .count()
+            };
+            let tree = Tree::by(&git, &r.0, "HEAD");
+            for _ in 0..5 {
+                assert_eq!(
+                    tree.file("docs/arch/core.md").as_deref(),
+                    Some(&b"the rules\n"[..])
+                );
+            }
+            assert_eq!(started(), 0, "a plain file read by git");
+            let by_git = [
+                (".claude/rules/core.md", Some(&b"the rules\n"[..])),
+                ("folder/arch/core.md", Some(&b"the rules\n"[..])),
+                ("out", None),
+                ("dangling", None),
+                ("loop-a", None),
+                ("docs", None),
+                ("missing", None),
+            ];
+            for (p, want) in by_git {
+                assert_eq!(tree.file(p).as_deref(), want, "{p}");
+            }
+            assert_eq!(started(), by_git.len());
         }
     }
 
