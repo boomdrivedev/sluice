@@ -95,8 +95,8 @@ user. So an agent submits with `--no-wait` and waits with `sluice wait`,
 which follows the host process, in its harness's background:
 
 ```sh
-sluice submit main --no-wait --json        # {"id":12,"branch":"main","ahead":[...]}
-sluice wait 12 --timeout 9m --json         # in the background, again for as long as it exits 5
+sluice submit main --no-wait --json        # {"id":12,"branch":"main","ahead":[...],"wait":"sluice wait 12 --branch main"}
+sluice wait 12 --branch main --timeout 9m --json   # its `wait`, in the background, again for as long as it exits 5
 sluice wait main --timeout 9m --json       # this worktree's last submission to main
 sluice wait main --pull-request 41 --timeout 9m --json   # a pull request's answer's `wait`, from any folder
 ```
@@ -175,9 +175,13 @@ order, or none. sluice queues all of them, in that order, or none,
 and forms no combination on any of them until every one is queued. Once
 queued, each is its own submission: blamed, withdrawn and waited on
 (`sluice wait <id>`) alone. See [references/submit.md](references/submit.md).
-A number more than one branch holds is refused by `sluice wait`, `status`,
-`amend` and `withdraw`, naming each branch, and `--branch <branch>` names
-the one meant, as `sluice wait 26 --branch main`.
+A submit's answer gives its `wait`, the command that follows it from any
+folder, with the branch named: `sluice wait 12 --branch main`. A number
+more than one branch holds names the submission the worktree you run in
+submitted, where it submitted that number on one of those branches alone.
+Elsewhere, `sluice wait`, `status`, `amend` and `withdraw` refuse it,
+naming each branch, and `--branch <branch>` names the one you mean, as
+`sluice wait 26 --branch main`.
 
 A `--no-wait` submission moves with nobody waiting on it: sluice's host
 process, which the submit told, runs its rounds. `sluice wait` follows it,

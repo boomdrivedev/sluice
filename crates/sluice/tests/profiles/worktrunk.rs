@@ -2896,7 +2896,10 @@ mod by_name {
         let v: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
         assert_eq!(
             v,
-            serde_json::json!({ "id": n, "branch": "bolt/x", "ahead": [] })
+            serde_json::json!({
+                "id": n, "branch": "bolt/x", "ahead": [],
+                "wait": format!("sluice wait {n} --branch bolt/x"),
+            })
         );
         let out = s
             .command(env!("CARGO_BIN_EXE_sluice"), &bare)

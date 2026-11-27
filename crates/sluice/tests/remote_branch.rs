@@ -1535,7 +1535,8 @@ fn a_branch_by_name_is_submitted_at_its_remotes_revision() {
     let said = String::from_utf8_lossy(&out.stdout);
     let line = said
         .strip_prefix("submission ")
-        .and_then(|l| l.strip_suffix(" to main from bolt/x · nothing queued ahead\n"));
+        .and_then(|l| l.split_once(" to main from bolt/x · nothing queued ahead\n"))
+        .filter(|(n, rest)| *rest == format!("sluice wait {n} --branch main follows it\n"));
     assert!(line.is_some(), "{}", text(&out));
     assert!(!text(&out).contains("this host's"), "{}", text(&out));
     let subs = s.status()["submissions"].clone();
@@ -1547,7 +1548,10 @@ fn a_branch_by_name_is_submitted_at_its_remotes_revision() {
     let v: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
     assert_eq!(
         v,
-        serde_json::json!({ "id": v["id"], "branch": "main", "ahead": [] })
+        serde_json::json!({
+            "id": v["id"], "branch": "main", "ahead": [],
+            "wait": format!("sluice wait {} --branch main", v["id"]),
+        })
     );
     assert_eq!(refs(&s), before, "nothing pushed to origin");
     assert_eq!(s.repo.rev("bolt/x"), made, "nor written here");

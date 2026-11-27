@@ -226,6 +226,10 @@ pub struct Cli {
     #[arg(long)]
     pub json: bool,
     /// With no command: the worktree to show.
+    // Record 0114 as amended 2026-11-26: with `status`, `amend` or
+    // `withdraw` of a number more than one branch holds, the worktree
+    // whose submission of it the number names; `sluice host` sets it to
+    // the folder the command ran in.
     #[arg(long, default_value = ".")]
     pub worktree: String,
     // The telemetry flags are hidden, here and in every command, and
@@ -2266,17 +2270,17 @@ fn dispatch(
             json,
             branch,
         } => match target.parse::<u64>() {
-            Ok(id) => match lookup(&s, id, branch.as_deref())? {
-                Lookup::Unfound(unread) if unread.is_empty() => {
+            Ok(id) => match lookup_here(&s, &cli.worktree, id, branch.as_deref())? {
+                (Lookup::Unfound(unread), branch) if unread.is_empty() => {
                     let (text, next) = no_such(id, branch.as_deref());
                     told::tell(out, json, Kind::NotFound, &text, &next)?;
                     Ok(1)
                 }
-                Lookup::Unfound(unread) => unfound(id, &unread, json, out),
-                Lookup::Several(several) => {
+                (Lookup::Unfound(unread), _) => unfound(id, &unread, json, out),
+                (Lookup::Several(several), _) => {
                     refuse_several(id, "sluice status", &several, json, 2, out)
                 }
-                Lookup::Found(sub) if json => {
+                (Lookup::Found(sub), _) if json => {
                     let mut doc = with_waiting(&s, &sub, decided_document(&s, &sub, None)?);
                     // 51, D13: a decided submission's delivery.
                     if let Some(d) = s.delivery_of(&sub)? {
@@ -2291,7 +2295,7 @@ fn dispatch(
                     writeln!(out, "{}", serde_json::to_string_pretty(&doc)?)?;
                     Ok(0)
                 }
-                Lookup::Found(sub) => {
+                (Lookup::Found(sub), _) => {
                     // Record 0122 (design D5, D6): carried under another
                     // number, named as it is now.
                     if sub.id != id {
@@ -2446,146 +2450,187 @@ fn dispatch(
             priority,
             by,
             json,
-            branch,
-        } => match match &branch {
-            Some(b) => s.amend_on(b, id, &requester(&by), after, priority)?,
-            None => s.amend(id, &requester(&by), after, priority)?,
-        } {
-            Ok(()) if json => {
-                serve();
-                // Record 0114: another branch may take the number between
-                // the amend and this read, which then finds none.
-                let doc = match state(&s, id, branch.as_deref())? {
-                    Some(sub) => serde_json::json!({
-                        "id": id, "after": sub.after, "priority": sub.priority,
-                    }),
-                    None => serde_json::json!({ "id": id }),
-                };
-                writeln!(out, "{doc}")?;
-                Ok(0)
-            }
-            Ok(()) => {
-                serve();
-                writeln!(out, "amended #{id}")?;
-                Ok(0)
-            }
-            Err(AmendRefusal::NoSuchSubmission(unread)) if !unread.is_empty() => {
-                unfound(id, &unread, json, out)
-            }
-            Err(AmendRefusal::Several(several)) => {
-                refuse_several(id, "sluice amend", &several, json, 2, out)
-            }
-            Err(r) => {
-                let (why, next) = match r {
-                    AmendRefusal::NoSuchSubmission(_) | AmendRefusal::Several(_) => {
-                        no_submission(id, branch.as_deref())
+            mut branch,
+        } => {
+            let amend = |b: Option<&str>| match b {
+                Some(b) => s.amend_on(b, id, &requester(&by), after.clone(), priority),
+                None => s.amend(id, &requester(&by), after.clone(), priority),
+            };
+            // Record 0114 as amended 2026-11-26: a number more than one
+            // branch holds, asked in the worktree that made one of them,
+            // amends that one.
+            let amended = match (amend(branch.as_deref())?, &branch) {
+                (Err(AmendRefusal::Several(several)), None) => {
+                    match submitted_here(&s, &cli.worktree, id, &several)? {
+                        Some(b) => {
+                            let amended = amend(Some(&b))?;
+                            branch = Some(b);
+                            amended
+                        }
+                        None => Err(AmendRefusal::Several(several)),
                     }
-                    AmendRefusal::NotYours => (
-                        format!(
-                            "#{id} is not {by}'s to change: {}",
-                            owner(&s, id, branch.as_deref())?
-                        ),
-                        owner_next(
-                            &s,
-                            id,
-                            branch.as_deref(),
-                            &asked("sluice amend", id, branch.as_deref()),
-                        )?,
-                    ),
-                    AmendRefusal::UnderTest => {
-                        let status = asked("sluice status", id, branch.as_deref());
-                        let withdraw = asked("sluice withdraw", id, branch.as_deref());
-                        (
+                }
+                (amended, _) => amended,
+            };
+            match amended {
+                Ok(()) if json => {
+                    serve();
+                    // Record 0114: another branch may take the number between
+                    // the amend and this read, which then finds none.
+                    let doc = match state(&s, id, branch.as_deref())? {
+                        Some(sub) => serde_json::json!({
+                            "id": id, "after": sub.after, "priority": sub.priority,
+                        }),
+                        None => serde_json::json!({ "id": id }),
+                    };
+                    writeln!(out, "{doc}")?;
+                    Ok(0)
+                }
+                Ok(()) => {
+                    serve();
+                    writeln!(out, "amended #{id}")?;
+                    Ok(0)
+                }
+                Err(AmendRefusal::NoSuchSubmission(unread)) if !unread.is_empty() => {
+                    unfound(id, &unread, json, out)
+                }
+                Err(AmendRefusal::Several(several)) => {
+                    refuse_several(id, "sluice amend", &several, json, 2, out)
+                }
+                Err(r) => {
+                    let (why, next) = match r {
+                        AmendRefusal::NoSuchSubmission(_) | AmendRefusal::Several(_) => {
+                            no_submission(id, branch.as_deref())
+                        }
+                        AmendRefusal::NotYours => (
                             format!(
+                                "#{id} is not {by}'s to change: {}",
+                                owner(&s, id, branch.as_deref())?
+                            ),
+                            owner_next(
+                                &s,
+                                id,
+                                branch.as_deref(),
+                                &asked("sluice amend", id, branch.as_deref()),
+                            )?,
+                        ),
+                        AmendRefusal::UnderTest => {
+                            let status = asked("sluice status", id, branch.as_deref());
+                            let withdraw = asked("sluice withdraw", id, branch.as_deref());
+                            (
+                                format!(
                                 "#{id} is under test; its order is fixed: {status} follows it, \
                                  or {withdraw} takes it out"
                             ),
-                            vec![status, withdraw],
-                        )
-                    }
-                    AmendRefusal::NotQueued(st) => {
-                        let status = asked("sluice status", id, branch.as_deref());
-                        (
-                            format!("#{id} is {}, past changing: {status}", st.word()),
-                            vec![status],
-                        )
-                    }
-                    AmendRefusal::UnknownAfter(ids) => {
-                        let queue = match state(&s, id, branch.as_deref())? {
-                            Some(sub) => format!("sluice status {}", sub.branch),
-                            None => "sluice overview".into(),
-                        };
-                        let text = format!(
-                            "--after names no queued submission: {}; {queue} lists the queue",
-                            hashes(&ids, None, &mut BTreeSet::new())
-                        );
-                        (text, vec![queue])
-                    }
-                };
-                told::tell(out, json, Kind::Refused, &format!("refused: {why}"), &next)?;
-                Ok(2)
+                                vec![status, withdraw],
+                            )
+                        }
+                        AmendRefusal::NotQueued(st) => {
+                            let status = asked("sluice status", id, branch.as_deref());
+                            (
+                                format!("#{id} is {}, past changing: {status}", st.word()),
+                                vec![status],
+                            )
+                        }
+                        AmendRefusal::UnknownAfter(ids) => {
+                            let queue = match state(&s, id, branch.as_deref())? {
+                                Some(sub) => format!("sluice status {}", sub.branch),
+                                None => "sluice overview".into(),
+                            };
+                            let text = format!(
+                                "--after names no queued submission: {}; {queue} lists the queue",
+                                hashes(&ids, None, &mut BTreeSet::new())
+                            );
+                            (text, vec![queue])
+                        }
+                    };
+                    told::tell(out, json, Kind::Refused, &format!("refused: {why}"), &next)?;
+                    Ok(2)
+                }
             }
-        },
+        }
         Command::Withdraw {
             id,
             by,
             json,
-            branch,
-        } => match match &branch {
-            Some(b) => s.withdraw_on(b, id, &requester(&by))?,
-            None => s.withdraw(id, &requester(&by))?,
-        } {
-            Ok(withdrew) => {
-                serve();
-                let already = withdrew == Withdrew::Already;
-                if json {
-                    let mut doc = serde_json::json!({ "id": id, "state": "withdrawn" });
-                    if already {
-                        doc["already"] = true.into();
+            mut branch,
+        } => {
+            let withdraw = |b: Option<&str>| match b {
+                Some(b) => s.withdraw_on(b, id, &requester(&by)),
+                None => s.withdraw(id, &requester(&by)),
+            };
+            // Record 0114 as amended 2026-11-26: a number more than one
+            // branch holds, asked in the worktree that made one of them,
+            // withdraws that one.
+            let withdrew = match (withdraw(branch.as_deref())?, &branch) {
+                (Err(WithdrawRefusal::Several(several)), None) => {
+                    match submitted_here(&s, &cli.worktree, id, &several)? {
+                        Some(b) => {
+                            let withdrew = withdraw(Some(&b))?;
+                            branch = Some(b);
+                            withdrew
+                        }
+                        None => Err(WithdrawRefusal::Several(several)),
                     }
-                    writeln!(out, "{doc}")?;
-                } else if already {
-                    writeln!(out, "#{id} was already withdrawn")?;
-                } else {
-                    writeln!(out, "withdrew #{id}")?;
                 }
-                Ok(0)
-            }
-            Err(WithdrawRefusal::NoSuchSubmission(unread)) if !unread.is_empty() => {
-                unfound(id, &unread, json, out)
-            }
-            Err(WithdrawRefusal::Several(several)) => {
-                refuse_several(id, "sluice withdraw", &several, json, 2, out)
-            }
-            Err(r) => {
-                let (why, next) = match r {
-                    WithdrawRefusal::NoSuchSubmission(_) | WithdrawRefusal::Several(_) => {
-                        no_submission(id, branch.as_deref())
+                (withdrew, _) => withdrew,
+            };
+            match withdrew {
+                Ok(withdrew) => {
+                    serve();
+                    let already = withdrew == Withdrew::Already;
+                    if json {
+                        let mut doc = serde_json::json!({ "id": id, "state": "withdrawn" });
+                        if already {
+                            doc["already"] = true.into();
+                        }
+                        writeln!(out, "{doc}")?;
+                    } else if already {
+                        writeln!(out, "#{id} was already withdrawn")?;
+                    } else {
+                        writeln!(out, "withdrew #{id}")?;
                     }
-                    WithdrawRefusal::NotYours => (
-                        format!(
-                            "#{id} is not {by}'s to withdraw: {}",
-                            owner(&s, id, branch.as_deref())?
+                    Ok(0)
+                }
+                Err(WithdrawRefusal::NoSuchSubmission(unread)) if !unread.is_empty() => {
+                    unfound(id, &unread, json, out)
+                }
+                Err(WithdrawRefusal::Several(several)) => {
+                    refuse_several(id, "sluice withdraw", &several, json, 2, out)
+                }
+                Err(r) => {
+                    let (why, next) = match r {
+                        WithdrawRefusal::NoSuchSubmission(_) | WithdrawRefusal::Several(_) => {
+                            no_submission(id, branch.as_deref())
+                        }
+                        WithdrawRefusal::NotYours => (
+                            format!(
+                                "#{id} is not {by}'s to withdraw: {}",
+                                owner(&s, id, branch.as_deref())?
+                            ),
+                            owner_next(
+                                &s,
+                                id,
+                                branch.as_deref(),
+                                &asked("sluice withdraw", id, branch.as_deref()),
+                            )?,
                         ),
-                        owner_next(
-                            &s,
-                            id,
-                            branch.as_deref(),
-                            &asked("sluice withdraw", id, branch.as_deref()),
-                        )?,
-                    ),
-                    WithdrawRefusal::Final(st) => {
-                        let status = asked("sluice status", id, branch.as_deref());
-                        (
-                            format!("#{id} is {}, out of the queue already: {status}", st.word()),
-                            vec![status],
-                        )
-                    }
-                };
-                told::tell(out, json, Kind::Refused, &format!("refused: {why}"), &next)?;
-                Ok(2)
+                        WithdrawRefusal::Final(st) => {
+                            let status = asked("sluice status", id, branch.as_deref());
+                            (
+                                format!(
+                                    "#{id} is {}, out of the queue already: {status}",
+                                    st.word()
+                                ),
+                                vec![status],
+                            )
+                        }
+                    };
+                    told::tell(out, json, Kind::Refused, &format!("refused: {why}"), &next)?;
+                    Ok(2)
+                }
             }
-        },
+        }
         Command::Exec {
             branch,
             command,
@@ -3356,8 +3401,14 @@ fn submit(
         clock,
     });
     if json && no_wait {
-        let mut doc =
-            serde_json::json!({ "id": id, "branch": req.branch, "ahead": accepted.ahead });
+        // Record 0114 as amended 2026-11-26: the command that follows it
+        // from any folder, whatever other branch holds its number.
+        let mut doc = serde_json::json!({
+            "id": id,
+            "branch": req.branch,
+            "ahead": accepted.ahead,
+            "wait": wait_command(id, &req.branch),
+        });
         // ADR 0050: only a submission taken unchecked has any.
         if !accepted.warnings.is_empty() {
             doc["warnings"] = serde_json::json!(accepted.warnings);
@@ -3378,6 +3429,9 @@ fn submit(
         }
         for w in &accepted.warnings {
             writeln!(out, "warning: {w}")?;
+        }
+        if no_wait {
+            writeln!(out, "{} follows it", wait_command(id, &req.branch))?;
         }
     }
     if no_wait {
@@ -3459,7 +3513,12 @@ fn submit_group(
         let submissions: Vec<serde_json::Value> = items
             .iter()
             .map(|(w, a)| {
-                let mut doc = serde_json::json!({ "id": a.id, "worktree": w, "ahead": a.ahead });
+                let mut doc = serde_json::json!({
+                    "id": a.id,
+                    "worktree": w,
+                    "ahead": a.ahead,
+                    "wait": wait_command(a.id, branch),
+                });
                 // ADR 0050: only a submission taken unchecked has any.
                 if !a.warnings.is_empty() {
                     doc["warnings"] = serde_json::json!(a.warnings);
@@ -3483,6 +3542,9 @@ fn submit_group(
             }
             for warning in &a.warnings {
                 writeln!(out, "warning: {warning}")?;
+            }
+            if no_wait {
+                writeln!(out, "{} follows it", wait_command(a.id, branch))?;
             }
         }
     }
@@ -3942,7 +4004,10 @@ pub fn wait_step(
                 return Ok(WaitStepped::Ended(USAGE));
             }
             match number {
-                Ok(id) => match lookup(s, id, named)? {
+                // Record 0114 as amended 2026-11-26: a number more than
+                // one branch holds, asked in the worktree that made one of
+                // them, follows that one.
+                Ok(id) => match lookup_here(s, worktree, id, named)?.0 {
                     Lookup::Found(sub) => sub,
                     Lookup::Unfound(unread) if unread.is_empty() => {
                         let (text, next) = no_such(id, named);
@@ -5768,6 +5833,66 @@ fn lookup(s: &Sluice<'_>, id: u64, branch: Option<&str>) -> Result<Lookup> {
         Some(b) => s.lookup_on(b, id),
         None => s.lookup(id),
     }
+}
+
+/// 26, record 0114 as amended 2026-11-26: of the branches `several` names
+/// for submission `id`, the one whose submission `id` the worktree at
+/// `worktree` made, as `sluice wait <branch>` finds its last submission by
+/// the worktree's branch. `None`, and the number refused as before, where
+/// any branch could not be read, where the folder holds no session its
+/// driver names, or where that worktree made submission `id` on no branch,
+/// or on more than one. A submission by name is no worktree's (124; rule
+/// core.50).
+fn submitted_here(
+    s: &Sluice<'_>,
+    worktree: &str,
+    id: u64,
+    several: &Several,
+) -> Result<Option<String>> {
+    if !several.unread.is_empty() {
+        return Ok(None);
+    }
+    let Ok(session) = s.seams().driver.session(worktree) else {
+        return Ok(None);
+    };
+    let mut own = Vec::new();
+    for branch in &several.branches {
+        if let Lookup::Found(sub) = s.lookup_on(branch, id)? {
+            if !sub.from.by_name() && sub.from.worktree == session.from.worktree {
+                own.push(branch.clone());
+            }
+        }
+    }
+    Ok(match own.len() {
+        1 => own.pop(),
+        _ => None,
+    })
+}
+
+/// Submission `id`, looked up as [`lookup`] does, and where more than one
+/// branch holds the number and the command named none, on the one branch
+/// whose submission `id` the worktree at `worktree` made
+/// ([`submitted_here`]); with the branch it was read on alone, `branch`
+/// or that one (26; record 0114 as amended 2026-11-26).
+fn lookup_here(
+    s: &Sluice<'_>,
+    worktree: &str,
+    id: u64,
+    branch: Option<&str>,
+) -> Result<(Lookup, Option<String>)> {
+    let found = lookup(s, id, branch)?;
+    if let (Lookup::Several(several), None) = (&found, branch) {
+        if let Some(b) = submitted_here(s, worktree, id, several)? {
+            return Ok((s.lookup_on(&b, id)?, Some(b)));
+        }
+    }
+    Ok((found, branch.map(str::to_string)))
+}
+
+/// The command that follows submission `id` on `branch` from any folder,
+/// as a submit's answer gives it (26; record 0114 as amended 2026-11-26).
+fn wait_command(id: u64, branch: &str) -> String {
+    format!("sluice wait {id} --branch {branch}")
 }
 
 /// Why `--branch` beside `target`, a branch, is a command line sluice

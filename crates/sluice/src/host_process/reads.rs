@@ -221,7 +221,10 @@ pub(crate) async fn document(
 fn cli_of(request: Request) -> Option<Cli> {
     let path = |p: PathBuf| p.to_string_lossy().into_owned();
     let (command, json, worktree) = match request {
+        // Record 0114 as amended 2026-11-26: a number more than one branch
+        // holds is read on the one the folder's worktree submitted it to.
         Request::Status {
+            folder,
             target,
             all,
             json,
@@ -235,7 +238,7 @@ fn cli_of(request: Request) -> Option<Cli> {
                 branch,
             }),
             false,
-            ".".to_string(),
+            path(folder),
         ),
         Request::Overview { json, .. } => (
             Some(Command::Overview {
@@ -698,5 +701,22 @@ mod tests {
             ..ask(now - chrono::TimeDelta::seconds(1), true)
         };
         assert_eq!(past_its_time(stopped, now).stopped, Some(crate::STOPPED));
+    }
+
+    /// Record 0114 as amended 2026-11-26: a status of a number is run as
+    /// from the folder its client ran in, so a number more than one branch
+    /// holds is read on the one that folder's worktree submitted it to.
+    #[test]
+    fn a_status_runs_as_from_its_clients_folder() {
+        let cli = cli_of(Request::Status {
+            folder: "/w/feat".into(),
+            caller: Default::default(),
+            target: Some("26".into()),
+            all: false,
+            json: true,
+            branch: None,
+        })
+        .expect("a status is a read");
+        assert_eq!(cli.worktree, "/w/feat");
     }
 }

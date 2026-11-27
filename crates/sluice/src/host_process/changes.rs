@@ -317,6 +317,15 @@ impl crate::Pause for NoPause {
 /// The command a change runs, as `sluice` parses it from its client's
 /// arguments.
 fn cli_of(request: Request) -> Cli {
+    // Record 0114 as amended 2026-11-26: an amend or a withdrawal of a
+    // number more than one branch holds takes the one the folder's
+    // worktree submitted it to.
+    let worktree = match &request {
+        Request::Amend { folder, .. } | Request::Withdraw { folder, .. } => {
+            folder.to_string_lossy().into_owned()
+        }
+        _ => ".".into(),
+    };
     let command = match request {
         Request::Submit { submit, .. } => Some(Command::Submit {
             branch: submit.branch,
@@ -391,11 +400,50 @@ fn cli_of(request: Request) -> Cli {
     Cli {
         command,
         json: false,
-        worktree: ".".into(),
+        worktree,
         otel: None,
         otel_service_name: None,
         otel_logs: None,
         otel_logs_limit: None,
         caller: None,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Record 0114 as amended 2026-11-26: an amend and a withdrawal are run
+    /// as from the folder their client ran in, so a number more than one
+    /// branch holds is taken on the one that folder's worktree submitted it
+    /// to; another change is run as from `.`.
+    #[test]
+    fn an_amend_and_a_withdrawal_run_as_from_their_clients_folder() {
+        let amend = cli_of(Request::Amend {
+            folder: "/w/feat".into(),
+            caller: Default::default(),
+            id: 26,
+            after: None,
+            priority: Some(5),
+            by: "operator".into(),
+            json: false,
+            branch: None,
+        });
+        assert_eq!(amend.worktree, "/w/feat");
+        let withdraw = cli_of(Request::Withdraw {
+            folder: "/w/feat".into(),
+            caller: Default::default(),
+            id: 26,
+            by: "operator".into(),
+            json: false,
+            branch: None,
+        });
+        assert_eq!(withdraw.worktree, "/w/feat");
+        let previews = cli_of(Request::Previews {
+            folder: "/w/feat".into(),
+            caller: Default::default(),
+            json: false,
+        });
+        assert_eq!(previews.worktree, ".");
     }
 }
