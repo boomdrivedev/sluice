@@ -366,8 +366,19 @@ impl OnGitHub {
 
     /// `main` under the policy whose `main` table holds `lines` and its
     /// time limit `timeout`, whose `pull_requests` table holds
-    /// `conditions`, and `extra` after them.
+    /// `conditions`, and `extra` after them; `main` requires its gate.
     fn built(conditions: &str, lines: &str, timeout: &str, extra: &str) -> OnGitHub {
+        OnGitHub::requiring("\"#gate\"", conditions, lines, timeout, extra)
+    }
+
+    /// [`OnGitHub::built`], `main` requiring `required`, its list's items.
+    fn requiring(
+        required: &str,
+        conditions: &str,
+        lines: &str,
+        timeout: &str,
+        extra: &str,
+    ) -> OnGitHub {
         let f = Fakes::new();
         f.world.init(
             "main",
@@ -377,7 +388,7 @@ impl OnGitHub {
                     "[tests]\nrunner = \"fake\"\n\n\
                      [signers.a]\nssh = \"a ssh-ed25519 AAAA\"\n\n\
                      [signers.b]\nssh = \"b ssh-ed25519 BBBB\"\n\n\
-                     [branches.main]\nrequired = [\"#gate\"]\ntrust = [\"a\", \"b\"]\n\
+                     [branches.main]\nrequired = [{required}]\ntrust = [\"a\", \"b\"]\n\
                      remote = \"origin\"\ntimeout = \"{timeout}\"\n{lines}\n\
                      [branches.main.pull_requests]\n{conditions}\n{extra}"
                 ),
@@ -5416,4 +5427,246 @@ fn a_refused_query_falls_back_to_the_reads_per_pull_request() {
     assert_eq!(g.calls("query/main"), 2);
     assert_eq!(g.calls(&format!("reviews/{one}")), 1);
     assert_eq!(g.of(one).len(), 1, "{:?}", g.subs());
+}
+
+// ---------------------------------------------------------------------------
+// a branch submitted by name (124, C.5; record 0130)
+// ---------------------------------------------------------------------------
+
+impl OnGitHub {
+    /// `bolt/x` moved on GitHub to a commit of `changes` over it, as
+    /// another queue lands one there: returns its revision.
+    fn moved_on_github(&self, changes: &[(&str, Option<&str>)]) -> Rev {
+        let moved = self.f.world.hand_commit("bolt/x", changes);
+        self.gh().pushed("bolt/x", &moved.0).unwrap();
+        moved
+    }
+
+    /// `sluice submit main --head <branch>` from no worktree, then `args`.
+    fn submit_by_name(&self, branch: &str, args: &[&str]) -> (i32, String) {
+        self.sluice(&[&["submit", "main", "--head", branch][..], args].concat())
+    }
+}
+
+/// ADR 0050: a branch requiring a task the task runner keeps out of CI in
+/// the worktree refuses the submission, naming the task and its line of
+/// the policy, before anything is pushed: no branch on GitHub, and no pull
+/// request opened or marked ready.
+#[test]
+fn submit_refuses_a_gate_requiring_a_task_kept_out_of_ci() {
+    let g = OnGitHub::requiring("\"app:test\"", "", "", "1h", "");
+    g.f.sluice().as_peer(peer("a")).step("main").unwrap();
+    g.f.world.keeps_out("app:test");
+    let w = g.session("kept", &[("k.txt", "k\n")]);
+    g.f.world.at_path(&w, "/work/unit-kept");
+    let policy =
+        g.f.seams()
+            .branch
+            .read_file(&g.f.world.tip("main"), POLICY_PATH)
+            .unwrap()
+            .unwrap();
+    let line = 1 + String::from_utf8(policy)
+        .unwrap()
+        .lines()
+        .position(|l| l.starts_with("required = "))
+        .expect("main's required checks");
+    let (code, said) = g.submit(&w, &["--no-wait"]);
+    assert_eq!(code, 2, "{said}");
+    assert!(
+        said.contains(&format!(
+            "refused: main requires app:test (.config/sluice.toml line {line}), which \
+             the task runner in this worktree keeps out of CI"
+        )),
+        "{said}"
+    );
+    assert_eq!(g.pushed("unit/kept"), None);
+    assert!(g.forge.held().unwrap().pulls.is_empty());
+}
+
+/// 124, C.5, D7: `main` takes pull requests, and this host's `bolt/x`
+/// stands two landings behind GitHub's. `sluice submit main --head bolt/x`
+/// opens the request from `bolt/x` into `main`, ready, titled `bolt/x`, at
+/// GitHub's revision; nothing is pushed and nothing is said of the host's
+/// copy; intake takes it in as the request's, its `from.head` `bolt/x`,
+/// with no path and no session. Submitted again with a subject, the same
+/// request is titled by it.
+#[test]
+fn a_submit_by_name_opens_the_request_from_the_branch() {
+    let g = OnGitHub::with_bolt();
+    g.f.world.hold_runs(true);
+    let made = g.f.world.tip("bolt/x");
+    g.moved_on_github(&[("one.txt", Some("1\n"))]);
+    let remote = g.moved_on_github(&[("two.txt", Some("2\n"))]);
+    g.f.world.set_copy("bolt/x", Some(&made));
+    let doc: Value = {
+        let (code, out) = g.submit_by_name("bolt/x", &["--no-wait", "--json"]);
+        assert_eq!(code, 0, "{out}");
+        last_document(&out)
+    };
+    let pull = g.pull_from("bolt/x");
+    assert!(pull.open && !pull.draft && pull.base == "main", "{pull:?}");
+    assert_eq!(pull.title, "bolt/x");
+    assert_eq!(pull.head, remote.0);
+    assert_eq!(
+        g.pushed("bolt/x"),
+        None,
+        "nothing pushed to GitHub's bolt/x"
+    );
+    assert_eq!(
+        g.f.world.copy_of("bolt/x"),
+        Some(made),
+        "this host's bolt/x unmoved"
+    );
+    assert_eq!(doc["pull_request"], pull.number, "{doc}");
+    assert_eq!(doc["branch"], "main", "{doc}");
+    assert!(doc.get("copy").is_none(), "{doc}");
+    let id = doc["id"].as_u64().unwrap_or_else(|| panic!("{doc}"));
+    let subs = g.of(pull.number);
+    assert_eq!(subs.len(), 1, "{subs:?}");
+    assert_eq!(subs[0]["id"], id);
+    assert_eq!(subs[0]["head"], remote.0.as_str());
+    assert_eq!(subs[0]["from"]["head"], "bolt/x");
+    assert_eq!(subs[0]["from"]["path"], Value::Null);
+    assert_eq!(subs[0]["from"]["session"], Value::Null);
+    let (code, said) = g.submit_by_name(
+        "bolt/x",
+        &["--subject", "Batch the review cards", "--no-wait"],
+    );
+    assert_eq!(code, 0, "{said}");
+    assert!(
+        said.contains(&format!("updated #{}: Batch the review cards", pull.number)),
+        "{said}"
+    );
+    assert!(
+        !said.contains("pushed") && !said.contains("this host's"),
+        "{said}"
+    );
+    let held = g.forge.held().unwrap();
+    assert_eq!(held.pulls.len(), 1);
+    assert_eq!(held.pulls[0].title, "Batch the review cards");
+    assert_eq!(g.pushed("bolt/x"), None);
+}
+
+/// pull-request-submit, "Submitted by name": `main` takes pull requests
+/// with `reviews = 1`, and `sluice submit main --head bolt/x --no-wait
+/// --json` opens a pull request from `bolt/x` and answers with it and the
+/// wait that follows it, with no `id` (124; record 0130).
+#[test]
+fn a_submit_by_name_names_its_pull_requests_wait() {
+    let g = OnGitHub::built(
+        "reviews = 1",
+        "",
+        "1h",
+        "\n[branches.\"bolt/*\"]\nrequired = [\"#gate\"]\ntrust = [\"a\", \"b\"]\n\
+         remote = \"origin\"\n",
+    );
+    g.f.sluice().as_peer(peer("a")).step("main").unwrap();
+    g.f.world.set_branch("bolt/x", &g.f.world.tip("main"));
+    g.f.world.on_remote("bolt/x");
+    g.moved_on_github(&[("x.txt", Some("x\n"))]);
+    let (code, out) = g.submit_by_name("bolt/x", &["--no-wait", "--json"]);
+    assert_eq!(code, 0, "{out}");
+    let doc = last_document(&out);
+    let n = g.pull_from("bolt/x").number;
+    assert_eq!(doc["pull_request"], n, "{doc}");
+    assert_eq!(
+        doc["wait"],
+        format!("sluice wait main --pull-request {n}").as_str(),
+        "{doc}"
+    );
+    assert!(doc.get("id").is_none(), "{doc}");
+}
+
+/// 135, 67; record 0100 D2, D4: a waiting submit by name whose request
+/// `bolt/x` moves under, taken in again on its new head and landed there,
+/// ends with the submission it made, landed by that one's landing and
+/// naming it in `carried_by`, never with that one's record.
+#[test]
+fn a_waiting_submit_ends_with_its_own_submission_when_the_branch_moves_under_it() {
+    let g = OnGitHub::with_bolt();
+    g.f.world.hold_runs(true);
+    g.moved_on_github(&[("b.txt", Some("b\n"))]);
+    let moved = RefCell::new(None);
+    let pause = Then(Cell::new(0), |k| {
+        if k == 2 {
+            let head = g.moved_on_github(&[("more.txt", Some("more\n"))]);
+            let (code, said) = g.submit_by_name("bolt/x", &["--no-wait"]);
+            assert_eq!(code, 0, "{said}");
+            *moved.borrow_mut() = Some(head);
+            g.f.world.hold_runs(false);
+            g.f.world.complete_all();
+        }
+    });
+    let (code, out) = g.sluice_pausing(&["submit", "main", "--head", "bolt/x", "--json"], &pause);
+    assert_eq!(code, sluice::LANDED, "{out}");
+    let moved = moved
+        .into_inner()
+        .expect("bolt/x moved while the submit waited");
+    let doc: Value = serde_json::from_str(&out).unwrap_or_else(|e| panic!("{e}: {out}"));
+    let n = g.pull_from("bolt/x").number;
+    let subs = g.of(n);
+    let first = subs[0]["id"].clone();
+    let second = subs
+        .iter()
+        .find(|x| x["head"] == moved.0.as_str())
+        .unwrap_or_else(|| panic!("{subs:?}"));
+    assert_eq!(second["state"], "landed", "{second}");
+    assert_eq!(doc["id"], first, "{doc}");
+    assert_eq!(doc["state"], "landed", "{doc}");
+    assert_eq!(doc["carried_by"]["id"], second["id"], "{doc}");
+    assert_eq!(doc["carried_by"]["state"], "landed", "{doc}");
+}
+
+/// 124, 51, D6: the request a submit by name opened is blamed while GitHub
+/// refuses every post of its outcome, so the outcome stays owed to the
+/// request with no hand-over; `sluice inbox --json` in a worktree that has
+/// checked out `bolt/x` collects nothing of it, since no worktree pushed a
+/// branch sluice lands on, and `main`'s status shows it owed to the
+/// request, handed over by nothing (record 0102, D13).
+#[test]
+fn a_request_by_name_is_collected_by_no_worktree() {
+    let g = OnGitHub::with_bolt();
+    let broke = g.moved_on_github(&[("broken", Some("x\n"))]);
+    let (code, out) = g.submit_by_name("bolt/x", &["--no-wait", "--json"]);
+    assert_eq!(code, 0, "{out}");
+    let id = last_document(&out)["id"]
+        .as_u64()
+        .unwrap_or_else(|| panic!("{out}"));
+    let n = g.pull_from("bolt/x").number;
+    g.forge.refuse_posts(true);
+    for _ in 0..20 {
+        if g.of(n).iter().any(|s| s["state"] == "failed") {
+            break;
+        }
+        g.interval_passes();
+        g.sluice(&["step", "main"]);
+    }
+    let sub = g.of(n).into_iter().find(|s| s["id"] == id).unwrap();
+    assert_eq!(sub["state"], "failed", "{sub}");
+    assert_eq!(sub["from"]["head"], "bolt/x", "{sub}");
+    assert_eq!(g.delivery(&sub["id"])["state"], "owed", "{sub}");
+    g.f.world.session("bolt/x", "bolt/x", &broke);
+    let (code, out) = g.sluice(&["inbox", "--worktree", "bolt/x", "--json"]);
+    assert_eq!(code, 0, "{out}");
+    let doc: Value = serde_json::from_str(&out).unwrap();
+    assert_eq!(doc, serde_json::json!({ "outcomes": [] }));
+    let id = Value::from(id);
+    assert_eq!(g.delivery(&id)["reader"], format!("pull/{n}").as_str());
+    assert_eq!(g.delivery(&id)["handed"], serde_json::json!([]));
+    let said = g.status_words();
+    let owed = said
+        .split_once("OWED\n")
+        .unwrap_or_else(|| panic!("no OWED section: {said}"))
+        .1;
+    let mut lines = owed.lines();
+    assert!(
+        lines
+            .next()
+            .unwrap_or_default()
+            .starts_with(&format!("  pull/{n}")),
+        "{said}"
+    );
+    let row = lines.next().unwrap_or_default();
+    assert!(row.contains(&format!("{id}:failed #{id}")), "{said}");
+    assert!(row.contains("handed over by nothing"), "{said}");
 }
