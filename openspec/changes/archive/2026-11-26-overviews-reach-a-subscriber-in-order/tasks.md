@@ -10,4 +10,4 @@ Each check runs through sluice: `sluice exec main -- <command>`.
 ## 2. The change
 
 - [x] 2.1 Run `openspec validate overviews-reach-a-subscriber-in-order --strict`. Check: `sluice exec main -- moon run root:specs root:changes`.
-- [ ] 2.2 Archive the change with `openspec archive overviews-reach-a-subscriber-in-order`.
+- [x] 2.2 Archive the change with `openspec archive overviews-reach-a-subscriber-in-order`.
