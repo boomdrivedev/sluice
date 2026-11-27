@@ -36,7 +36,7 @@ The host keeps the time of the repository's last asking in `requests/<owner>/<re
 - The branch or its records moved since the branch's last reading.
 - The branch has no reading, and this process holds no list.
 
-A pass asks for a repository's list one time at most. `Pulls::next_pass` clears the mark.
+A pass asks for a repository's list one time at most. `Pulls::next_pass` starts a new pass. A second intake of one branch also starts one, because `sluice step` takes one branch in with no pass around it.
 
 ### D3. A list held serves each branch
 

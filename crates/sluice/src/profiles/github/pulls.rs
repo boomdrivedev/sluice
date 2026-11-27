@@ -337,6 +337,9 @@ pub struct Pulls {
     listings: RefCell<BTreeMap<String, Listing>>,
     /// The repositories listed this pass: a pass lists each once at most.
     listed_this_pass: RefCell<std::collections::BTreeSet<String>>,
+    /// The branches taken in this pass. A branch taken in again starts a
+    /// new pass, as each `sluice step` of one branch does.
+    taken_this_pass: RefCell<std::collections::BTreeSet<String>>,
 }
 
 /// A repository's open pull requests as one list of them answered: when
@@ -522,6 +525,7 @@ impl Pulls {
             kept_across: RefCell::default(),
             listings: RefCell::default(),
             listed_this_pass: RefCell::default(),
+            taken_this_pass: RefCell::default(),
         }
     }
 
@@ -530,6 +534,7 @@ impl Pulls {
     pub fn next_pass(&self) {
         self.policies.next_pass();
         self.listed_this_pass.borrow_mut().clear();
+        self.taken_this_pass.borrow_mut().clear();
     }
 
     fn forge(&self, branch: &str) -> Result<&dyn Forge> {
@@ -797,6 +802,14 @@ impl Pulls {
         self.log_lines
             .borrow_mut()
             .insert(branch.to_string(), held.conditions.log_lines);
+        // A branch taken in a second time is in a new pass, which lists
+        // its repository afresh.
+        if !self.taken_this_pass.borrow_mut().insert(branch.to_string()) {
+            self.listed_this_pass.borrow_mut().clear();
+            let mut taken = self.taken_this_pass.borrow_mut();
+            taken.clear();
+            taken.insert(branch.to_string());
+        }
         let now = clock.now();
         let kept = self.kept.readings(&held.repo, branch);
         let records = s.seams().state.read_held(branch)?;
