@@ -25,8 +25,9 @@
 //! another process is never ended.
 //!
 //! When `sluice host` stops, it ends each worker's group ([`stop`]). When it
-//! starts, it ends each group that a killed host process left, and it keeps
-//! each worker that an earlier image of its own process started ([`sweep`]).
+//! starts, it ends each group that a killed host process left, and it waits
+//! again on each child that an earlier image of its own process started, a
+//! worker or not, and one that has ended already among them ([`sweep`]).
 //! A process that is not `sluice host` has no owner, and [`take`] does
 //! nothing in it.
 
@@ -270,14 +271,27 @@ pub fn wait(mut child: std::process::Child) {
 }
 
 /// Wait on `pid`, a child that an earlier image of this process started,
-/// on a thread of its own, as [`wait`] does.
-fn adopt(pid: i32) {
+/// on a thread of its own, as [`wait`] does: when it ends, its record in
+/// `dir` goes.
+fn adopt(dir: &Path, pid: i32) {
     CHILDREN.lock().expect("the children").insert(pid);
+    let dir = dir.to_path_buf();
     std::thread::spawn(move || {
+        let raw = pid;
         let pid = nix::unistd::Pid::from_raw(pid);
         while let Err(nix::errno::Errno::EINTR) = nix::sys::wait::waitpid(pid, None) {}
-        ended(pid.as_raw());
+        forget_in(&dir, raw);
+        ended(raw);
     });
+}
+
+/// The children of this process, each with whether it has ended unwaited
+/// on, a zombie.
+fn own_children() -> Vec<(i32, bool)> {
+    platform::children(std::process::id() as i32)
+        .into_iter()
+        .map(|pid| (pid, started(pid).is_none()))
+        .collect()
 }
 
 /// The child `pid` ended.
@@ -346,27 +360,42 @@ pub fn prune(dir: &Path) {
 pub struct Swept {
     /// The groups that a killed host process left, now ended.
     pub ended: Vec<Record>,
-    /// The child workers that an earlier image of this process started,
-    /// now waited on.
+    /// The children that an earlier image of this process started and
+    /// that still run, now waited on.
     pub kept: Vec<i32>,
+    /// The children that an earlier image of this process started and
+    /// that had ended unwaited on, now reaped.
+    pub reaped: Vec<i32>,
 }
 
 /// As `sluice host` starts, before it claims a run or starts a worker:
-/// each record whose worker no longer runs goes, each group of another
-/// owner is ended, and each child that an earlier image of this process
-/// started is waited on again.
+/// each child that an earlier image of this process started is waited on
+/// again, a recorded worker or not, one that ended already among them
+/// (`nothing-detached@f807c7f5fcea`); each record whose worker no longer
+/// runs goes; and each group of another owner is ended.
 pub fn sweep(owner: &Owner) -> Swept {
     let mut swept = Swept::default();
+    // No worker of this image has started yet, so each child is the
+    // earlier image's, and no handle of this image waits on it.
+    for (pid, zombie) in own_children() {
+        if CHILDREN.lock().expect("the children").contains(&pid) {
+            continue;
+        }
+        adopt(&owner.dir, pid);
+        if zombie {
+            swept.reaped.push(pid);
+        } else {
+            swept.kept.push(pid);
+        }
+    }
+    let waited = |pid: i32| swept.kept.contains(&pid) || swept.reaped.contains(&pid);
     let mut ending = Vec::new();
     for r in records(&owner.dir) {
-        if !r.live() {
+        if waited(r.pid) {
+            // Its waiter removes its record when it ends.
+        } else if !r.live() {
             forget_in(&owner.dir, r.pid);
-        } else if r.of(owner) {
-            if is_child(r.pid) {
-                adopt(r.pid);
-                swept.kept.push(r.pid);
-            }
-        } else {
+        } else if !r.of(owner) {
             ending.push(r);
         }
     }
@@ -483,11 +512,6 @@ fn signal_group(group: i32, signal: libc::c_int) {
     }
 }
 
-/// Whether `pid` is a child of this process.
-fn is_child(pid: i32) -> bool {
-    parent(pid) == Some(std::process::id() as i32)
-}
-
 /// The start time of the process `pid`, in seconds since the epoch, where
 /// it runs.
 pub fn started(pid: i32) -> Option<u64> {
@@ -528,6 +552,25 @@ mod platform {
     pub fn parent(pid: i32) -> Option<i32> {
         info(pid).map(|i| i.pbi_ppid as i32)
     }
+
+    /// The children of `pid`, a zombie among them.
+    pub fn children(pid: i32) -> Vec<i32> {
+        let mut pids: Vec<libc::pid_t> = vec![0; 256];
+        loop {
+            let size = (pids.len() * std::mem::size_of::<libc::pid_t>()) as libc::c_int;
+            // SAFETY: the buffer is `size` bytes of this process's memory.
+            let n = unsafe { libc::proc_listchildpids(pid, pids.as_mut_ptr().cast(), size) };
+            let Ok(n) = usize::try_from(n) else {
+                return Vec::new();
+            };
+            // A full buffer may have left some out: a larger one is asked.
+            if n < pids.len() {
+                pids.truncate(n);
+                return pids.into_iter().filter(|p| *p > 0).collect();
+            }
+            pids.resize(pids.len() * 2, 0);
+        }
+    }
 }
 
 #[cfg(target_os = "linux")]
@@ -561,6 +604,18 @@ mod platform {
 
     pub fn parent(pid: i32) -> Option<i32> {
         stat(pid)?.get(1)?.parse().ok()
+    }
+
+    /// The children of `pid`, a zombie among them.
+    pub fn children(pid: i32) -> Vec<i32> {
+        let Ok(entries) = std::fs::read_dir("/proc") else {
+            return Vec::new();
+        };
+        entries
+            .flatten()
+            .filter_map(|e| e.file_name().to_str()?.parse::<i32>().ok())
+            .filter(|p| parent(*p) == Some(pid))
+            .collect()
     }
 }
 
@@ -650,6 +705,67 @@ mod tests {
         end_groups(&[pid], Duration::from_secs(1));
         let _ = child.wait();
         assert!(!is_there(pid));
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// Whether the process `pid` is gone, a zombie that no one reaped
+    /// being no gone process.
+    fn gone(pid: i32) -> bool {
+        nix::sys::signal::kill(nix::unistd::Pid::from_raw(pid), None)
+            == Err(nix::errno::Errno::ESRCH)
+    }
+
+    /// `nothing-detached@f807c7f5fcea`: as `sluice host` starts, each
+    /// child that its earlier image left is waited on, one that has ended
+    /// already, recorded as a worker or not, among them, so none of them
+    /// stays a zombie of the host process (deneb, 2026-11-27: pid 64735, a
+    /// child of the daemon's image before its hand-over in place, a zombie
+    /// for 16 hours).
+    #[test]
+    fn a_sweep_reaps_each_child_its_earlier_image_left() {
+        let dir = scratch("sweep-reaps");
+        let me = std::process::id();
+        let owner = Owner {
+            dir: dir.clone(),
+            pid: me,
+            start: started(me as i32).unwrap(),
+        };
+        let held = serde_json::to_vec(&Held {
+            owner: owner.pid,
+            owner_start: owner.start,
+            what: "git".into(),
+        })
+        .unwrap();
+        let mut prefix = dir.as_os_str().as_bytes().to_vec();
+        prefix.push(b'/');
+        let mut recorded = Command::new("/bin/sh");
+        recorded.args(["-c", "exit 0"]).process_group(0);
+        // SAFETY: as in `take`.
+        unsafe {
+            recorded.pre_exec(move || record_self(&prefix, &held));
+        }
+        // Their handles go as the earlier image's did at its exec: no one
+        // waits on them.
+        let recorded = recorded.spawn().unwrap().id() as i32;
+        let unrecorded = Command::new("/bin/sh")
+            .args(["-c", "exit 0"])
+            .spawn()
+            .unwrap()
+            .id() as i32;
+        let until = Instant::now() + Duration::from_secs(10);
+        while [recorded, unrecorded].iter().any(|p| started(*p).is_some()) {
+            assert!(Instant::now() < until, "the children never ended");
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        let swept = sweep(&owner);
+        let until = Instant::now() + Duration::from_secs(5);
+        while !(gone(recorded) && gone(unrecorded)) && Instant::now() < until {
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        assert!(gone(recorded), "the recorded worker {recorded} is a zombie");
+        assert!(gone(unrecorded), "the child {unrecorded} is a zombie");
+        assert!(swept.ended.is_empty(), "{swept:?}");
+        assert!(records(&dir).is_empty(), "{:?}", records(&dir));
         std::fs::remove_dir_all(&dir).unwrap();
     }
 
