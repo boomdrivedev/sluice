@@ -195,14 +195,27 @@ pub trait Forge {
     /// where nothing else tells it (record 0108).
     fn login(&self, repo: &Repo) -> Result<String>;
 
-    /// The open pull requests into `base`.
-    fn pulls(&self, repo: &Repo, base: &str) -> Result<Vec<Pull>>;
+    /// Every open pull request of the repository, into any branch: one
+    /// list for the repository, which every branch reads its own from
+    /// (`one-forge-read-per-repository-per-interval@b3b6757cea2d`).
+    fn open_pulls(&self, repo: &Repo) -> Result<Vec<Pull>>;
 
-    /// The open pull requests into `base`, and whether their list changed
-    /// since the host last read it; a forge that cannot tell says it did.
-    fn listed(&self, repo: &Repo, base: &str) -> Result<Listed> {
+    /// The open pull requests into `base`, read from the repository's one
+    /// list.
+    fn pulls(&self, repo: &Repo, base: &str) -> Result<Vec<Pull>> {
+        Ok(self
+            .open_pulls(repo)?
+            .into_iter()
+            .filter(|p| p.base == base)
+            .collect())
+    }
+
+    /// Every open pull request of the repository, and whether their list
+    /// changed since the host last read it; a forge that cannot tell says
+    /// it did.
+    fn listed(&self, repo: &Repo) -> Result<Listed> {
         Ok(Listed {
-            pulls: self.pulls(repo, base)?,
+            pulls: self.open_pulls(repo)?,
             changed: true,
         })
     }

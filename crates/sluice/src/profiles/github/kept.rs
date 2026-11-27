@@ -13,13 +13,17 @@
 //!   from the app's key or given by the host's credential command, which
 //!   tells no installation's id (record 0108); `resource` is GitHub's own
 //!   name for the allowance, `core` for REST and `graphql`.
-//! - `requests/<owner>/<repo>/<base>.json`: each branch's readings, when
-//!   its open pull requests were last asked for, at which revision of the
+//! - `requests/<owner>/<repo>/<base>.json`: each branch's readings, as of
+//!   the asking of the list it last read, at which revision of the
 //!   branch and version of its records, and what was last read and posted
 //!   of each request ([`Readings`]), changed under the exclusive lock of
 //!   the `.lock` beside it, which goes with its process. It says only what
 //!   was last read, so that a request that has not moved is not read
 //!   again (rule core.14).
+//! - `requests/<owner>/<repo>/.listed.json`: when the repository's open
+//!   pull requests were last asked for, in one list for every branch of
+//!   it, so that every process of the host asks once in the interval
+//!   (`one-forge-read-per-repository-per-interval@b3b6757cea2d`).
 //! - `requests/<owner>/<repo>/<base>.moved`: touched by a submit on the
 //!   host that opened, updated or marked ready a request into the branch;
 //!   newer than the last asking, it asks at once.
@@ -106,6 +110,14 @@ pub struct Readings {
     pub version: Option<u64>,
     #[serde(default)]
     pub requests: BTreeMap<u64, Reading>,
+}
+
+/// When a repository's open pull requests were last asked for, by any
+/// process of the host: one list for every branch of it
+/// (`one-forge-read-per-repository-per-interval@b3b6757cea2d`).
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+struct Listed {
+    asked: Option<DateTime<Utc>>,
 }
 
 /// What was last read and posted of one pull request (128, 136).
@@ -297,6 +309,26 @@ impl Kept {
         let out = f(&mut readings);
         write(&self.requests_path(repo, base, "json"), &readings)?;
         Ok(out)
+    }
+
+    /// Where `repo`'s last asking of its open pull requests is kept.
+    fn listed_path(&self, repo: &Repo) -> PathBuf {
+        self.dir
+            .join("requests")
+            .join(&repo.owner)
+            .join(&repo.name)
+            .join(".listed.json")
+    }
+
+    /// When any process of the host last asked GitHub for `repo`'s open
+    /// pull requests; none where none did, or the file is torn.
+    pub fn listed(&self, repo: &Repo) -> Option<DateTime<Utc>> {
+        read::<Listed>(&self.listed_path(repo)).and_then(|l| l.asked)
+    }
+
+    /// `repo`'s open pull requests were asked for at `at`.
+    pub fn keep_listed(&self, repo: &Repo, at: DateTime<Utc>) -> Result<()> {
+        write(&self.listed_path(repo), &Listed { asked: Some(at) })
     }
 
     /// A submit on the host opened, updated or marked ready a pull request
