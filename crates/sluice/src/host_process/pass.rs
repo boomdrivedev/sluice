@@ -14,7 +14,7 @@ use serde::{Deserialize, Serialize};
 use sluice_core::{Clock, Sluice, Step};
 use sluice_seams::Rev;
 
-use crate::overview::{self, Follows};
+use crate::overview;
 use crate::{exec, preview, telemetry, PullRequests, INTERRUPTED};
 
 /// What a repository's passes keep from one to the next: what was last
@@ -147,6 +147,7 @@ pub fn pass(
             return Ok(report);
         }
     };
+    let records = branches.clone();
     match pulls.branches(seams) {
         Ok(b) => branches.extend(b),
         Err(e) => telemetry::warn(&format!("sluice: warning: {e:#}")),
@@ -227,9 +228,11 @@ pub fn pass(
     // 129: whether the repository has sluice, read as a one-shot overview
     // reads it; 137 (design D16, D25): the pass reads each request this
     // host follows into a branch it does not keep, as it falls due at the
-    // host's one bound. A read it could not make says nothing of it.
-    if let Ok(doc) = overview::read_held(s, host, clock, Follows::Asked(pulls), &mut kept.asked) {
-        report.no_sluice = overview::no_sluice(&doc);
+    // host's one bound. It builds no overview for them: a branch's view,
+    // its log and its policy are read when a reader asks. A read it could
+    // not make says nothing of it.
+    if let Ok(none) = overview::pass_reads(s, host, clock, pulls, &records, &mut kept.asked) {
+        report.no_sluice = none;
     }
     // What is left in play once the pass ended keeps its repository held
     // (135; design D6): a branch that cannot be read counts as in play, and
