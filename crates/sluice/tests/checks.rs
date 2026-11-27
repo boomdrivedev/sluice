@@ -11,9 +11,12 @@ use std::time::{Duration, Instant};
 use sluice::instance::{HostCache, Instance};
 use sluice::profiles::checks::{docker_host, Checks, Endpoint, EngineTls};
 use sluice_seams::{
-    Equip, EquipStep, Limits, Network, Outcome, Place, Progress, Refusals, RunHandle, RunKind,
-    RunReport, RunRequest, Setting, Settings, Source, TaskState, Tests, Through,
+    Equip, EquipStep, Limits, Network, Outcome, Place, Progress, RunHandle, RunKind, RunReport,
+    RunRequest, Setting, Settings, Source, TaskState, Tests, Through,
 };
+// The sandbox's tests, which run on macOS alone, read what it refused.
+#[cfg(target_os = "macos")]
+use sluice_seams::Refusals;
 use support::{Repo, Scratch};
 
 /// The check profile of `repo`, counting its runs in a registry of the
@@ -634,6 +637,7 @@ fn a_sandbox_run_records_the_grant_of_its_profile() {
 }
 
 /// `req` held to the sandbox, with `network`.
+#[cfg(target_os = "macos")]
 fn sandboxed(mut req: RunRequest, network: Option<Network>) -> RunRequest {
     req.limits = Limits {
         executor: Some("sandbox".into()),
