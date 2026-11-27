@@ -5461,7 +5461,8 @@ fn a_repositorys_branches_share_one_list_each_interval() {
 /// The fault "A `sluice submit --no-wait` exits 3 when the GitHub App's
 /// hourly requests are spent": main and two bolts take pull requests,
 /// and the installation's allowance holds what one list of the
-/// repository in each interval and a submit need. Forty passes of
+/// repository in each interval and a submit need, with room for the
+/// order the submit's calls and the host's pass fall in. Forty passes of
 /// `sluice run` over two minutes, with nothing on the host moving, leave
 /// the allowance for the submit, which opens its pull request and exits 0
 /// (`one-forge-read-per-repository-per-interval@b3b6757cea2d`).
@@ -5488,10 +5489,11 @@ fn idle_branches_leave_the_allowance_for_a_submit() {
 
 /// The calls the installation's allowance holds in
 /// [`idle_branches_leave_the_allowance_for_a_submit`]: the repository's
-/// one list in each of two minutes, and the submit's three calls. A list
-/// of each branch in each minute spends six before the submit, and the
-/// submit exits 3.
-const ALLOWED: usize = 5;
+/// one list in each of two minutes, and the submit's calls, three to five
+/// as the host's pass and the submit's own list fall. A list of each
+/// branch in each minute spends six before the submit, which leaves it
+/// one call, and the submit exits 3.
+const ALLOWED: usize = 7;
 
 /// reader-tick, "A branch that takes pull requests between discoveries":
 /// none open and the host's interval a minute, six passes of `sluice run`
