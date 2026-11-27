@@ -153,32 +153,6 @@ fn live_from_here(d: &OnDisk) {
     }
 }
 
-/// 135 (design D1): a second host process started while the first lives
-/// ends at once and moves nothing; the first goes on.
-#[test]
-fn a_second_host_process_ends_at_once() {
-    let d = OnDisk::new("host-second", POLICY);
-    let client = d.client(d.repo.dir());
-    let repository = d.repository(d.repo.dir());
-    let follow = client
-        .subscribe(vec![sluice::host_process::protocol::Added {
-            folder: std::path::PathBuf::from(&repository),
-            kind: FollowKind::Wait,
-        }])
-        .expect("the host process starts");
-    let first = follow.named.pid;
-    let out = d.command(d.repo.dir()).arg("host").output().unwrap();
-    assert!(out.status.success(), "{}", text(&out));
-    let again = client.answering().unwrap().expect("the first answers");
-    assert_eq!(again.named.pid, first);
-    assert!(alive(first));
-    assert!(
-        text(&out).contains("another host process holds"),
-        "{}",
-        text(&out)
-    );
-}
-
 /// 135 (design D1): a host process killed leaves its socket, which the
 /// next one replaces, at the same path.
 #[test]
@@ -201,27 +175,6 @@ fn a_socket_a_killed_host_process_left_is_replaced() {
     assert_ne!(next.named.pid, first);
     assert!(client.paths().socket.exists());
     assert!(client.paths().version().exists());
-}
-
-/// 135 (design D2): ten commands reaching at once start one host
-/// process.
-#[test]
-fn ten_reaches_at_once_start_one_host_process() {
-    let d = OnDisk::new("host-ten", POLICY);
-    let client = d.client(d.repo.dir());
-    let barrier = std::sync::Arc::new(std::sync::Barrier::new(10));
-    let reached: Vec<_> = (0..10)
-        .map(|_| {
-            let (client, barrier) = (client.clone(), barrier.clone());
-            std::thread::spawn(move || {
-                barrier.wait();
-                client.reach().expect("reached")
-            })
-        })
-        .collect();
-    let connections: Vec<_> = reached.into_iter().map(|t| t.join().unwrap()).collect();
-    let pids: BTreeSet<u32> = connections.iter().map(|c| c.named.pid).collect();
-    assert_eq!(pids.len(), 1, "{pids:?}");
 }
 
 /// 135 (design D2): a host process that does not answer within ten
@@ -797,25 +750,24 @@ fn an_older_command_uses_a_newer_host_process() {
     );
 }
 
-/// host-process, "A submit with no host process running": the submit
-/// starts it, and it lands the submission with no other command run (135).
+/// One host process serves every command and every repository of the host
+/// (135, 129; design D1, D2, D4). host-process, "Ten submits at once": with
+/// none running, ten submits at once each get a number of their own and
+/// start one host process, its log naming one start. 135 (design D2): ten
+/// reaches at once reach that one. 135 (design D1): a second `sluice host`
+/// while it lives ends at once, saying another holds the host, and the
+/// first goes on. host-process, "Two repositories, one process", and "A
+/// submit with no host process running": a submission of a second
+/// repository reaches the same process, which lands both repositories'
+/// submissions. host-process, "Started from another repository": with the
+/// host process killed while a submission of the first repository is
+/// queued, a submit in the second starts one, which finds the first in its
+/// index and lands both.
 #[test]
-fn a_submit_with_no_host_process_running_lands() {
-    let d = OnDisk::new("host-submit", POLICY);
-    let dir = d.session("a");
+fn one_host_process_serves_every_command_and_repository() {
+    let d = OnDisk::new("host-one", POLICY);
+    let b = d.another("host-one-b", POLICY);
     assert_eq!(answering(&d), None);
-    let id = queued_live(&d, &dir);
-    assert!(answering(&d).is_some(), "a host process runs");
-    within(60, "the submission lands", || {
-        state(&d, d.repo.dir(), id) == "landed"
-    });
-}
-
-/// host-process, "Ten submits at once": each has its own number, and one
-/// host process starts (135; design D2).
-#[test]
-fn ten_submits_at_once_start_one_host_process() {
-    let d = OnDisk::new("host-ten-submits", POLICY);
     let dirs: Vec<_> = (0..10).map(|n| d.session(&format!("s{n}"))).collect();
     let barrier = std::sync::Arc::new(std::sync::Barrier::new(10));
     let started: Vec<_> = dirs
@@ -843,6 +795,49 @@ fn ten_submits_at_once_start_one_host_process() {
     assert_eq!(log.matches(" started, pid ").count(), 1, "{log}");
     assert!(!log.contains("another host process holds"), "{log}");
     assert!(!client.paths().previous_log().exists(), "one process's log");
+    let pid = answering(&d).expect("a host process runs");
+
+    let barrier = std::sync::Arc::new(std::sync::Barrier::new(10));
+    let reached: Vec<_> = (0..10)
+        .map(|_| {
+            let (client, barrier) = (client.clone(), barrier.clone());
+            std::thread::spawn(move || {
+                barrier.wait();
+                client.reach().expect("reached")
+            })
+        })
+        .collect();
+    let connections: Vec<_> = reached.into_iter().map(|t| t.join().unwrap()).collect();
+    let pids: BTreeSet<u32> = connections.iter().map(|c| c.named.pid).collect();
+    assert_eq!(pids, BTreeSet::from([pid]));
+    drop(connections);
+
+    let out = d.command(d.repo.dir()).arg("host").output().unwrap();
+    assert!(out.status.success(), "{}", text(&out));
+    assert!(
+        text(&out).contains("another host process holds"),
+        "{}",
+        text(&out)
+    );
+    assert_eq!(answering(&d), Some(pid));
+
+    let theirs = session_of(&d, &b, "theirs");
+    let id_b = queued_live(&d, &theirs);
+    assert_eq!(answering(&d), Some(pid), "the same process");
+    within(120, "both repositories land", || {
+        ids.iter()
+            .all(|id| state(&d, d.repo.dir(), *id) == "landed")
+            && state(&d, b.dir(), id_b) == "landed"
+    });
+
+    let id_a = queued(&d, "a");
+    kill(answering(&d).expect("the host process the submit reached"));
+    within(10, "it is gone", || answering(&d).is_none());
+    let more = session_of(&d, &b, "more");
+    let id_b = queued_live(&d, &more);
+    within(60, "both land", || {
+        state(&d, d.repo.dir(), id_a) == "landed" && state(&d, b.dir(), id_b) == "landed"
+    });
 }
 
 /// host-process, "A withdrawal with no host process running": the
@@ -874,36 +869,6 @@ fn a_withdrawal_starts_the_host_process() {
     assert!(out.status.success(), "{}", text(&out));
     assert!(answering(&d).is_some(), "a host process runs");
     within(60, "the checkout is released", || checkouts() == 0);
-}
-
-/// host-process, "Two repositories, one process" (135).
-#[test]
-fn two_repositories_one_host_process() {
-    let d = OnDisk::new("host-two-a", POLICY);
-    let b = d.another("host-two-b", POLICY);
-    let a_dir = d.session("a");
-    let id_a = queued_live(&d, &a_dir);
-    let pid = answering(&d).expect("a host process runs");
-    let id_b = queued_live(&d, b.dir());
-    assert_eq!(answering(&d), Some(pid), "the same process");
-    within(60, "both land", || {
-        state(&d, d.repo.dir(), id_a) == "landed" && state(&d, b.dir(), id_b) == "landed"
-    });
-}
-
-/// host-process, "Started from another repository": the process a submit
-/// in B starts finds A in its index and lands both (135; design D4).
-#[test]
-fn started_from_another_repository_lands_both() {
-    let d = OnDisk::new("host-from-a", POLICY);
-    let b = d.another("host-from-b", POLICY);
-    let id_a = queued(&d, "a");
-    kill(answering(&d).expect("the host process the submit started"));
-    within(10, "it is gone", || answering(&d).is_none());
-    let id_b = queued_live(&d, b.dir());
-    within(60, "both land", || {
-        state(&d, d.repo.dir(), id_a) == "landed" && state(&d, b.dir(), id_b) == "landed"
-    });
 }
 
 /// host-process, "Started from inside a hook and a pane": the checks the
