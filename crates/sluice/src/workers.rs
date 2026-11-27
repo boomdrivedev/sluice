@@ -1096,7 +1096,6 @@ pub fn now() -> u64 {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::time::Instant;
 
     fn scratch(what: &str) -> PathBuf {
         let root =
@@ -1187,18 +1186,12 @@ mod tests {
             == Err(nix::errno::Errno::ESRCH)
     }
 
-    /// `nothing-detached@f807c7f5fcea`: as `sluice host` starts, each
-    /// child that its earlier image left is waited on, one that has ended
-    /// already, recorded as a worker or not, among them, so none of them
-    /// stays a zombie of the host process (deneb, 2026-11-27: pid 64735, a
-    /// child of the daemon's image before its hand-over in place, a zombie
-    /// for 16 hours).
-    #[test]
-    fn a_sweep_reaps_each_child_its_earlier_image_left() {
-        let dir = scratch("sweep-reaps");
+    /// The owner that a test's sweep runs as, this process, and the body
+    /// of a record that names it.
+    fn this_owner(dir: &Path) -> (Owner, Vec<u8>) {
         let me = std::process::id();
         let owner = Owner {
-            dir: dir.clone(),
+            dir: dir.to_path_buf(),
             pid: me,
             start: started(me as i32).unwrap(),
         };
@@ -1208,36 +1201,115 @@ mod tests {
             what: "git".into(),
         })
         .unwrap();
+        (owner, held)
+    }
+
+    /// A `/bin/sh -c <script>` that records itself in `dir` before its
+    /// exec, as a worker of `held`'s owner does.
+    fn recorded(dir: &Path, held: Vec<u8>, script: &str) -> Command {
         let mut prefix = dir.as_os_str().as_bytes().to_vec();
         prefix.push(b'/');
-        let mut recorded = Command::new("/bin/sh");
-        recorded.args(["-c", "exit 0"]).process_group(0);
+        let mut command = Command::new("/bin/sh");
+        command.args(["-c", script]).process_group(0);
         // SAFETY: as in `take`.
         unsafe {
-            recorded.pre_exec(move || record_self(&prefix, &held));
+            command.pre_exec(move || record_self(&prefix, &held));
         }
-        // Their handles go as the earlier image's did at its exec: no one
-        // waits on them.
-        let recorded = recorded.spawn().unwrap().id() as i32;
-        let unrecorded = Command::new("/bin/sh")
-            .args(["-c", "exit 0"])
+        command
+    }
+
+    /// `nothing-detached@f807c7f5fcea`: as `sluice host` starts, each
+    /// child that its earlier image left and that has ended, recorded as a
+    /// worker or not, is reaped, so none of them stays a zombie of the
+    /// host process (deneb, 2026-11-27: pid 64735, a child of the daemon's
+    /// image before its hand-over in place, a zombie for 16 hours). The
+    /// sweep reaps each one and removes its record before it returns, so
+    /// no one sees a reaped child whose record stands, however loaded the
+    /// host. Nothing is timed: the children have ended once `SIGCHLD` says
+    /// so, and what the sweep left is read as it returns, while every core
+    /// is kept busy, as under the load that left a record standing (a reap
+    /// on another thread, its record removed after, loses that race).
+    #[tokio::test(flavor = "current_thread")]
+    async fn a_sweep_reaps_each_child_its_earlier_image_left() {
+        let signal = tokio::signal::unix::SignalKind::child();
+        let mut ends = tokio::signal::unix::signal(signal).unwrap();
+        let cores = std::thread::available_parallelism().map_or(2, |n| n.get());
+        for round in 0..8 {
+            let dir = scratch(&format!("sweep-reaps-{round}"));
+            let (owner, held) = this_owner(&dir);
+            // Their handles go as the earlier image's did at its exec: no
+            // one waits on them.
+            let recorded = recorded(&dir, held, "exit 0").spawn().unwrap().id() as i32;
+            let unrecorded = Command::new("/bin/sh")
+                .args(["-c", "exit 0"])
+                .spawn()
+                .unwrap()
+                .id() as i32;
+            // A child is a zombie before its parent is sent `SIGCHLD`.
+            while [recorded, unrecorded].iter().any(|p| started(*p).is_some()) {
+                ends.recv().await;
+            }
+            let busy = std::sync::Arc::new(AtomicBool::new(true));
+            let load: Vec<_> = (0..cores * 2)
+                .map(|_| {
+                    let busy = busy.clone();
+                    std::thread::spawn(move || {
+                        while busy.load(Ordering::Relaxed) {
+                            std::hint::spin_loop();
+                        }
+                    })
+                })
+                .collect();
+            let swept = sweep(&owner);
+            let left = (gone(recorded), gone(unrecorded), records(&dir));
+            busy.store(false, Ordering::Relaxed);
+            for l in load {
+                l.join().unwrap();
+            }
+            assert!(
+                left.0,
+                "round {round}: the recorded worker {recorded} is a zombie"
+            );
+            assert!(left.1, "round {round}: the child {unrecorded} is a zombie");
+            assert!(left.2.is_empty(), "round {round}: {:?}", left.2);
+            assert!(swept.reaped.contains(&recorded), "{swept:?}");
+            assert!(swept.reaped.contains(&unrecorded), "{swept:?}");
+            assert!(swept.ended.is_empty(), "{swept:?}");
+            std::fs::remove_dir_all(&dir).unwrap();
+        }
+    }
+
+    /// A recorded child that the earlier image left and that runs is
+    /// waited on again on the edge. When it ends, its record goes before
+    /// the host process is told that a worker ended. Nothing is timed: the
+    /// child ends once its input closes, and the test waits for the hook.
+    #[tokio::test(flavor = "current_thread")]
+    async fn a_running_child_of_the_earlier_image_loses_its_record_as_it_ends() {
+        let dir = scratch("sweep-keeps");
+        let (owner, held) = this_owner(&dir);
+        let (told, mut ended) = tokio::sync::mpsc::unbounded_channel();
+        let _ = ENDED.set(Box::new(move || {
+            let _ = told.send(());
+        }));
+        edge(tokio::runtime::Handle::current());
+        let mut child = recorded(&dir, held, "read line")
+            .stdin(Stdio::piped())
             .spawn()
-            .unwrap()
-            .id() as i32;
-        let until = Instant::now() + Duration::from_secs(10);
-        while [recorded, unrecorded].iter().any(|p| started(*p).is_some()) {
-            assert!(Instant::now() < until, "the children never ended");
-            std::thread::sleep(Duration::from_millis(20));
-        }
-        let swept = sweep(&owner);
-        let until = Instant::now() + Duration::from_secs(5);
-        while !(gone(recorded) && gone(unrecorded)) && Instant::now() < until {
-            std::thread::sleep(Duration::from_millis(20));
-        }
-        assert!(gone(recorded), "the recorded worker {recorded} is a zombie");
-        assert!(gone(unrecorded), "the child {unrecorded} is a zombie");
-        assert!(swept.ended.is_empty(), "{swept:?}");
+            .unwrap();
+        let input = child.stdin.take().unwrap();
+        let pid = child.id() as i32;
+        // Its handle goes as the earlier image's did at its exec.
+        drop(child);
+        let swept = tokio::task::spawn_blocking(move || sweep(&owner))
+            .await
+            .unwrap();
+        assert_eq!(swept.kept, vec![pid], "{swept:?}");
+        assert_eq!(children(), 1);
+        drop(input);
+        ended.recv().await.unwrap();
         assert!(records(&dir).is_empty(), "{:?}", records(&dir));
+        assert!(gone(pid), "{pid} is a zombie");
+        assert_eq!(children(), 0);
         std::fs::remove_dir_all(&dir).unwrap();
     }
 
