@@ -271,6 +271,9 @@ fn held_record(doc: &serde_json::Value, words: &str) {
 #[test]
 fn a_waiting_submit_confirms_its_landing_on_receipt_and_leaves_a_blame_owed() {
     let f = setup();
+    // In no pane: the round hands nothing over by notice.
+    f.world.not_delivering("crw-1-unit-1");
+    f.world.not_delivering("crw-1-unit-2");
     work(
         &f,
         "unit/touches",

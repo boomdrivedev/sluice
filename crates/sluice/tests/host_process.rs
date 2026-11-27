@@ -759,10 +759,7 @@ fn an_older_command_uses_a_newer_host_process() {
 /// first goes on. host-process, "Two repositories, one process", and "A
 /// submit with no host process running": a submission of a second
 /// repository reaches the same process, which lands both repositories'
-/// submissions. host-process, "Started from another repository": with the
-/// host process killed while a submission of the first repository is
-/// queued, a submit in the second starts one, which finds the first in its
-/// index and lands both.
+/// submissions.
 #[test]
 fn one_host_process_serves_every_command_and_repository() {
     let d = OnDisk::new("host-one", POLICY);
@@ -829,12 +826,18 @@ fn one_host_process_serves_every_command_and_repository() {
             .all(|id| state(&d, d.repo.dir(), *id) == "landed")
             && state(&d, b.dir(), id_b) == "landed"
     });
+}
 
+/// host-process, "Started from another repository": the process a submit
+/// in B starts finds A in its index and lands both (135; design D4).
+#[test]
+fn started_from_another_repository_lands_both() {
+    let d = OnDisk::new("host-from-a", POLICY);
+    let b = d.another("host-from-b", POLICY);
     let id_a = queued(&d, "a");
-    kill(answering(&d).expect("the host process the submit reached"));
+    kill(answering(&d).expect("the host process the submit started"));
     within(10, "it is gone", || answering(&d).is_none());
-    let more = session_of(&d, &b, "more");
-    let id_b = queued_live(&d, &more);
+    let id_b = queued_live(&d, b.dir());
     within(60, "both land", || {
         state(&d, d.repo.dir(), id_a) == "landed" && state(&d, b.dir(), id_b) == "landed"
     });
@@ -4427,8 +4430,6 @@ fn a_sessions_commands_reach_sluice_host_and_run_no_git() {
     let d = OnDisk::new("host-commands", &policy);
     let empty = support::Scratch::new("host-commands-path");
     let dir = d.session("a");
-    let mut sub = held(&d);
-    settled(&mut sub);
 
     // A submit, naming its agent.
     let before = d.git.count();
@@ -4600,7 +4601,6 @@ fn a_sessions_commands_reach_sluice_host_and_run_no_git() {
     let doc: serde_json::Value =
         serde_json::from_slice(&out.stdout).unwrap_or_else(|_| panic!("{}", text(&out)));
     assert_eq!(doc["outcomes"], serde_json::json!([]), "{doc}");
-    drop(sub);
     stop_host(&d);
 }
 

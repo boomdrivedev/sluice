@@ -299,7 +299,7 @@ fn a_waiting_submit_hands_its_landing_over_and_inbox_hands_it_over_again() {
     let a = session(&f, "a", "a");
     let (code, out) = sluice(&f, &["submit", BRANCH, "--worktree", &a, "--json"]);
     assert_eq!(code, LANDED, "{out}");
-    let record = json(out.lines().last().unwrap());
+    let record = json(&out);
     assert_eq!(record["state"], "landed", "{record}");
     assert!(record.get("delivered").is_none(), "{record}");
     assert_eq!(record["delivery"]["state"], "owed", "{record}");
@@ -604,8 +604,9 @@ fn confirm_json_gives_a_first_confirmation_and_the_worst_of_its_exits() {
     f.world
         .fail_state_reads("bolt/y", Some("deliveries.jsonl does not read"));
     let (code, out) = confirm(&f, &a, &["99:landed"]);
+    // Which branch could not be read is said on stderr, as
+    // cli's the_refusal_names_a_branch_that_could_not_be_read proves.
     assert_eq!(code, INTERNAL, "{out}");
-    assert!(out.contains("bolt/y"), "{out}");
     let (code, out) = confirm(&f, &a, &["99:landed", &blame, "--json"]);
     assert_eq!(code, INTERNAL, "{out}");
     assert_eq!(json(&out)["error"]["kind"], "internal", "{out}");
