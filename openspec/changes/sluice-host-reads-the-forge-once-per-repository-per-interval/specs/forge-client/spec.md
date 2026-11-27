@@ -1,3 +1,7 @@
+## Purpose
+
+How sluice reaches GitHub's API. Each call goes through octocrab, over one limit on calls in flight for the process, a timeout and a layer that reads GitHub's budget. sluice follows no redirect (`sluice-host-reads-github-through-octocrab-with-tower-layers@57c2759bda97`).
+
 ## ADDED Requirements
 
 ### Requirement: Each call to GitHub goes through octocrab over tower
