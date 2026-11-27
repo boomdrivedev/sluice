@@ -34,3 +34,19 @@ A branch whose records are on its remote takes its submissions' numbers from the
 
 - A session's own `wait` after its `submit` is unchanged where its number is held on one branch, which is every branch with records in one place.
 - The statement's 26 is amended on agentplot/blueprints's branch above, which the user pushes.
+
+## Amendment, 2026-11-26: the worktree's own submission names the branch, and a submit gives its wait
+
+Status: accepted on 2026-11-26 on the brief for the place `fix--a-submission-is-named-by-its-branch`. A new version of the claim `a-number-two-branches-hold-names-neither-alone` that says it is proposed in Boom, for the user to accept.
+
+Deciders: the brief's author, on 2026-11-26. The change `a-submission-is-named-by-its-branch` made the choices within it (its design's D1 to D3).
+
+Sources: deneb on 2026-11-26. After each submit, agents ran `sluice wait <id>`, and sluice refused it. The number was on `main` and on an old bolt (boomdrive-cloud #37, boomdrive #40 and #44, sluice #162). Each agent ran the wait again with `--branch main`, and boomdrive's runner got the refusal every 4 seconds until it named the branch. Rules core.11, core.25 and core.50.
+
+sluice knew the branch each time. The submit's answer named the branch but gave no command that names it. The worktree that waited made the submission.
+
+1. **A submit's answer gives its wait.** Before: `sluice submit --no-wait --json` gave `{id,branch,ahead}`. Now: it also gives `wait`, `sluice wait <id> --branch <branch>`, which follows the submission from any folder. The answer in words under `--no-wait` gives the line `sluice wait <id> --branch <branch> follows it`. A submit of several worktrees gives both for each submission.
+2. **The worktree's own submission is the one the number names.** Before: a number that more than one branch holds was refused for every command that gave no `--branch`. Now: `wait`, `status`, `amend` and `withdraw` take the branch where the worktree they run in made that number, as `sluice wait <branch>` finds the worktree's last submission, by `from.worktree`. This holds only where the worktree made the number on one of those branches only, and every branch could be read. Anywhere else the number is refused as before, naming each branch. A branch that could not be read keeps the refusal, since it can hold the number from the same worktree (core.11). A submission by name is no worktree's (core.50).
+3. **`sluice host` runs from its client's folder.** Before: `sluice host` ran a status, an amend and a withdrawal with the folder `.`, its own. Now: it runs them with the folder the request names. Every client already sends that folder, so a client of an earlier release gets the same answer.
+
+*Not taken:* refuse the number always and fix only the submit's answer. The session context and the skill tell agents to wait with `sluice wait <id>`, and such a wait would still be refused.

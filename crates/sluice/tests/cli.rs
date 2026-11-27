@@ -57,7 +57,11 @@ fn sluice_under(
     args: &[&str],
 ) -> (i32, String) {
     let cli = Cli::try_parse_from(std::iter::once("sluice").chain(args.iter().copied())).unwrap();
-    let cli = Cli { caller, ..cli };
+    sluice_cli(f, Cli { caller, ..cli })
+}
+
+/// `cli` run over the fakes: its exit and what it said.
+fn sluice_cli(f: &Fakes, cli: Cli) -> (i32, String) {
     let mut out = Vec::new();
     let code = settled(|| {
         run(
@@ -972,7 +976,8 @@ fn a_submission_the_runner_could_not_check_is_taken_with_a_warning() {
             "submission 1 to {BRANCH} · nothing queued ahead\n\
              warning: could not check which of {BRANCH}'s required checks the task runner in \
              this worktree keeps out of CI, so the submission was taken unchecked: \
-             [tests] toolchain exited 1: no devenv\n"
+             [tests] toolchain exited 1: no devenv\n\
+             sluice wait 1 --branch {BRANCH} follows it\n"
         )
     );
 
@@ -7184,8 +7189,11 @@ fn a_group_is_numbered_in_the_order_given() {
         out,
         format!(
             "submission 1 to {BRANCH} from unit/b1 · nothing queued ahead\n\
+             sluice wait 1 --branch {BRANCH} follows it\n\
              submission 2 to {BRANCH} from unit/b2 · 1 queued ahead (#1)\n\
-             submission 3 to {BRANCH} from unit/b3 · 2 queued ahead (#1, #2)\n"
+             sluice wait 2 --branch {BRANCH} follows it\n\
+             submission 3 to {BRANCH} from unit/b3 · 2 queued ahead (#1, #2)\n\
+             sluice wait 3 --branch {BRANCH} follows it\n"
         )
     );
     assert!(f.world.started().is_empty(), "submitting runs nothing");
@@ -7198,7 +7206,10 @@ fn a_group_is_numbered_in_the_order_given() {
     assert_eq!(code, LANDED);
     assert_eq!(
         out,
-        format!("submission 4 to {BRANCH} · 3 queued ahead (#1, #2, #3)\n")
+        format!(
+            "submission 4 to {BRANCH} · 3 queued ahead (#1, #2, #3)\n\
+             sluice wait 4 --branch {BRANCH} follows it\n"
+        )
     );
 
     work(&f, "unit/b5", "agent-5", &[("plugin/five", Some("5"))]);
@@ -7210,8 +7221,14 @@ fn a_group_is_numbered_in_the_order_given() {
         serde_json::json!({
             "branch": BRANCH,
             "submissions": [
-                { "id": 5, "worktree": "unit/b5", "ahead": [1, 2, 3, 4] },
-                { "id": 6, "worktree": "unit/b6", "ahead": [1, 2, 3, 4, 5] },
+                {
+                    "id": 5, "worktree": "unit/b5", "ahead": [1, 2, 3, 4],
+                    "wait": format!("sluice wait 5 --branch {BRANCH}"),
+                },
+                {
+                    "id": 6, "worktree": "unit/b6", "ahead": [1, 2, 3, 4, 5],
+                    "wait": format!("sluice wait 6 --branch {BRANCH}"),
+                },
             ],
         })
     );
@@ -7382,7 +7399,10 @@ fn head_takes_a_branch_by_name_and_says_it() {
     assert_eq!(code, 0, "{out}");
     assert_eq!(
         out,
-        format!("submission 1 to {BRANCH} from bolt/w · nothing queued ahead\n")
+        format!(
+            "submission 1 to {BRANCH} from bolt/w · nothing queued ahead\n\
+             sluice wait 1 --branch {BRANCH} follows it\n"
+        )
     );
     let v = f.world.work(&w, &[("plugin/v", Some("v"))]);
     f.world.set_branch("bolt/v", &v);
@@ -7393,7 +7413,10 @@ fn head_takes_a_branch_by_name_and_says_it() {
     assert_eq!(code, 0, "{out}");
     assert_eq!(
         json(&out),
-        serde_json::json!({ "id": 2, "branch": BRANCH, "ahead": [1] })
+        serde_json::json!({
+            "id": 2, "branch": BRANCH, "ahead": [1],
+            "wait": format!("sluice wait 2 --branch {BRANCH}"),
+        })
     );
     let subs = queued(&f);
     assert_eq!(subs[0]["head"], w.0.as_str());
@@ -8058,7 +8081,8 @@ fn submit_from_a_bolt_says_how_its_copy_stands() {
         out,
         format!(
             "submission 2 to main · nothing queued ahead\n\
-             this host's {BRANCH} is at {m}, behind origin's {l}; submitted {l}\n"
+             this host's {BRANCH} is at {m}, behind origin's {l}; submitted {l}\n\
+             sluice wait 2 --branch main follows it\n"
         )
     );
     let (_, out) = sluice(
@@ -8084,7 +8108,8 @@ fn submit_from_a_bolt_says_how_its_copy_stands() {
 
     f.world.session(BRANCH, "ops", &landing);
     let (_, out) = sluice(&f, &["submit", "main", "--worktree", BRANCH, "--no-wait"]);
-    assert_eq!(out.lines().count(), 1, "{out}");
+    assert_eq!(out.lines().count(), 2, "{out}");
+    assert!(!out.contains("this host's"), "{out}");
     let (_, out) = sluice(
         &f,
         &[
@@ -9424,6 +9449,198 @@ mod number_on_two_branches {
         assert!(
             out.starts_with("sluice status: --branch names the branch"),
             "{out}"
+        );
+    }
+
+    /// `sluice <args>` as run in the worktree on `worktree`, which
+    /// `sluice host` gives a status, an amend or a withdrawal as the
+    /// folder its client ran in.
+    fn sluice_in(f: &Fakes, worktree: &str, args: &[&str]) -> (i32, String) {
+        let cli =
+            Cli::try_parse_from(std::iter::once("sluice").chain(args.iter().copied())).unwrap();
+        sluice_cli(
+            f,
+            Cli {
+                worktree: worktree.into(),
+                ..cli
+            },
+        )
+    }
+
+    /// Record 0114 as amended 2026-11-26: status, amend and withdraw of a
+    /// number two branches hold, run in the worktree that submitted one of
+    /// them, act on that one, and leave the other as it was.
+    #[test]
+    fn a_worktree_takes_its_own_submission_of_the_number() {
+        let f = both_queued();
+        let (code, out) = sluice_in(&f, "unit/b", &["status", N, "--json"]);
+        assert_eq!(code, 0, "{out}");
+        assert_eq!(json(&out)["branch"], B, "{out}");
+        let (code, out) = sluice_in(&f, "unit/a", &["status", N]);
+        assert_eq!(code, 0, "{out}");
+        assert!(out.contains(A) && !out.contains(B), "{out}");
+
+        let (code, out) = sluice_in(&f, "unit/b", &["amend", N, "--priority", "5"]);
+        assert_eq!((code, out.as_str()), (0, "amended #26\n"));
+        let (code, out) = sluice_in(&f, "unit/a", &["withdraw", N]);
+        assert_eq!((code, out.as_str()), (0, "withdrew #26\n"));
+
+        let b = on(&f, B);
+        assert_eq!(
+            (b["state"].clone(), b["priority"].clone()),
+            ("queued".into(), 5.into())
+        );
+        let a = on(&f, A);
+        assert_eq!(
+            (a["state"].clone(), a["priority"].clone()),
+            ("withdrawn".into(), 0.into())
+        );
+    }
+
+    /// Record 0114 as amended 2026-11-26: a wait on a number two branches
+    /// hold, run in the worktree that submitted one of them, follows that
+    /// one to its landing.
+    #[test]
+    fn a_wait_in_the_worktree_follows_its_own_submission() {
+        let f = both_queued();
+        let (code, out) = sluice(&f, &["wait", N, "--worktree", "unit/b", "--json"]);
+        assert_eq!(code, LANDED, "{out}");
+        let v = json(&out);
+        assert_eq!(
+            (v["id"].clone(), v["branch"].clone(), v["state"].clone()),
+            (26.into(), B.into(), "landed".into())
+        );
+    }
+
+    /// Record 0114 as amended 2026-11-26: a worktree's own submission
+    /// names a refusal's branch where it holds a number it changes; the
+    /// refusal names that branch in each command it gives.
+    #[test]
+    fn a_refusal_in_the_worktree_names_its_own_branch() {
+        let f = both_queued();
+        let (code, out) = sluice_in(&f, "unit/a", &["withdraw", N, "--as", "someone", "--json"]);
+        assert_eq!(code, 2, "{out}");
+        assert_eq!(
+            json(&out)["error"]["next"],
+            serde_json::json!([
+                "sluice withdraw 26 --branch bolt/a --as agent-unit/a",
+                "sluice withdraw 26 --branch bolt/a --as operator"
+            ])
+        );
+        assert_eq!(on(&f, A)["state"], "queued");
+    }
+
+    /// Record 0114 as amended 2026-11-26: run in a worktree that submitted
+    /// neither, or in a folder no driver names a session of, a number two
+    /// branches hold is refused naming both, as before, and nothing is
+    /// done.
+    #[test]
+    fn a_worktree_that_submitted_neither_is_refused_naming_both() {
+        let f = both_queued();
+        let head = f.world.tip(A);
+        f.world.session("unit/c", "agent-unit/c", &head);
+        let before = versions(&f);
+        for worktree in ["unit/c", "/nowhere"] {
+            for (ask, args) in [
+                ("sluice status", &["status", N][..]),
+                ("sluice amend", &["amend", N, "--priority", "5"]),
+                ("sluice withdraw", &["withdraw", N]),
+            ] {
+                let (code, out) = sluice_in(&f, worktree, args);
+                assert_eq!(code, 2, "{worktree} {args:?}: {out}");
+                assert_eq!(out, format!("{}\n", refusal(ask)), "{worktree} {args:?}");
+            }
+            let (code, out) = sluice(&f, &["wait", N, "--worktree", worktree]);
+            assert_eq!(
+                (code, out),
+                (sluice::USAGE, format!("{}\n", refusal("sluice wait")))
+            );
+        }
+        assert_eq!(versions(&f), before);
+    }
+
+    /// Record 0114 as amended 2026-11-26: a worktree that submitted the
+    /// number on both branches names neither alone, and is refused naming
+    /// both.
+    #[test]
+    fn a_worktree_that_submitted_it_on_both_is_refused_naming_both() {
+        let f = setup();
+        branch(&f, A);
+        branch(&f, B);
+        submit_as(&f, 26, A, "unit/a");
+        submit_as(&f, 26, B, "unit/a");
+        let (code, out) = sluice_in(&f, "unit/a", &["status", N]);
+        assert_eq!(code, 2, "{out}");
+        assert_eq!(out, format!("{}\n", refusal("sluice status")));
+    }
+
+    /// Record 0114 as amended 2026-11-26, rule core.11: where another
+    /// branch cannot be read, the worktree's own submission names no
+    /// branch alone, since the branch it cannot read may hold the number
+    /// from it too; the refusal names that branch, as before.
+    #[test]
+    fn a_branch_that_cannot_be_read_keeps_the_refusal() {
+        let f = both_and_unread();
+        let (code, out) = sluice_in(&f, "unit/b", &["status", N]);
+        assert_eq!(code, 2, "{out}");
+        assert_eq!(
+            out,
+            format!(
+                "{}\n{C} could not be read: {UNREADABLE}\n",
+                refusal("sluice status")
+            )
+        );
+    }
+
+    /// Record 0114 as amended 2026-11-26: a submit that does not wait
+    /// names its submission with its branch and gives the command that
+    /// follows it from any folder, in its text and under `--json`; that
+    /// command follows it to its landing whatever other branch holds its
+    /// number.
+    #[test]
+    fn a_submits_answer_gives_the_wait_that_names_its_branch() {
+        let f = setup();
+        branch(&f, A);
+        branch(&f, B);
+        submit_as(&f, 26, A, "unit/a");
+        let head = f
+            .world
+            .work(&f.world.tip(B), &[("plugin/unit/b", Some("n"))]);
+        f.world.session("unit/b", "agent-unit/b", &head);
+        f.world.numbers_from(26);
+        let (code, out) = sluice(
+            &f,
+            &["submit", B, "--worktree", "unit/b", "--no-wait", "--json"],
+        );
+        assert_eq!(code, 0, "{out}");
+        let v = json(&out);
+        assert_eq!(
+            v,
+            serde_json::json!({
+                "id": 26, "branch": B, "ahead": [], "wait": "sluice wait 26 --branch bolt/b",
+            })
+        );
+
+        let head = f
+            .world
+            .work(&f.world.tip(A), &[("plugin/unit/c", Some("n"))]);
+        f.world.session("unit/c", "agent-unit/c", &head);
+        f.world.numbers_from(27);
+        let (code, out) = sluice(&f, &["submit", A, "--worktree", "unit/c", "--no-wait"]);
+        assert_eq!(code, 0, "{out}");
+        assert_eq!(
+            out,
+            "submission 27 to bolt/a · 1 queued ahead (#26)\n\
+             sluice wait 27 --branch bolt/a follows it\n"
+        );
+
+        let wait: Vec<&str> = v["wait"].as_str().unwrap().split(' ').skip(1).collect();
+        let (code, out) = sluice(&f, &[&wait[..], &["--json"]].concat());
+        assert_eq!(code, LANDED, "{out}");
+        let v = json(&out);
+        assert_eq!(
+            (v["id"].clone(), v["branch"].clone(), v["state"].clone()),
+            (26.into(), B.into(), "landed".into())
         );
     }
 }
