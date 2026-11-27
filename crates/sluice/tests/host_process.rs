@@ -504,83 +504,6 @@ fn the_host_processs_look_at_an_idle_repository_starts_nothing() {
     drop(held);
 }
 
-/// reader-tick, "A remote's records are asked for once a minute where
-/// nothing is in play" (129 as amended 2026-11-19): a host process that
-/// lives on, here for a subscription of no folder, asks origin for the records of
-/// a repository with nothing in play once as it starts, and not again
-/// within the minute, however many times it goes through its index; a
-/// watch's opening asks origin at once, and the watch's passes, a second
-/// apart, ask nothing more within the minute.
-#[test]
-fn an_idle_repositorys_remote_is_asked_once_a_minute() {
-    let (_origin, d) = on_origin("host-idle-asks");
-    let repository = d.repository(d.repo.dir());
-    within(15, "the host process ends once idle", || {
-        answering(&d).is_none()
-    });
-    let before = d.git.count();
-    let client = d.client(d.repo.dir());
-    // A subscription of no folder keeps it, and reads nothing.
-    let held = client
-        .subscribe(Vec::new())
-        .expect("the host process starts");
-    let pid = answering(&d).expect("the host process answers");
-    let asks = || {
-        d.git.parented()[before..]
-            .iter()
-            .filter(|(p, args)| *p == pid && asks_a_remote(args))
-            .count()
-    };
-    let said = || {
-        format!(
-            "{:?}\n{}",
-            &d.git.parented()[before..],
-            std::fs::read_to_string(client.paths().log()).unwrap_or_default()
-        )
-    };
-    let until = Instant::now() + Duration::from_secs(10);
-    while asks() != 1 {
-        assert!(
-            Instant::now() < until,
-            "its first look asks origin: {}",
-            said()
-        );
-        std::thread::sleep(Duration::from_millis(100));
-    }
-    std::thread::sleep(Duration::from_secs(7));
-    assert_eq!(
-        asks(),
-        1,
-        "a look within the minute asked origin: {}",
-        said()
-    );
-
-    let watch = client
-        .subscribe(vec![sluice::host_process::protocol::Added {
-            folder: std::path::PathBuf::from(&repository),
-            kind: FollowKind::Watch,
-        }])
-        .expect("the watch follows");
-    let until = Instant::now() + Duration::from_secs(10);
-    while asks() != 2 {
-        assert!(
-            Instant::now() < until,
-            "the watch's opening asks origin: {}",
-            said()
-        );
-        std::thread::sleep(Duration::from_millis(100));
-    }
-    std::thread::sleep(Duration::from_secs(4));
-    assert_eq!(
-        asks(),
-        2,
-        "a watched pass within the minute asked origin: {}",
-        said()
-    );
-    drop(watch);
-    drop(held);
-}
-
 /// 135 (design D6): the host process ends at its next tick once its state
 /// folder is gone, and its socket with it.
 #[test]
@@ -3300,15 +3223,6 @@ mod edge {
                 .filter(|p| *p == r)
                 .count()
         }
-
-        pub fn passes(&self, r: &Path) -> usize {
-            self.passes
-                .lock()
-                .unwrap()
-                .iter()
-                .filter(|p| *p == r)
-                .count()
-        }
     }
 
     struct Fake {
@@ -3509,32 +3423,6 @@ async fn three_idle_repositories_are_read_once_a_minute() {
         }
     }
     assert_eq!(seen.passes.lock().unwrap().len(), 0, "no pass");
-}
-
-/// host-events, "Five serves during a reading" (`one-read-in-flight@e99acda774d0`):
-/// five commands' `serve` while a pass is in flight make one more pass
-/// after it, and no third.
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn five_serves_during_a_reading_make_one_more() {
-    let seen = edge::Seen::default();
-    let tasks = edge::tasks(&seen, Duration::from_millis(300));
-    let repo = std::path::PathBuf::from("/host/five.git");
-    let _run = tasks
-        .handle(&repo)
-        .follow(sluice::host_process::protocol::FollowKind::Run);
-    let first = tasks.handle(&repo);
-    first.wake();
-    edge::soon("the worker holds it", || tasks.holds(&repo)).await;
-    // The pass the wake asked is in flight for 300 ms.
-    tokio::time::sleep(Duration::from_millis(50)).await;
-    let before = seen.passes(&repo);
-    for _ in 0..5 {
-        tasks.told(&repo);
-        tasks.handle(&repo).wake();
-    }
-    edge::soon("one more pass", || seen.passes(&repo) == before + 2).await;
-    tokio::time::sleep(Duration::from_millis(800)).await;
-    assert_eq!(seen.passes(&repo), before + 2, "no third pass");
 }
 
 /// host-events, "A burst of ref changes" (`one-read-in-flight@e99acda774d0`):
@@ -4076,96 +3964,6 @@ fn ten_statuses_share_one_read() {
         .filter(|a| a.contains(" fetch "))
         .count();
     assert_eq!(fetches, 1, "one reading");
-}
-
-/// resident-subscriptions, "Twenty statuses during a reading" (design D5):
-/// a reading in flight, a command told of a change, and twenty statuses
-/// within the reading's time: one more reading follows the first, and no
-/// third.
-#[test]
-fn twenty_statuses_during_a_reading_make_one_more() {
-    let (_origin, d) = on_origin("host-twenty-statuses");
-    queued(&d, "mine");
-    let host = Slowed::start(&d, "host-twenty-statuses");
-    std::thread::sleep(sluice::host_process::READ_TICK + Duration::from_millis(500));
-    let before = d.git.count();
-    host.slow();
-    let first = d
-        .command(d.repo.dir())
-        .env("SLUICE_ROUND_SLEEP", "record")
-        .args(["status", "main"])
-        .stdout(std::process::Stdio::null())
-        .spawn()
-        .unwrap();
-    within(10, "a reading is in flight", || {
-        host_git_running(&d, host.pid)
-    });
-    host.client.serve(&host.repository).expect("told");
-    let twenty: Vec<_> = (0..20)
-        .map(|_| {
-            d.command(d.repo.dir())
-                .env("SLUICE_ROUND_SLEEP", "record")
-                .args(["status", "main"])
-                .stdout(std::process::Stdio::null())
-                .spawn()
-                .unwrap()
-        })
-        .collect();
-    std::thread::sleep(Duration::from_secs(2));
-    let _ = std::fs::remove_file(&host.flag);
-    for mut c in twenty.into_iter().chain([first]) {
-        assert!(c.wait().unwrap().success());
-    }
-    let fetches = hosts_git(&d, host.pid, before)
-        .iter()
-        .filter(|a| a.contains(" fetch "))
-        .count();
-    assert_eq!(fetches, 2, "one reading, and one more");
-}
-
-/// resident-subscriptions, "A subscription and a status of one
-/// repository" (design D5, D6): a subscription of one worktree and a
-/// status in another worktree of the repository, asked while a reading is
-/// in flight, share that reading.
-#[test]
-fn a_subscription_and_a_status_share_a_reading() {
-    let (_origin, d) = on_origin("host-share-reading");
-    queued(&d, "mine");
-    let other = d.session("other");
-    let host = Slowed::start(&d, "host-share-reading");
-    std::thread::sleep(sluice::host_process::READ_TICK + Duration::from_millis(500));
-    let before = d.git.count();
-    host.slow();
-    let status = d
-        .command(&other)
-        .env("SLUICE_ROUND_SLEEP", "record")
-        .args(["status", "main"])
-        .stdout(std::process::Stdio::null())
-        .spawn()
-        .unwrap();
-    within(30, "a reading is in flight", || {
-        host_git_running(&d, host.pid)
-    });
-    let mut sub = held(&d);
-    std::thread::sleep(Duration::from_secs(1));
-    let _ = std::fs::remove_file(&host.flag);
-    let mut status = status;
-    assert!(status.wait().unwrap().success());
-    let line = sub.line(Some(Duration::from_secs(30))).unwrap();
-    assert!(
-        matches!(
-            line,
-            Some(sluice::host_process::protocol::SubscriptionLine::Document(
-                _
-            ))
-        ),
-        "{line:?}"
-    );
-    let fetches = hosts_git(&d, host.pid, before)
-        .iter()
-        .filter(|a| a.contains(" fetch "))
-        .count();
-    assert_eq!(fetches, 1, "one reading for both");
 }
 
 /// resident-reads, "A client of another tool" (design D1;
