@@ -2319,6 +2319,26 @@ impl subscription::Serves for Subscribed {
     fn ends(&self, document: &serde_json::Value) -> bool {
         crate::overview::no_sluice(document) || document["gone"] == true
     }
+
+    /// The forecast a subscription asks: the read `sluice submit <branch>
+    /// --check --json` asks in the worktree `folder`, joined with each
+    /// such read of it, and the document it prints. A read that prints no
+    /// document gives the error document of what it said.
+    async fn forecast(&self, folder: PathBuf, branch: String) -> serde_json::Value {
+        let request = Request::Forecast {
+            folder: folder.clone(),
+            caller: std::collections::BTreeMap::new(),
+            branch,
+            worktree: folder,
+            head: None,
+            after: Vec::new(),
+            json: true,
+        };
+        let output = reads::answer(&self.0, request).await;
+        serde_json::from_str(output.stdout.trim()).unwrap_or_else(|_| {
+            crate::told::document(crate::told::Kind::Internal, &output.stderr.join("\n"), &[])
+        })
+    }
 }
 
 /// Serve a subscription on the connection (design D6), until the client

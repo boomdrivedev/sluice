@@ -7,7 +7,10 @@
 //! resident sends a `document` line for a folder when the folder is added,
 //! and after that each time the folder's document changes. A folder that
 //! the client follows so that it gets reports gets a `pass` line for each
-//! report, in order.
+//! report, in order. A `{"forecast":"<worktree>","branch":"<branch>"}`
+//! line asks for one forecast of the worktree's head on the branch, which
+//! the resident sends as a `forecast` line when it is made; the documents
+//! and the reports go on while it is made.
 //!
 //! The connection's task holds a `StreamMap` of `WatchStream`s of the
 //! documents and a `StreamMap` of the reports, each keyed by folder, and a
@@ -25,6 +28,7 @@
 use std::future::Future;
 use std::path::PathBuf;
 
+use futures_util::stream::FuturesUnordered;
 use futures_util::SinkExt;
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
@@ -47,6 +51,8 @@ pub enum Ask<K> {
     },
     /// Serve `remove` no more.
     Remove { remove: PathBuf },
+    /// Forecast the head of the worktree `forecast` on `branch`, once.
+    Forecast { forecast: PathBuf, branch: String },
 }
 
 /// A folder's document, as the resident sends it.
@@ -63,12 +69,21 @@ pub struct Pass<R> {
     pub report: R,
 }
 
+/// A worktree's forecast on a branch, as the resident sends it.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct Forecast<D> {
+    pub folder: PathBuf,
+    pub branch: String,
+    pub forecast: D,
+}
+
 /// A line that the resident sends.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum Sent<D, R> {
     Document(Document<D>),
     Pass(Pass<R>),
+    Forecast(Forecast<D>),
     /// A line that the resident could not read, in these words.
     Error(String),
 }
@@ -109,6 +124,15 @@ pub trait Serves: Send + Sync {
     /// Whether `document` ends its folder's part of the subscription: its
     /// repository is gone, or has no sluice.
     fn ends(&self, document: &Self::Document) -> bool;
+
+    /// The forecast of the head of the worktree `folder` on `branch`, as a
+    /// document: the forecast, or the document that says why there is
+    /// none.
+    fn forecast(
+        &self,
+        folder: PathBuf,
+        branch: String,
+    ) -> impl Future<Output = Self::Document> + Send;
 }
 
 /// What a connection's loop holds.
@@ -146,6 +170,8 @@ where
         passes: StreamMap::new(),
         guards: Default::default(),
     };
+    // The forecasts asked and not yet made, each sent when it is made.
+    let mut forecasts = FuturesUnordered::new();
     for (folder, kind) in folders {
         if let Some(sent) = add(serves, &mut held, folder, kind).await {
             send::<S, _>(&mut sink, &sent).await?;
@@ -170,6 +196,9 @@ where
                         }
                     }
                     Ok(Ask::Remove { remove }) => held.remove(&remove),
+                    Ok(Ask::Forecast { forecast, branch }) => {
+                        forecasts.push(forecast_of(serves, forecast, branch));
+                    }
                     Err(e) => {
                         let words = format!("a subscription's line that could not be read: {e}");
                         let _ = send::<S, _>(&mut sink, &Sent::Error(words.clone())).await;
@@ -192,8 +221,25 @@ where
                     held.remove(&folder);
                 }
             }
+            Some(sent) = forecasts.next(), if !forecasts.is_empty() => {
+                send::<S, _>(&mut sink, &sent).await?;
+            }
         }
     }
+}
+
+/// The forecast of `folder`'s head on `branch`, as the line to send.
+async fn forecast_of<S: Serves>(
+    serves: &S,
+    folder: PathBuf,
+    branch: String,
+) -> Sent<S::Document, S::Report> {
+    let forecast = serves.forecast(folder.clone(), branch.clone()).await;
+    Sent::Forecast(Forecast {
+        folder,
+        branch,
+        forecast,
+    })
 }
 
 /// Add `folder`, followed as `kind`, replacing what the loop held for it;
@@ -265,6 +311,8 @@ mod tests {
         reports: Mutex<BTreeMap<PathBuf, mpsc::UnboundedSender<String>>>,
         alive: Arc<AtomicUsize>,
         served: AtomicUsize,
+        /// What lets the forecast of `/slow` be made.
+        release: tokio::sync::Notify,
     }
 
     impl Fake {
@@ -325,6 +373,13 @@ mod tests {
 
         fn ends(&self, document: &String) -> bool {
             document == "gone"
+        }
+
+        async fn forecast(&self, folder: PathBuf, branch: String) -> String {
+            if folder.as_path() == std::path::Path::new("/slow") {
+                self.release.notified().await;
+            }
+            format!("{} on {branch}", folder.display())
         }
     }
 
@@ -527,5 +582,35 @@ mod tests {
             serde_json::json!("gone")
         );
         assert_eq!(fake.alive.load(Ordering::SeqCst), 1);
+    }
+
+    /// A forecast asked on the subscription is sent once it is made, and
+    /// a forecast still being made holds back no document and no other
+    /// forecast. On a paused clock: the test waits for lines, never on
+    /// the time.
+    #[tokio::test(start_paused = true)]
+    async fn a_forecast_is_sent_once_it_is_made_and_holds_nothing_back() {
+        let fake = Arc::new(Fake::default());
+        fake.document("/a", "a1");
+        let mut c = Client::start(fake.clone(), CancellationToken::new());
+        c.say(r#"{"add":"/a"}"#).await;
+        assert!(c.next().await.is_some());
+        c.say(r#"{"forecast":"/slow","branch":"main"}"#).await;
+        c.say(r#"{"forecast":"/a","branch":"main"}"#).await;
+        assert_eq!(
+            c.next().await.unwrap(),
+            serde_json::json!({"forecast": {"folder": "/a", "branch": "main", "forecast": "/a on main"}})
+        );
+        fake.document("/a", "a2");
+        assert_eq!(
+            c.next().await.unwrap()["document"]["overview"],
+            serde_json::json!("a2")
+        );
+        fake.release.notify_one();
+        assert_eq!(
+            c.next().await.unwrap(),
+            serde_json::json!({"forecast": {"folder": "/slow", "branch": "main", "forecast": "/slow on main"}})
+        );
+        assert_eq!(c.next().await, None, "one line for each forecast");
     }
 }

@@ -443,6 +443,45 @@ fn the_watch_serves_the_folders_on_its_input() {
     assert!(!log.contains("a connection:"), "{log}");
 }
 
+/// resident-subscriptions, "A forecast asked on the subscription": a line
+/// `forecast main <worktree>` on the watch's input prints the worktree's
+/// forecast, with its `folder` and `branch`, on the same connection, and
+/// the watch starts no other process of sluice's for it. The test waits
+/// for the line, and bounds only how long it waits to fail.
+#[test]
+fn the_watch_prints_a_forecast_asked_on_its_input() {
+    let d = OnDisk::new("served-forecast", MAIN);
+    let head = d
+        .repo
+        .branch("work", "main", &[("work.txt", Some("work\n"))]);
+    let work = Scratch::new("served-forecast-work");
+    let at = work.path().join("w");
+    d.repo
+        .git(&["worktree", "add", "-q", at.to_str().unwrap(), "work"]);
+    let mut served = Served::start(&d);
+    served.say(&format!("add {}", d.repo.dir().display()));
+    assert_eq!(served.watch.first_line()["schema"], "sluice/overview@1");
+    served.say(&format!("forecast main {}", at.display()));
+    let until = Instant::now() + Duration::from_secs(60);
+    let mut got = None;
+    while got.is_none() && Instant::now() < until {
+        got = served
+            .watch
+            .lines_within(Duration::from_millis(500))
+            .into_iter()
+            .find(|l| l.get("forecast").is_some());
+    }
+    let line = got.unwrap_or_else(|| panic!("no forecast: {}", served.watch.stderr()));
+    assert_eq!(line["folder"], at.display().to_string(), "{line}");
+    assert_eq!(line["branch"], "main", "{line}");
+    assert_eq!(
+        line["forecast"]["conflict"],
+        serde_json::Value::Null,
+        "{line}"
+    );
+    assert_eq!(line["forecast"]["head"], head, "{line}");
+}
+
 /// resident-subscriptions, "The watch command serves the folders named on
 /// its input": its input ends while it serves no folder: it ends, 0.
 #[test]

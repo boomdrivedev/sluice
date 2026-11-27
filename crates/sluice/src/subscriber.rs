@@ -163,14 +163,22 @@ pub fn watch<'a>(
 /// `None` for a line that is neither.
 fn input_line(line: &str, cwd: &Path) -> Option<crate::host_process::protocol::SubscriptionAsk> {
     use crate::host_process::protocol::SubscriptionAsk;
-    let (word, folder) = line.trim().split_once(' ')?;
-    let folder = cwd.join(folder.trim());
+    let (word, rest) = line.trim().split_once(' ')?;
     match word {
         "add" => Some(SubscriptionAsk::Add {
-            add: folder,
+            add: cwd.join(rest.trim()),
             kind: None,
         }),
-        "remove" => Some(SubscriptionAsk::Remove { remove: folder }),
+        "remove" => Some(SubscriptionAsk::Remove {
+            remove: cwd.join(rest.trim()),
+        }),
+        "forecast" => {
+            let (branch, folder) = rest.trim().split_once(' ')?;
+            Some(SubscriptionAsk::Forecast {
+                forecast: cwd.join(folder.trim()),
+                branch: branch.to_string(),
+            })
+        }
         _ => None,
     }
 }
@@ -210,6 +218,7 @@ pub fn watch_input(cwd: &Path, out: &mut dyn Write) -> Result<i32> {
                 crate::host_process::protocol::SubscriptionAsk::Remove { remove } => {
                     folders.remove(remove);
                 }
+                crate::host_process::protocol::SubscriptionAsk::Forecast { .. } => {}
             }
             if crate::host_process::protocol::send(&mut writer, &ask).is_err() {
                 return;
@@ -231,6 +240,15 @@ pub fn watch_input(cwd: &Path, out: &mut dyn Write) -> Result<i32> {
                 if let (Some(line), Some(doc)) = (line.as_object_mut(), d.overview.as_object()) {
                     line.extend(doc.clone());
                 }
+                writeln!(out, "{}", serde_json::to_string(&line)?)?;
+                out.flush()?;
+            }
+            Ok(Some(SubscriptionLine::Forecast(f))) => {
+                let line = serde_json::json!({
+                    "folder": f.folder,
+                    "branch": f.branch,
+                    "forecast": f.forecast,
+                });
                 writeln!(out, "{}", serde_json::to_string(&line)?)?;
                 out.flush()?;
             }
@@ -519,7 +537,7 @@ impl<'a> Waiter<'a> {
                     self.seen = self.seen.max(p.report.pass);
                     self.reports.push(p.report);
                 }
-                SubscriptionLine::Error(_) => {}
+                SubscriptionLine::Forecast(_) | SubscriptionLine::Error(_) => {}
             }
         }
     }
