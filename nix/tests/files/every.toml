@@ -14,6 +14,9 @@ dir = "~/.moon/cache/shared"
 [caches.env]
 MOON_CACHE_SHARED_WORKTREE_CACHE = "true"
 
+[daemon]
+managed = true
+
 [deliveries]
 expire_after = "72h"
 

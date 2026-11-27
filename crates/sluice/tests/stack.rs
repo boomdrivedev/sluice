@@ -402,6 +402,7 @@ fn a_sessions_stack_stays_between_runs_and_goes_on_release() {
             expire_after: sluice_core::EXPIRE_AFTER,
             telemetry: None,
             aws: Default::default(),
+            managed: false,
         },
     )
     .with_running(running.path().to_path_buf());
