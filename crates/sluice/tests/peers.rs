@@ -157,6 +157,21 @@ impl Host {
         }
     }
 
+    /// Until this host reads submission `id` as `state`, at most a
+    /// minute: its `sluice host` answers from its last read of the remote,
+    /// which may come before another host's landing (129; rule core.31).
+    fn reads(&self, id: u64, state: &str) {
+        let deadline = Instant::now() + Duration::from_secs(60);
+        loop {
+            let now = self.state_of(id);
+            if now == state {
+                return;
+            }
+            assert!(Instant::now() < deadline, "reads {now}, not {state}");
+            std::thread::sleep(Duration::from_millis(100));
+        }
+    }
+
     fn state_of(&self, id: u64) -> String {
         let out = self.sluice(&["status", &id.to_string(), "--json"]);
         assert!(out.status.success(), "{}", text(&out));
@@ -299,7 +314,7 @@ fn a_submission_lands_by_another_host() {
         );
         std::thread::sleep(Duration::from_millis(50));
     }
-    assert_eq!(host_a.state_of(id), "landed");
+    host_a.reads(id, "landed");
     // The landing is on the remote's branch, made by the other host.
     let landed = support::git_command()
         .arg("--git-dir")
@@ -438,7 +453,7 @@ fn a_host_whose_own_main_is_refused_counts_the_remotes_signers() {
         );
         std::thread::sleep(Duration::from_millis(50));
     }
-    assert_eq!(host_a.state_of(id), "landed");
+    host_a.reads(id, "landed");
     assert!(refs_under(&origin, "refs/sluice/runs/").contains("refs/sluice/runs/box"));
     let landed = support::git_command()
         .arg("--git-dir")
