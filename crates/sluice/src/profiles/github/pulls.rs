@@ -372,12 +372,22 @@ impl Pulls {
 }
 
 /// A pull request as a wait last read it from GitHub, and its timeline
-/// once read.
+/// once read, with its entry as this host's records held it then.
 #[derive(Clone, Debug)]
 struct Seen {
     at: DateTime<Utc>,
     pull: Option<Pull>,
     readied: Option<Vec<DateTime<Utc>>>,
+    entry: Held,
+}
+
+/// A pull request's entry in this host's records: the latest submission
+/// of its place, by its number and state; `None` where it has none.
+type Held = Option<(u64, State)>;
+
+/// The entry `latest` is, as [`Seen`] keeps it.
+fn entry_of(latest: Option<&Submission>) -> Held {
+    latest.map(|e| (e.id, e.state))
 }
 
 /// A pull request's state: what sluice posts, and what a submit that
@@ -3231,10 +3241,12 @@ impl crate::PullRequests for Pulls {
         let forge = self.forge(branch)?;
         let pull = forge.pull(&t.repo, n)?;
         let held = pull.as_ref().is_some_and(|p| p.base == branch);
+        let latest = self.latest_of(&s, branch, &[place(n)])?.remove(&place(n));
         let seen = Seen {
             at: clock.now(),
             pull,
             readied: None,
+            entry: entry_of(latest.as_ref()),
         };
         self.seen.borrow_mut().insert(n, seen);
         Ok(held)
@@ -3270,11 +3282,17 @@ impl crate::PullRequests for Pulls {
                 self.away.borrow_mut().remove(branch);
             }
         }
+        // What GitHub last said stands only while the request's entry here
+        // stands as it was then: once its entry moved, as a closing read
+        // at a discovery withdraws it, the request is read again (rule
+        // core.32), so no wait decides on what GitHub said before it.
+        let latest = self.latest_of(&s, branch, &[place(n)])?.remove(&place(n));
+        let entry = entry_of(latest.as_ref());
         let fresh = self
             .seen
             .borrow()
             .get(&n)
-            .filter(|seen| now - seen.at < self.discovery / 4)
+            .filter(|seen| now - seen.at < self.discovery / 4 && seen.entry == entry)
             .map(|seen| seen.pull.clone());
         let pull = match fresh {
             Some(pull) => pull,
@@ -3284,6 +3302,7 @@ impl crate::PullRequests for Pulls {
                     at: now,
                     pull: pull.clone(),
                     readied: None,
+                    entry,
                 };
                 self.seen.borrow_mut().insert(n, seen);
                 pull
@@ -3300,7 +3319,6 @@ impl crate::PullRequests for Pulls {
             Ok(r)
         };
         let status = s.status(branch)?;
-        let latest = self.latest_of(&s, branch, &[place(n)])?.remove(&place(n));
         if let Some(e) = &latest {
             let current = pull.as_ref().is_none_or(|p| p.head == e.head.0);
             if current && matches!(e.state, State::Landed | State::Failed | State::Conflict) {

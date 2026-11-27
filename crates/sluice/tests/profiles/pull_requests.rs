@@ -1042,10 +1042,15 @@ fn a_wait_follows_the_new_head_its_submit_withdrew_it_for() {
 /// 67, 120; record 0100 D2, D3: a pull request closed on the new head that
 /// carries a withdrawn submission's work, before that head lands, ends the
 /// withdrawn submission's wait withdrawn, exit 4, its own record naming the
-/// request closed in `carried_by`.
+/// request closed in `carried_by`. What the submit read of the request
+/// stays the wait's for a quarter of the host's interval, here the whole
+/// test, and is read again once the request's entry moved (rule core.32):
+/// the closing that withdrew the new head decides the wait, never the
+/// submit's read of the request open.
 #[test]
 fn a_wait_exits_withdrawn_when_the_request_carrying_its_work_closes() {
     let g = OnGitHub::new("pr-follow-closed", "");
+    g.discovery("1h");
     let w = g.session("follow-closed", &[("slow", "x\n")]);
     let out = g.wt_submit(&w, &["--no-wait"]);
     assert_eq!(out.status.code(), Some(0), "{}", text(&out));
@@ -1071,7 +1076,9 @@ fn a_wait_exits_withdrawn_when_the_request_carrying_its_work_closes() {
     assert_eq!(
         doc["carried_by"],
         serde_json::json!({ "pull_request": n, "state": "closed" }),
-        "{doc}"
+        "{}\n{}",
+        text(&out),
+        g.host_log()
     );
 }
 
@@ -4916,7 +4923,9 @@ fn a_waiting_submit_ends_with_its_own_submission_when_the_branch_moves_under_it(
 /// a waiting submit by name in the repository's git directory, whose
 /// request another queue of `main` lands once this host took it in, exits
 /// 0 and says `landed as <rev>`, never `withdrawn`, and its submission's
-/// record reads landed, `landed_elsewhere`.
+/// record reads landed, `landed_elsewhere`, once a round read the branch.
+/// The wait answers from the branch (rule core.48), so it can end before
+/// any round of a host that passes only when asked moved the record.
 #[test]
 fn a_waiting_submit_by_name_in_a_bare_clone_reports_another_queues_landing() {
     let (g, pid) = with_a_hanging_bolt("pr-by-name-elsewhere");
@@ -4935,6 +4944,7 @@ fn a_waiting_submit_by_name_in_a_bare_clone_reports_another_queues_landing() {
         "{said}"
     );
     assert!(!said.contains("withdrawn"), "{said}");
+    let _ = g.round();
     let sub = g
         .of(pull.number)
         .into_iter()

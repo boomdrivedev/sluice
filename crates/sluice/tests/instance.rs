@@ -333,7 +333,14 @@ mod bound {
         assert!(out.status.success(), "{}", text(&out));
 
         let starts = starts(seen.path());
-        assert_eq!(starts.len(), 6, "every candidate ran once: {starts:?}");
+        assert_eq!(
+            starts.len(),
+            6,
+            "every candidate ran once: {starts:?}\n{}\n{}\n{}",
+            text(&out),
+            records_logs(s.repo.dir()),
+            host_log(&s)
+        );
         let most = starts.iter().map(|(a, _)| *a).max().unwrap();
         assert_eq!(most, 2, "runs alive at once: {starts:?}");
         let processors = std::thread::available_parallelism().map_or(1, |n| n.get());
@@ -357,6 +364,32 @@ mod bound {
         }
     }
 
+    /// Each log line of the branches' records under `dir`, by its file.
+    fn records_logs(dir: &Path) -> String {
+        fn walk(at: &Path, found: &mut Vec<PathBuf>) {
+            for entry in std::fs::read_dir(at).into_iter().flatten().flatten() {
+                let path = entry.path();
+                if path.is_dir() {
+                    walk(&path, found);
+                } else if path.file_name().is_some_and(|n| n == "log.jsonl") {
+                    found.push(path);
+                }
+            }
+        }
+        let mut found = Vec::new();
+        walk(&dir.join(".git"), &mut found);
+        found
+            .iter()
+            .map(|p| {
+                format!(
+                    "{}:\n{}",
+                    p.display(),
+                    std::fs::read_to_string(p).unwrap_or_default()
+                )
+            })
+            .collect()
+    }
+
     /// The statuses of `branch`'s submissions in `s`'s repository.
     fn states(s: &Setup, branch: &str) -> Vec<String> {
         let out = s
@@ -364,10 +397,11 @@ mod bound {
             .args(["status", branch, "--json", "--all"])
             .output()
             .unwrap();
+        assert!(out.status.success(), "{}", text(&out));
         let status: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
         status["submissions"]
             .as_array()
-            .unwrap()
+            .unwrap_or_else(|| panic!("{status}"))
             .iter()
             .map(|x| x["state"].as_str().unwrap().to_string())
             .collect()

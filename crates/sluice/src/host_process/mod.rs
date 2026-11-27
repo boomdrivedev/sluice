@@ -113,6 +113,12 @@ pub const START_LOCK_FD_VAR: &str = "SLUICE_START_LOCK_FD";
 /// `sluice-host-runs-on-a-tokio-edge`).
 pub const SOCKET_FD_VAR: &str = "SLUICE_SOCKET_FD";
 
+/// The variable a host process starting afresh in place names the host's
+/// lock's descriptor in, so the image started afresh holds the lock its
+/// last image held, with no moment between the two in which another
+/// process may take it.
+pub const LOCK_FD_VAR: &str = "SLUICE_LOCK_FD";
+
 /// The variable a host process that hands over names a descriptor in, to
 /// which its successor writes once its socket answers (design D20).
 pub const READY_FD_VAR: &str = "SLUICE_READY_FD";
@@ -522,6 +528,9 @@ pub struct Carried {
     pub socket: Option<std::os::unix::net::UnixListener>,
     /// Where a successor says that its socket answers (design D20).
     pub ready: Option<File>,
+    /// The host's lock a host process started afresh in place was handed,
+    /// which it holds as its last image held it.
+    pub lock: Option<File>,
 }
 
 /// The descriptor `var` names, taken out of the environment and set to
@@ -551,6 +560,7 @@ pub fn take_carried() -> Carried {
         start: take_fd(START_LOCK_FD_VAR).map(File::from),
         socket: take_fd(SOCKET_FD_VAR).map(std::os::unix::net::UnixListener::from),
         ready: take_fd(READY_FD_VAR).map(File::from),
+        lock: take_fd(LOCK_FD_VAR).map(File::from),
     }
 }
 
@@ -614,9 +624,17 @@ pub fn run(choices: crate::telemetry::Choices, mut carried: Carried) -> Result<i
     }
     let folder =
         Folder::open(&paths.dir).with_context(|| format!("opening {}", paths.dir.display()))?;
-    let Some(lock) = folder.try_lock(LOCK)? else {
-        log("sluice host: another host process holds this host's lock; this one ends");
-        return Ok(0);
+    // An image started afresh in place holds the lock its last image
+    // handed it.
+    let lock = match carried.lock.take() {
+        Some(lock) => lock,
+        None => match folder.try_lock(LOCK)? {
+            Some(lock) => lock,
+            None => {
+                log("sluice host: another host process holds this host's lock; this one ends");
+                return Ok(0);
+            }
+        },
     };
     let runtime = runtime()?;
     run_holding(
@@ -662,7 +680,10 @@ pub fn daemon(choices: crate::telemetry::Choices, mut carried: Carried) -> Resul
     let folder = Arc::new(
         Folder::open(&paths.dir).with_context(|| format!("opening {}", paths.dir.display()))?,
     );
-    let (lock, start) = match folder.try_lock(LOCK)? {
+    // An image started afresh in place holds the lock its last image
+    // handed it.
+    let handed = carried.lock.take();
+    let (lock, start) = match handed.map_or_else(|| folder.try_lock(LOCK), |l| Ok(Some(l)))? {
         Some(lock) => (lock, start),
         None => {
             // D6: a start lock it was handed is let go before it waits, so
@@ -1360,12 +1381,13 @@ fn flush(telemetry: Option<&crate::telemetry::Telemetry>) {
 /// children, and whatever keeps it running keeps the image started afresh
 /// (`sluices-runs-end-with-its-host-process@e814b716f3b1`). Every scheduler
 /// finishes its reading and lets its worker go, and its telemetry sends
-/// what it holds. Then, under the start lock and with its socket, each
-/// handed to the image started afresh by its descriptor, it lets its lock
-/// go and replaces its image. A command that connects meanwhile waits in
+/// what it holds. Then, under the start lock, it replaces its image, the
+/// start lock, its socket and the host's lock each handed to the image
+/// started afresh by its descriptor, so no other process takes the host's
+/// lock between the two images. A command that connects meanwhile waits in
 /// the socket's queue for the new image (D6 of
 /// `sluice-host-runs-on-a-tokio-edge`). It returns only where the start
-/// failed: its lock taken back, its schedulers going on, and why.
+/// failed: its schedulers going on, and why.
 async fn start_afresh(
     hosting: &Arc<Hosting>,
     listener: &UnixListener,
@@ -1395,9 +1417,13 @@ async fn start_afresh(
         let held = unsafe { std::os::fd::BorrowedFd::borrow_raw(fd) };
         nix::fcntl::fcntl(held, nix::fcntl::FcntlArg::F_SETFD(flag))
     };
+    let held = lock.as_ref().map(|l| l.as_raw_fd());
     let handed = || -> Result<std::process::Command> {
         inherit(start.as_raw_fd(), nix::fcntl::FdFlag::empty())?;
         inherit(socket, nix::fcntl::FdFlag::empty())?;
+        if let Some(fd) = held {
+            inherit(fd, nix::fcntl::FdFlag::empty())?;
+        }
         let mut command = std::process::Command::new(program);
         command
             .arg(role)
@@ -1406,23 +1432,31 @@ async fn start_afresh(
                 successor
                     .env
                     .iter()
-                    .filter(|(name, _)| name != START_LOCK_FD_VAR && name != SOCKET_FD_VAR)
+                    .filter(|(name, _)| {
+                        ![START_LOCK_FD_VAR, SOCKET_FD_VAR, LOCK_FD_VAR]
+                            .iter()
+                            .any(|var| *name == *var)
+                    })
                     .cloned(),
             )
             .env(START_LOCK_FD_VAR, start.as_raw_fd().to_string())
             .env(SOCKET_FD_VAR, socket.to_string());
+        if let Some(fd) = held {
+            command.env(LOCK_FD_VAR, fd.to_string());
+        }
         Ok(command)
     };
     let why = match handed() {
-        Ok(command) => {
-            drop(lock.take());
-            format!("{:#}", crate::hand_over::replace(&command))
-        }
+        Ok(command) => format!("{:#}", crate::hand_over::replace(&command)),
         Err(e) => format!("{e:#}"),
     };
-    // The start failed: the process as it was, its socket still its own.
+    // The start failed: the process as it was, its socket and its lock
+    // still its own.
     let _ = inherit(start.as_raw_fd(), nix::fcntl::FdFlag::FD_CLOEXEC);
     let _ = inherit(socket, nix::fcntl::FdFlag::FD_CLOEXEC);
+    if let Some(fd) = held {
+        let _ = inherit(fd, nix::fcntl::FdFlag::FD_CLOEXEC);
+    }
     if lock.is_none() {
         match hosting.folder.try_lock(LOCK) {
             Ok(Some(f)) => *lock = Some(f),

@@ -598,6 +598,73 @@ fn a_newer_client_has_an_older_host_process_hand_over() {
     assert!(follow.next(Some(Duration::from_secs(5))).is_err());
 }
 
+/// 135 (design D3 of `sluice-host-owns-its-workers`): a host process that
+/// starts afresh in place hands the host's lock to its new image, so no
+/// other process takes the lock between the two images. Another process
+/// that asks for the lock all through the hand-over never gets it, and
+/// the new image keeps the pid.
+#[test]
+fn a_host_process_starting_afresh_in_place_keeps_the_hosts_lock() {
+    let d = OnDisk::new("host-keeps-lock", POLICY);
+    let older = d
+        .client(d.repo.dir())
+        .reach()
+        .expect("the host process")
+        .named
+        .clone();
+    keeps_the_hosts_lock(&d, &older);
+}
+
+/// host-daemon, "A newer command reaches an older daemon": a daemon that
+/// starts afresh in place hands the host's lock to its new image as a host
+/// process does, so no other process takes the lock between the two
+/// images.
+#[test]
+fn a_daemon_starting_afresh_in_place_keeps_the_hosts_lock() {
+    let d = OnDisk::new("daemon-keeps-lock", POLICY);
+    let daemon = Daemon::start(&d, d.repo.dir());
+    answers(&d, &daemon);
+    let older = named(&d).expect("it answers");
+    keeps_the_hosts_lock(&d, &older);
+}
+
+/// A newer command reaches `older`, the host process of `d`, which starts
+/// afresh in place, while another process asks for the host's lock all
+/// through: that process never gets it, and the image started afresh has
+/// `older`'s pid and a later `since`.
+fn keeps_the_hosts_lock(d: &OnDisk, older: &sluice::host_process::protocol::Named) {
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::Arc;
+    let client = d.client(d.repo.dir());
+    let lock = client.paths().lock();
+    let stop = Arc::new(AtomicBool::new(false));
+    let asking = {
+        let stop = stop.clone();
+        std::thread::spawn(move || {
+            let mut took = 0u32;
+            while !stop.load(Ordering::SeqCst) {
+                let file = std::fs::OpenOptions::new().write(true).open(&lock).unwrap();
+                if file.try_lock().is_ok() {
+                    took += 1;
+                }
+            }
+            took
+        })
+    };
+    let reached = client.clone().with_version("0.72.0").reach();
+    stop.store(true, Ordering::SeqCst);
+    let took = asking.join().unwrap();
+    assert_eq!(
+        took,
+        0,
+        "another process took the host's lock\n{}",
+        host_logs(d)
+    );
+    let reached = reached.expect("the newer command's own");
+    assert_eq!(reached.named.pid, older.pid, "{}", host_logs(d));
+    assert_ne!(reached.named.since, older.since);
+}
+
 /// 135 (design D8): an older host process whose tasks take longer than a
 /// start's ten seconds to finish their rounds is waited out, its lock
 /// held until it ends, and the newer command's own process then answers.
@@ -2662,8 +2729,21 @@ fn a_stopped_daemon_ends_its_runs() {
 }
 
 /// The pid of the run's check that `marks` holds: the shell whose command
-/// names its marks, where one runs.
+/// names its marks and that leads its process group, where one runs.
 fn check_of(marks: &support::Scratch) -> Option<u32> {
+    // The run's supervisor starts the checks' shell in a process group of
+    // its own, so the shell leads it. A copy that the shell forked to run
+    // `sleep` has the shell's command line until it is replaced, and is in
+    // the shell's group: it is not the check.
+    matching(marks).into_iter().find(|&pid| {
+        let pid = nix::unistd::Pid::from_raw(pid as i32);
+        nix::unistd::getpgid(Some(pid)).is_ok_and(|group| group == pid)
+    })
+}
+
+/// Every process that runs the held command's line, a check's shell and
+/// any copy of it that the shell forked and has not yet replaced.
+fn matching(marks: &support::Scratch) -> Vec<u32> {
     use sysinfo::{ProcessRefreshKind, ProcessStatus, ProcessesToUpdate, System, UpdateKind};
     let began = marks.path().join("began").display().to_string();
     let mut system = System::new();
@@ -2676,7 +2756,7 @@ fn check_of(marks: &support::Scratch) -> Option<u32> {
         .processes()
         .iter()
         .filter(|(_, p)| !matches!(p.status(), ProcessStatus::Zombie))
-        .find(|(_, p)| {
+        .filter(|(_, p)| {
             let words: Vec<String> = p
                 .cmd()
                 .iter()
@@ -2686,6 +2766,37 @@ fn check_of(marks: &support::Scratch) -> Option<u32> {
             line.contains(&began) && line.contains("while")
         })
         .map(|(pid, _)| pid.as_u32())
+        .collect()
+}
+
+/// test-children, "A check's shell between a fork and an exec": a check
+/// whose shell has a copy of itself that it forked, which runs the same
+/// command line, is named by the leader of its process group, the shell
+/// that the run's supervisor started. The copy is held, so every read sees
+/// both.
+#[test]
+fn a_checks_forked_copy_is_not_the_check() {
+    use std::os::unix::process::CommandExt;
+    let marks = support::Scratch::new("check-of-copy-marks");
+    let command = format!(
+        "echo run >> {began}; (while [ ! -f {go} ] && [ -d {dir} ]; do sleep 0.1; done); :",
+        began = marks.path().join("began").display(),
+        go = marks.path().join("go").display(),
+        dir = marks.path().display()
+    );
+    let mut shell = std::process::Command::new("/bin/sh")
+        .args(["-c", &command])
+        .current_dir(marks.path())
+        .process_group(0)
+        .spawn()
+        .unwrap();
+    let leader = shell.id();
+    within(30, "the shell's copy runs", || matching(&marks).len() == 2);
+    for _ in 0..20 {
+        assert_eq!(check_of(&marks), Some(leader));
+    }
+    std::fs::write(marks.path().join("go"), "").unwrap();
+    shell.wait().unwrap();
 }
 
 /// The process groups that `d`'s host state names as workers.
@@ -2839,6 +2950,14 @@ fn an_upgrade_keeps_its_runs_as_children() {
         .expect("the newer command's own");
     assert_eq!(reached.named.pid, first.pid, "{}", host_logs(&d));
     assert_ne!(reached.named.since, first.since);
+    // Read now: each host process that starts keeps only the log of the
+    // one before it, and one that ends once idle after the landing is
+    // followed by another.
+    let logs = host_logs(&d);
+    assert!(
+        logs.contains("it starts afresh in its own process, keeping its pid"),
+        "{logs}"
+    );
     drop(reached);
     assert!(alive(check), "the check goes on");
     let supervisor = sluice::workers::parent(check as i32).unwrap();
@@ -2847,12 +2966,6 @@ fn an_upgrade_keeps_its_runs_as_children() {
     lands(&d, id);
     let ran = std::fs::read_to_string(marks.path().join("began")).unwrap();
     assert_eq!(ran.lines().count(), 1, "no check ran again: {ran}");
-    // A stop of the image started afresh ends what it took over.
-    let logs = host_logs(&d);
-    assert!(
-        logs.contains("it starts afresh in its own process, keeping its pid"),
-        "{logs}"
-    );
 }
 
 /// daemon-service, "A new package" (D5 of `sluice-host-owns-its-workers`):
