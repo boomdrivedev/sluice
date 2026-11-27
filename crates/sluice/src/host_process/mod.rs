@@ -2100,21 +2100,9 @@ async fn answer(hosting: &Arc<Hosting>, stream: UnixStream) -> Result<()> {
     let Some(line) = next_line(&mut lines).await? else {
         return Ok(());
     };
-    let request: Request = match serde_json::from_str(line.trim_end()) {
+    let request = match request_of(&line, &hello.hello, &hosting.named.version) {
         Ok(r) => r,
-        Err(_) => {
-            // The change `sluice-host-answers-every-read`, design D9: it
-            // answers only the requests of its own release, and names the
-            // sluice to run.
-            let words = format!(
-                "sluice {} asked what this host process, sluice {}, does not know: {}. Run sluice {}.",
-                hello.hello,
-                hosting.named.version,
-                line.trim_end(),
-                hosting.named.version
-            );
-            return send(&mut writer, &Answer::Error(words)).await;
-        }
+        Err(words) => return send(&mut writer, &Answer::Error(words)).await,
     };
     // The change `the-git-hook-asks-sluice-host`, design D1: the hook's
     // transaction is judged before any read or change, from the state the
@@ -2260,6 +2248,21 @@ async fn answer(hosting: &Arc<Hosting>, stream: UnixStream) -> Result<()> {
             send(&mut writer, &Answer::Ok).await
         }
     }
+}
+
+/// The request `line` of a client of sluice `hello`, as this host
+/// process, sluice `own`, reads it; or, for a request it does not know,
+/// the words that say so and name the sluice to run. It answers only the
+/// requests of its own release (the change
+/// `sluice-host-answers-every-read`, design D9).
+fn request_of(line: &str, hello: &str, own: &str) -> std::result::Result<Request, String> {
+    let line = line.trim_end();
+    serde_json::from_str(line).map_err(|_| {
+        format!(
+            "sluice {hello} asked what this host process, sluice {own}, does not know: {line}. \
+             Run sluice {own}."
+        )
+    })
 }
 
 /// sluice's part in a subscription (the change
@@ -2426,6 +2429,39 @@ pub(crate) fn view_of(room: &Shared) -> Result<RoomView> {
 
 #[cfg(test)]
 mod tests {
+
+    /// resident-reads, "An older one-shot read" and "An older watch",
+    /// resident-workers, "An older hold", and resident-changes, "An older
+    /// step" (the change `sluice-host-answers-every-read`, design D9; the
+    /// change `sluice-host-makes-each-change`, design D5): each request an
+    /// older client sends that this release does not know, a `read`, a
+    /// `follow`, a `hold` or a `step` naming a repository, is refused
+    /// before anything is read or held, its words naming both versions,
+    /// the request, and the sluice to run; a request of its own release
+    /// reads.
+    #[test]
+    fn a_request_of_another_release_is_refused_naming_both_versions() {
+        for line in [
+            r#"{"ask":"read","repository":"/r.git"}"#,
+            r#"{"ask":"follow","repository":"/r.git","kind":"watch"}"#,
+            r#"{"ask":"hold","kind":"session","repository":"/r.git","place":"unit/a","branch":"main"}"#,
+            r#"{"ask":"step","repository":"/r.git","branch":"main"}"#,
+        ] {
+            let words = request_of(&format!("{line}\n"), "0.97.0", "0.99.0").unwrap_err();
+            assert_eq!(
+                words,
+                format!(
+                    "sluice 0.97.0 asked what this host process, sluice 0.99.0, does not know: \
+                     {line}. Run sluice 0.99.0."
+                )
+            );
+        }
+        let own = r#"{"ask":"step","folder":"/w/a","branch":"main"}"#;
+        assert!(matches!(
+            request_of(own, "0.99.0", "0.99.0"),
+            Ok(Request::Step { .. })
+        ));
+    }
     use super::*;
     use std::sync::Mutex;
     use tracing::field::{Field, Visit};

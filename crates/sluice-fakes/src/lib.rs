@@ -2010,6 +2010,14 @@ impl World {
         );
     }
 
+    /// 3: `worktree`'s session is on no branch, as a detached worktree's
+    /// is: it names no session's work.
+    pub fn detach(&self, worktree: &str) {
+        if let Some(s) = self.0.borrow_mut().worktrees.get_mut(worktree) {
+            s.detached = true;
+        }
+    }
+
     /// 124: from now, a submit by name runs in a session whose harness
     /// names `agent`, as `SLUICE_AGENT` does; `None` names the branch.
     pub fn harness_names(&self, agent: Option<&str>) {

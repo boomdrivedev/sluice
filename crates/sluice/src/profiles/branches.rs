@@ -166,61 +166,10 @@ impl Branches {
     }
 
     /// Where `branch` is, read off the revisions of `from` this host
-    /// holds (124; rule core.27): the remote any of their policies names
-    /// for `branch`, with the first revision naming it and its policy, or,
-    /// when none names one, the first revision holding a policy. Each
-    /// policy is read only as far as the deciding needs, the remote named
-    /// for `branch` and whether signers are named, so a revision this
-    /// sluice refuses elsewhere in its policy votes as every other does
-    /// (record 0069). A revision that holds no policy or names no remote
-    /// decides nothing; two naming different remotes are refused, naming
-    /// both, since nothing the host holds says which is right (record
-    /// 0060).
+    /// holds, as [`routing`] decides it from their policies.
     fn routing(&self, branch: &str, from: &str) -> Result<Routing> {
-        let mut named: Option<(String, String, Rev, Policy)> = None;
-        let mut first: Option<(Rev, Policy)> = None;
-        let mut read: Vec<Rev> = Vec::new();
-        for (name, rev) in self.revisions(from)? {
-            if read.contains(&rev) {
-                continue;
-            }
-            read.push(rev.clone());
-            let Some(policy) = self.policy_at(&name, &rev)? else {
-                continue;
-            };
-            // core.27 (design D22): the remote whatever the table refuses.
-            let remote = policy.remote_of(branch)?;
-            match (remote, &named) {
-                (Some(remote), None) => named = Some((remote, name, rev, policy)),
-                (Some(remote), Some((was, by, at, _))) if remote != *was => {
-                    let (what, which) = match branch == from {
-                        true => (format!("{branch}'s policy names"), "is on"),
-                        false => (
-                            format!("{from}'s policy names, for {branch},"),
-                            "would be made on",
-                        ),
-                    };
-                    bail!(
-                        "{what} two remotes: {was} on {by} ({}), {remote} on {name} ({}); \
-                         sluice cannot tell which remote {branch} {which}",
-                        at.short(),
-                        rev.short()
-                    );
-                }
-                (Some(_), Some(_)) => {}
-                (None, _) if first.is_none() => first = Some((rev, policy)),
-                (None, _) => {}
-            }
-        }
-        Ok(match named {
-            Some((remote, _, rev, policy)) => Routing {
-                remote: Some(remote),
-                at: Some((rev, policy)),
-            },
-            None => Routing {
-                remote: None,
-                at: first,
-            },
+        routing(branch, from, self.revisions(from)?, |name, rev| {
+            self.policy_at(name, rev)
         })
     }
 
@@ -249,21 +198,14 @@ impl Branches {
         let decided = match kept {
             Some(d) => d,
             None => {
-                let decided = match self.local.read_file(rev, POLICY_PATH)? {
-                    None => Ok(None),
-                    Some(bytes) => std::str::from_utf8(&bytes)
-                        .map_err(anyhow::Error::from)
-                        .and_then(Policy::guarding)
-                        .map(Some)
-                        .map_err(|e| format!("{e:#}")),
-                };
+                let decided = guarded(self.local.read_file(rev, POLICY_PATH)?.as_deref());
                 self.guarded
                     .borrow_mut()
                     .insert(rev.clone(), decided.clone());
                 decided
             }
         };
-        decided.map_err(|words| anyhow!(words).context(format!("{name}'s policy at {rev}")))
+        read_as(name, rev, decided)
     }
 
     /// The profile for `branch`: its remote's, or `None` for local refs.
@@ -293,6 +235,94 @@ impl Branches {
 struct Routing {
     remote: Option<String>,
     at: Option<(Rev, Policy)>,
+}
+
+/// The policy a file holds, `None` for none, read only as far as deciding
+/// where a branch is needs ([`Policy::guarding`]; record 0069); or the
+/// words it was refused with.
+fn guarded(file: Option<&[u8]>) -> std::result::Result<Option<Policy>, String> {
+    match file {
+        None => Ok(None),
+        Some(bytes) => std::str::from_utf8(bytes)
+            .map_err(anyhow::Error::from)
+            .and_then(Policy::guarding)
+            .map(Some)
+            .map_err(|e| format!("{e:#}")),
+    }
+}
+
+/// `decided`, the policy at `rev` of the ref the user knows as `name`,
+/// a refusal naming both.
+fn read_as(
+    name: &str,
+    rev: &Rev,
+    decided: std::result::Result<Option<Policy>, String>,
+) -> Result<Option<Policy>> {
+    decided.map_err(|words| anyhow!(words).context(format!("{name}'s policy at {rev}")))
+}
+
+/// Where `branch` is, read off `revisions`, the revisions of `from` this
+/// host holds, each with its ref as the user knows it, its own first (124;
+/// rule core.27): the remote any of their policies names for `branch`,
+/// with the first revision naming it and its policy, or, when none names
+/// one, the first revision holding a policy. `policy_at` reads each
+/// revision's policy only as far as the deciding needs, the remote named
+/// for `branch` and whether signers are named, so a revision this sluice
+/// refuses elsewhere in its policy votes as every other does (record
+/// 0069). A revision that holds no policy or names no remote decides
+/// nothing; two naming different remotes are refused, naming both, since
+/// nothing the host holds says which is right (record 0060).
+fn routing(
+    branch: &str,
+    from: &str,
+    revisions: Vec<(String, Rev)>,
+    mut policy_at: impl FnMut(&str, &Rev) -> Result<Option<Policy>>,
+) -> Result<Routing> {
+    let mut named: Option<(String, String, Rev, Policy)> = None;
+    let mut first: Option<(Rev, Policy)> = None;
+    let mut read: Vec<Rev> = Vec::new();
+    for (name, rev) in revisions {
+        if read.contains(&rev) {
+            continue;
+        }
+        read.push(rev.clone());
+        let Some(policy) = policy_at(&name, &rev)? else {
+            continue;
+        };
+        // core.27 (design D22): the remote whatever the table refuses.
+        let remote = policy.remote_of(branch)?;
+        match (remote, &named) {
+            (Some(remote), None) => named = Some((remote, name, rev, policy)),
+            (Some(remote), Some((was, by, at, _))) if remote != *was => {
+                let (what, which) = match branch == from {
+                    true => (format!("{branch}'s policy names"), "is on"),
+                    false => (
+                        format!("{from}'s policy names, for {branch},"),
+                        "would be made on",
+                    ),
+                };
+                bail!(
+                    "{what} two remotes: {was} on {by} ({}), {remote} on {name} ({}); \
+                     sluice cannot tell which remote {branch} {which}",
+                    at.short(),
+                    rev.short()
+                );
+            }
+            (Some(_), Some(_)) => {}
+            (None, _) if first.is_none() => first = Some((rev, policy)),
+            (None, _) => {}
+        }
+    }
+    Ok(match named {
+        Some((remote, _, rev, policy)) => Routing {
+            remote: Some(remote),
+            at: Some((rev, policy)),
+        },
+        None => Routing {
+            remote: None,
+            at: first,
+        },
+    })
 }
 
 impl Pushers for Branches {
@@ -391,5 +421,168 @@ impl Branch for Branches {
             Some(p) => p.remove(branch, expected),
             None => self.local.remove(branch, expected),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A `[[checkout.cache]]` table, which sluice no longer keeps and whose
+    /// policy it refuses whole (ADR 0049).
+    const CACHE: &str = "[[checkout.cache]]\nkey = [\"Cargo.lock\"]\npaths = [\"target\"]\n";
+
+    /// `branch` routed off the revisions of `from` in `held`, each its ref
+    /// as the user knows it, its revision, and the policy file it holds.
+    fn route(branch: &str, from: &str, held: &[(&str, &str, Option<&str>)]) -> Result<Routing> {
+        let revisions = held
+            .iter()
+            .map(|(name, rev, _)| (name.to_string(), Rev::new(*rev)))
+            .collect();
+        routing(branch, from, revisions, |name, rev| {
+            let file = held
+                .iter()
+                .find(|(_, r, _)| *r == rev.as_str())
+                .and_then(|(_, _, f)| *f);
+            read_as(name, rev, guarded(file.map(str::as_bytes)))
+        })
+    }
+
+    const ORIGIN: &str =
+        "[branches.main]\nremote = \"origin\"\n[branches.\"bolt/*\"]\nremote = \"origin\"\n";
+
+    /// 124 (rule core.27): a host's own `main` from before the policy file
+    /// decides nothing, and origin's copy as last fetched routes `main` to
+    /// origin, by origin's revision; a branch made from it is made there.
+    /// Nothing is fetched to decide (`the_router_reads_a_copy_from_before_the_policy_as_origins`,
+    /// `made_from_and_policy_of_read_a_copy_from_before_the_policy_as_origins`,
+    /// `the_router_decides_with_the_remote_out_of_reach`).
+    #[test]
+    fn a_copy_from_before_the_policy_routes_by_the_remote_copy() {
+        let held = [
+            ("main", "aaaaaaa0", None),
+            ("origin/main", "bbbbbbb0", Some(ORIGIN)),
+        ];
+        let r = route("main", "main", &held).unwrap();
+        assert_eq!(r.remote.as_deref(), Some("origin"));
+        assert_eq!(r.at.unwrap().0, Rev::new("bbbbbbb0"));
+        let made = route("bolt/x", "main", &held).unwrap();
+        assert_eq!(made.remote.as_deref(), Some("origin"));
+    }
+
+    /// 124: a host's `main` whose policy names no remote decides nothing
+    /// against origin's later copy, which names origin; with no copy naming
+    /// one, `main` stays local, routed by the host's own revision
+    /// (`the_router_follows_a_later_copy_naming_a_remote`,
+    /// `the_router_keeps_a_branch_no_copy_routes_local`).
+    #[test]
+    fn a_copy_naming_a_remote_routes_and_none_keeps_the_branch_local() {
+        let none = "[branches.main]\n";
+        let r = route(
+            "main",
+            "main",
+            &[
+                ("main", "aaaaaaa0", Some(none)),
+                ("origin/main", "bbbbbbb0", Some(ORIGIN)),
+            ],
+        )
+        .unwrap();
+        assert_eq!(r.remote.as_deref(), Some("origin"));
+        assert_eq!(r.at.unwrap().0, Rev::new("bbbbbbb0"));
+        let r = route(
+            "main",
+            "main",
+            &[
+                ("main", "aaaaaaa0", Some(none)),
+                ("origin/main", "bbbbbbb0", Some(none)),
+            ],
+        )
+        .unwrap();
+        assert_eq!(r.remote, None);
+        assert_eq!(r.at.unwrap().0, Rev::new("aaaaaaa0"));
+    }
+
+    /// 124 (record 0060, 0069): two revisions naming different remotes are
+    /// refused, naming each remote and its ref, whatever else one of them
+    /// is refused for (`the_router_refuses_two_remotes_named`,
+    /// `two_remotes_are_still_refused_when_one_copy_is_refused_elsewhere`).
+    #[test]
+    fn two_remotes_named_are_refused_naming_each() {
+        let upstream = "[branches.main]\nremote = \"upstream\"\n";
+        for own in [
+            "[branches.main]\nremote = \"origin\"\n".to_string(),
+            format!("[branches.main]\nremote = \"origin\"\n{CACHE}"),
+        ] {
+            let err = route(
+                "main",
+                "main",
+                &[
+                    ("main", "aaaaaaa0", Some(&own)),
+                    ("upstream/main", "bbbbbbb0", Some(upstream)),
+                ],
+            )
+            .err()
+            .map(|e| format!("{e:#}"))
+            .expect("refused");
+            assert!(err.contains("origin on main (aaaaaaa)"), "{err}");
+            assert!(err.contains("upstream on upstream/main (bbbbbbb)"), "{err}");
+            assert!(!err.contains("cache"), "{err}");
+        }
+    }
+
+    /// 124, record 0069: a revision whose policy sluice refuses elsewhere,
+    /// for a `[[checkout.cache]]` table, still names its branch's remote,
+    /// beside a clean copy and as the one revision naming it; and the policy
+    /// it routes by keeps what the deciding reads, its signers among it
+    /// (`a_copy_refused_elsewhere_still_says_where_the_branch_is`,
+    /// `the_one_revision_naming_the_remote_is_refused_elsewhere`,
+    /// `made_from_and_policy_of_read_a_refused_copy_as_remote_does`).
+    #[test]
+    fn a_revision_refused_elsewhere_still_routes() {
+        let refused = format!("{ORIGIN}{CACHE}");
+        assert!(Policy::parse(&refused).is_err());
+        for held in [
+            vec![
+                ("bolt/x", "aaaaaaa0", Some(refused.as_str())),
+                ("origin/bolt/x", "bbbbbbb0", Some(ORIGIN)),
+            ],
+            vec![("bolt/x", "aaaaaaa0", Some(refused.as_str()))],
+        ] {
+            let r = route("bolt/x", "bolt/x", &held).unwrap();
+            assert_eq!(r.remote.as_deref(), Some("origin"));
+        }
+        let signed = format!("{ORIGIN}[signers.box]\nssh = \"keys/box.pub\"\n{CACHE}");
+        let held = [("main", "aaaaaaa0", Some(signed.as_str()))];
+        let r = route("main", "main", &held).unwrap();
+        assert_eq!(r.remote.as_deref(), Some("origin"));
+        let (rev, policy) = r.at.unwrap();
+        assert_eq!(rev, Rev::new("aaaaaaa0"));
+        assert_eq!(policy.signers.keys().collect::<Vec<_>>(), ["box"]);
+        let made = route("bolt/x", "main", &held).unwrap();
+        assert_eq!(made.remote.as_deref(), Some("origin"));
+    }
+
+    /// 124, record 0069: a `remote` that is not a remote's name refuses the
+    /// routing, naming the copy, its revision and what `remote` must be
+    /// (`a_remote_that_cant_be_read_refuses_naming_the_copy`).
+    #[test]
+    fn a_remote_that_cannot_be_read_refuses_naming_the_copy() {
+        let err = route(
+            "bolt/x",
+            "bolt/x",
+            &[(
+                "bolt/x",
+                "aaaaaaa0",
+                Some("[branches.main]\n[branches.\"bolt/*\"]\nremote = 1\n"),
+            )],
+        )
+        .err()
+        .map(|e| format!("{e:#}"))
+        .expect("refused");
+        assert!(err.contains("bolt/x's policy at aaaaaaa"), "{err}");
+        assert!(
+            err.contains("[branches.\"bolt/*\"] remote must be the name of a git remote"),
+            "{err}"
+        );
     }
 }

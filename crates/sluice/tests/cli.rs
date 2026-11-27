@@ -263,6 +263,83 @@ fn held_record(doc: &serde_json::Value, words: &str) {
     assert!(notice.contains(words), "{notice}");
 }
 
+/// 51; outcome-delivery spec, "wt submit removes a landed worktree" and
+/// "wt submit reports a blame": a waiting submit under `--confirm-landing`,
+/// as `wt submit` gives it where the worktree goes once it lands, hands its
+/// landing over by `wait` and confirms it on receipt; a blame it reports is
+/// handed over and stays owed (record 0102, design D5).
+#[test]
+fn a_waiting_submit_confirms_its_landing_on_receipt_and_leaves_a_blame_owed() {
+    let f = setup();
+    // In no pane: the round hands nothing over by notice.
+    f.world.not_delivering("crw-1-unit-1");
+    f.world.not_delivering("crw-1-unit-2");
+    work(
+        &f,
+        "unit/touches",
+        "crw-1-unit-1",
+        &[("plugin/lib/plan.py", Some("touched"))],
+    );
+    let (code, out) = sluice(
+        &f,
+        &[
+            "submit",
+            BRANCH,
+            "--worktree",
+            "unit/touches",
+            "--confirm-landing",
+        ],
+    );
+    assert_eq!(code, LANDED, "{out}");
+    let (_, out) = sluice(&f, &["status", "1", "--json"]);
+    let d = &json(&out)["delivery"];
+    assert_eq!(d["key"], "1:landed", "{d}");
+    assert_eq!(d["state"], "done", "{d}");
+    assert_eq!(d["handed"][0]["by"], "wait", "{d}");
+    assert!(d["confirmed"].is_string(), "{d}");
+
+    f.world
+        .fails_with("tests:t-batch-cards", "tests/t_cards.py", "broken");
+    work(
+        &f,
+        "unit/broken",
+        "crw-1-unit-2",
+        &[("tests/t_cards.py", Some("broken"))],
+    );
+    let (code, out) = sluice(
+        &f,
+        &[
+            "submit",
+            BRANCH,
+            "--worktree",
+            "unit/broken",
+            "--confirm-landing",
+        ],
+    );
+    assert_eq!(code, FAILED, "{out}");
+    let (_, out) = sluice(&f, &["status", "2", "--json"]);
+    let d = &json(&out)["delivery"];
+    assert_eq!(d["state"], "owed", "{d}");
+    assert_eq!(d["handed"][0]["by"], "wait", "{d}");
+    assert!(d["confirmed"].is_null(), "{d}");
+}
+
+/// Record 0065: a wait from a worktree whose submission has landed ends at
+/// once with its landing, and runs no round, which would start the
+/// submission queued behind it.
+#[test]
+fn a_wait_on_a_landed_submission_runs_no_round() {
+    let f = setup();
+    work(&f, "unit/a", "agent-a", &[("plugin/a", Some("a"))]);
+    let (code, out) = sluice(&f, &["submit", BRANCH, "--worktree", "unit/a"]);
+    assert_eq!(code, LANDED, "{out}");
+    work(&f, "unit/b", "agent-b", &[("tests/b", Some("b"))]);
+    sluice(&f, &["submit", BRANCH, "--worktree", "unit/b", "--no-wait"]);
+    let (code, out) = sluice(&f, &["wait", BRANCH, "--worktree", "unit/a"]);
+    assert_eq!(code, LANDED, "{out}");
+    assert_eq!(state_of(&f, 2), "queued");
+}
+
 #[test]
 fn submit_fails_and_names_the_combination() {
     let f = setup();

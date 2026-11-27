@@ -153,32 +153,6 @@ fn live_from_here(d: &OnDisk) {
     }
 }
 
-/// 135 (design D1): a second host process started while the first lives
-/// ends at once and moves nothing; the first goes on.
-#[test]
-fn a_second_host_process_ends_at_once() {
-    let d = OnDisk::new("host-second", POLICY);
-    let client = d.client(d.repo.dir());
-    let repository = d.repository(d.repo.dir());
-    let follow = client
-        .subscribe(vec![sluice::host_process::protocol::Added {
-            folder: std::path::PathBuf::from(&repository),
-            kind: FollowKind::Wait,
-        }])
-        .expect("the host process starts");
-    let first = follow.named.pid;
-    let out = d.command(d.repo.dir()).arg("host").output().unwrap();
-    assert!(out.status.success(), "{}", text(&out));
-    let again = client.answering().unwrap().expect("the first answers");
-    assert_eq!(again.named.pid, first);
-    assert!(alive(first));
-    assert!(
-        text(&out).contains("another host process holds"),
-        "{}",
-        text(&out)
-    );
-}
-
 /// 135 (design D1): a host process killed leaves its socket, which the
 /// next one replaces, at the same path.
 #[test]
@@ -201,27 +175,6 @@ fn a_socket_a_killed_host_process_left_is_replaced() {
     assert_ne!(next.named.pid, first);
     assert!(client.paths().socket.exists());
     assert!(client.paths().version().exists());
-}
-
-/// 135 (design D2): ten commands reaching at once start one host
-/// process.
-#[test]
-fn ten_reaches_at_once_start_one_host_process() {
-    let d = OnDisk::new("host-ten", POLICY);
-    let client = d.client(d.repo.dir());
-    let barrier = std::sync::Arc::new(std::sync::Barrier::new(10));
-    let reached: Vec<_> = (0..10)
-        .map(|_| {
-            let (client, barrier) = (client.clone(), barrier.clone());
-            std::thread::spawn(move || {
-                barrier.wait();
-                client.reach().expect("reached")
-            })
-        })
-        .collect();
-    let connections: Vec<_> = reached.into_iter().map(|t| t.join().unwrap()).collect();
-    let pids: BTreeSet<u32> = connections.iter().map(|c| c.named.pid).collect();
-    assert_eq!(pids.len(), 1, "{pids:?}");
 }
 
 /// 135 (design D2): a host process that does not answer within ten
@@ -501,83 +454,6 @@ fn the_host_processs_look_at_an_idle_repository_starts_nothing() {
         .unwrap();
     assert!(!out.status.success(), "{}", text(&out));
     assert_eq!(refused(), 1, "a command's ask: {}", host_logs(&d));
-    drop(held);
-}
-
-/// reader-tick, "A remote's records are asked for once a minute where
-/// nothing is in play" (129 as amended 2026-11-19): a host process that
-/// lives on, here for a subscription of no folder, asks origin for the records of
-/// a repository with nothing in play once as it starts, and not again
-/// within the minute, however many times it goes through its index; a
-/// watch's opening asks origin at once, and the watch's passes, a second
-/// apart, ask nothing more within the minute.
-#[test]
-fn an_idle_repositorys_remote_is_asked_once_a_minute() {
-    let (_origin, d) = on_origin("host-idle-asks");
-    let repository = d.repository(d.repo.dir());
-    within(15, "the host process ends once idle", || {
-        answering(&d).is_none()
-    });
-    let before = d.git.count();
-    let client = d.client(d.repo.dir());
-    // A subscription of no folder keeps it, and reads nothing.
-    let held = client
-        .subscribe(Vec::new())
-        .expect("the host process starts");
-    let pid = answering(&d).expect("the host process answers");
-    let asks = || {
-        d.git.parented()[before..]
-            .iter()
-            .filter(|(p, args)| *p == pid && asks_a_remote(args))
-            .count()
-    };
-    let said = || {
-        format!(
-            "{:?}\n{}",
-            &d.git.parented()[before..],
-            std::fs::read_to_string(client.paths().log()).unwrap_or_default()
-        )
-    };
-    let until = Instant::now() + Duration::from_secs(10);
-    while asks() != 1 {
-        assert!(
-            Instant::now() < until,
-            "its first look asks origin: {}",
-            said()
-        );
-        std::thread::sleep(Duration::from_millis(100));
-    }
-    std::thread::sleep(Duration::from_secs(7));
-    assert_eq!(
-        asks(),
-        1,
-        "a look within the minute asked origin: {}",
-        said()
-    );
-
-    let watch = client
-        .subscribe(vec![sluice::host_process::protocol::Added {
-            folder: std::path::PathBuf::from(&repository),
-            kind: FollowKind::Watch,
-        }])
-        .expect("the watch follows");
-    let until = Instant::now() + Duration::from_secs(10);
-    while asks() != 2 {
-        assert!(
-            Instant::now() < until,
-            "the watch's opening asks origin: {}",
-            said()
-        );
-        std::thread::sleep(Duration::from_millis(100));
-    }
-    std::thread::sleep(Duration::from_secs(4));
-    assert_eq!(
-        asks(),
-        2,
-        "a watched pass within the minute asked origin: {}",
-        said()
-    );
-    drop(watch);
     drop(held);
 }
 
@@ -874,25 +750,21 @@ fn an_older_command_uses_a_newer_host_process() {
     );
 }
 
-/// host-process, "A submit with no host process running": the submit
-/// starts it, and it lands the submission with no other command run (135).
+/// One host process serves every command and every repository of the host
+/// (135, 129; design D1, D2, D4). host-process, "Ten submits at once": with
+/// none running, ten submits at once each get a number of their own and
+/// start one host process, its log naming one start. 135 (design D2): ten
+/// reaches at once reach that one. 135 (design D1): a second `sluice host`
+/// while it lives ends at once, saying another holds the host, and the
+/// first goes on. host-process, "Two repositories, one process", and "A
+/// submit with no host process running": a submission of a second
+/// repository reaches the same process, which lands both repositories'
+/// submissions.
 #[test]
-fn a_submit_with_no_host_process_running_lands() {
-    let d = OnDisk::new("host-submit", POLICY);
-    let dir = d.session("a");
+fn one_host_process_serves_every_command_and_repository() {
+    let d = OnDisk::new("host-one", POLICY);
+    let b = d.another("host-one-b", POLICY);
     assert_eq!(answering(&d), None);
-    let id = queued_live(&d, &dir);
-    assert!(answering(&d).is_some(), "a host process runs");
-    within(60, "the submission lands", || {
-        state(&d, d.repo.dir(), id) == "landed"
-    });
-}
-
-/// host-process, "Ten submits at once": each has its own number, and one
-/// host process starts (135; design D2).
-#[test]
-fn ten_submits_at_once_start_one_host_process() {
-    let d = OnDisk::new("host-ten-submits", POLICY);
     let dirs: Vec<_> = (0..10).map(|n| d.session(&format!("s{n}"))).collect();
     let barrier = std::sync::Arc::new(std::sync::Barrier::new(10));
     let started: Vec<_> = dirs
@@ -920,6 +792,55 @@ fn ten_submits_at_once_start_one_host_process() {
     assert_eq!(log.matches(" started, pid ").count(), 1, "{log}");
     assert!(!log.contains("another host process holds"), "{log}");
     assert!(!client.paths().previous_log().exists(), "one process's log");
+    let pid = answering(&d).expect("a host process runs");
+
+    let barrier = std::sync::Arc::new(std::sync::Barrier::new(10));
+    let reached: Vec<_> = (0..10)
+        .map(|_| {
+            let (client, barrier) = (client.clone(), barrier.clone());
+            std::thread::spawn(move || {
+                barrier.wait();
+                client.reach().expect("reached")
+            })
+        })
+        .collect();
+    let connections: Vec<_> = reached.into_iter().map(|t| t.join().unwrap()).collect();
+    let pids: BTreeSet<u32> = connections.iter().map(|c| c.named.pid).collect();
+    assert_eq!(pids, BTreeSet::from([pid]));
+    drop(connections);
+
+    let out = d.command(d.repo.dir()).arg("host").output().unwrap();
+    assert!(out.status.success(), "{}", text(&out));
+    assert!(
+        text(&out).contains("another host process holds"),
+        "{}",
+        text(&out)
+    );
+    assert_eq!(answering(&d), Some(pid));
+
+    let theirs = session_of(&d, &b, "theirs");
+    let id_b = queued_live(&d, &theirs);
+    assert_eq!(answering(&d), Some(pid), "the same process");
+    within(120, "both repositories land", || {
+        ids.iter()
+            .all(|id| state(&d, d.repo.dir(), *id) == "landed")
+            && state(&d, b.dir(), id_b) == "landed"
+    });
+}
+
+/// host-process, "Started from another repository": the process a submit
+/// in B starts finds A in its index and lands both (135; design D4).
+#[test]
+fn started_from_another_repository_lands_both() {
+    let d = OnDisk::new("host-from-a", POLICY);
+    let b = d.another("host-from-b", POLICY);
+    let id_a = queued(&d, "a");
+    kill(answering(&d).expect("the host process the submit started"));
+    within(10, "it is gone", || answering(&d).is_none());
+    let id_b = queued_live(&d, b.dir());
+    within(60, "both land", || {
+        state(&d, d.repo.dir(), id_a) == "landed" && state(&d, b.dir(), id_b) == "landed"
+    });
 }
 
 /// host-process, "A withdrawal with no host process running": the
@@ -951,36 +872,6 @@ fn a_withdrawal_starts_the_host_process() {
     assert!(out.status.success(), "{}", text(&out));
     assert!(answering(&d).is_some(), "a host process runs");
     within(60, "the checkout is released", || checkouts() == 0);
-}
-
-/// host-process, "Two repositories, one process" (135).
-#[test]
-fn two_repositories_one_host_process() {
-    let d = OnDisk::new("host-two-a", POLICY);
-    let b = d.another("host-two-b", POLICY);
-    let a_dir = d.session("a");
-    let id_a = queued_live(&d, &a_dir);
-    let pid = answering(&d).expect("a host process runs");
-    let id_b = queued_live(&d, b.dir());
-    assert_eq!(answering(&d), Some(pid), "the same process");
-    within(60, "both land", || {
-        state(&d, d.repo.dir(), id_a) == "landed" && state(&d, b.dir(), id_b) == "landed"
-    });
-}
-
-/// host-process, "Started from another repository": the process a submit
-/// in B starts finds A in its index and lands both (135; design D4).
-#[test]
-fn started_from_another_repository_lands_both() {
-    let d = OnDisk::new("host-from-a", POLICY);
-    let b = d.another("host-from-b", POLICY);
-    let id_a = queued(&d, "a");
-    kill(answering(&d).expect("the host process the submit started"));
-    within(10, "it is gone", || answering(&d).is_none());
-    let id_b = queued_live(&d, b.dir());
-    within(60, "both land", || {
-        state(&d, d.repo.dir(), id_a) == "landed" && state(&d, b.dir(), id_b) == "landed"
-    });
 }
 
 /// host-process, "Started from inside a hook and a pane": the checks the
@@ -2243,18 +2134,29 @@ fn answers(d: &OnDisk, daemon: &Daemon) {
 /// The host process's tick (64, 129).
 const TICK: Duration = Duration::from_secs(3);
 
-/// host-daemon, "Idle, it keeps running", and host-process, "A daemon's
-/// queues empty" (135, 137; design D1 of `sluice-runs-as-a-daemon`):
-/// `sluice daemon` with nothing queued and nothing following it still runs
-/// three ticks on, the host process that answers is it, and its `hello`
-/// and `host/version` say it is a daemon; and once the one submission
-/// queued lands, it still runs three ticks after the landing.
+/// `sluice daemon`'s life (135, 137, 150; design D1 and D8 of
+/// `sluice-runs-as-a-daemon`). host-daemon, "Started in a repository": a
+/// daemon started in a repository in no index adds it to the host's index
+/// before it answers. host-process, "A daemon": its `hello`, `host/version`
+/// and `sluice overview --json` say it is a daemon and give its pid.
+/// host-daemon, "Idle, it keeps running": with nothing queued and nothing
+/// following it, it still runs three ticks on. host-daemon, "A submission
+/// to an idle daemon", and host-process, "A daemon's queues empty": a
+/// submit that does not wait reaches it, it lands the submission with no
+/// other host process started, and it still runs three ticks after.
+/// host-daemon, "Started in no repository": started in `/`, it answers
+/// all the same, the index as it was. A host process a wait started is no
+/// daemon, as the overview says.
 #[test]
-fn an_idle_daemon_keeps_running() {
-    let d = OnDisk::new("daemon-idle", POLICY);
+fn a_daemon_keeps_running_and_lands_what_it_is_given() {
+    let d = OnDisk::new("daemon-life", POLICY);
     let dir = d.session("a");
+    let index = d.client(d.repo.dir()).paths().index();
+    assert_eq!(index.list().unwrap(), Vec::<std::path::PathBuf>::new());
+    let repository = std::fs::canonicalize(d.repo.dir().join(".git")).unwrap();
     let mut daemon = Daemon::start(&d, d.repo.dir());
     answers(&d, &daemon);
+    assert_eq!(index.list().unwrap(), vec![repository]);
     let hello = named(&d).expect("it answers");
     assert!(hello.daemon, "{hello:?}");
     let version = d
@@ -2264,6 +2166,9 @@ fn an_idle_daemon_keeps_running() {
         .expect("host/version");
     assert!(version.daemon, "{version:?}");
     assert_eq!(version.pid, daemon.pid());
+    let doc = overview_of(&d);
+    assert_eq!(doc["host_process"]["daemon"], true, "{doc}");
+    assert_eq!(doc["host_process"]["pid"], daemon.pid(), "{doc}");
 
     std::thread::sleep(TICK * 3);
     assert!(daemon.runs(), "idle three ticks: {}", daemon.said());
@@ -2273,6 +2178,12 @@ fn an_idle_daemon_keeps_running() {
     within(60, "the submission lands", || {
         state(&d, d.repo.dir(), id) == "landed"
     });
+    let starts = starts_in_log(&d);
+    assert_eq!(starts.len(), 1, "one host process started: {starts:#?}");
+    assert!(
+        starts[0].contains(&format!("sluice daemon {} started", sluice::VERSION)),
+        "{starts:#?}"
+    );
     std::thread::sleep(TICK * 3);
     assert!(
         daemon.runs(),
@@ -2280,6 +2191,38 @@ fn an_idle_daemon_keeps_running() {
         daemon.said()
     );
     assert_eq!(answering(&d), Some(daemon.pid()));
+    drop(daemon);
+
+    let d = OnDisk::new("daemon-life-nowhere", POLICY);
+    let index = d.client(d.repo.dir()).paths().index();
+    let daemon = Daemon::start(&d, Path::new("/"));
+    answers(&d, &daemon);
+    assert_eq!(index.list().unwrap(), Vec::<std::path::PathBuf>::new());
+    drop(daemon);
+
+    let d = OnDisk::new("daemon-life-wait", POLICY);
+    let repository = d.repository(d.repo.dir());
+    let follow = d
+        .client(d.repo.dir())
+        .subscribe(vec![sluice::host_process::protocol::Added {
+            folder: std::path::PathBuf::from(&repository),
+            kind: FollowKind::Wait,
+        }])
+        .unwrap();
+    let doc = overview_of(&d);
+    assert_eq!(doc["host_process"]["daemon"], false, "{doc}");
+    assert_eq!(doc["host_process"]["pid"], follow.named.pid, "{doc}");
+}
+
+/// `sluice overview --json` of `d`'s repository.
+fn overview_of(d: &OnDisk) -> serde_json::Value {
+    let out = d
+        .command(d.repo.dir())
+        .args(["overview", "--json"])
+        .output()
+        .unwrap();
+    assert!(out.status.success(), "{}", text(&out));
+    serde_json::from_slice(&out.stdout).unwrap()
 }
 
 /// The lines of the host process's log and the one before it that say a
@@ -2297,91 +2240,6 @@ fn starts_in_log(d: &OnDisk) -> Vec<String> {
         })
         .filter(|l| l.contains(" started") || l.contains("another host process holds"))
         .collect()
-}
-
-/// host-daemon, "A submission to an idle daemon" (135, 137; design D1 of
-/// `sluice-runs-as-a-daemon`): a submit that does not wait, in a repository
-/// whose `main` holds a policy, reaches the idle daemon, which lands it,
-/// and no other host process starts.
-#[test]
-fn a_daemon_lands_a_submission_with_no_other_host_process() {
-    let d = OnDisk::new("daemon-lands", POLICY);
-    let dir = d.session("a");
-    let mut daemon = Daemon::start(&d, d.repo.dir());
-    answers(&d, &daemon);
-    std::thread::sleep(TICK);
-    let id = queued_live(&d, &dir);
-    within(60, "the submission lands", || {
-        state(&d, d.repo.dir(), id) == "landed"
-    });
-    assert!(daemon.runs(), "{}", daemon.said());
-    assert_eq!(answering(&d), Some(daemon.pid()));
-    let starts = starts_in_log(&d);
-    assert_eq!(starts.len(), 1, "one host process started: {starts:#?}");
-    assert!(
-        starts[0].contains(&format!("sluice daemon {} started", sluice::VERSION)),
-        "{starts:#?}"
-    );
-}
-
-/// host-daemon, "Started in a repository" and "Started in no repository"
-/// (135; design D8 of `sluice-runs-as-a-daemon`): `sluice daemon` started
-/// in a repository whose `main` holds a policy, in no index, adds it to the
-/// host's index before it runs as the host process; started in `/`, it
-/// runs as the host process all the same, and the index is as it was.
-#[test]
-fn a_daemon_indexes_the_repository_it_starts_in() {
-    let d = OnDisk::new("daemon-index", POLICY);
-    let index = d.client(d.repo.dir()).paths().index();
-    assert_eq!(index.list().unwrap(), Vec::<std::path::PathBuf>::new());
-    let repository = std::fs::canonicalize(d.repo.dir().join(".git")).unwrap();
-    let daemon = Daemon::start(&d, d.repo.dir());
-    answers(&d, &daemon);
-    assert_eq!(index.list().unwrap(), vec![repository]);
-    drop(daemon);
-
-    let d = OnDisk::new("daemon-index-none", POLICY);
-    let index = d.client(d.repo.dir()).paths().index();
-    let daemon = Daemon::start(&d, Path::new("/"));
-    answers(&d, &daemon);
-    assert_eq!(index.list().unwrap(), Vec::<std::path::PathBuf>::new());
-}
-
-/// host-process, "A daemon" (150; design D1 of `sluice-runs-as-a-daemon`):
-/// with `sluice daemon` running, `sluice overview --json` gives
-/// `host_process.daemon` true and its pid; with a host process a wait
-/// started, `host_process.daemon` is false.
-#[test]
-fn the_overview_names_a_daemon() {
-    let overview = |d: &OnDisk| {
-        let out = d
-            .command(d.repo.dir())
-            .args(["overview", "--json"])
-            .output()
-            .unwrap();
-        assert!(out.status.success(), "{}", text(&out));
-        serde_json::from_slice::<serde_json::Value>(&out.stdout).unwrap()
-    };
-    let d = OnDisk::new("daemon-overview", POLICY);
-    let daemon = Daemon::start(&d, d.repo.dir());
-    answers(&d, &daemon);
-    let doc = overview(&d);
-    assert_eq!(doc["host_process"]["daemon"], true, "{doc}");
-    assert_eq!(doc["host_process"]["pid"], daemon.pid(), "{doc}");
-    drop(daemon);
-
-    let d = OnDisk::new("daemon-overview-wait", POLICY);
-    let repository = d.repository(d.repo.dir());
-    let follow = d
-        .client(d.repo.dir())
-        .subscribe(vec![sluice::host_process::protocol::Added {
-            folder: std::path::PathBuf::from(&repository),
-            kind: FollowKind::Wait,
-        }])
-        .unwrap();
-    let doc = overview(&d);
-    assert_eq!(doc["host_process"]["daemon"], false, "{doc}");
-    assert_eq!(doc["host_process"]["pid"], follow.named.pid, "{doc}");
 }
 
 /// A policy whose check marks that it began in `marks`, then waits for
@@ -2583,26 +2441,38 @@ fn ask_hand_over(d: &OnDisk, program: &Path) {
     assert_eq!(answer, sluice::host_process::protocol::Answer::Ok);
 }
 
-/// host-daemon, "The daemon is asked to hand over" (135; design D3, D4
-/// of `sluice-runs-as-a-daemon`): a daemon running a combination's checks,
-/// asked to hand over naming an executable, starts afresh in place as that
-/// executable: a host process with its pid and a later `since` answers as
-/// a daemon, its log says it started afresh as that executable, and the
-/// submission lands.
+/// A daemon's start afresh in place (135; record 0107 as amended
+/// 2026-11-13; design D3 to D6 of `sluice-runs-as-a-daemon`; design D6 of
+/// `sluice-host-runs-on-a-tokio-edge`). host-daemon, "The daemon is asked
+/// to hand over": running a combination's checks and asked to hand over
+/// naming an executable, it starts afresh in place as that executable,
+/// its pid kept and a later `since`, answering as a daemon on the socket
+/// it held, the same file, its log naming the executable; the submission
+/// lands with no check run again. host-daemon, "An executable that is not
+/// there": asked to hand over naming an executable that is not there, it
+/// goes on as it was, its log naming the executable once. host-daemon, "A
+/// submit during the start afresh", and settings-take-up, "A submit during
+/// a daemon's start afresh": a submit made as it starts afresh for a
+/// changed `[telemetry]` reaches the daemon started afresh, which lands
+/// it, and no other host process starts.
 #[test]
-fn a_daemon_asked_to_hand_over_starts_afresh_in_place() {
+fn a_daemon_starts_afresh_in_place_when_asked() {
+    use std::os::unix::fs::MetadataExt;
     let marks = support::Scratch::new("daemon-afresh-marks");
     let d = OnDisk::new("daemon-afresh", &held_policy(&marks));
+    settings(&d, "[telemetry]\nservice = \"one\"\n");
     let dir = d.session("a");
     let daemon = Daemon::start(&d, d.repo.dir());
     answers(&d, &daemon);
     let first = named(&d).expect("it answers");
+    let socket = d.client(d.repo.dir()).paths().socket.clone();
+    let inode = std::fs::metadata(&socket).unwrap().ino();
     let id = queued_live(&d, &dir);
     within(60, "the combination's check runs", || {
         marks.path().join("began").exists()
     });
-    // The executable named: a copy of sluice's, so the image started
-    // afresh is the one the ask named.
+
+    // Asked to hand over naming a copy of sluice's executable.
     let bin = support::Scratch::new("daemon-afresh-bin");
     let copy = bin.path().join("sluice");
     std::fs::copy(env!("CARGO_BIN_EXE_sluice"), &copy).unwrap();
@@ -2616,12 +2486,55 @@ fn a_daemon_asked_to_hand_over_starts_afresh_in_place() {
         logs.contains(&format!("started afresh in place as {}", copy.display())),
         "{logs}"
     );
+    assert_eq!(
+        std::fs::metadata(&socket).unwrap().ino(),
+        inode,
+        "the same socket: {logs}"
+    );
+
+    // Asked to hand over naming an executable that is not there.
+    let now = named(&d).expect("it answers");
+    let none = support::Scratch::new("daemon-afresh-none");
+    let missing = none.path().join("no-such-sluice");
+    ask_hand_over(&d, &missing);
+    within(90, "it says it could not start afresh", || {
+        host_logs(&d).contains("could not start afresh")
+    });
+    let after = named(&d).expect("it answers");
+    assert_eq!((after.pid, &after.since), (now.pid, &now.since));
+    let logs = host_logs(&d);
+    assert_eq!(
+        logs.matches(&missing.display().to_string()).count(),
+        1,
+        "{logs}"
+    );
+
     std::fs::write(marks.path().join("go"), "").unwrap();
     within(60, "the submission lands", || {
         state(&d, d.repo.dir(), id) == "landed"
     });
     let ran = std::fs::read_to_string(marks.path().join("began")).unwrap();
     assert_eq!(ran.lines().count(), 1, "no check ran again: {ran}");
+
+    // A submit made as it starts afresh for a changed `[telemetry]`.
+    settings(&d, "[telemetry]\nservice = \"two\"\n");
+    within(30, "the daemon starts afresh", || {
+        host_logs(&d).contains("it starts afresh in its own process")
+    });
+    let b = d.session("b");
+    let next = queued_live(&d, &b);
+    within(ENDS_WITHIN, "the daemon started afresh answers", || {
+        named(&d).is_some_and(|n| n.pid == first.pid && n.since != after.since)
+    });
+    within(60, "the submission lands", || {
+        state(&d, d.repo.dir(), next) == "landed"
+    });
+    let starts = starts_in_log(&d);
+    assert!(
+        starts.iter().all(|l| l.contains("sluice daemon ")),
+        "no other host process: {starts:#?}"
+    );
+    assert_eq!(answering(&d), Some(daemon.pid()));
 }
 
 /// A child killed and waited for once dropped.
@@ -2724,74 +2637,6 @@ fn a_newer_client_has_an_older_daemon_start_afresh() {
     assert_eq!(asked["program"], own.display().to_string(), "{asked}");
     assert_eq!(reached.named.pid, started.0.id());
     assert!(reached.named.daemon, "{:?}", reached.named);
-}
-
-/// host-daemon, "An executable that is not there" (design D3 of
-/// `sluice-runs-as-a-daemon`): a daemon asked to hand over naming an
-/// executable that is not there goes on as it was: the host process that
-/// answers has its pid and its first `since`, its log names the executable
-/// once, and it goes on passing.
-#[test]
-fn a_daemon_whose_start_afresh_fails_goes_on() {
-    let d = OnDisk::new("daemon-afresh-fails", POLICY);
-    let dir = d.session("a");
-    let daemon = Daemon::start(&d, d.repo.dir());
-    answers(&d, &daemon);
-    let first = named(&d).expect("it answers");
-    let none = support::Scratch::new("daemon-afresh-none");
-    let missing = none.path().join("no-such-sluice");
-    ask_hand_over(&d, &missing);
-    within(90, "it says it could not start afresh", || {
-        host_logs(&d).contains("could not start afresh")
-    });
-    let now = named(&d).expect("it answers");
-    assert_eq!((now.pid, &now.since), (first.pid, &first.since));
-    let logs = host_logs(&d);
-    assert_eq!(
-        logs.matches(&missing.display().to_string()).count(),
-        1,
-        "{logs}"
-    );
-    let id = queued_live(&d, &dir);
-    within(60, "the submission lands", || {
-        state(&d, d.repo.dir(), id) == "landed"
-    });
-    assert_eq!(answering(&d), Some(daemon.pid()));
-}
-
-/// host-daemon, "A submit during the start afresh", and settings-take-up,
-/// "A submit during a daemon's start afresh" (135; record 0107 as amended
-/// 2026-11-13; design D5, D6 of `sluice-runs-as-a-daemon`): a submit made
-/// as the daemon starts afresh for a changed `[telemetry]` reaches the
-/// daemon started afresh, no other host process starts, and the
-/// submission lands.
-#[test]
-fn a_submit_during_a_daemons_start_afresh_reaches_it() {
-    let d = OnDisk::new("daemon-afresh-submit", POLICY);
-    settings(&d, "[telemetry]\nservice = \"one\"\n");
-    let dir = d.session("a");
-    let daemon = Daemon::start(&d, d.repo.dir());
-    answers(&d, &daemon);
-    let first = named(&d).expect("it answers");
-
-    settings(&d, "[telemetry]\nservice = \"two\"\n");
-    within(30, "the daemon starts afresh", || {
-        host_logs(&d).contains("it starts afresh in its own process")
-    });
-    let id = queued_live(&d, &dir);
-    // It starts afresh once its readings in flight finish.
-    within(ENDS_WITHIN, "the daemon started afresh answers", || {
-        named(&d).is_some_and(|n| n.pid == first.pid && n.since != first.since)
-    });
-    within(60, "the submission lands", || {
-        state(&d, d.repo.dir(), id) == "landed"
-    });
-    let starts = starts_in_log(&d);
-    assert!(
-        starts.iter().all(|l| l.contains("sluice daemon ")),
-        "no other host process: {starts:#?}"
-    );
-    assert_eq!(answering(&d), Some(daemon.pid()));
 }
 
 /// host-daemon, "Stopped while a run goes on" (135; design D7 of
@@ -3346,15 +3191,6 @@ mod edge {
                 .filter(|p| *p == r)
                 .count()
         }
-
-        pub fn passes(&self, r: &Path) -> usize {
-            self.passes
-                .lock()
-                .unwrap()
-                .iter()
-                .filter(|p| *p == r)
-                .count()
-        }
     }
 
     struct Fake {
@@ -3555,32 +3391,6 @@ async fn three_idle_repositories_are_read_once_a_minute() {
         }
     }
     assert_eq!(seen.passes.lock().unwrap().len(), 0, "no pass");
-}
-
-/// host-events, "Five serves during a reading" (`one-read-in-flight@e99acda774d0`):
-/// five commands' `serve` while a pass is in flight make one more pass
-/// after it, and no third.
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn five_serves_during_a_reading_make_one_more() {
-    let seen = edge::Seen::default();
-    let tasks = edge::tasks(&seen, Duration::from_millis(300));
-    let repo = std::path::PathBuf::from("/host/five.git");
-    let _run = tasks
-        .handle(&repo)
-        .follow(sluice::host_process::protocol::FollowKind::Run);
-    let first = tasks.handle(&repo);
-    first.wake();
-    edge::soon("the worker holds it", || tasks.holds(&repo)).await;
-    // The pass the wake asked is in flight for 300 ms.
-    tokio::time::sleep(Duration::from_millis(50)).await;
-    let before = seen.passes(&repo);
-    for _ in 0..5 {
-        tasks.told(&repo);
-        tasks.handle(&repo).wake();
-    }
-    edge::soon("one more pass", || seen.passes(&repo) == before + 2).await;
-    tokio::time::sleep(Duration::from_millis(800)).await;
-    assert_eq!(seen.passes(&repo), before + 2, "no third pass");
 }
 
 /// host-events, "A burst of ref changes" (`one-read-in-flight@e99acda774d0`):
@@ -3785,35 +3595,6 @@ fn sigterm_stops_a_host_process_after_its_round() {
     let _ = again.wait();
 }
 
-/// host-daemon, "The daemon is asked to hand over", on tokio's edge
-/// (design D6 of `sluice-host-runs-on-a-tokio-edge`): a daemon that starts
-/// afresh in place answers on the socket it held, the same file, so a
-/// command that connects meanwhile waits in its queue.
-#[test]
-fn a_daemon_started_afresh_answers_on_its_socket() {
-    use std::os::unix::fs::MetadataExt;
-    let d = OnDisk::new("daemon-socket", POLICY);
-    let daemon = Daemon::start(&d, d.repo.dir());
-    answers(&d, &daemon);
-    let first = named(&d).expect("it answers");
-    let socket = d.client(d.repo.dir()).paths().socket.clone();
-    let inode = std::fs::metadata(&socket).unwrap().ino();
-    let bin = support::Scratch::new("daemon-socket-bin");
-    let copy = bin.path().join("sluice");
-    std::fs::copy(env!("CARGO_BIN_EXE_sluice"), &copy).unwrap();
-    let copy = std::fs::canonicalize(&copy).unwrap();
-    ask_hand_over(&d, &copy);
-    within(60, "the daemon started afresh answers", || {
-        named(&d).is_some_and(|n| n.pid == first.pid && n.since != first.since && n.daemon)
-    });
-    assert_eq!(
-        std::fs::metadata(&socket).unwrap().ino(),
-        inode,
-        "the same socket: {}",
-        host_logs(&d)
-    );
-}
-
 /// host-events, "Another process writes the records": with a watch
 /// following a host process and nothing in play, no document comes while
 /// nothing changes; a submission another process writes to `main`'s
@@ -3977,84 +3758,6 @@ fn host_git_running(d: &OnDisk, pid: u32) -> bool {
         .unwrap_or(false)
 }
 
-/// resident-reads, "A status in text and in JSON" (design D1): `sluice
-/// status main` and its `--json` show `main`'s queue with `#4` as
-/// `sluice host` answers it; the status process starts no git but the
-/// branch protection's look at its hook.
-#[test]
-fn a_status_is_answered_by_sluice_host() {
-    let (_origin, d) = on_origin("host-answers-status");
-    let id = queued(&d, "mine");
-    let mut sub = held(&d);
-    settled(&mut sub);
-    for json in [false, true] {
-        let before = d.git.count();
-        let mut c = d.command(d.repo.dir());
-        c.env("SLUICE_ROUND_SLEEP", "record")
-            .args(["status", "main"]);
-        if json {
-            c.arg("--json");
-        }
-        let child = c
-            .stdout(std::process::Stdio::piped())
-            .stderr(std::process::Stdio::piped())
-            .spawn()
-            .unwrap();
-        let pid = child.id();
-        let out = child.wait_with_output().unwrap();
-        assert!(out.status.success(), "{}", text(&out));
-        let shown = String::from_utf8_lossy(&out.stdout);
-        match json {
-            true => {
-                let doc: serde_json::Value = serde_json::from_str(&shown).unwrap();
-                assert_eq!(doc["branch"], "main", "{doc}");
-                assert!(
-                    doc["submissions"]
-                        .as_array()
-                        .is_some_and(|s| s.iter().any(|x| x["id"].as_u64() == Some(id))),
-                    "{doc}"
-                );
-            }
-            false => assert!(shown.contains(&format!("#{id}")), "{shown}"),
-        }
-        let own: Vec<String> = d.git.parented()[before..]
-            .iter()
-            .filter(|(p, args)| {
-                *p == pid && !args.contains(" rev-parse ") && !args.contains(" worktree list")
-            })
-            .map(|(_, a)| a.clone())
-            .collect();
-        assert!(own.is_empty(), "the status ran git: {own:?}");
-    }
-}
-
-/// resident-reads, "A status with no git" (design D2): with `sluice host`
-/// running, `sluice status main --json` with no git on its path shows the
-/// queue and exits 0.
-#[test]
-fn a_status_runs_with_no_git() {
-    let (_origin, d) = on_origin("host-status-no-git");
-    let id = queued(&d, "mine");
-    let mut sub = held(&d);
-    settled(&mut sub);
-    let empty = support::Scratch::new("host-status-no-git-path");
-    let mut c = d.command(d.repo.dir());
-    let out = no_git(&mut c, &empty)
-        .env("SLUICE_ROUND_SLEEP", "record")
-        .args(["status", "main", "--json"])
-        .output()
-        .unwrap();
-    assert!(out.status.success(), "{}", text(&out));
-    let doc: serde_json::Value =
-        serde_json::from_slice(&out.stdout).unwrap_or_else(|_| panic!("{}", text(&out)));
-    assert!(
-        doc["submissions"]
-            .as_array()
-            .is_some_and(|s| s.iter().any(|x| x["id"].as_u64() == Some(id))),
-        "{doc}"
-    );
-}
-
 /// resident-reads, "A folder in no repository" (design D2): a status in a
 /// folder that is in no repository prints what a status printed there
 /// before, `sluice: opening the repository at <folder>: ...`, and exits 3;
@@ -4088,27 +3791,6 @@ fn a_status_in_no_repository_says_as_before() {
         serde_json::from_slice(&out.stdout).unwrap_or_else(|_| panic!("{}", text(&out)));
     assert_eq!(doc["error"]["kind"], "internal", "{doc}");
     stop_host(&d);
-}
-
-/// resident-reads, "The home view" (design D1, D2): `sluice` with no
-/// command in a worktree that submitted `#n` shows it, as `sluice host`
-/// answers it, with no git on its path.
-#[test]
-fn the_home_view_is_answered_by_sluice_host() {
-    let (_origin, d) = on_origin("host-answers-home");
-    let dir = d.session("mine");
-    let id = queued_from(&d, &dir);
-    let mut sub = held(&d);
-    settled(&mut sub);
-    let empty = support::Scratch::new("host-answers-home-path");
-    let mut c = d.command(&dir);
-    let out = no_git(&mut c, &empty)
-        .env("SLUICE_ROUND_SLEEP", "record")
-        .output()
-        .unwrap();
-    assert!(out.status.success(), "{}", text(&out));
-    let shown = String::from_utf8_lossy(&out.stdout);
-    assert!(shown.contains(&format!("#{id}")), "{shown}");
 }
 
 /// design D3: a status while a step of the repository is long under way
@@ -4252,96 +3934,6 @@ fn ten_statuses_share_one_read() {
     assert_eq!(fetches, 1, "one reading");
 }
 
-/// resident-subscriptions, "Twenty statuses during a reading" (design D5):
-/// a reading in flight, a command told of a change, and twenty statuses
-/// within the reading's time: one more reading follows the first, and no
-/// third.
-#[test]
-fn twenty_statuses_during_a_reading_make_one_more() {
-    let (_origin, d) = on_origin("host-twenty-statuses");
-    queued(&d, "mine");
-    let host = Slowed::start(&d, "host-twenty-statuses");
-    std::thread::sleep(sluice::host_process::READ_TICK + Duration::from_millis(500));
-    let before = d.git.count();
-    host.slow();
-    let first = d
-        .command(d.repo.dir())
-        .env("SLUICE_ROUND_SLEEP", "record")
-        .args(["status", "main"])
-        .stdout(std::process::Stdio::null())
-        .spawn()
-        .unwrap();
-    within(10, "a reading is in flight", || {
-        host_git_running(&d, host.pid)
-    });
-    host.client.serve(&host.repository).expect("told");
-    let twenty: Vec<_> = (0..20)
-        .map(|_| {
-            d.command(d.repo.dir())
-                .env("SLUICE_ROUND_SLEEP", "record")
-                .args(["status", "main"])
-                .stdout(std::process::Stdio::null())
-                .spawn()
-                .unwrap()
-        })
-        .collect();
-    std::thread::sleep(Duration::from_secs(2));
-    let _ = std::fs::remove_file(&host.flag);
-    for mut c in twenty.into_iter().chain([first]) {
-        assert!(c.wait().unwrap().success());
-    }
-    let fetches = hosts_git(&d, host.pid, before)
-        .iter()
-        .filter(|a| a.contains(" fetch "))
-        .count();
-    assert_eq!(fetches, 2, "one reading, and one more");
-}
-
-/// resident-subscriptions, "A subscription and a status of one
-/// repository" (design D5, D6): a subscription of one worktree and a
-/// status in another worktree of the repository, asked while a reading is
-/// in flight, share that reading.
-#[test]
-fn a_subscription_and_a_status_share_a_reading() {
-    let (_origin, d) = on_origin("host-share-reading");
-    queued(&d, "mine");
-    let other = d.session("other");
-    let host = Slowed::start(&d, "host-share-reading");
-    std::thread::sleep(sluice::host_process::READ_TICK + Duration::from_millis(500));
-    let before = d.git.count();
-    host.slow();
-    let status = d
-        .command(&other)
-        .env("SLUICE_ROUND_SLEEP", "record")
-        .args(["status", "main"])
-        .stdout(std::process::Stdio::null())
-        .spawn()
-        .unwrap();
-    within(30, "a reading is in flight", || {
-        host_git_running(&d, host.pid)
-    });
-    let mut sub = held(&d);
-    std::thread::sleep(Duration::from_secs(1));
-    let _ = std::fs::remove_file(&host.flag);
-    let mut status = status;
-    assert!(status.wait().unwrap().success());
-    let line = sub.line(Some(Duration::from_secs(30))).unwrap();
-    assert!(
-        matches!(
-            line,
-            Some(sluice::host_process::protocol::SubscriptionLine::Document(
-                _
-            ))
-        ),
-        "{line:?}"
-    );
-    let fetches = hosts_git(&d, host.pid, before)
-        .iter()
-        .filter(|a| a.contains(" fetch "))
-        .count();
-    assert_eq!(fetches, 1, "one reading for both");
-}
-
 /// resident-reads, "A client of another tool" (design D1;
 /// `flume-has-a-resident@49876bc5c73c`): a client that speaks the
 /// protocol from the test, and starts no sluice command, says `hello` and
@@ -4408,13 +4000,30 @@ fn fake_host(d: &OnDisk, version: &str, answer: Option<String>) -> std::thread::
     })
 }
 
-/// resident-reads, "No host process answers" (design D4): a process that
-/// holds the socket, answers `hello`, and closes the connection at the
-/// status's ask: the status says that sluice's host process did not
-/// answer, reads no record, and exits 3.
+/// A command that the process at the host's socket does not answer exits
+/// 3, saying so, and reads no record itself. resident-reads, "No host
+/// process answers" (design D4): a process that answers `hello` and closes
+/// the connection at a status's ask: the status says that sluice's host
+/// process did not answer, its `--json` the internal error document, and
+/// runs no git. resident-reads, "A newer command at an older host process"
+/// (design D9): an older `sluice host` that answers the status with an
+/// error: the status names that host process's version. resident-changes,
+/// "No host process answers a change" (design D1): a withdrawal there says
+/// the host process did not answer, and the submission is still queued.
 #[test]
-fn a_read_with_no_host_process_that_answers_exits_3() {
-    let d = OnDisk::new("host-read-unanswered", POLICY);
+fn a_command_that_sluice_host_does_not_answer_exits_3() {
+    let slow = "[tests]\nrunner = \"command\"\ncommand = \"sleep 30\"\n\n[branches.main]\ntimeout = \"5m\"\n";
+    let d = OnDisk::new("host-unanswered", slow);
+    let id = queued(&d, "a");
+    stop_host(&d);
+    let ran_git = |before: usize| -> Vec<String> {
+        d.git.starts()[before..]
+            .iter()
+            .filter(|a| !a.contains(" rev-parse ") && !a.contains(" worktree list"))
+            .cloned()
+            .collect()
+    };
+
     let fake = fake_host(&d, sluice::VERSION, None);
     let before = d.git.count();
     let out = d.sluice(&["status", "main", "--json"]);
@@ -4428,21 +4037,8 @@ fn a_read_with_no_host_process_that_answers_exits_3() {
     let doc: serde_json::Value =
         serde_json::from_slice(&out.stdout).unwrap_or_else(|_| panic!("{}", text(&out)));
     assert_eq!(doc["error"]["kind"], "internal", "{doc}");
-    let read: Vec<String> = d.git.starts()[before..]
-        .iter()
-        .filter(|a| !a.contains(" rev-parse ") && !a.contains(" worktree list"))
-        .cloned()
-        .collect();
-    assert!(read.is_empty(), "the status ran git: {read:?}");
-}
+    assert!(ran_git(before).is_empty(), "the status ran git");
 
-/// resident-reads, "A newer command at an older host process" (design
-/// D9): an older `sluice host` that does not know `status` answers it with
-/// an error: the status names that host process's version, reads no
-/// record, and exits 3.
-#[test]
-fn a_newer_read_at_an_older_host_process_exits_3() {
-    let d = OnDisk::new("host-read-older", POLICY);
     let words = format!(
         "sluice {} asked what this host process, sluice 9.9.9, does not know: {{\"ask\":\"status\"}}",
         sluice::VERSION
@@ -4458,12 +4054,21 @@ fn a_newer_read_at_an_older_host_process_exits_3() {
     assert_eq!(out.status.code(), Some(3), "{}", text(&out));
     let err = String::from_utf8_lossy(&out.stderr);
     assert!(err.contains("sluice 9.9.9"), "{err}");
-    let read: Vec<String> = d.git.starts()[before..]
-        .iter()
-        .filter(|a| !a.contains(" rev-parse ") && !a.contains(" worktree list"))
-        .cloned()
-        .collect();
-    assert!(read.is_empty(), "the status ran git: {read:?}");
+    assert!(ran_git(before).is_empty(), "the status ran git");
+
+    let fake = fake_host(&d, sluice::VERSION, None);
+    let out = d.sluice(&["withdraw", &id.to_string()]);
+    let _ = fake.join();
+    assert_eq!(out.status.code(), Some(3), "{}", text(&out));
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        err.contains("sluice's host process did not answer"),
+        "{err}"
+    );
+    let socket = d.client(d.repo.dir()).paths().socket.clone();
+    let _ = std::fs::remove_file(&socket);
+    assert_ne!(state(&d, d.repo.dir(), id), "withdrawn");
+    stop_host(&d);
 }
 
 /// host-process, "A result recorded after the index was read" (the change
@@ -4606,31 +4211,23 @@ fn landed_in(doc: &serde_json::Value, id: u64) -> bool {
     })
 }
 
-/// resident-subscriptions, "A watch's folder is read each second" (design
-/// D6): each overview that a subscription following a folder as a watch
-/// gets, while a submission of its repository is in play, holds `"tick":
-/// 1`.
+/// One subscription's folders as they come and go (resident-subscriptions,
+/// design D6). "Two folders on one connection": a client subscribed to
+/// worktrees of two repositories gets each folder's overview at the start,
+/// and once a submission is in play in the second, overviews of the second
+/// alone. "A watch's folder is read each second": each such overview,
+/// while the submission is in play, holds `"tick": 1`. "A folder added
+/// later": a third folder added on the same connection gets its overview.
+/// "A folder removed": once the client removes the first folder, a landing
+/// in the first repository brings no overview of it. "A repository
+/// removed": the second repository removed, the client gets an overview of
+/// its folder that says it is gone, in the words its read failed with, and
+/// later overviews of the third alone.
 #[test]
-fn a_watchs_folder_is_read_each_second() {
-    let d = OnDisk::new("host-sub-watch", POLICY);
-    let dir = d.session("a");
-    let mut sub = subscribed(&d, &[d.repo.dir()], FollowKind::Watch);
-    queued_live(&d, &dir);
-    let docs = documents_until(&mut sub, 30, |got| got.len() >= 2);
-    assert!(docs.len() >= 2, "{docs:?}");
-    for (_, doc) in &docs {
-        assert_eq!(doc["tick"], 1, "{doc}");
-    }
-}
-
-/// resident-subscriptions, "Two folders on one connection" (design D6): a
-/// client subscribes to worktrees of two repositories; it gets each
-/// folder's overview at the start, and once a submission lands in the
-/// second repository, new overviews for the second folder only.
-#[test]
-fn a_subscription_serves_two_folders() {
-    let d = OnDisk::new("host-sub-two", POLICY);
-    let b = d.another("host-sub-two-b", POLICY);
+fn a_subscription_serves_its_folders_as_they_come_and_go() {
+    let d = OnDisk::new("host-sub", POLICY);
+    let b = d.another("host-sub-b", POLICY);
+    let c = d.another("host-sub-c", POLICY);
     let theirs = session_of(&d, &b, "theirs");
     let mut sub = subscribed(&d, &[d.repo.dir(), b.dir()], FollowKind::Watch);
     let first = documents_until(&mut sub, 30, |got| got.len() >= 2);
@@ -4640,88 +4237,66 @@ fn a_subscription_serves_two_folders() {
         BTreeSet::from([folder(d.repo.dir()), folder(b.dir())]),
         "{first:?}"
     );
+
     let id = queued_live(&d, &theirs);
+    let ticking = documents_until(&mut sub, 30, |got| got.len() >= 2);
+    assert!(ticking.len() >= 2, "{ticking:?}");
+    for (f, doc) in &ticking {
+        assert_eq!(*f, folder(b.dir()), "{doc}");
+        if !landed_in(doc, id) {
+            assert_eq!(doc["tick"], 1, "{doc}");
+        }
+    }
     let after = documents_until(&mut sub, 60, |got| {
         got.iter().any(|(_, doc)| landed_in(doc, id))
     });
-    assert!(after.iter().any(|(_, doc)| landed_in(doc, id)), "{after:?}");
+    assert!(
+        ticking
+            .iter()
+            .chain(&after)
+            .any(|(_, doc)| landed_in(doc, id)),
+        "{after:?}"
+    );
     assert!(
         after.iter().all(|(f, _)| *f == folder(b.dir())),
-        "an overview for the first folder: {after:?}"
+        "an overview of the first folder: {after:?}"
     );
-}
 
-/// resident-subscriptions, "A folder added later" (design D6): a
-/// subscription serves one folder, the client adds a second on the same
-/// connection, and gets the second folder's overview.
-#[test]
-fn a_folder_added_later_shares_the_connection() {
-    let d = OnDisk::new("host-sub-later", POLICY);
-    let b = d.another("host-sub-later-b", POLICY);
-    let mut sub = subscribed(&d, &[d.repo.dir()], FollowKind::Watch);
-    let first = documents_until(&mut sub, 30, |got| !got.is_empty());
-    assert_eq!(first[0].0, folder(d.repo.dir()));
     sub.say(&sluice::host_process::protocol::SubscriptionAsk::Add {
-        add: folder(b.dir()),
+        add: folder(c.dir()),
         kind: None,
     })
     .unwrap();
     let later = documents_until(&mut sub, 30, |got| {
-        got.iter().any(|(f, _)| *f == folder(b.dir()))
+        got.iter().any(|(f, _)| *f == folder(c.dir()))
     });
     assert!(
         later
             .iter()
-            .any(|(f, doc)| *f == folder(b.dir()) && doc["schema"] == "sluice/overview@1"),
+            .any(|(f, doc)| *f == folder(c.dir()) && doc["schema"] == "sluice/overview@1"),
         "{later:?}"
     );
-}
 
-/// resident-subscriptions, "A folder removed" (design D6): a subscription
-/// serves two folders, the client removes the first, and a submission
-/// then lands in the first folder's repository: the client gets no
-/// overview for the first folder.
-#[test]
-fn a_removed_folder_gets_no_overview() {
-    let d = OnDisk::new("host-sub-removed", POLICY);
-    let b = d.another("host-sub-removed-b", POLICY);
-    let mine = d.session("mine");
-    let mut sub = subscribed(&d, &[d.repo.dir(), b.dir()], FollowKind::Watch);
-    documents_until(&mut sub, 30, |got| got.len() >= 2);
     sub.say(&sluice::host_process::protocol::SubscriptionAsk::Remove {
         remove: folder(d.repo.dir()),
     })
     .unwrap();
-    let id = queued_live(&d, &mine);
+    let mine = d.session("mine");
+    let landed = queued_live(&d, &mine);
     within(60, "the submission lands", || {
-        state(&d, d.repo.dir(), id) == "landed"
+        state(&d, d.repo.dir(), landed) == "landed"
     });
     let after = documents_until(&mut sub, 3, |_| false);
     assert!(
         after.iter().all(|(f, _)| *f != folder(d.repo.dir())),
         "{after:?}"
     );
-}
 
-/// resident-subscriptions, "A repository removed" (design D6): a
-/// subscription serves two folders, and the first folder's repository is
-/// removed: the client gets an overview for the first folder that says it
-/// is gone, and later overviews for the second.
-#[test]
-fn a_gone_repository_leaves_the_subscription() {
-    let d = OnDisk::new("host-sub-gone", POLICY);
-    let b = d.another("host-sub-gone-a", POLICY);
-    let theirs = session_of(&d, &b, "theirs");
+    // The second repository goes in one step, while work is in play in it.
     let gone = folder(b.dir());
-    let mut sub = subscribed(&d, &[b.dir(), d.repo.dir()], FollowKind::Watch);
-    documents_until(&mut sub, 30, |got| got.len() >= 2);
-    // Its worker holds the repository while work is in play, and finds it
-    // gone at its next pass.
-    queued_live(&d, &theirs);
-    // The repository goes in one step: its round writes in `.git` while
-    // the round goes, so a removal that walks `.git` can meet a folder that
-    // the round wrote in after the walk emptied it.
-    let removed = support::Scratch::new("host-sub-gone-removed");
+    let more = session_of(&d, &b, "more");
+    queued_live(&d, &more);
+    let removed = support::Scratch::new("host-sub-removed");
     std::fs::rename(b.dir().join(".git"), removed.path().join("git")).unwrap();
     let said = documents_until(&mut sub, 60, |got| {
         got.iter().any(|(f, doc)| *f == gone && doc["gone"] == true)
@@ -4730,17 +4305,16 @@ fn a_gone_repository_leaves_the_subscription() {
         .iter()
         .find(|(f, doc)| *f == gone && doc["gone"] == true)
         .unwrap_or_else(|| panic!("no gone document: {said:?}\n{}", host_logs(&d)));
-    // It says so in the words its read failed with.
     assert!(doc["error"]["message"].is_string(), "{doc}");
-    let mine = d.session("mine");
-    let id = queued_live(&d, &mine);
+    let ours = session_of(&d, &c, "ours");
+    let id = queued_live(&d, &ours);
     let later = documents_until(&mut sub, 60, |got| {
         got.iter().any(|(_, doc)| landed_in(doc, id))
     });
     assert!(
         later
             .iter()
-            .any(|(f, doc)| *f == folder(d.repo.dir()) && landed_in(doc, id)),
+            .any(|(f, doc)| *f == folder(c.dir()) && landed_in(doc, id)),
         "{later:?}"
     );
     assert!(later.iter().all(|(f, _)| *f != gone), "{later:?}");
@@ -4803,197 +4377,6 @@ fn sluice_run_prints_the_passes_of_its_subscription() {
     let _ = id;
 }
 
-/// A client of sluice 0.97.0 says `hello` on `d`'s socket and asks
-/// `line`: the answer.
-fn older_asks(d: &OnDisk, line: &str) -> serde_json::Value {
-    let socket = d.client(d.repo.dir()).paths().socket.clone();
-    let stream = UnixStream::connect(&socket).unwrap();
-    let mut reader = BufReader::new(stream.try_clone().unwrap());
-    let mut writer = stream;
-    writeln!(writer, "{{\"hello\":\"0.97.0\"}}").unwrap();
-    let mut named = String::new();
-    reader.read_line(&mut named).unwrap();
-    writeln!(writer, "{line}").unwrap();
-    let mut answer = String::new();
-    reader.read_line(&mut answer).unwrap();
-    serde_json::from_str(&answer).unwrap_or_else(|_| panic!("{answer}"))
-}
-
-/// resident-workers, "An older hold" (the change
-/// `sluice-host-runs-a-sessions-checks`, design D5): a client that says
-/// `hello` as the version of `sluice host` and asks `hold` gets the error
-/// that names both versions and says to run sluice of that version.
-#[test]
-fn an_older_hold_gets_the_host_processs_version() {
-    let d = OnDisk::new("host-older-hold", POLICY);
-    let mut sub = held(&d);
-    settled(&mut sub);
-    let repository = d.repository(d.repo.dir());
-    let socket = d.client(d.repo.dir()).paths().socket.clone();
-    let stream = UnixStream::connect(&socket).unwrap();
-    let mut reader = BufReader::new(stream.try_clone().unwrap());
-    let mut writer = stream;
-    writeln!(writer, "{{\"hello\":\"{}\"}}", sluice::VERSION).unwrap();
-    let mut named = String::new();
-    reader.read_line(&mut named).unwrap();
-    let hold = serde_json::json!({
-        "ask": "hold",
-        "kind": "session",
-        "repository": repository,
-        "place": "unit/a",
-        "branch": "main",
-    });
-    writeln!(writer, "{hold}").unwrap();
-    let mut answer = String::new();
-    reader.read_line(&mut answer).unwrap();
-    let answer: serde_json::Value =
-        serde_json::from_str(&answer).unwrap_or_else(|_| panic!("{answer}"));
-    let words = answer["error"]
-        .as_str()
-        .unwrap_or_else(|| panic!("{answer}"));
-    assert!(
-        words.starts_with(&format!(
-            "sluice {} asked what this host process, sluice {}, does not know: ",
-            sluice::VERSION,
-            sluice::VERSION
-        )),
-        "{words}"
-    );
-    assert!(words.contains("\"hold\""), "{words}");
-    assert!(
-        words.ends_with(&format!(". Run sluice {}.", sluice::VERSION)),
-        "{words}"
-    );
-}
-
-/// The error a client of 0.97.0 is answered, naming both versions and the
-/// sluice to run.
-fn assert_names_versions(answer: &serde_json::Value) {
-    let words = answer["error"]
-        .as_str()
-        .unwrap_or_else(|| panic!("{answer}"));
-    assert!(
-        words.starts_with("sluice 0.97.0 asked what this host process, sluice "),
-        "{words}"
-    );
-    assert!(
-        words.ends_with(&format!(". Run sluice {}.", sluice::VERSION)),
-        "{words}"
-    );
-}
-
-/// resident-reads, "An older one-shot read" (the change
-/// `sluice-host-answers-every-read`, design D9): a client that says
-/// `hello` as sluice 0.97.0 and asks `read` gets an error that names 0.97.0
-/// and the version of `sluice host`, and says to run that sluice; `sluice
-/// host` reads nothing for it.
-#[test]
-fn an_older_read_gets_the_host_processs_version() {
-    let d = OnDisk::new("host-older-read", POLICY);
-    let mut sub = held(&d);
-    settled(&mut sub);
-    let repository = d.repository(d.repo.dir());
-    let before = reads_logged(&d, "status") + reads_logged(&d, "overview");
-    let answer = older_asks(
-        &d,
-        &serde_json::json!({"ask": "read", "repository": repository}).to_string(),
-    );
-    assert_names_versions(&answer);
-    assert_eq!(
-        reads_logged(&d, "status") + reads_logged(&d, "overview"),
-        before,
-        "{}",
-        host_logs(&d)
-    );
-}
-
-/// resident-reads, "An older watch" (design D9): a client of 0.97.0 that
-/// asks `follow` as a watch gets the same error, and `sluice host` writes
-/// no file under `readers/`.
-#[test]
-fn an_older_follow_gets_the_host_processs_version() {
-    let d = OnDisk::new("host-older-follow", POLICY);
-    let mut sub = held(&d);
-    settled(&mut sub);
-    let repository = d.repository(d.repo.dir());
-    let answer = older_asks(
-        &d,
-        &serde_json::json!({"ask": "follow", "repository": repository, "kind": "watch"})
-            .to_string(),
-    );
-    assert_names_versions(&answer);
-    std::thread::sleep(Duration::from_secs(1));
-    assert!(
-        !d.state.path().join("sluice/readers").exists(),
-        "a file under readers/"
-    );
-}
-
-/// overview-reader, "Landed while followed" (the change
-/// `sluice-host-answers-every-read`, design D8): `sluice wait <n>` with no
-/// git on its path follows `sluice host`, prints `passed · landed as
-/// <rev>` once `sluice host` answers its record landed, and exits 0: it
-/// read no file of the records.
-#[test]
-fn a_wait_landed_while_followed_reads_no_record() {
-    let d = OnDisk::new("host-wait-landed", POLICY);
-    let dir = d.session("a");
-    let mut sub = subscribed(&d, &[d.repo.dir()], FollowKind::Watch);
-    documents_until(&mut sub, 30, |got| !got.is_empty());
-    let id = queued_live(&d, &dir);
-    let empty = support::Scratch::new("host-wait-landed-path");
-    let out = d
-        .command(&dir)
-        .env("PATH", empty.path())
-        .args(["wait", &id.to_string()])
-        .output()
-        .unwrap();
-    assert_eq!(out.status.code(), Some(0), "{}", text(&out));
-    let landed = d.repo.rev("main");
-    assert!(
-        String::from_utf8_lossy(&out.stdout)
-            .contains(&format!("passed · landed as {}", &landed[..7])),
-        "{}",
-        text(&out)
-    );
-}
-
-/// overview-reader, "Withdrawn while followed" (design D8): a wait with no
-/// git on its path follows `sluice host`; its submission is withdrawn, and
-/// the wait exits 4, as a wait that read the records did.
-#[test]
-fn a_wait_withdrawn_while_followed_reads_no_record() {
-    let marks = support::Scratch::new("host-wait-withdrawn-marks");
-    let go = marks.path().join("go");
-    let policy = format!(
-        "[tests]\nrunner = \"command\"\ncommand = \"i=0; while [ ! -f '{}' ] && [ $i -lt 600 ]; do sleep 0.1; i=$((i+1)); done\"\n\n[branches.main]\ntimeout = \"1m\"\n",
-        go.display()
-    );
-    let d = OnDisk::new("host-wait-withdrawn", &policy);
-    let dir = d.session("a");
-    let mut sub = subscribed(&d, &[d.repo.dir()], FollowKind::Watch);
-    documents_until(&mut sub, 30, |got| !got.is_empty());
-    let id = queued_live(&d, &dir);
-    let empty = support::Scratch::new("host-wait-withdrawn-path");
-    let wait = d
-        .command(&dir)
-        .env("PATH", empty.path())
-        .args(["wait", &id.to_string(), "--json"])
-        .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::piped())
-        .spawn()
-        .unwrap();
-    std::thread::sleep(Duration::from_secs(2));
-    let out = d.sluice(&["withdraw", &id.to_string()]);
-    assert!(out.status.success(), "{}", text(&out));
-    let out = wait.wait_with_output().unwrap();
-    std::fs::write(&go, "").unwrap();
-    assert_eq!(out.status.code(), Some(sluice::WITHDRAWN), "{}", text(&out));
-    let doc: serde_json::Value =
-        serde_json::from_slice(&out.stdout).unwrap_or_else(|_| panic!("{}", text(&out)));
-    assert_eq!(doc["state"], "withdrawn", "{doc}");
-}
-
 /// Each git that the process `pid` started after `before` that is no part
 /// of the branch protection's upkeep of its hook, `protect.rs`'s `git`:
 /// what a change command ran for its change.
@@ -5020,57 +4403,91 @@ fn run_child(c: &mut std::process::Command) -> (std::process::Output, u32) {
     (child.wait_with_output().unwrap(), pid)
 }
 
-/// resident-changes, "A withdrawal" (the change
-/// `sluice-host-makes-each-change`, design D1): with `sluice host`
-/// running, `sluice withdraw <n> --json` prints the document a withdrawal
-/// printed, exits 0, and `sluice status <n>` says it is withdrawn; the log
-/// of `sluice host` names the withdrawal, and the command ran no git but
-/// the upkeep of the branch protection's hook.
+/// Each command a session runs reaches `sluice host`, which reads and
+/// changes the records for it; the command runs no git but the upkeep of
+/// the branch protection's hook, and works with no git on its path (the
+/// changes `sluice-host-answers-every-read`, design D1, D2, D8, and
+/// `sluice-host-makes-each-change`, design D1, D2, D5).
+///
+/// resident-changes, "A submit names its agent" and host-process, "A
+/// submit with no git": a submit from a worktree names the worktree's
+/// head and the agent its command names, whatever `sluice host` was
+/// started with. resident-reads, "A status in text and in JSON", "A
+/// status with no git" and "The home view": a status and the home view
+/// show the queue as `sluice host` answers. resident-changes, "An amend
+/// and a confirmation", "A withdrawal" and "A step from a folder", and
+/// overview-reader, "Withdrawn while followed" and "Landed while
+/// followed": an amend, a withdrawal, a step, a wait and a confirmation
+/// each print what they printed, and the records hold each change.
 #[test]
-fn a_withdrawal_runs_no_git() {
-    let slow = "[tests]\nrunner = \"command\"\ncommand = \"sleep 30\"\n\n[branches.main]\ntimeout = \"5m\"\n";
-    let d = OnDisk::new("host-withdraw-no-git", slow);
-    let id = queued(&d, "a");
+fn a_sessions_commands_reach_sluice_host_and_run_no_git() {
+    let marks = support::Scratch::new("host-commands-marks");
+    let go = marks.path().join("go");
+    let policy = format!(
+        "[tests]\nrunner = \"command\"\ncommand = \"i=0; while [ ! -f '{}' ] && [ $i -lt 600 ]; do sleep 0.1; i=$((i+1)); done\"\n\n[branches.main]\ntimeout = \"1m\"\n",
+        go.display()
+    );
+    let d = OnDisk::new("host-commands", &policy);
+    let empty = support::Scratch::new("host-commands-path");
+    let dir = d.session("a");
+
+    // A submit, naming its agent.
     let before = d.git.count();
-    let mut c = d.command(d.repo.dir());
+    let mut c = d.command(&dir);
     c.env("SLUICE_ROUND_SLEEP", "record")
-        .args(["withdraw", &id.to_string(), "--json"]);
+        .env("SLUICE_AGENT", "feat")
+        .args(["submit", "main", "--no-wait", "--json"]);
     let (out, pid) = run_child(&mut c);
     assert_eq!(out.status.code(), Some(0), "{}", text(&out));
     let doc: serde_json::Value =
         serde_json::from_slice(&out.stdout).unwrap_or_else(|_| panic!("{}", text(&out)));
-    assert_eq!(doc, serde_json::json!({ "id": id, "state": "withdrawn" }));
-    assert_eq!(state(&d, d.repo.dir(), id), "withdrawn");
-    let logs = host_logs(&d);
-    assert!(
-        logs.lines()
-            .any(|l| l.contains(": change {") && l.contains("\"ask\":\"withdraw\"")),
-        "{logs}"
-    );
+    let id = doc["id"].as_u64().expect("a number");
     let own = own_git(&d, pid, before);
-    assert!(own.is_empty(), "the withdrawal ran git: {own:?}");
-    stop_host(&d);
-}
+    assert!(own.is_empty(), "the submit ran git: {own:?}");
+    let out = d.sluice(&["status", &id.to_string(), "--json"]);
+    let doc: serde_json::Value =
+        serde_json::from_slice(&out.stdout).unwrap_or_else(|_| panic!("{}", text(&out)));
+    assert_eq!(doc["head"], d.repo.rev("unit/a").as_str(), "{doc}");
+    assert_eq!(doc["from"]["agent"], "feat", "{doc}");
 
-/// resident-changes, "An amend and a confirmation" (design D1): with
-/// `sluice host` running, `sluice amend` and `sluice confirm` each print
-/// what they printed and exit 0, the records hold the change, and neither
-/// ran git but the upkeep of the branch protection's hook.
-#[test]
-fn an_amend_and_a_confirmation_run_no_git() {
-    let d = OnDisk::new("host-amend-confirm", POLICY);
-    let dir = d.session("a");
-    let out = d
-        .command(&dir)
+    // A status, in text and in JSON, and the home view, with no git.
+    for json in [false, true] {
+        let mut c = d.command(d.repo.dir());
+        no_git(&mut c, &empty)
+            .env("SLUICE_ROUND_SLEEP", "record")
+            .args(["status", "main"]);
+        if json {
+            c.arg("--json");
+        }
+        let out = c.output().unwrap();
+        assert!(out.status.success(), "{}", text(&out));
+        let shown = String::from_utf8_lossy(&out.stdout);
+        match json {
+            true => {
+                let doc: serde_json::Value = serde_json::from_str(&shown).unwrap();
+                assert!(
+                    doc["submissions"]
+                        .as_array()
+                        .is_some_and(|s| s.iter().any(|x| x["id"].as_u64() == Some(id))),
+                    "{doc}"
+                );
+            }
+            false => assert!(shown.contains(&format!("#{id}")), "{shown}"),
+        }
+    }
+    let mut c = d.command(&dir);
+    let out = no_git(&mut c, &empty)
         .env("SLUICE_ROUND_SLEEP", "record")
-        .args(["submit", "main"])
         .output()
         .unwrap();
     assert!(out.status.success(), "{}", text(&out));
-    let landed = 1;
-    // A second submission, queued: the tests' host process passes only
-    // when asked, so it stays queued to amend.
-    let id = queued(&d, "b");
+    assert!(
+        String::from_utf8_lossy(&out.stdout).contains(&format!("#{id}")),
+        "{}",
+        text(&out)
+    );
+
+    // An amend.
     let before = d.git.count();
     let mut c = d.command(d.repo.dir());
     c.env("SLUICE_ROUND_SLEEP", "record").args([
@@ -5087,16 +4504,84 @@ fn an_amend_and_a_confirmation_run_no_git() {
         String::from_utf8_lossy(&out.stdout),
         format!("amended #{id}\n")
     );
+    let own = own_git(&d, pid, before);
+    assert!(own.is_empty(), "the amend ran git: {own:?}");
     let out = d.sluice(&["status", &id.to_string(), "--json"]);
     let doc: serde_json::Value =
         serde_json::from_slice(&out.stdout).unwrap_or_else(|_| panic!("{}", text(&out)));
     assert_eq!(doc["priority"], 5, "{doc}");
+
+    // A withdrawal, while a wait with no git follows the submission.
+    let b = d.session("b");
+    let withdrawn = queued_from(&d, &b);
+    let wait = d
+        .command(&b)
+        .env("PATH", empty.path())
+        .args(["wait", &withdrawn.to_string(), "--json"])
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .unwrap();
+    std::thread::sleep(Duration::from_secs(2));
+    let before = d.git.count();
+    let mut c = d.command(d.repo.dir());
+    c.env("SLUICE_ROUND_SLEEP", "record")
+        .args(["withdraw", &withdrawn.to_string(), "--json"]);
+    let (out, pid) = run_child(&mut c);
+    assert_eq!(out.status.code(), Some(0), "{}", text(&out));
+    let doc: serde_json::Value =
+        serde_json::from_slice(&out.stdout).unwrap_or_else(|_| panic!("{}", text(&out)));
+    assert_eq!(
+        doc,
+        serde_json::json!({ "id": withdrawn, "state": "withdrawn" })
+    );
     let own = own_git(&d, pid, before);
-    assert!(own.is_empty(), "the amend ran git: {own:?}");
+    assert!(own.is_empty(), "the withdrawal ran git: {own:?}");
+    let logs = host_logs(&d);
+    assert!(
+        logs.lines()
+            .any(|l| l.contains(": change {") && l.contains("\"ask\":\"withdraw\"")),
+        "{logs}"
+    );
+    let out = wait.wait_with_output().unwrap();
+    assert_eq!(out.status.code(), Some(sluice::WITHDRAWN), "{}", text(&out));
+    let doc: serde_json::Value =
+        serde_json::from_slice(&out.stdout).unwrap_or_else(|_| panic!("{}", text(&out)));
+    assert_eq!(doc["state"], "withdrawn", "{doc}");
+
+    // A step from the worktree, then a wait with no git to the landing.
+    std::fs::write(&go, "").unwrap();
     let before = d.git.count();
     let mut c = d.command(&dir);
     c.env("SLUICE_ROUND_SLEEP", "record")
-        .args(["confirm", &format!("{landed}:landed"), "--json"]);
+        .args(["step", "main", "--json"]);
+    let (out, pid) = run_child(&mut c);
+    assert_eq!(out.status.code(), Some(0), "{}", text(&out));
+    let doc: serde_json::Value =
+        serde_json::from_slice(&out.stdout).unwrap_or_else(|_| panic!("{}", text(&out)));
+    assert_eq!(doc["branch"], "main", "{doc}");
+    let own = own_git(&d, pid, before);
+    assert!(own.is_empty(), "the step ran git: {own:?}");
+    let out = d
+        .command(&dir)
+        .env("PATH", empty.path())
+        .args(["wait", &id.to_string()])
+        .output()
+        .unwrap();
+    assert_eq!(out.status.code(), Some(0), "{}", text(&out));
+    let landed = d.repo.rev("main");
+    assert!(
+        String::from_utf8_lossy(&out.stdout)
+            .contains(&format!("passed · landed as {}", &landed[..7])),
+        "{}",
+        text(&out)
+    );
+
+    // A confirmation, after which the inbox holds nothing.
+    let before = d.git.count();
+    let mut c = d.command(&dir);
+    c.env("SLUICE_ROUND_SLEEP", "record")
+        .args(["confirm", &format!("{id}:landed"), "--json"]);
     let (out, pid) = run_child(&mut c);
     assert_eq!(out.status.code(), Some(0), "{}", text(&out));
     let doc: serde_json::Value =
@@ -5116,136 +4601,6 @@ fn an_amend_and_a_confirmation_run_no_git() {
     let doc: serde_json::Value =
         serde_json::from_slice(&out.stdout).unwrap_or_else(|_| panic!("{}", text(&out)));
     assert_eq!(doc["outcomes"], serde_json::json!([]), "{doc}");
-    stop_host(&d);
-}
-
-/// resident-changes, "No host process answers a change" (design D1): a
-/// process that holds the socket, answers `hello`, and closes the
-/// connection at the withdrawal's ask: the withdrawal says that sluice's
-/// host process did not answer, exits 3, and the submission is still
-/// queued.
-#[test]
-fn a_change_with_no_host_process_that_answers_exits_3() {
-    let slow = "[tests]\nrunner = \"command\"\ncommand = \"sleep 30\"\n\n[branches.main]\ntimeout = \"5m\"\n";
-    let d = OnDisk::new("host-change-unanswered", slow);
-    let id = queued(&d, "a");
-    stop_host(&d);
-    let fake = fake_host(&d, sluice::VERSION, None);
-    let out = d.sluice(&["withdraw", &id.to_string()]);
-    let _ = fake.join();
-    assert_eq!(out.status.code(), Some(3), "{}", text(&out));
-    let err = String::from_utf8_lossy(&out.stderr);
-    assert!(
-        err.contains("sluice's host process did not answer"),
-        "{err}"
-    );
-    let socket = d.client(d.repo.dir()).paths().socket.clone();
-    let _ = std::fs::remove_file(&socket);
-    assert_ne!(state(&d, d.repo.dir(), id), "withdrawn");
-    stop_host(&d);
-}
-
-/// host-process, "A submit with no git" (design D2): with `sluice host`
-/// running, `sluice submit main --no-wait` in a worktree exits 0 with the
-/// submission's number, which names the worktree's head, and ran no git
-/// but the upkeep of the branch protection's hook.
-#[test]
-fn a_submit_runs_no_git_and_names_the_worktrees_head() {
-    let d = OnDisk::new("host-submit-no-git", POLICY);
-    let dir = d.session("a");
-    let mut sub = held(&d);
-    settled(&mut sub);
-    let before = d.git.count();
-    let mut c = d.command(&dir);
-    c.env("SLUICE_ROUND_SLEEP", "record")
-        .args(["submit", "main", "--no-wait", "--json"]);
-    let (out, pid) = run_child(&mut c);
-    assert_eq!(out.status.code(), Some(0), "{}", text(&out));
-    let doc: serde_json::Value =
-        serde_json::from_slice(&out.stdout).unwrap_or_else(|_| panic!("{}", text(&out)));
-    let id = doc["id"].as_u64().expect("a number");
-    let own = own_git(&d, pid, before);
-    assert!(own.is_empty(), "the submit ran git: {own:?}");
-    let head = d.repo.rev("unit/a");
-    let out = d.sluice(&["status", &id.to_string(), "--json"]);
-    let doc: serde_json::Value =
-        serde_json::from_slice(&out.stdout).unwrap_or_else(|_| panic!("{}", text(&out)));
-    assert_eq!(doc["head"], head.as_str(), "{doc}");
-    drop(sub);
-    stop_host(&d);
-}
-
-/// resident-changes, "A submit names its agent" (design D1): `sluice
-/// host`, started by a command with no `SLUICE_AGENT`, writes the
-/// submission of `sluice submit main --no-wait` run with `SLUICE_AGENT=feat`
-/// naming the agent `feat`.
-#[test]
-fn a_submit_names_its_agent() {
-    let d = OnDisk::new("host-submit-agent", POLICY);
-    let dir = d.session("a");
-    let mut sub = held(&d);
-    settled(&mut sub);
-    let out = d
-        .command(&dir)
-        .env("SLUICE_ROUND_SLEEP", "record")
-        .env("SLUICE_AGENT", "feat")
-        .args(["submit", "main", "--no-wait", "--json"])
-        .output()
-        .unwrap();
-    assert!(out.status.success(), "{}", text(&out));
-    let doc: serde_json::Value =
-        serde_json::from_slice(&out.stdout).unwrap_or_else(|_| panic!("{}", text(&out)));
-    let id = doc["id"].as_u64().expect("a number");
-    let out = d.sluice(&["status", &id.to_string(), "--json"]);
-    let doc: serde_json::Value =
-        serde_json::from_slice(&out.stdout).unwrap_or_else(|_| panic!("{}", text(&out)));
-    assert_eq!(doc["from"]["agent"], "feat", "{doc}");
-    drop(sub);
-    stop_host(&d);
-}
-
-/// resident-changes, "An older step" (the change
-/// `sluice-host-makes-each-change`, design D5): a client that says `hello`
-/// as sluice 0.97.0 and asks `step` naming a repository and no folder gets
-/// the error that names both versions and says to run sluice of that
-/// version.
-#[test]
-fn an_older_step_gets_the_host_processs_version() {
-    let d = OnDisk::new("host-older-step", POLICY);
-    let mut sub = held(&d);
-    settled(&mut sub);
-    let repository = d.repository(d.repo.dir());
-    let answer = older_asks(
-        &d,
-        &serde_json::json!({"ask": "step", "repository": repository, "branch": "main"}).to_string(),
-    );
-    assert_names_versions(&answer);
-}
-
-/// resident-changes, "A step from a folder" (design D5): with `#n` queued
-/// on `main`, `sluice step main` in a worktree prints the round as it
-/// printed it, exits 0, and ran no git but the upkeep of the branch
-/// protection's hook.
-#[test]
-fn a_step_from_a_folder_runs_no_git() {
-    let d = OnDisk::new("host-step-folder", POLICY);
-    let dir = d.session("a");
-    let id = queued_from(&d, &dir);
-    let before = d.git.count();
-    let mut c = d.command(&dir);
-    c.env("SLUICE_ROUND_SLEEP", "record")
-        .args(["step", "main", "--json"]);
-    let (out, pid) = run_child(&mut c);
-    assert_eq!(out.status.code(), Some(0), "{}", text(&out));
-    let doc: serde_json::Value =
-        serde_json::from_slice(&out.stdout).unwrap_or_else(|_| panic!("{}", text(&out)));
-    assert_eq!(doc["branch"], "main", "{doc}");
-    let own = own_git(&d, pid, before);
-    assert!(own.is_empty(), "the step ran git: {own:?}");
-    within(60, "the submission lands", || {
-        let st = state(&d, d.repo.dir(), id);
-        st == "landed" || st == "testing"
-    });
     stop_host(&d);
 }
 
@@ -5270,82 +4625,35 @@ fn starts_no_host(said: &str, version: &str, newest: &Path) {
     }
 }
 
-/// host-process, "A host process records the newest sluice that has run"
-/// (design D1 of `an-older-client-starts-no-older-host`): a host process
-/// that starts writes its own version and executable in `host/newest`,
-/// where the file names none or cannot be read.
+/// No sluice older than the newest that has run replaces the host
+/// process (design D1 to D3 of `an-older-client-starts-no-older-host`).
+/// host-process, "A host process records the newest sluice that has run":
+/// one that starts writes its own version and executable in `host/newest`
+/// where the file cannot be read. With a newer sluice recorded and the
+/// host process running: "An older daemon starts while a newer host
+/// process runs", it asks nothing and ends with exit 3; "An older sluice
+/// asks a host process to hand over", the host process answers a
+/// hand-over and a daemon's ask to end with an error naming both versions,
+/// says so in its log, and goes on as it was; "An older `sluice
+/// hand-over`" asks nothing and exits 3; "A command between the host
+/// process and the newest" asks no hand-over and uses the host process as
+/// it is. With none running: "An older command finds no host process
+/// answering", the command starts none and says why, its binary exiting
+/// 3; "An older `sluice host` or `sluice daemon` starts", each ends at
+/// once with exit 3, saying why, and takes no lock.
 #[test]
-fn a_host_process_records_the_newest_sluice_that_has_run() {
+fn no_sluice_older_than_the_newest_replaces_the_host_process() {
+    use sluice::host_process::protocol::{Answer, Request};
     let d = OnDisk::new("host-newest", POLICY);
     let client = d.client(d.repo.dir());
     let paths = client.paths().clone();
     std::fs::write(paths.newest(), "not a record").unwrap();
-    let c = client.reach().expect("started");
-    let newest = paths.newest_run().expect("it names the newest");
-    assert_eq!(newest.version, sluice::VERSION);
-    assert_eq!(newest.program, c.named.program);
-    assert!(newest.program.is_some());
-    drop(c);
-    stop_host(&d);
-}
-
-/// host-process, "An older command finds no host process answering"
-/// (design D2 of `an-older-client-starts-no-older-host`): a command older
-/// than the newest sluice that has run starts no host process, and says
-/// why, naming the newer version; through the binary, it exits 3.
-#[test]
-fn an_older_command_starts_no_host_process() {
-    let d = OnDisk::new("host-older-starts-none", POLICY);
-    let newest = newer_has_run(&d);
-    let failed = d
-        .client(d.repo.dir())
-        .reach()
-        .err()
-        .expect("it starts no host process");
-    starts_no_host(&format!("{failed:#}"), sluice::VERSION, &newest);
-    assert_eq!(answering(&d), None, "it started a host process");
-
-    let out = d
-        .command(d.repo.dir())
-        .args(["overview", "--json"])
-        .output()
-        .unwrap();
-    assert_eq!(out.status.code(), Some(3), "{}", text(&out));
-    starts_no_host(&text(&out), sluice::VERSION, &newest);
-    assert_eq!(answering(&d), None, "it started a host process");
-    assert_eq!(d.client(d.repo.dir()).paths().named(), None);
-}
-
-/// host-process, "An older `sluice host` or `sluice daemon` starts" (design
-/// D2 of `an-older-client-starts-no-older-host`): each ends at once with
-/// exit 3, says why on standard error, and takes no lock.
-#[test]
-fn an_older_host_or_daemon_starts_no_host_process() {
-    let d = OnDisk::new("host-older-host", POLICY);
-    let newest = newer_has_run(&d);
-    let out = d.command(d.repo.dir()).arg("host").output().unwrap();
-    assert_eq!(out.status.code(), Some(3), "{}", text(&out));
-    starts_no_host(&text(&out), sluice::VERSION, &newest);
-    let mut daemon = Daemon::start(&d, d.repo.dir());
-    within(30, "the older daemon ends", || !daemon.runs());
-    assert_eq!(daemon.child.wait().unwrap().code(), Some(3));
-    starts_no_host(&daemon.said(), sluice::VERSION, &newest);
-    assert_eq!(answering(&d), None, "it started a host process");
-    let lock = std::fs::OpenOptions::new()
-        .create(true)
-        .write(true)
-        .truncate(false)
-        .open(d.client(d.repo.dir()).paths().lock())
-        .unwrap();
-    assert!(lock.try_lock().is_ok(), "the host's lock is held");
-}
-
-/// host-process, "An older daemon starts while a newer host process runs"
-/// (design D2, D3 of `an-older-client-starts-no-older-host`): it asks the
-/// host process nothing and ends, and the host process goes on as it was.
-#[test]
-fn an_older_daemon_ends_no_newer_host_process() {
-    let d = OnDisk::new("host-older-daemon", POLICY);
+    let held = client.reach().expect("started");
+    let recorded = paths.newest_run().expect("it names the newest");
+    assert_eq!(recorded.version, sluice::VERSION);
+    assert_eq!(recorded.program, held.named.program);
+    assert!(recorded.program.is_some());
+    let first = held.named.clone();
     let follow = d
         .client(d.repo.dir())
         .subscribe(vec![sluice::host_process::protocol::Added {
@@ -5353,36 +4661,19 @@ fn an_older_daemon_ends_no_newer_host_process() {
             kind: FollowKind::Wait,
         }])
         .unwrap();
-    let first = follow.named.clone();
+    drop(held);
     let newest = newer_has_run(&d);
+    let unchanged = |what: &str| {
+        let now = named(&d).expect("the host process answers");
+        assert_eq!((now.pid, &now.since), (first.pid, &first.since), "{what}");
+    };
+
     let mut daemon = Daemon::start(&d, d.repo.dir());
     within(30, "the older daemon ends", || !daemon.runs());
     assert_eq!(daemon.child.wait().unwrap().code(), Some(3));
     starts_no_host(&daemon.said(), sluice::VERSION, &newest);
-    let now = named(&d).expect("the host process answers");
-    assert_eq!((now.pid, &now.since), (first.pid, &first.since));
-    drop(follow);
-    stop_host(&d);
-}
+    unchanged("an older daemon");
 
-/// host-process, "An older sluice asks a host process to hand over"
-/// (design D3 of `an-older-client-starts-no-older-host`): the host
-/// process answers with an error naming both versions, says so in its
-/// log, and goes on as it was, for a hand-over and for a daemon's ask to
-/// end.
-#[test]
-fn a_host_process_hands_over_to_no_older_sluice() {
-    use sluice::host_process::protocol::{Answer, Request};
-    let d = OnDisk::new("host-no-older-hand-over", POLICY);
-    let follow = d
-        .client(d.repo.dir())
-        .subscribe(vec![sluice::host_process::protocol::Added {
-            folder: std::path::PathBuf::from(d.repository(d.repo.dir())),
-            kind: FollowKind::Wait,
-        }])
-        .unwrap();
-    let first = follow.named.clone();
-    newer_has_run(&d);
     for ends in [false, true] {
         let mut c = d
             .client(d.repo.dir())
@@ -5406,51 +4697,19 @@ fn a_host_process_hands_over_to_no_older_sluice() {
             "{words}"
         );
     }
-    let now = named(&d).expect("the host process answers");
-    assert_eq!((now.pid, &now.since), (first.pid, &first.since));
+    unchanged("an older hand-over");
     assert!(
         host_logs(&d).contains("warning: sluice 1.0.0 asked this host process"),
         "{}",
         host_logs(&d)
     );
-    drop(follow);
-    stop_host(&d);
-}
 
-/// host-process, "An older `sluice hand-over`" (design D3 of
-/// `an-older-client-starts-no-older-host`): it asks nothing, exits 3 and
-/// says why.
-#[test]
-fn an_older_hand_over_asks_nothing() {
-    let d = OnDisk::new("host-older-hand-over-cmd", POLICY);
-    let follow = d
-        .client(d.repo.dir())
-        .subscribe(vec![sluice::host_process::protocol::Added {
-            folder: std::path::PathBuf::from(d.repository(d.repo.dir())),
-            kind: FollowKind::Wait,
-        }])
-        .unwrap();
-    let first = follow.named.clone();
-    let newest = newer_has_run(&d);
     let out = d.command(d.repo.dir()).arg("hand-over").output().unwrap();
     assert_eq!(out.status.code(), Some(3), "{}", text(&out));
     starts_no_host(&text(&out), sluice::VERSION, &newest);
-    let now = named(&d).expect("the host process answers");
-    assert_eq!((now.pid, &now.since), (first.pid, &first.since));
+    unchanged("an older sluice hand-over");
     assert!(!host_logs(&d).contains("asked this one to hand over"));
-    drop(follow);
-    stop_host(&d);
-}
 
-/// host-process, "A command between the host process and the newest"
-/// (design D3 of `an-older-client-starts-no-older-host`): a command newer
-/// than the host process, and older than the newest sluice that has run,
-/// asks no hand-over and uses the host process as it is.
-#[test]
-fn a_command_older_than_the_newest_uses_the_host_process_as_it_is() {
-    let d = OnDisk::new("host-between", POLICY);
-    let first = d.client(d.repo.dir()).reach().expect("started").named;
-    newer_has_run(&d);
     let reached = d
         .client(d.repo.dir())
         .with_version("1.0.0")
@@ -5461,7 +4720,39 @@ fn a_command_older_than_the_newest_uses_the_host_process_as_it_is() {
         (first.pid, &first.since)
     );
     drop(reached);
+    drop(follow);
     stop_host(&d);
+    within(30, "the host process ends", || answering(&d).is_none());
+
+    let failed = d
+        .client(d.repo.dir())
+        .reach()
+        .err()
+        .expect("it starts no host process");
+    starts_no_host(&format!("{failed:#}"), sluice::VERSION, &newest);
+    assert_eq!(answering(&d), None, "it started a host process");
+    let out = d
+        .command(d.repo.dir())
+        .args(["overview", "--json"])
+        .output()
+        .unwrap();
+    assert_eq!(out.status.code(), Some(3), "{}", text(&out));
+    starts_no_host(&text(&out), sluice::VERSION, &newest);
+    let out = d.command(d.repo.dir()).arg("host").output().unwrap();
+    assert_eq!(out.status.code(), Some(3), "{}", text(&out));
+    starts_no_host(&text(&out), sluice::VERSION, &newest);
+    let mut daemon = Daemon::start(&d, d.repo.dir());
+    within(30, "the older daemon ends", || !daemon.runs());
+    assert_eq!(daemon.child.wait().unwrap().code(), Some(3));
+    starts_no_host(&daemon.said(), sluice::VERSION, &newest);
+    assert_eq!(answering(&d), None, "it started a host process");
+    let lock = std::fs::OpenOptions::new()
+        .create(true)
+        .write(true)
+        .truncate(false)
+        .open(paths.lock())
+        .unwrap();
+    assert!(lock.try_lock().is_ok(), "the host's lock is held");
 }
 
 /// host-process, "A newer command's hand-over is refused" (design D3 of

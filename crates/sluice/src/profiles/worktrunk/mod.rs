@@ -24,6 +24,7 @@ use anyhow::{bail, Context as _, Result};
 use clap::{CommandFactory as _, FromArgMatches as _};
 use sluice_seams::{Delivery, Driver, Notification, Rev, Session, Submitter};
 
+pub mod flow;
 pub mod herdr;
 
 /// The worktrunk driver, on the host its peers name `host`.
@@ -392,7 +393,7 @@ impl Submit {
 
 /// What stands of a worktree's last submission to a branch, at the
 /// revision a submit from the worktree would send now (124; record 0065).
-#[derive(Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Standing {
     /// A submission of that revision, undecided or landed.
     Submission { id: u64, landed: bool },
@@ -497,18 +498,6 @@ pub fn standing_in(branch: &str, worktree: &Path) -> std::result::Result<Standin
         .output()
         .map_err(|e| format!("running sluice: {e}"))?;
     standing(out.status.code(), &out.stdout, &out.stderr)
-}
-
-/// Whether sluice records `worktree`'s submission to `branch` as landed:
-/// its last submission from the worktree, or its pull request another
-/// host took in (137; record 0096), has landed, and is of the revision a
-/// submit from the worktree would send now. A worktree is removed on
-/// this, never on an exit alone.
-pub fn landed(branch: &str, worktree: &Path) -> bool {
-    matches!(
-        standing_in(branch, worktree),
-        Ok(Standing::Submission { landed: true, .. } | Standing::PullRequest { landed: true, .. })
-    )
 }
 
 /// Whether worktrunk removes a worktree once it lands: the user's
@@ -972,5 +961,96 @@ mod tests {
     fn wt_submit_is_sluice_submit() {
         let args = forward(["bolt/x".into(), "--no-wait".into()]);
         assert_eq!(args, vec!["submit", "bolt/x", "--no-wait"]);
+    }
+
+    fn vars(pairs: &[(&str, &str)]) -> std::collections::BTreeMap<String, String> {
+        pairs
+            .iter()
+            .map(|(k, v)| (k.to_string(), v.to_string()))
+            .collect()
+    }
+
+    const PANE: [(&str, &str); 2] = [
+        ("HERDR_PANE_ID", "w1:p2"),
+        ("HERDR_SOCKET_PATH", "/run/herdr.sock"),
+    ];
+
+    /// 124 (record 0090; rule core.50): a branch submitted by name, from a
+    /// pane or not, is the agent the harness names, else the branch; the
+    /// branch as its work and its head; this host; and no path and no
+    /// pane, nothing of the folder read (`named_records_no_worktree`).
+    #[test]
+    fn a_branch_by_name_records_no_worktree() {
+        let w = Worktrunk::new("box-1");
+        let from = crate::caller::as_caller(vars(&PANE), || w.named("bolt/x")).unwrap();
+        assert_eq!(
+            from,
+            Submitter {
+                agent: "bolt/x".into(),
+                worktree: "bolt/x".into(),
+                path: None,
+                head: Some("bolt/x".into()),
+                host: Some("box-1".into()),
+                session: None,
+            }
+        );
+        assert!(from.by_name());
+        let mut named = vars(&PANE);
+        named.insert("SLUICE_AGENT".into(), "flume-base-1".into());
+        let from = crate::caller::as_caller(named, || w.named("bolt/x")).unwrap();
+        assert_eq!(from.agent, "flume-base-1");
+        assert_eq!((from.path, from.session), (None, None));
+    }
+
+    fn landing(to: Submitter) -> Notification {
+        Notification {
+            id: "1:landed".into(),
+            submission: 1,
+            branch: "bolt/x".into(),
+            to,
+            decided: sluice_seams::Decided::Landed {
+                landed_as: Rev::new("abc1234def"),
+                beside: false,
+                covered_by: None,
+            },
+            report: None,
+        }
+    }
+
+    fn submitter(host: Option<&str>, session: Option<&str>) -> Submitter {
+        Submitter {
+            agent: "unit/a".into(),
+            worktree: "unit/a".into(),
+            path: None,
+            head: None,
+            host: host.map(str::to_string),
+            session: session.map(str::to_string),
+        }
+    }
+
+    /// 50, 51 (record 0102, D5): a submission in no pane, one on another
+    /// host, and one whose session is no herdr pane are handed nothing,
+    /// and herdr is never called; each says why
+    /// (`a_submit_in_no_pane_is_pushed_nothing`,
+    /// `a_submission_from_another_host_is_not_pushed`).
+    #[test]
+    fn an_outcome_reaches_only_a_pane_on_this_host() {
+        let w = Worktrunk::new("box-2");
+        let why = |to: Submitter| match w.notify(&landing(to)).unwrap() {
+            Delivery::Undelivered { why } => why,
+            other => panic!("{other:?}"),
+        };
+        assert_eq!(why(submitter(Some("box-2"), None)), "no session recorded");
+        assert_eq!(
+            why(submitter(
+                Some("box-1"),
+                Some("herdr:w1:p2@/run/herdr.sock")
+            )),
+            "herdr:w1:p2@/run/herdr.sock is on box-1, and this round on box-2"
+        );
+        assert_eq!(
+            why(submitter(Some("box-2"), Some("tmux:%1"))),
+            "tmux:%1 is no herdr pane"
+        );
     }
 }
