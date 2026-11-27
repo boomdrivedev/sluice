@@ -24,6 +24,7 @@ use anyhow::{bail, Context as _, Result};
 use clap::{CommandFactory as _, FromArgMatches as _};
 use sluice_seams::{Delivery, Driver, Notification, Rev, Session, Submitter};
 
+pub mod flow;
 pub mod herdr;
 
 /// The worktrunk driver, on the host its peers name `host`.
@@ -392,7 +393,7 @@ impl Submit {
 
 /// What stands of a worktree's last submission to a branch, at the
 /// revision a submit from the worktree would send now (124; record 0065).
-#[derive(Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Standing {
     /// A submission of that revision, undecided or landed.
     Submission { id: u64, landed: bool },
@@ -497,18 +498,6 @@ pub fn standing_in(branch: &str, worktree: &Path) -> std::result::Result<Standin
         .output()
         .map_err(|e| format!("running sluice: {e}"))?;
     standing(out.status.code(), &out.stdout, &out.stderr)
-}
-
-/// Whether sluice records `worktree`'s submission to `branch` as landed:
-/// its last submission from the worktree, or its pull request another
-/// host took in (137; record 0096), has landed, and is of the revision a
-/// submit from the worktree would send now. A worktree is removed on
-/// this, never on an exit alone.
-pub fn landed(branch: &str, worktree: &Path) -> bool {
-    matches!(
-        standing_in(branch, worktree),
-        Ok(Standing::Submission { landed: true, .. } | Standing::PullRequest { landed: true, .. })
-    )
 }
 
 /// Whether worktrunk removes a worktree once it lands: the user's
