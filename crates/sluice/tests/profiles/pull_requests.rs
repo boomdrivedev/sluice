@@ -4873,12 +4873,20 @@ fn with_a_hanging_bolt(name: &str) -> (OnGitHub, PathBuf) {
 }
 
 /// Until `pid` exists: the check of the submission first taken in has
-/// started.
+/// started. It waits on the file events of `pid`'s folder, and on no
+/// clock: sluice names no time within which a check starts, since a run
+/// waits for room under the host's bound, which other runs on the host may
+/// hold (150, rule core.49). The run's own time limit ends a check that
+/// never starts (66).
 fn started(pid: &Path) {
-    let until = Instant::now() + Duration::from_secs(60);
+    use notify_debouncer_full::notify::{recommended_watcher, RecursiveMode, Watcher};
+    let (tx, rx) = std::sync::mpsc::channel();
+    let mut watcher = recommended_watcher(tx).expect("a watch of the check's folder");
+    watcher
+        .watch(pid.parent().unwrap(), RecursiveMode::NonRecursive)
+        .expect("a watch of the check's folder");
     while !pid.exists() {
-        assert!(Instant::now() < until, "the check never started");
-        std::thread::sleep(Duration::from_millis(100));
+        let _ = rx.recv().expect("the watch of the check's folder ended");
     }
 }
 
