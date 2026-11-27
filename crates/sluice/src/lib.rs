@@ -5837,12 +5837,14 @@ fn lookup(s: &Sluice<'_>, id: u64, branch: Option<&str>) -> Result<Lookup> {
 
 /// 26, record 0114 as amended 2026-11-26: of the branches `several` names
 /// for submission `id`, the one whose submission `id` the worktree at
-/// `worktree` made, as `sluice wait <branch>` finds its last submission by
-/// the worktree's branch. `None`, and the number refused as before, where
-/// any branch could not be read, where the folder holds no session its
-/// driver names, or where that worktree made submission `id` on no branch,
-/// or on more than one. A submission by name is no worktree's (124; rule
-/// core.50).
+/// `worktree` made, by the one reading the inbox and a wait's delivery
+/// take of a worktree's own (`Sluice::made`, design D6): its own by the
+/// work it names, or a pull request's opened from its branch where sluice
+/// lands on that branch nowhere. `None`, and the number refused as before,
+/// where any branch could not be read, where the folder holds no session
+/// its driver names, or where that worktree made submission `id` on no
+/// branch, or on more than one. A submission by name is no worktree's
+/// (124; rule core.50).
 fn submitted_here(
     s: &Sluice<'_>,
     worktree: &str,
@@ -5855,10 +5857,11 @@ fn submitted_here(
     let Ok(session) = s.seams().driver.session(worktree) else {
         return Ok(None);
     };
+    let here = sluice_core::overview::Here::on(&session.from.worktree);
     let mut own = Vec::new();
     for branch in &several.branches {
         if let Lookup::Found(sub) = s.lookup_on(branch, id)? {
-            if !sub.from.by_name() && sub.from.worktree == session.from.worktree {
+            if s.made(&here, &sub.from) {
                 own.push(branch.clone());
             }
         }
