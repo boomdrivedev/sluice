@@ -113,15 +113,16 @@ pub trait Worker {
 pub type Bind = Arc<dyn Fn(&Path) -> Result<Box<dyn Worker>, String> + Send + Sync>;
 
 /// A repository's overview document, read after a reading that ended at a
-/// moment: `None` where none could be made (the change
+/// moment, and the moment its read began, which orders the documents:
+/// `None` where none could be made (the change
 /// `sluice-host-answers-every-read`, design D6).
 pub type DocumentRead = Arc<
     dyn Fn(
             PathBuf,
             Moment,
-        )
-            -> std::pin::Pin<Box<dyn std::future::Future<Output = Option<serde_json::Value>> + Send>>
-        + Send
+        ) -> std::pin::Pin<
+            Box<dyn std::future::Future<Output = Option<(Moment, serde_json::Value)>> + Send>,
+        > + Send
         + Sync,
 >;
 
@@ -476,6 +477,7 @@ impl Tasks {
         };
         let scheduler = Scheduler {
             documents: repo.documents.clone(),
+            sent: Arc::default(),
             tasks: self.clone(),
             repository: repository.to_path_buf(),
             id: repo.id,
@@ -964,6 +966,9 @@ enum Command {
 struct Scheduler {
     /// The repository's overview document (design D6).
     documents: Arc<watch::Sender<Option<serde_json::Value>>>,
+    /// When the read of the newest document sent began: a read that began
+    /// before it sends nothing, whenever it ends.
+    sent: Arc<Mutex<Option<Moment>>>,
     tasks: Tasks,
     repository: PathBuf,
     id: u64,
@@ -1236,6 +1241,7 @@ impl Scheduler {
             return;
         };
         let documents = self.documents.clone();
+        let sent = self.sent.clone();
         let repository = self.repository.clone();
         let every = tick(self.watched());
         let after = Moment::now();
@@ -1248,10 +1254,11 @@ impl Scheduler {
                     doc = read(repository, after) => doc,
                     () = token.cancelled() => None,
                 };
-                let Some(doc) = doc else {
+                let Some((began, doc)) = doc else {
                     return;
                 };
-                send_document(&documents, crate::overview::ticked(doc, every));
+                let doc = crate::overview::ticked(doc, every);
+                send_document(&documents, &sent, Some(began), doc);
             },
             &self.tasks.0.runtime,
         );
@@ -1271,7 +1278,7 @@ impl Scheduler {
             crate::told::document(crate::told::Kind::Internal, &words, &[])
         });
         doc["gone"] = true.into();
-        send_document(&self.documents, doc);
+        send_document(&self.documents, &self.sent, None, doc);
     }
 
     /// Start the next work, where none is in flight.
@@ -1600,10 +1607,27 @@ impl Scheduler {
 }
 
 /// Send `doc` to a repository's followers, where any follows and it
-/// changed in a part other than its time (design D6).
-fn send_document(documents: &watch::Sender<Option<serde_json::Value>>, doc: serde_json::Value) {
+/// changed in a part other than its time (design D6). A document whose
+/// read `began` before the read of the newest document `sent` is older
+/// than it, and is not sent: the reads of one repository's documents end
+/// in any order, and its followers get them in the order of the state
+/// each read. A document with no read, the one that says the repository
+/// is gone, is always the newest.
+fn send_document(
+    documents: &watch::Sender<Option<serde_json::Value>>,
+    sent: &Mutex<Option<Moment>>,
+    began: Option<Moment>,
+    doc: serde_json::Value,
+) {
     if documents.receiver_count() == 0 {
         return;
+    }
+    let mut sent = locked(sent);
+    if let Some(began) = began {
+        if sent.is_some_and(|s| began < s) {
+            return;
+        }
+        *sent = Some(began);
     }
     let now = crate::overview::untimed(&doc);
     documents.send_if_modified(|d| {
@@ -2457,17 +2481,24 @@ mod tests {
     const IDLE_ASK_TEST: Duration = Duration::from_secs(61);
 
     /// Tasks that pass only when asked, each document read giving the
-    /// next of `docs` (the change `sluice-host-answers-every-read`, design
-    /// D6), and how many documents were read.
+    /// next of `docs` with the moment it began (the change
+    /// `sluice-host-answers-every-read`, design D6), and how many
+    /// documents were read.
     fn documented(docs: Vec<serde_json::Value>) -> (Tasks, Arc<AtomicUsize>) {
         let tasks = Fakes::default().tasks().passes_when_asked();
         let read = Arc::new(AtomicUsize::new(0));
         let n = read.clone();
         let docs = Arc::new(docs);
+        let order = Arc::new(Mutex::new(()));
         tasks.documenting(Arc::new(move |_, _| {
-            let i = n.fetch_add(1, Ordering::SeqCst);
+            // A later read begins later, as the host's reads of one
+            // repository do.
+            let (i, began) = {
+                let _order = locked(&order);
+                (n.fetch_add(1, Ordering::SeqCst), Moment::now())
+            };
             let doc = docs.get(i).or(docs.last()).cloned();
-            Box::pin(async move { doc })
+            Box::pin(async move { doc.map(|d| (began, d)) })
         }));
         (tasks, read)
     }
@@ -2536,6 +2567,80 @@ mod tests {
         let first = stream.next().await.flatten().expect("a document");
         assert_eq!(first["n"], 3, "the newest, alone");
         assert!(documents.has_changed().is_ok());
+    }
+
+    /// resident-subscriptions, "A read that ends after a newer one" (the
+    /// change `overviews-reach-a-subscriber-in-order`): three passes each
+    /// read the document, and the first read ends last, as a read does on
+    /// a host under load. Its older document is not sent after the newer
+    /// ones, and a subscriber gets the documents in the order of their
+    /// state.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_document_read_that_ends_late_is_not_sent_after_a_newer_one() {
+        let repo = PathBuf::from("/host/late-read.git");
+        let tasks = Fakes::default().tasks().passes_when_asked();
+        let order = Arc::new(Mutex::new(0u64));
+        let ended = Arc::new(AtomicUsize::new(0));
+        let first = Arc::new(tokio::sync::Notify::new());
+        {
+            let (order, ended, first) = (order.clone(), ended.clone(), first.clone());
+            tasks.documenting(Arc::new(move |_, _| {
+                let (n, began) = {
+                    let mut n = locked(&order);
+                    *n += 1;
+                    (*n, Moment::now())
+                };
+                let (ended, first) = (ended.clone(), first.clone());
+                Box::pin(async move {
+                    if n == 1 {
+                        first.notified().await;
+                    }
+                    ended.fetch_add(1, Ordering::SeqCst);
+                    Some((began, serde_json::json!({"at": n.to_string(), "n": n})))
+                })
+            }));
+        }
+        let documents = tasks.documents(&repo).expect("its channel");
+        let seen = Arc::new(Mutex::new(Vec::new()));
+        let subscriber = {
+            let (seen, mut documents) = (seen.clone(), documents.clone());
+            tokio::spawn(async move {
+                while documents.changed().await.is_ok() {
+                    let n = documents
+                        .borrow_and_update()
+                        .as_ref()
+                        .map(|d| d["n"].clone());
+                    locked(&seen).extend(n.and_then(|n| n.as_u64()));
+                }
+            })
+        };
+        let handle = tasks.handle(&repo);
+        let _follower = handle.following(FollowKind::Watch, false);
+        for _ in 0..3 {
+            handle.pass(None).await.expect("a pass");
+        }
+        soon("the two later reads end", || {
+            ended.load(Ordering::SeqCst) == 2
+        })
+        .await;
+        soon("the newest is sent", || {
+            documents.borrow().as_ref().is_some_and(|d| d["n"] == 3)
+        })
+        .await;
+        first.notify_one();
+        soon("the first read ends", || ended.load(Ordering::SeqCst) == 3).await;
+        settle().await;
+        assert_eq!(
+            documents.borrow().as_ref().map(|d| d["n"].clone()),
+            Some(3.into()),
+            "the newest stays"
+        );
+        let seen = locked(&seen).clone();
+        assert!(
+            seen.is_sorted() && seen.last() == Some(&3),
+            "in order: {seen:?}"
+        );
+        subscriber.abort();
     }
 
     /// resident-reads, "A read past its bound is answered from the last

@@ -16,8 +16,10 @@
 //! call, not many.
 //!
 //! The newest answer replaces the older one, so an ask that reads late
-//! reads the newest. A key with no receiver and no call in flight leaves
-//! the map.
+//! reads the newest. An answer carries the moment its call began: the
+//! calls of a key never overlap, so these moments order its answers as
+//! the state that each call read. A key with no receiver and no call in
+//! flight leaves the map.
 //!
 //! This module names no type of sluice. It uses only tokio and tokio-util.
 
@@ -55,8 +57,9 @@ type Start<V> = Box<dyn FnOnce() -> Call<V> + Send>;
 
 /// One key's state.
 struct Entry<V> {
-    /// The newest answer and its generation; `None` before the first.
-    answers: watch::Sender<Option<(u64, V)>>,
+    /// The newest answer, its generation and when its call began; `None`
+    /// before the first.
+    answers: watch::Sender<Option<(u64, Moment, V)>>,
     /// The generation of the call in flight, and when it began.
     flight: Option<(u64, Moment)>,
     /// The start of one more call, due when the call in flight ends.
@@ -111,6 +114,24 @@ where
         F: FnOnce() -> Fut + Send + 'static,
         Fut: Future<Output = V> + Send + 'static,
     {
+        self.ask_dated(key, changed, until, start)
+            .await
+            .map(|(_, v)| v)
+    }
+
+    /// As `ask`, with the moment the answer's call began. Two answers of
+    /// one key are in the order of these moments.
+    pub async fn ask_dated<F, Fut>(
+        &self,
+        key: K,
+        changed: Option<Moment>,
+        until: Option<Instant>,
+        start: F,
+    ) -> Option<(Moment, V)>
+    where
+        F: FnOnce() -> Fut + Send + 'static,
+        Fut: Future<Output = V> + Send + 'static,
+    {
         let start: Start<V> = Box::new(move || Box::pin(start()) as Call<V>);
         let (mut rx, needs) = {
             let mut keys = self.keys();
@@ -137,18 +158,19 @@ where
             };
             (rx, needs)
         };
-        let reached = |v: &Option<(u64, V)>| v.as_ref().is_some_and(|(g, _)| *g >= needs);
+        let reached =
+            |v: &Option<(u64, Moment, V)>| v.as_ref().is_some_and(|(g, _, _)| *g >= needs);
         let answer = match until {
             Some(until) => tokio::time::timeout_at(until, rx.wait_for(reached))
                 .await
                 .ok()
                 .and_then(Result::ok)
-                .and_then(|v| v.as_ref().map(|(_, v)| v.clone())),
+                .and_then(|v| v.as_ref().map(|(_, b, v)| (*b, v.clone()))),
             None => rx
                 .wait_for(reached)
                 .await
                 .ok()
-                .and_then(|v| v.as_ref().map(|(_, v)| v.clone())),
+                .and_then(|v| v.as_ref().map(|(_, b, v)| (*b, v.clone()))),
         };
         drop(rx);
         self.leave_if_idle(&key);
@@ -176,7 +198,11 @@ where
         let Some(entry) = keys.get_mut(key) else {
             return;
         };
-        entry.answers.send_replace(Some((generation, answer)));
+        // The call that ended is the one in flight: calls never overlap.
+        let began = entry.flight.map_or_else(Moment::now, |(_, began)| began);
+        entry
+            .answers
+            .send_replace(Some((generation, began, answer)));
         entry.flight = None;
         if let Some(start) = entry.due.take() {
             let next = entry.last + 1;
