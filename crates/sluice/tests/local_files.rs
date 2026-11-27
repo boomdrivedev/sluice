@@ -615,3 +615,85 @@ fn a_stopped_writers_pending_write_is_read_whole_over_what_was_kept() {
     assert_eq!(read.version, 2);
     assert_eq!(read.files["submissions/2.json"], b"{\"id\":2}\n");
 }
+
+/// 129, 131, core.41: a read made while another process writes gives one
+/// version whole. Each write puts `branch.json` and twenty submissions at
+/// its version, and moves one submission to the finished records, as a
+/// landing does; a reader with nothing kept reads all the while, and every
+/// read it makes gives every file at the version it names, the moved
+/// submission among the finished records alone.
+#[test]
+fn a_read_beside_writes_is_one_version_whole() {
+    let dir = Scratch::new("whole-under-writes");
+    let writer = LocalFiles::new(dir.path());
+    let at = |v: u64| -> Changes {
+        let mut c = Changes::default();
+        c.put
+            .insert("branch.json".into(), format!("{v}\n").into_bytes());
+        for n in 0..20 {
+            c.put.insert(
+                format!("submissions/{n}.json"),
+                format!("{v}\n").into_bytes(),
+            );
+        }
+        c.put
+            .insert(format!("submissions/moving-{v}.json"), b"live\n".to_vec());
+        if v > 1 {
+            c.remove
+                .insert(format!("submissions/moving-{}.json", v - 1));
+            c.put.insert(
+                format!("{}/moving-{}.json", sluice_seams::FINISHED, v - 1),
+                b"finished\n".to_vec(),
+            );
+        }
+        c
+    };
+    write(&writer, "main", at(1));
+    let stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let reader = {
+        let stop = stop.clone();
+        let root = dir.path().to_path_buf();
+        std::thread::spawn(move || -> Result<usize, String> {
+            let mut reads = 0;
+            while !stop.load(std::sync::atomic::Ordering::SeqCst) {
+                // A reader of its own each time: nothing kept between reads.
+                let read = LocalFiles::new(&root)
+                    .read("main")
+                    .map_err(|e| format!("read {reads}: {e:#}"))?;
+                let v = read.version.to_string() + "\n";
+                for (name, bytes) in &read.files {
+                    let whole = match name.strip_prefix("submissions/moving-") {
+                        Some(n) => n == format!("{}.json", read.version) && bytes == b"live\n",
+                        None => bytes == v.as_bytes(),
+                    };
+                    if !whole {
+                        return Err(format!(
+                            "read {reads} at version {} holds {name}: {:?}",
+                            read.version,
+                            String::from_utf8_lossy(bytes)
+                        ));
+                    }
+                }
+                let live = format!("submissions/moving-{}.json", read.version);
+                if !read.files.contains_key(&live) || read.files.len() != 22 {
+                    return Err(format!(
+                        "read {reads} at version {} holds {:?}",
+                        read.version,
+                        read.files.keys().collect::<Vec<_>>()
+                    ));
+                }
+                reads += 1;
+            }
+            Ok(reads)
+        })
+    };
+    let until = Instant::now() + Duration::from_secs(3);
+    let mut v = 1;
+    while Instant::now() < until && !reader.is_finished() {
+        v += 1;
+        assert!(matches!(write(&writer, "main", at(v)), Written::Written(_)));
+    }
+    stop.store(true, std::sync::atomic::Ordering::SeqCst);
+    let reads = reader.join().unwrap().unwrap_or_else(|e| panic!("{e}"));
+    assert!(reads > 0 && v > 2, "{reads} reads beside {v} writes");
+}

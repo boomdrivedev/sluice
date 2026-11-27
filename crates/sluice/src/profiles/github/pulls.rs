@@ -3590,15 +3590,19 @@ impl Pulls {
                 return Err(e);
             }
         };
-        self.kept
-            .change_follows(repo, branch, |follows| match &read {
-                Some(f) => {
-                    follows.requests.insert(n, f.clone());
-                }
-                None => {
+        // 137 (design D3): what was read is kept only into the follow this
+        // read claimed. A status or a wait that let the request go while
+        // it was read has said its end, so it stays let go; a process that
+        // followed it again or read it since keeps what it wrote.
+        self.kept.change_follows(repo, branch, |follows| {
+            match (&read, follows.requests.get_mut(&n)) {
+                (Some(f), Some(kept)) if kept.read_at == Some(now) => *kept = f.clone(),
+                (Some(_), _) => {}
+                (None, _) => {
                     follows.requests.remove(&n);
                 }
-            })?;
+            }
+        })?;
         Ok(read)
     }
 
@@ -4430,6 +4434,142 @@ mod tests {
             assert!(pulls.branches(fakes.seams()).unwrap().is_empty());
         }
         assert_eq!(fakes.world.reads_of(POLICY_PATH), 2);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// GitHub as `forge` holds it, with `meanwhile` run as each pull
+    /// request is read from it: what another process does while a read is
+    /// made.
+    struct Meanwhile<'a> {
+        forge: &'a FileForge,
+        meanwhile: Box<dyn Fn() + 'a>,
+    }
+
+    impl Forge for Meanwhile<'_> {
+        fn login(&self, repo: &Repo) -> Result<String> {
+            Forge::login(self.forge, repo)
+        }
+        fn pulls(&self, repo: &Repo, base: &str) -> Result<Vec<Pull>> {
+            Forge::pulls(self.forge, repo, base)
+        }
+        fn requests(&self, repo: &Repo, base: &str) -> Result<Vec<Request>> {
+            Forge::requests(self.forge, repo, base)
+        }
+        fn pull(&self, repo: &Repo, number: u64) -> Result<Option<Pull>> {
+            (self.meanwhile)();
+            Forge::pull(self.forge, repo, number)
+        }
+        fn reviews(&self, repo: &Repo, number: u64) -> Result<Vec<Review>> {
+            Forge::reviews(self.forge, repo, number)
+        }
+        fn checks(&self, repo: &Repo, rev: &str) -> Result<Vec<Check>> {
+            Forge::checks(self.forge, repo, rev)
+        }
+        fn readied(&self, repo: &Repo, number: u64) -> Result<Vec<DateTime<Utc>>> {
+            Forge::readied(self.forge, repo, number)
+        }
+        fn posted_all(&self, repo: &Repo, rev: &str) -> Result<Vec<Posted>> {
+            Forge::posted_all(self.forge, repo, rev)
+        }
+        fn post_named(
+            &self,
+            repo: &Repo,
+            rev: &str,
+            name: &str,
+            existing: Option<u64>,
+            posting: &Posting,
+        ) -> Result<u64> {
+            Forge::post_named(self.forge, repo, rev, name, existing, posting)
+        }
+        fn comment_list(
+            &self,
+            repo: &Repo,
+            number: u64,
+        ) -> Result<Vec<super::super::forge::Comment>> {
+            Forge::comment_list(self.forge, repo, number)
+        }
+        fn comment(&self, repo: &Repo, number: u64, body: &str) -> Result<u64> {
+            Forge::comment(self.forge, repo, number, body)
+        }
+        fn edit_comment(&self, repo: &Repo, id: u64, body: &str) -> Result<()> {
+            Forge::edit_comment(self.forge, repo, id, body)
+        }
+        fn open(
+            &self,
+            repo: &Repo,
+            base: &str,
+            head_ref: &str,
+            title: &str,
+            body: &str,
+            draft: bool,
+        ) -> Result<Pull> {
+            Forge::open(self.forge, repo, base, head_ref, title, body, draft)
+        }
+        fn edit(&self, repo: &Repo, number: u64, title: Option<&str>, body: &str) -> Result<()> {
+            Forge::edit(self.forge, repo, number, title, body)
+        }
+        fn set_draft(&self, repo: &Repo, number: u64, draft: bool) -> Result<()> {
+            Forge::set_draft(self.forge, repo, number, draft)
+        }
+    }
+
+    /// 137 (design D3), request-intake-host, "Merged": host A's reading
+    /// reads pull request 7, which it follows into main, from GitHub, and
+    /// finds it merged. While it reads, a status on A says it landed and
+    /// lets it go, as a status does once it has said so. A's reading gives
+    /// what it read, and keeps it into no follow: the request stays let
+    /// go, so the next status shows no row for it.
+    #[test]
+    fn a_follow_let_go_while_it_is_read_stays_let_go() {
+        let dir = std::env::temp_dir().join(format!("sluice-pulls-let-go-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let repo = Repo::from_url("https://github.com/o/r.git").unwrap();
+        let github = FileForge::new(&dir.join("github.json"), &repo);
+        let opened = github
+            .open(&repo, "main", "unit/x", "x", "", false)
+            .unwrap();
+        github
+            .change(|h| {
+                let p = h.pulls.iter_mut().find(|p| p.number == opened.number);
+                let p = p.expect("the request is held");
+                (p.open, p.merged) = (false, true);
+                Ok(())
+            })
+            .unwrap();
+        let n = opened.number;
+        let kept = Kept::new(&dir.join("state"));
+        kept.change_follows(&repo, "main", |f| {
+            f.requests
+                .insert(n, known(&opened.head, false, "x", "unit/x"))
+        })
+        .unwrap();
+        let pulls = Pulls::new(
+            &dir,
+            &dir,
+            None,
+            None,
+            Rc::new(retry::Policy::command()),
+            Kept::new(&dir.join("state")),
+            crate::instance::DISCOVERY,
+            sluice_core::Peer::default(),
+        );
+        let status = Kept::new(&dir.join("state"));
+        let forge = Meanwhile {
+            forge: &github,
+            meanwhile: Box::new(|| {
+                status
+                    .change_follows(&repo, "main", |f| f.requests.remove(&n))
+                    .unwrap();
+            }),
+        };
+        let read = pulls
+            .read_followed(&forge, &repo, "main", n, Utc::now())
+            .unwrap()
+            .expect("GitHub holds the request");
+        assert!(read.merged, "{read:?}");
+        let follows = kept.follows(&repo, "main").requests;
+        assert!(!follows.contains_key(&n), "{follows:?}");
         let _ = std::fs::remove_dir_all(dir);
     }
 
