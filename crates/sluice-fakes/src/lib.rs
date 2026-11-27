@@ -629,6 +629,19 @@ impl World {
         Self::put_commit(&mut inner, tree, vec![on.clone()], message)
     }
 
+    /// Another queue lands `head` on `branch` by hand: a merge commit of
+    /// the two, `head`'s files over the branch's, saying `message`, which
+    /// the branch moves to. Returns the merge.
+    pub fn merge_onto(&self, branch: &str, head: &Rev, message: &str) -> Rev {
+        let mut inner = self.0.borrow_mut();
+        let tip = inner.refs[branch].clone();
+        let mut tree = inner.commits[&tip].tree.clone();
+        tree.extend(inner.commits[head].tree.clone());
+        let rev = Self::put_commit(&mut inner, tree, vec![tip, head.clone()], message);
+        inner.refs.insert(branch.into(), rev.clone());
+        rev
+    }
+
     /// Someone moves the branch by hand with a commit of their own.
     /// The branch is deleted, as by hand.
     pub fn delete_branch(&self, branch: &str) {

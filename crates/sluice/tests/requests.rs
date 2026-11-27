@@ -14,10 +14,13 @@ use std::rc::Rc;
 use std::time::Duration;
 
 use anyhow::{anyhow, bail, Result};
+use chrono::{DateTime, Utc};
 use clap::Parser;
 use serde_json::Value;
 use sluice::profiles::github::fake::FileForge;
-use sluice::profiles::github::forge::{Forge as _, Posting, Standing, Status};
+use sluice::profiles::github::forge::{
+    Check, Comment, Forge, Listed, Posted, Posting, Pull, Request, Review, Standing, Status,
+};
 use sluice::profiles::github::kept::Kept;
 use sluice::profiles::github::pulls::{self, Pulls};
 use sluice::profiles::github::request_refs::{RemoteRefs, RequestRefs};
@@ -138,6 +141,105 @@ impl RemoteRefs for FakeRemote<'_> {
             .borrow_mut()
             .push((branch.into(), rev.clone()));
         self.0.forge.pushed(branch, &rev.0)
+    }
+}
+
+/// GitHub as a host's pull request driver reaches it: the file standing
+/// for it, each call stamped at the fakes' time as it is made, so what the
+/// driver changes on GitHub and what it records are on one clock.
+struct Stamped {
+    world: World,
+    forge: Rc<FileForge>,
+}
+
+impl Stamped {
+    fn now(&self) -> &FileForge {
+        self.forge.stamp_at(self.world.now());
+        &self.forge
+    }
+}
+
+impl Forge for Stamped {
+    fn login(&self, repo: &GitHubRepo) -> Result<String> {
+        self.now().login(repo)
+    }
+    fn open_pulls(&self, repo: &GitHubRepo) -> Result<Vec<Pull>> {
+        self.now().open_pulls(repo)
+    }
+    fn pulls(&self, repo: &GitHubRepo, base: &str) -> Result<Vec<Pull>> {
+        self.now().pulls(repo, base)
+    }
+    fn listed(&self, repo: &GitHubRepo) -> Result<Listed> {
+        self.now().listed(repo)
+    }
+    fn requests(&self, repo: &GitHubRepo, base: &str) -> Result<Vec<Request>> {
+        self.now().requests(repo, base)
+    }
+    fn pull(&self, repo: &GitHubRepo, number: u64) -> Result<Option<Pull>> {
+        self.now().pull(repo, number)
+    }
+    fn reviews(&self, repo: &GitHubRepo, number: u64) -> Result<Vec<Review>> {
+        self.now().reviews(repo, number)
+    }
+    fn checks(&self, repo: &GitHubRepo, rev: &str) -> Result<Vec<Check>> {
+        self.now().checks(repo, rev)
+    }
+    fn readied(&self, repo: &GitHubRepo, number: u64) -> Result<Vec<DateTime<Utc>>> {
+        self.now().readied(repo, number)
+    }
+    fn posted(&self, repo: &GitHubRepo, rev: &str) -> Result<Option<Posted>> {
+        self.now().posted(repo, rev)
+    }
+    fn posted_all(&self, repo: &GitHubRepo, rev: &str) -> Result<Vec<Posted>> {
+        self.now().posted_all(repo, rev)
+    }
+    fn post(
+        &self,
+        repo: &GitHubRepo,
+        rev: &str,
+        existing: Option<u64>,
+        posting: &Posting,
+    ) -> Result<u64> {
+        self.now().post(repo, rev, existing, posting)
+    }
+    fn post_named(
+        &self,
+        repo: &GitHubRepo,
+        rev: &str,
+        name: &str,
+        existing: Option<u64>,
+        posting: &Posting,
+    ) -> Result<u64> {
+        self.now().post_named(repo, rev, name, existing, posting)
+    }
+    fn comments(&self, repo: &GitHubRepo, number: u64) -> Result<Vec<String>> {
+        self.now().comments(repo, number)
+    }
+    fn comment_list(&self, repo: &GitHubRepo, number: u64) -> Result<Vec<Comment>> {
+        self.now().comment_list(repo, number)
+    }
+    fn comment(&self, repo: &GitHubRepo, number: u64, body: &str) -> Result<u64> {
+        self.now().comment(repo, number, body)
+    }
+    fn edit_comment(&self, repo: &GitHubRepo, id: u64, body: &str) -> Result<()> {
+        self.now().edit_comment(repo, id, body)
+    }
+    fn open(
+        &self,
+        repo: &GitHubRepo,
+        base: &str,
+        head_ref: &str,
+        title: &str,
+        body: &str,
+        draft: bool,
+    ) -> Result<Pull> {
+        self.now().open(repo, base, head_ref, title, body, draft)
+    }
+    fn edit(&self, repo: &GitHubRepo, number: u64, title: Option<&str>, body: &str) -> Result<()> {
+        self.now().edit(repo, number, title, body)
+    }
+    fn set_draft(&self, repo: &GitHubRepo, number: u64, draft: bool) -> Result<()> {
+        Forge::set_draft(self.now(), repo, number, draft)
     }
 }
 
@@ -288,7 +390,10 @@ impl OnGitHub {
         let pulls = Pulls::new(
             refs.clone(),
             dir.path(),
-            Some(self.forge.clone()),
+            Some(Rc::new(Stamped {
+                world: self.f.world.clone(),
+                forge: self.forge.clone(),
+            })),
             Kept::new(&dir.path().join("state")),
             self.discovery.get(),
             peer.clone(),
@@ -622,7 +727,7 @@ impl OnGitHub {
     }
 
     /// The pull request from `head_ref`, as GitHub holds it now.
-    fn pull_from(&self, head_ref: &str) -> sluice::profiles::github::forge::Pull {
+    fn pull_from(&self, head_ref: &str) -> Pull {
         self.forge
             .by_ref(head_ref)
             .unwrap()
@@ -1979,7 +2084,7 @@ impl OnGitHub {
     }
 
     /// The open pull request from `unit/<name>`.
-    fn pull_of(&self, name: &str) -> sluice::profiles::github::forge::Pull {
+    fn pull_of(&self, name: &str) -> Pull {
         self.pull_from(&format!("unit/{name}"))
     }
 
@@ -2752,7 +2857,7 @@ impl OnGitHub {
     /// Host B keeps main, and host A opened a pull request from its session
     /// `name` by a submit that does not wait: the session's worktree, and
     /// the pull request. The next commands run on A.
-    fn opened_here_held_by_b(&self, name: &str) -> (String, sluice::profiles::github::forge::Pull) {
+    fn opened_here_held_by_b(&self, name: &str) -> (String, Pull) {
         self.leads("b");
         self.be("a");
         let w = self.session(name, &[(&format!("{name}.txt"), "x\n")]);
@@ -3478,4 +3583,231 @@ fn a_status_says_a_merged_request_landed_once() {
     let said = g.status_words();
     assert!(!said.contains(&format!("#{n} ")), "{said}");
     assert!(g.status_document()["pull_requests"].is_null());
+}
+
+// ---------------------------------------------------------------------------
+// a submission whose work lands elsewhere (122, 5; record 0100)
+// ---------------------------------------------------------------------------
+
+impl OnGitHub {
+    /// Another queue of `main` lands pull request `n` at `head`: a merge
+    /// commit onto main, as a second copy of the repository on the host
+    /// lands it, which GitHub reads as the pull request merged. Returns the
+    /// landing.
+    fn landed_elsewhere(&self, n: u64, head: &Rev) -> Rev {
+        let landing = self
+            .f
+            .world
+            .merge_onto("main", head, "chore(land): elsewhere");
+        self.gh().merge(n).unwrap();
+        landing
+    }
+
+    /// `main`'s log, a document a line, as its records hold it.
+    fn log(&self) -> Vec<Value> {
+        let snap = self.f.sluice().seams().state.read("main").unwrap();
+        sluice_core::line::Line::read_log(&snap)
+            .unwrap()
+            .iter()
+            .map(|l| serde_json::to_value(l).unwrap())
+            .collect()
+    }
+}
+
+/// 122, 5; pull-request-intake, "Landed by another queue": a submitted pull
+/// request another queue of `main` lands, under test here, leaves GitHub's
+/// open list as merged; its submission here is landed as that landing,
+/// never withdrawn, its run ended, and a wait on it exits 0.
+#[test]
+fn landed_by_another_queue_while_queued() {
+    let g = OnGitHub::new("");
+    g.f.world.hold_runs(true);
+    let (n, head) = g.by_hand("unit/elsewhere", &[("e.txt", Some("x\n"))], false);
+    g.step();
+    let id = g.of(n)[0]["id"].as_u64().unwrap();
+    assert_eq!(g.of(n)[0]["state"], "testing", "{:?}", g.of(n));
+    let landing = g.landed_elsewhere(n, &head);
+    g.step();
+    let a = g.of(n);
+    assert_eq!(a.len(), 1, "{a:?}");
+    assert_eq!(a[0]["state"], "landed", "{a:?}");
+    assert_eq!(a[0]["landed_as"], landing.0.as_str());
+    assert_eq!(a[0]["landed_elsewhere"], true);
+    let log = g.log();
+    assert!(!log.iter().any(|l| l["event"] == "withdrawn"), "{log:?}");
+    assert!(
+        log.iter()
+            .any(|l| l["event"] == "found_landed" && l["to"] == landing.0.as_str()),
+        "{log:?}"
+    );
+    assert_eq!(
+        g.f.world.tip("main"),
+        landing,
+        "nothing more is landed of it"
+    );
+    assert_eq!(g.f.world.live_runs(), 0, "its run ended");
+    let (code, out) = g.sluice(&["wait", &id.to_string(), "--json"]);
+    assert_eq!(code, sluice::LANDED, "{out}");
+    let doc: Value = serde_json::from_str(&out).unwrap();
+    assert_eq!(doc["state"], "landed");
+    assert_eq!(doc["landed_as"], landing.0.as_str());
+}
+
+/// 122: a submission withdrawn whose work the branch then took, as a copy
+/// whose intake withdrew a request another queue landed left its records,
+/// is reported landed as the commit that landed it, by `sluice wait <id>`
+/// and by `sluice wait main` for its worktree, never as withdrawn.
+#[test]
+fn a_withdrawn_submission_whose_work_landed_is_reported_landed() {
+    let g = OnGitHub::new("");
+    g.f.world.hold_runs(true);
+    let w = g.session("withdrawn-landed", &[("w.txt", "x\n")]);
+    g.submitted(&w, &["--no-wait"]);
+    let pull = g.pull_from("unit/withdrawn-landed");
+    let id = g.of(pull.number)[0]["id"].as_u64().unwrap();
+    let (code, said) = g.sluice(&["withdraw", &id.to_string()]);
+    assert_eq!(code, 0, "{said}");
+    let landing = g.landed_elsewhere(pull.number, &Rev::new(pull.head.clone()));
+    let (code, out) = g.sluice(&["wait", &id.to_string(), "--json"]);
+    assert_eq!(code, sluice::LANDED, "{out}");
+    let doc: Value = serde_json::from_str(&out).unwrap();
+    assert_eq!(doc["state"], "landed", "{doc}");
+    assert_eq!(doc["landed_as"], landing.0.as_str());
+    assert_eq!(
+        g.of(pull.number)[0]["state"],
+        "withdrawn",
+        "its record stands"
+    );
+    let (code, said) = g.sluice(&["wait", "main", "--worktree", &w]);
+    assert_eq!(code, sluice::LANDED, "{said}");
+    assert!(
+        said.contains(&format!("landed as {}", &landing.0[..7])),
+        "{said}"
+    );
+    assert!(!said.contains("closed without landing"), "{said}");
+}
+
+/// 122; record 0100 D5: `sluice wait main` follows a pull request this host
+/// took in; another queue then lands it, and GitHub reads it closed, with
+/// no fetch of `main` on this host since the wait began. The wait reads the
+/// closed request against `main` as a round reads it, from its remote: it
+/// says landed as the commit that landed it and exits 0, never closed
+/// without landing.
+#[test]
+fn a_wait_beside_a_driver_reads_a_request_another_queue_landed_from_the_branch() {
+    let g = OnGitHub::new("");
+    g.f.world.hold_runs(true);
+    let w = g.session("beside", &[("b.txt", "x\n")]);
+    g.submitted(&w, &["--no-wait"]);
+    let pull = g.pull_from("unit/beside");
+    assert_eq!(g.of(pull.number).len(), 1, "{:?}", g.subs());
+    let landing = RefCell::new(None);
+    let pause = Then(Cell::new(0), |k| {
+        if k == 2 {
+            *landing.borrow_mut() =
+                Some(g.landed_elsewhere(pull.number, &Rev::new(pull.head.clone())));
+        }
+    });
+    let (code, said) = g.sluice_pausing(
+        &["wait", "main", "--worktree", &w, "--timeout", "60s"],
+        &pause,
+    );
+    assert_eq!(code, sluice::LANDED, "{said}");
+    let landing = landing.into_inner().expect("landed while the wait went");
+    assert!(
+        said.contains(&format!("landed as {}", &landing.0[..7])),
+        "{said}"
+    );
+    assert!(!said.contains("closed without landing"), "{said}");
+}
+
+/// 5, 120: the operator's withdrawal of a hand-opened pull request's
+/// submission rests it on its head, open and ready: no work of it goes
+/// on, so a wait on it exits 4 at once.
+#[test]
+fn a_wait_on_a_request_the_operator_withdrew_exits_withdrawn() {
+    let g = OnGitHub::new("");
+    g.f.world.hold_runs(true);
+    let (n, _) = g.by_hand("unit/rested", &[("r.txt", Some("x\n"))], false);
+    g.step();
+    let id = g.of(n)[0]["id"].as_u64().unwrap();
+    let (code, said) = g.sluice(&["withdraw", &id.to_string()]);
+    assert_eq!(code, 0, "{said}");
+    let (code, out) = g.sluice(&["wait", &id.to_string(), "--timeout", "20s", "--json"]);
+    assert_eq!(code, sluice::WITHDRAWN, "{out}");
+    let doc: Value = serde_json::from_str(&out).unwrap();
+    assert_eq!(doc["state"], "withdrawn", "{doc}");
+    assert_eq!(doc["id"], id, "{doc}");
+}
+
+/// 67, 122; record 0100 D2, D4: a wait on a pull request's submission its
+/// own submit withdrew for a new head follows the request to the
+/// submission of that head, and ends with its own submission landed by
+/// that one's landing, naming it in `carried_by`.
+#[test]
+fn a_wait_follows_the_new_head_its_submit_withdrew_it_for() {
+    let g = OnGitHub::new("");
+    g.f.world.hold_runs(true);
+    let w = g.session("follow", &[("f.txt", "x\n")]);
+    g.submitted(&w, &["--no-wait"]);
+    let n = g.pull_from("unit/follow").number;
+    let first = g.of(n)[0]["id"].as_u64().unwrap();
+    let new = g.commit_in(&w, &[("more.txt", "more\n")]);
+    g.submitted(&w, &["--no-wait"]);
+    g.f.world.hold_runs(false);
+    g.f.world.complete_all();
+    let (code, out) = g.sluice(&["wait", &first.to_string(), "--timeout", "60s", "--json"]);
+    assert_eq!(code, sluice::LANDED, "{out}");
+    let doc: Value = serde_json::from_str(&out).unwrap();
+    let subs = g.of(n);
+    let second = subs
+        .iter()
+        .find(|x| x["head"] == new.0.as_str())
+        .unwrap_or_else(|| panic!("{subs:?}"));
+    assert_eq!(second["state"], "landed", "{second}");
+    assert_eq!(doc["id"], first, "{doc}");
+    assert_eq!(doc["state"], "landed", "{doc}");
+    assert_eq!(doc["landed_elsewhere"], true, "{doc}");
+    assert_eq!(doc["landed_as"], second["landed_as"], "{doc}");
+    assert_eq!(
+        doc["carried_by"],
+        serde_json::json!({ "id": second["id"], "state": "landed" }),
+        "{doc}"
+    );
+    assert_eq!(g.of(n)[0]["state"], "withdrawn");
+}
+
+/// 67, 120; record 0100 D2, D3: a pull request closed on the new head that
+/// carries a withdrawn submission's work, before that head lands, ends the
+/// withdrawn submission's wait withdrawn, exit 4, its own record naming the
+/// request closed in `carried_by`. What the submit read of the request
+/// stays the wait's for a quarter of the host's interval, here the whole
+/// test, and is read again once the request's entry moved (rule core.32):
+/// the closing that withdrew the new head decides the wait, never the
+/// submit's read of the request open.
+#[test]
+fn a_wait_exits_withdrawn_when_the_request_carrying_its_work_closes() {
+    let g = OnGitHub::unled("", "");
+    g.discovery(Duration::from_secs(3600));
+    g.f.sluice().as_peer(peer("a")).step("main").unwrap();
+    g.f.world.hold_runs(true);
+    let w = g.session("follow-closed", &[("c.txt", "x\n")]);
+    g.submitted(&w, &["--no-wait"]);
+    let n = g.pull_from("unit/follow-closed").number;
+    let first = g.of(n)[0]["id"].as_u64().unwrap();
+    g.commit_in(&w, &[("more.txt", "more\n")]);
+    g.submitted(&w, &["--no-wait"]);
+    assert_eq!(g.of(n).len(), 2, "{:?}", g.of(n));
+    g.gh().close(n).unwrap();
+    g.interval_passes();
+    let (code, out) = g.sluice(&["wait", &first.to_string(), "--timeout", "60s", "--json"]);
+    assert_eq!(code, sluice::WITHDRAWN, "{out}");
+    let doc: Value = serde_json::from_str(&out).unwrap();
+    assert_eq!(doc["id"], first, "{doc}");
+    assert_eq!(doc["state"], "withdrawn", "{doc}");
+    assert_eq!(
+        doc["carried_by"],
+        serde_json::json!({ "pull_request": n, "state": "closed" }),
+        "{out}"
+    );
 }
