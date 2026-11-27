@@ -1090,6 +1090,9 @@ fn run_holding(runtime: &tokio::runtime::Runtime, holder: Holder) -> Result<i32>
         // killed host process left are ended, and the workers that an
         // earlier image of this process started are its own again
         // (`nothing-detached@f807c7f5fcea`).
+        // Each worker starts on this runtime, through process-wrap, owned by
+        // a task of the edge (`each-worker-starts-through-process-wrap@025fae162990`).
+        crate::workers::edge(tokio::runtime::Handle::current());
         let swept = tokio::task::block_in_place(|| crate::workers::sweep(&owner));
         for r in &swept.ended {
             log(&format!(

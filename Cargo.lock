@@ -3975,8 +3975,10 @@ version = "11.0.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "e3655b18489c90df24f2c401ac65f908b17210e59cf676127f79890f67f3e30e"
 dependencies = [
+ "futures",
  "indexmap",
  "nix 0.32.0",
+ "tokio",
 ]
 
 [[package]]

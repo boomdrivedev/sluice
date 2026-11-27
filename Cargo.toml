@@ -38,11 +38,16 @@ chrono = { version = "0.4", default-features = false, features = [
   "std",
 ] }
 clap = { version = "4", features = ["derive", "env"] }
-# A command starts sluice's host process in a session of its own through
-# process-wrap (`each-worker-starts-through-process-wrap@025fae162990`).
+# A command starts sluice's host process in a session of its own, and
+# sluice host starts each worker in a process group of its own that ends
+# when it drops the worker, through process-wrap
+# (`each-worker-starts-through-process-wrap@025fae162990`).
 process-wrap = { version = "11", default-features = false, features = [
   "std",
+  "tokio1",
   "process-session",
+  "process-group",
+  "kill-on-drop",
 ] }
 nix = { version = "0.31", default-features = false, features = [
   "signal",
@@ -199,6 +204,7 @@ tokio = { version = "1", default-features = false, features = [
   "sync",
   "macros",
   "io-util",
+  "process",
 ] }
 # sluice host's edge (the change `sluice-host-runs-on-a-tokio-edge`): its
 # tasks and stops, its socket's lines, and the file events that start a
