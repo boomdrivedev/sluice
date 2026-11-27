@@ -2243,18 +2243,29 @@ fn answers(d: &OnDisk, daemon: &Daemon) {
 /// The host process's tick (64, 129).
 const TICK: Duration = Duration::from_secs(3);
 
-/// host-daemon, "Idle, it keeps running", and host-process, "A daemon's
-/// queues empty" (135, 137; design D1 of `sluice-runs-as-a-daemon`):
-/// `sluice daemon` with nothing queued and nothing following it still runs
-/// three ticks on, the host process that answers is it, and its `hello`
-/// and `host/version` say it is a daemon; and once the one submission
-/// queued lands, it still runs three ticks after the landing.
+/// `sluice daemon`'s life (135, 137, 150; design D1 and D8 of
+/// `sluice-runs-as-a-daemon`). host-daemon, "Started in a repository": a
+/// daemon started in a repository in no index adds it to the host's index
+/// before it answers. host-process, "A daemon": its `hello`, `host/version`
+/// and `sluice overview --json` say it is a daemon and give its pid.
+/// host-daemon, "Idle, it keeps running": with nothing queued and nothing
+/// following it, it still runs three ticks on. host-daemon, "A submission
+/// to an idle daemon", and host-process, "A daemon's queues empty": a
+/// submit that does not wait reaches it, it lands the submission with no
+/// other host process started, and it still runs three ticks after.
+/// host-daemon, "Started in no repository": started in `/`, it answers
+/// all the same, the index as it was. A host process a wait started is no
+/// daemon, as the overview says.
 #[test]
-fn an_idle_daemon_keeps_running() {
-    let d = OnDisk::new("daemon-idle", POLICY);
+fn a_daemon_keeps_running_and_lands_what_it_is_given() {
+    let d = OnDisk::new("daemon-life", POLICY);
     let dir = d.session("a");
+    let index = d.client(d.repo.dir()).paths().index();
+    assert_eq!(index.list().unwrap(), Vec::<std::path::PathBuf>::new());
+    let repository = std::fs::canonicalize(d.repo.dir().join(".git")).unwrap();
     let mut daemon = Daemon::start(&d, d.repo.dir());
     answers(&d, &daemon);
+    assert_eq!(index.list().unwrap(), vec![repository]);
     let hello = named(&d).expect("it answers");
     assert!(hello.daemon, "{hello:?}");
     let version = d
@@ -2264,6 +2275,9 @@ fn an_idle_daemon_keeps_running() {
         .expect("host/version");
     assert!(version.daemon, "{version:?}");
     assert_eq!(version.pid, daemon.pid());
+    let doc = overview_of(&d);
+    assert_eq!(doc["host_process"]["daemon"], true, "{doc}");
+    assert_eq!(doc["host_process"]["pid"], daemon.pid(), "{doc}");
 
     std::thread::sleep(TICK * 3);
     assert!(daemon.runs(), "idle three ticks: {}", daemon.said());
@@ -2273,6 +2287,12 @@ fn an_idle_daemon_keeps_running() {
     within(60, "the submission lands", || {
         state(&d, d.repo.dir(), id) == "landed"
     });
+    let starts = starts_in_log(&d);
+    assert_eq!(starts.len(), 1, "one host process started: {starts:#?}");
+    assert!(
+        starts[0].contains(&format!("sluice daemon {} started", sluice::VERSION)),
+        "{starts:#?}"
+    );
     std::thread::sleep(TICK * 3);
     assert!(
         daemon.runs(),
@@ -2280,6 +2300,38 @@ fn an_idle_daemon_keeps_running() {
         daemon.said()
     );
     assert_eq!(answering(&d), Some(daemon.pid()));
+    drop(daemon);
+
+    let d = OnDisk::new("daemon-life-nowhere", POLICY);
+    let index = d.client(d.repo.dir()).paths().index();
+    let daemon = Daemon::start(&d, Path::new("/"));
+    answers(&d, &daemon);
+    assert_eq!(index.list().unwrap(), Vec::<std::path::PathBuf>::new());
+    drop(daemon);
+
+    let d = OnDisk::new("daemon-life-wait", POLICY);
+    let repository = d.repository(d.repo.dir());
+    let follow = d
+        .client(d.repo.dir())
+        .subscribe(vec![sluice::host_process::protocol::Added {
+            folder: std::path::PathBuf::from(&repository),
+            kind: FollowKind::Wait,
+        }])
+        .unwrap();
+    let doc = overview_of(&d);
+    assert_eq!(doc["host_process"]["daemon"], false, "{doc}");
+    assert_eq!(doc["host_process"]["pid"], follow.named.pid, "{doc}");
+}
+
+/// `sluice overview --json` of `d`'s repository.
+fn overview_of(d: &OnDisk) -> serde_json::Value {
+    let out = d
+        .command(d.repo.dir())
+        .args(["overview", "--json"])
+        .output()
+        .unwrap();
+    assert!(out.status.success(), "{}", text(&out));
+    serde_json::from_slice(&out.stdout).unwrap()
 }
 
 /// The lines of the host process's log and the one before it that say a
@@ -2297,91 +2349,6 @@ fn starts_in_log(d: &OnDisk) -> Vec<String> {
         })
         .filter(|l| l.contains(" started") || l.contains("another host process holds"))
         .collect()
-}
-
-/// host-daemon, "A submission to an idle daemon" (135, 137; design D1 of
-/// `sluice-runs-as-a-daemon`): a submit that does not wait, in a repository
-/// whose `main` holds a policy, reaches the idle daemon, which lands it,
-/// and no other host process starts.
-#[test]
-fn a_daemon_lands_a_submission_with_no_other_host_process() {
-    let d = OnDisk::new("daemon-lands", POLICY);
-    let dir = d.session("a");
-    let mut daemon = Daemon::start(&d, d.repo.dir());
-    answers(&d, &daemon);
-    std::thread::sleep(TICK);
-    let id = queued_live(&d, &dir);
-    within(60, "the submission lands", || {
-        state(&d, d.repo.dir(), id) == "landed"
-    });
-    assert!(daemon.runs(), "{}", daemon.said());
-    assert_eq!(answering(&d), Some(daemon.pid()));
-    let starts = starts_in_log(&d);
-    assert_eq!(starts.len(), 1, "one host process started: {starts:#?}");
-    assert!(
-        starts[0].contains(&format!("sluice daemon {} started", sluice::VERSION)),
-        "{starts:#?}"
-    );
-}
-
-/// host-daemon, "Started in a repository" and "Started in no repository"
-/// (135; design D8 of `sluice-runs-as-a-daemon`): `sluice daemon` started
-/// in a repository whose `main` holds a policy, in no index, adds it to the
-/// host's index before it runs as the host process; started in `/`, it
-/// runs as the host process all the same, and the index is as it was.
-#[test]
-fn a_daemon_indexes_the_repository_it_starts_in() {
-    let d = OnDisk::new("daemon-index", POLICY);
-    let index = d.client(d.repo.dir()).paths().index();
-    assert_eq!(index.list().unwrap(), Vec::<std::path::PathBuf>::new());
-    let repository = std::fs::canonicalize(d.repo.dir().join(".git")).unwrap();
-    let daemon = Daemon::start(&d, d.repo.dir());
-    answers(&d, &daemon);
-    assert_eq!(index.list().unwrap(), vec![repository]);
-    drop(daemon);
-
-    let d = OnDisk::new("daemon-index-none", POLICY);
-    let index = d.client(d.repo.dir()).paths().index();
-    let daemon = Daemon::start(&d, Path::new("/"));
-    answers(&d, &daemon);
-    assert_eq!(index.list().unwrap(), Vec::<std::path::PathBuf>::new());
-}
-
-/// host-process, "A daemon" (150; design D1 of `sluice-runs-as-a-daemon`):
-/// with `sluice daemon` running, `sluice overview --json` gives
-/// `host_process.daemon` true and its pid; with a host process a wait
-/// started, `host_process.daemon` is false.
-#[test]
-fn the_overview_names_a_daemon() {
-    let overview = |d: &OnDisk| {
-        let out = d
-            .command(d.repo.dir())
-            .args(["overview", "--json"])
-            .output()
-            .unwrap();
-        assert!(out.status.success(), "{}", text(&out));
-        serde_json::from_slice::<serde_json::Value>(&out.stdout).unwrap()
-    };
-    let d = OnDisk::new("daemon-overview", POLICY);
-    let daemon = Daemon::start(&d, d.repo.dir());
-    answers(&d, &daemon);
-    let doc = overview(&d);
-    assert_eq!(doc["host_process"]["daemon"], true, "{doc}");
-    assert_eq!(doc["host_process"]["pid"], daemon.pid(), "{doc}");
-    drop(daemon);
-
-    let d = OnDisk::new("daemon-overview-wait", POLICY);
-    let repository = d.repository(d.repo.dir());
-    let follow = d
-        .client(d.repo.dir())
-        .subscribe(vec![sluice::host_process::protocol::Added {
-            folder: std::path::PathBuf::from(&repository),
-            kind: FollowKind::Wait,
-        }])
-        .unwrap();
-    let doc = overview(&d);
-    assert_eq!(doc["host_process"]["daemon"], false, "{doc}");
-    assert_eq!(doc["host_process"]["pid"], follow.named.pid, "{doc}");
 }
 
 /// A policy whose check marks that it began in `marks`, then waits for
@@ -2583,26 +2550,38 @@ fn ask_hand_over(d: &OnDisk, program: &Path) {
     assert_eq!(answer, sluice::host_process::protocol::Answer::Ok);
 }
 
-/// host-daemon, "The daemon is asked to hand over" (135; design D3, D4
-/// of `sluice-runs-as-a-daemon`): a daemon running a combination's checks,
-/// asked to hand over naming an executable, starts afresh in place as that
-/// executable: a host process with its pid and a later `since` answers as
-/// a daemon, its log says it started afresh as that executable, and the
-/// submission lands.
+/// A daemon's start afresh in place (135; record 0107 as amended
+/// 2026-11-13; design D3 to D6 of `sluice-runs-as-a-daemon`; design D6 of
+/// `sluice-host-runs-on-a-tokio-edge`). host-daemon, "The daemon is asked
+/// to hand over": running a combination's checks and asked to hand over
+/// naming an executable, it starts afresh in place as that executable,
+/// its pid kept and a later `since`, answering as a daemon on the socket
+/// it held, the same file, its log naming the executable; the submission
+/// lands with no check run again. host-daemon, "An executable that is not
+/// there": asked to hand over naming an executable that is not there, it
+/// goes on as it was, its log naming the executable once. host-daemon, "A
+/// submit during the start afresh", and settings-take-up, "A submit during
+/// a daemon's start afresh": a submit made as it starts afresh for a
+/// changed `[telemetry]` reaches the daemon started afresh, which lands
+/// it, and no other host process starts.
 #[test]
-fn a_daemon_asked_to_hand_over_starts_afresh_in_place() {
+fn a_daemon_starts_afresh_in_place_when_asked() {
+    use std::os::unix::fs::MetadataExt;
     let marks = support::Scratch::new("daemon-afresh-marks");
     let d = OnDisk::new("daemon-afresh", &held_policy(&marks));
+    settings(&d, "[telemetry]\nservice = \"one\"\n");
     let dir = d.session("a");
     let daemon = Daemon::start(&d, d.repo.dir());
     answers(&d, &daemon);
     let first = named(&d).expect("it answers");
+    let socket = d.client(d.repo.dir()).paths().socket.clone();
+    let inode = std::fs::metadata(&socket).unwrap().ino();
     let id = queued_live(&d, &dir);
     within(60, "the combination's check runs", || {
         marks.path().join("began").exists()
     });
-    // The executable named: a copy of sluice's, so the image started
-    // afresh is the one the ask named.
+
+    // Asked to hand over naming a copy of sluice's executable.
     let bin = support::Scratch::new("daemon-afresh-bin");
     let copy = bin.path().join("sluice");
     std::fs::copy(env!("CARGO_BIN_EXE_sluice"), &copy).unwrap();
@@ -2616,12 +2595,55 @@ fn a_daemon_asked_to_hand_over_starts_afresh_in_place() {
         logs.contains(&format!("started afresh in place as {}", copy.display())),
         "{logs}"
     );
+    assert_eq!(
+        std::fs::metadata(&socket).unwrap().ino(),
+        inode,
+        "the same socket: {logs}"
+    );
+
+    // Asked to hand over naming an executable that is not there.
+    let now = named(&d).expect("it answers");
+    let none = support::Scratch::new("daemon-afresh-none");
+    let missing = none.path().join("no-such-sluice");
+    ask_hand_over(&d, &missing);
+    within(90, "it says it could not start afresh", || {
+        host_logs(&d).contains("could not start afresh")
+    });
+    let after = named(&d).expect("it answers");
+    assert_eq!((after.pid, &after.since), (now.pid, &now.since));
+    let logs = host_logs(&d);
+    assert_eq!(
+        logs.matches(&missing.display().to_string()).count(),
+        1,
+        "{logs}"
+    );
+
     std::fs::write(marks.path().join("go"), "").unwrap();
     within(60, "the submission lands", || {
         state(&d, d.repo.dir(), id) == "landed"
     });
     let ran = std::fs::read_to_string(marks.path().join("began")).unwrap();
     assert_eq!(ran.lines().count(), 1, "no check ran again: {ran}");
+
+    // A submit made as it starts afresh for a changed `[telemetry]`.
+    settings(&d, "[telemetry]\nservice = \"two\"\n");
+    within(30, "the daemon starts afresh", || {
+        host_logs(&d).contains("it starts afresh in its own process")
+    });
+    let b = d.session("b");
+    let next = queued_live(&d, &b);
+    within(ENDS_WITHIN, "the daemon started afresh answers", || {
+        named(&d).is_some_and(|n| n.pid == first.pid && n.since != after.since)
+    });
+    within(60, "the submission lands", || {
+        state(&d, d.repo.dir(), next) == "landed"
+    });
+    let starts = starts_in_log(&d);
+    assert!(
+        starts.iter().all(|l| l.contains("sluice daemon ")),
+        "no other host process: {starts:#?}"
+    );
+    assert_eq!(answering(&d), Some(daemon.pid()));
 }
 
 /// A child killed and waited for once dropped.
@@ -2724,74 +2746,6 @@ fn a_newer_client_has_an_older_daemon_start_afresh() {
     assert_eq!(asked["program"], own.display().to_string(), "{asked}");
     assert_eq!(reached.named.pid, started.0.id());
     assert!(reached.named.daemon, "{:?}", reached.named);
-}
-
-/// host-daemon, "An executable that is not there" (design D3 of
-/// `sluice-runs-as-a-daemon`): a daemon asked to hand over naming an
-/// executable that is not there goes on as it was: the host process that
-/// answers has its pid and its first `since`, its log names the executable
-/// once, and it goes on passing.
-#[test]
-fn a_daemon_whose_start_afresh_fails_goes_on() {
-    let d = OnDisk::new("daemon-afresh-fails", POLICY);
-    let dir = d.session("a");
-    let daemon = Daemon::start(&d, d.repo.dir());
-    answers(&d, &daemon);
-    let first = named(&d).expect("it answers");
-    let none = support::Scratch::new("daemon-afresh-none");
-    let missing = none.path().join("no-such-sluice");
-    ask_hand_over(&d, &missing);
-    within(90, "it says it could not start afresh", || {
-        host_logs(&d).contains("could not start afresh")
-    });
-    let now = named(&d).expect("it answers");
-    assert_eq!((now.pid, &now.since), (first.pid, &first.since));
-    let logs = host_logs(&d);
-    assert_eq!(
-        logs.matches(&missing.display().to_string()).count(),
-        1,
-        "{logs}"
-    );
-    let id = queued_live(&d, &dir);
-    within(60, "the submission lands", || {
-        state(&d, d.repo.dir(), id) == "landed"
-    });
-    assert_eq!(answering(&d), Some(daemon.pid()));
-}
-
-/// host-daemon, "A submit during the start afresh", and settings-take-up,
-/// "A submit during a daemon's start afresh" (135; record 0107 as amended
-/// 2026-11-13; design D5, D6 of `sluice-runs-as-a-daemon`): a submit made
-/// as the daemon starts afresh for a changed `[telemetry]` reaches the
-/// daemon started afresh, no other host process starts, and the
-/// submission lands.
-#[test]
-fn a_submit_during_a_daemons_start_afresh_reaches_it() {
-    let d = OnDisk::new("daemon-afresh-submit", POLICY);
-    settings(&d, "[telemetry]\nservice = \"one\"\n");
-    let dir = d.session("a");
-    let daemon = Daemon::start(&d, d.repo.dir());
-    answers(&d, &daemon);
-    let first = named(&d).expect("it answers");
-
-    settings(&d, "[telemetry]\nservice = \"two\"\n");
-    within(30, "the daemon starts afresh", || {
-        host_logs(&d).contains("it starts afresh in its own process")
-    });
-    let id = queued_live(&d, &dir);
-    // It starts afresh once its readings in flight finish.
-    within(ENDS_WITHIN, "the daemon started afresh answers", || {
-        named(&d).is_some_and(|n| n.pid == first.pid && n.since != first.since)
-    });
-    within(60, "the submission lands", || {
-        state(&d, d.repo.dir(), id) == "landed"
-    });
-    let starts = starts_in_log(&d);
-    assert!(
-        starts.iter().all(|l| l.contains("sluice daemon ")),
-        "no other host process: {starts:#?}"
-    );
-    assert_eq!(answering(&d), Some(daemon.pid()));
 }
 
 /// host-daemon, "Stopped while a run goes on" (135; design D7 of
@@ -3783,35 +3737,6 @@ fn sigterm_stops_a_host_process_after_its_round() {
     }
     let _ = again.kill();
     let _ = again.wait();
-}
-
-/// host-daemon, "The daemon is asked to hand over", on tokio's edge
-/// (design D6 of `sluice-host-runs-on-a-tokio-edge`): a daemon that starts
-/// afresh in place answers on the socket it held, the same file, so a
-/// command that connects meanwhile waits in its queue.
-#[test]
-fn a_daemon_started_afresh_answers_on_its_socket() {
-    use std::os::unix::fs::MetadataExt;
-    let d = OnDisk::new("daemon-socket", POLICY);
-    let daemon = Daemon::start(&d, d.repo.dir());
-    answers(&d, &daemon);
-    let first = named(&d).expect("it answers");
-    let socket = d.client(d.repo.dir()).paths().socket.clone();
-    let inode = std::fs::metadata(&socket).unwrap().ino();
-    let bin = support::Scratch::new("daemon-socket-bin");
-    let copy = bin.path().join("sluice");
-    std::fs::copy(env!("CARGO_BIN_EXE_sluice"), &copy).unwrap();
-    let copy = std::fs::canonicalize(&copy).unwrap();
-    ask_hand_over(&d, &copy);
-    within(60, "the daemon started afresh answers", || {
-        named(&d).is_some_and(|n| n.pid == first.pid && n.since != first.since && n.daemon)
-    });
-    assert_eq!(
-        std::fs::metadata(&socket).unwrap().ino(),
-        inode,
-        "the same socket: {}",
-        host_logs(&d)
-    );
 }
 
 /// host-events, "Another process writes the records": with a watch
