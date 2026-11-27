@@ -179,13 +179,14 @@ pub(crate) async fn answer(hosting: &Arc<Hosting>, request: Request) -> Output {
 
 /// `repository`'s overview document, as `sluice overview --json` prints it
 /// in its main folder, read after a reading that ended at `after`, joined
-/// with each one-shot overview of that folder (design D5, D6); `None` where
-/// the read printed no document.
+/// with each one-shot overview of that folder (design D5, D6), and the
+/// moment its read began, which orders the documents; `None` where the read
+/// printed no document.
 pub(crate) async fn document(
     hosting: &Arc<Hosting>,
     repository: PathBuf,
     after: super::joined::Moment,
-) -> Option<serde_json::Value> {
+) -> Option<(super::joined::Moment, serde_json::Value)> {
     let folder = super::tasks::open_dir(&repository);
     let request = Request::Overview {
         folder: folder.clone(),
@@ -202,10 +203,10 @@ pub(crate) async fn document(
     );
     let held = hosting.clone();
     let tracker = hosting.connected.clone();
-    let output = hosting
+    let (began, output) = hosting
         .reads
         .of(&repository, &tracker)
-        .ask(key, changed, None, move || async move {
+        .ask_dated(key, changed, None, move || async move {
             let runtime = tokio::runtime::Handle::current();
             tokio::task::spawn_blocking(move || {
                 render(&held, &repository, &folder, request, reading, runtime)
@@ -214,7 +215,7 @@ pub(crate) async fn document(
             .unwrap_or_else(|e| failed(&format!("the read ended: {e}"), true))
         })
         .await?;
-    serde_json::from_str(output.stdout.trim()).ok()
+    Some((began, serde_json::from_str(output.stdout.trim()).ok()?))
 }
 
 /// The command a read runs, as `sluice` parses it from its client's
