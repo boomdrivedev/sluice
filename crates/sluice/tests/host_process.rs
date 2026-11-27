@@ -3997,13 +3997,30 @@ fn fake_host(d: &OnDisk, version: &str, answer: Option<String>) -> std::thread::
     })
 }
 
-/// resident-reads, "No host process answers" (design D4): a process that
-/// holds the socket, answers `hello`, and closes the connection at the
-/// status's ask: the status says that sluice's host process did not
-/// answer, reads no record, and exits 3.
+/// A command that the process at the host's socket does not answer exits
+/// 3, saying so, and reads no record itself. resident-reads, "No host
+/// process answers" (design D4): a process that answers `hello` and closes
+/// the connection at a status's ask: the status says that sluice's host
+/// process did not answer, its `--json` the internal error document, and
+/// runs no git. resident-reads, "A newer command at an older host process"
+/// (design D9): an older `sluice host` that answers the status with an
+/// error: the status names that host process's version. resident-changes,
+/// "No host process answers a change" (design D1): a withdrawal there says
+/// the host process did not answer, and the submission is still queued.
 #[test]
-fn a_read_with_no_host_process_that_answers_exits_3() {
-    let d = OnDisk::new("host-read-unanswered", POLICY);
+fn a_command_that_sluice_host_does_not_answer_exits_3() {
+    let slow = "[tests]\nrunner = \"command\"\ncommand = \"sleep 30\"\n\n[branches.main]\ntimeout = \"5m\"\n";
+    let d = OnDisk::new("host-unanswered", slow);
+    let id = queued(&d, "a");
+    stop_host(&d);
+    let ran_git = |before: usize| -> Vec<String> {
+        d.git.starts()[before..]
+            .iter()
+            .filter(|a| !a.contains(" rev-parse ") && !a.contains(" worktree list"))
+            .cloned()
+            .collect()
+    };
+
     let fake = fake_host(&d, sluice::VERSION, None);
     let before = d.git.count();
     let out = d.sluice(&["status", "main", "--json"]);
@@ -4017,21 +4034,8 @@ fn a_read_with_no_host_process_that_answers_exits_3() {
     let doc: serde_json::Value =
         serde_json::from_slice(&out.stdout).unwrap_or_else(|_| panic!("{}", text(&out)));
     assert_eq!(doc["error"]["kind"], "internal", "{doc}");
-    let read: Vec<String> = d.git.starts()[before..]
-        .iter()
-        .filter(|a| !a.contains(" rev-parse ") && !a.contains(" worktree list"))
-        .cloned()
-        .collect();
-    assert!(read.is_empty(), "the status ran git: {read:?}");
-}
+    assert!(ran_git(before).is_empty(), "the status ran git");
 
-/// resident-reads, "A newer command at an older host process" (design
-/// D9): an older `sluice host` that does not know `status` answers it with
-/// an error: the status names that host process's version, reads no
-/// record, and exits 3.
-#[test]
-fn a_newer_read_at_an_older_host_process_exits_3() {
-    let d = OnDisk::new("host-read-older", POLICY);
     let words = format!(
         "sluice {} asked what this host process, sluice 9.9.9, does not know: {{\"ask\":\"status\"}}",
         sluice::VERSION
@@ -4047,12 +4051,21 @@ fn a_newer_read_at_an_older_host_process_exits_3() {
     assert_eq!(out.status.code(), Some(3), "{}", text(&out));
     let err = String::from_utf8_lossy(&out.stderr);
     assert!(err.contains("sluice 9.9.9"), "{err}");
-    let read: Vec<String> = d.git.starts()[before..]
-        .iter()
-        .filter(|a| !a.contains(" rev-parse ") && !a.contains(" worktree list"))
-        .cloned()
-        .collect();
-    assert!(read.is_empty(), "the status ran git: {read:?}");
+    assert!(ran_git(before).is_empty(), "the status ran git");
+
+    let fake = fake_host(&d, sluice::VERSION, None);
+    let out = d.sluice(&["withdraw", &id.to_string()]);
+    let _ = fake.join();
+    assert_eq!(out.status.code(), Some(3), "{}", text(&out));
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        err.contains("sluice's host process did not answer"),
+        "{err}"
+    );
+    let socket = d.client(d.repo.dir()).paths().socket.clone();
+    let _ = std::fs::remove_file(&socket);
+    assert_ne!(state(&d, d.repo.dir(), id), "withdrawn");
+    stop_host(&d);
 }
 
 /// host-process, "A result recorded after the index was read" (the change
@@ -4588,32 +4601,6 @@ fn a_sessions_commands_reach_sluice_host_and_run_no_git() {
         serde_json::from_slice(&out.stdout).unwrap_or_else(|_| panic!("{}", text(&out)));
     assert_eq!(doc["outcomes"], serde_json::json!([]), "{doc}");
     drop(sub);
-    stop_host(&d);
-}
-
-/// resident-changes, "No host process answers a change" (design D1): a
-/// process that holds the socket, answers `hello`, and closes the
-/// connection at the withdrawal's ask: the withdrawal says that sluice's
-/// host process did not answer, exits 3, and the submission is still
-/// queued.
-#[test]
-fn a_change_with_no_host_process_that_answers_exits_3() {
-    let slow = "[tests]\nrunner = \"command\"\ncommand = \"sleep 30\"\n\n[branches.main]\ntimeout = \"5m\"\n";
-    let d = OnDisk::new("host-change-unanswered", slow);
-    let id = queued(&d, "a");
-    stop_host(&d);
-    let fake = fake_host(&d, sluice::VERSION, None);
-    let out = d.sluice(&["withdraw", &id.to_string()]);
-    let _ = fake.join();
-    assert_eq!(out.status.code(), Some(3), "{}", text(&out));
-    let err = String::from_utf8_lossy(&out.stderr);
-    assert!(
-        err.contains("sluice's host process did not answer"),
-        "{err}"
-    );
-    let socket = d.client(d.repo.dir()).paths().socket.clone();
-    let _ = std::fs::remove_file(&socket);
-    assert_ne!(state(&d, d.repo.dir(), id), "withdrawn");
     stop_host(&d);
 }
 
