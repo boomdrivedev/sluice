@@ -135,6 +135,10 @@ pub struct WaitAsk {
     /// step is tried again until then (134).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub deadline: Option<String>,
+    /// The wait's time as it asks this step. Where `sluice host` passes
+    /// only when asked, the step is at this time, as a pass is at the time
+    /// of the command that asks it (design D14).
+    pub at: chrono::DateTime<chrono::Utc>,
 }
 
 /// A pull request a wait follows, as its last step left it (C.5; the
