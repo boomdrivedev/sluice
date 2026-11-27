@@ -73,6 +73,8 @@ struct Failing {
     drafts: bool,
     /// The query of a branch's pull requests whole.
     query: bool,
+    /// Each post of a check run or a comment, and each edit of one.
+    posts: bool,
 }
 
 /// GitHub's words for a request its app may not make.
@@ -160,6 +162,19 @@ impl FileForge {
     /// whole, as GitHub refuses one it cannot answer.
     pub fn refuse_query(&self, refuse: bool) {
         self.failing.lock().unwrap().query = refuse;
+    }
+
+    /// Refuse, or take again, each post of a check run or a comment and
+    /// each edit of one, as GitHub answers 422 to one it will not take.
+    pub fn refuse_posts(&self, refuse: bool) {
+        self.failing.lock().unwrap().posts = refuse;
+    }
+
+    fn posting(&self) -> Result<()> {
+        if self.failing.lock().unwrap().posts {
+            bail!("GitHub answered 422 Unprocessable Entity");
+        }
+        Ok(())
     }
 
     /// From now, each change is stamped `at`, as GitHub would stamp it at
@@ -421,6 +436,7 @@ impl Forge for FileForge {
         existing: Option<u64>,
         posting: &Posting,
     ) -> Result<u64> {
+        self.posting()?;
         self.change(|h| {
             let id = match existing {
                 Some(id) => id,
@@ -456,6 +472,7 @@ impl Forge for FileForge {
     }
 
     fn comment(&self, repo: &Repo, number: u64, body: &str) -> Result<u64> {
+        self.posting()?;
         self.change(|h| {
             self.touch(h, number);
             let id = h.next;
@@ -470,6 +487,7 @@ impl Forge for FileForge {
     }
 
     fn edit_comment(&self, _: &Repo, id: u64, body: &str) -> Result<()> {
+        self.posting()?;
         self.change(|h| {
             let c = h
                 .comments

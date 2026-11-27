@@ -10,6 +10,7 @@ mod support;
 
 use std::cell::{Cell, RefCell};
 use std::collections::{BTreeMap, BTreeSet};
+use std::io::Write as _;
 use std::rc::Rc;
 use std::time::Duration;
 
@@ -599,8 +600,20 @@ impl OnGitHub {
         self.sluice_pausing(args, &Rounds(Cell::new(0)))
     }
 
+    /// What GitHub does by itself: an open pull request whose head `main`
+    /// holds now reads merged.
+    fn github_merges(&self) {
+        let main = self.f.world.tip("main");
+        for p in self.forge.held().unwrap().pulls {
+            if p.open && !p.head.is_empty() && self.f.world.is_ancestor(&Rev::new(p.head), &main) {
+                self.gh().merge(p.number).unwrap();
+            }
+        }
+    }
+
     /// [`OnGitHub::sluice`], each of its pauses `pause`.
     fn sluice_pausing(&self, args: &[&str], pause: &dyn Pause) -> (i32, String) {
+        self.github_merges();
         self.forge.stamp_at(self.f.world.now());
         let cli =
             Cli::try_parse_from(std::iter::once("sluice").chain(args.iter().copied())).unwrap();
@@ -626,7 +639,12 @@ impl OnGitHub {
             pause,
             &mut out,
         )
-        .unwrap_or_else(|e| panic!("sluice {args:?}: {e:#}"));
+        // An error ends the command with sluice's own exit, its words
+        // last, as the binary ends it.
+        .unwrap_or_else(|e| {
+            writeln!(out, "sluice: {e:#}").unwrap();
+            sluice::INTERNAL
+        });
         (code, String::from_utf8(out).unwrap())
     }
 
@@ -638,6 +656,7 @@ impl OnGitHub {
         self.f
             .world
             .advance(chrono::Duration::from_std(self.discovery.get()).unwrap());
+        self.github_merges();
         self.forge.stamp_at(self.f.world.now());
         let here = self.host();
         let seams = self.f.seams();
@@ -3809,5 +3828,350 @@ fn a_wait_exits_withdrawn_when_the_request_carrying_its_work_closes() {
         doc["carried_by"],
         serde_json::json!({ "pull_request": n, "state": "closed" }),
         "{out}"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// pull-request-status: what a request shows of its entry
+// ---------------------------------------------------------------------------
+
+impl OnGitHub {
+    /// 51, D13: submission `id`'s `delivery`, as `sluice status <id>
+    /// --json` gives it; null where it has none.
+    fn delivery(&self, id: &Value) -> Value {
+        let (code, out) = self.sluice(&["status", &id.to_string(), "--json"]);
+        assert_eq!(code, 0, "{out}");
+        serde_json::from_str::<Value>(&out).unwrap()["delivery"].clone()
+    }
+
+    /// The log's lines of `event` naming submission `id`.
+    fn logged(&self, event: &str, id: &Value) -> Vec<Value> {
+        self.log()
+            .into_iter()
+            .filter(|l| l["event"] == event && l["id"] == *id)
+            .collect()
+    }
+
+    /// How many times sluice's check on `head` was posted.
+    fn posts_on(&self, head: &Rev) -> usize {
+        let held = self.forge.held().unwrap();
+        held.posts
+            .iter()
+            .filter(|(at, name, _)| *at == head.0 && name == "sluice")
+            .count()
+    }
+}
+
+/// A pull request held for its submitter says so: one a waiting submit
+/// opened, blamed, is a draft whose check reads "waiting: the next submit",
+/// naming the next submit from its branch and the ready mark; GitHub keeps
+/// the check failed once it was, so what sluice sent is queued (record
+/// 0096, D3). Its one comment names the failed check, links to the report,
+/// and says sluice marked it a draft and what submits it again.
+#[test]
+fn a_submits_pull_request_sent_back_says_so() {
+    let g = OnGitHub::new("");
+    let w = g.session("blamed", &[("broken", "x\n")]);
+    let (code, said) = g.submit(&w, &[]);
+    assert_eq!(code, sluice::FAILED, "{said}");
+    let pull = g.pull_from("unit/blamed");
+    assert!(pull.draft, "{pull:?}");
+    assert_eq!(g.of_after(pull.number, 2).len(), 1, "{:?}", g.subs());
+    let head = Rev::new(pull.head.clone());
+    let (_, title, summary) = g.posted(&head).unwrap();
+    assert_eq!(title, "waiting: the next submit");
+    let held = g.forge.held().unwrap();
+    let sent = held
+        .posts
+        .iter()
+        .rfind(|(rev, name, _)| *rev == pull.head && name == "sluice")
+        .unwrap();
+    assert_eq!(
+        (sent.2.status, sent.2.title.as_str()),
+        (Status::Queued, "waiting: the next submit")
+    );
+    assert!(
+        summary.contains(
+            "The next `sluice submit main` from `unit/blamed`, or marking it ready for review, \
+             submits it again."
+        ),
+        "{summary}"
+    );
+    let delivered: Vec<String> = g
+        .comments(pull.number)
+        .into_iter()
+        .filter(|c| c.contains("told="))
+        .collect();
+    assert_eq!(delivered.len(), 1, "{delivered:?}");
+    let c = &delivered[0];
+    assert!(c.contains("`app:test` failed"), "{c}");
+    assert!(c.contains("[sluice's report]("), "{c}");
+    assert!(
+        c.contains(
+            "sluice marked it a draft. The next `sluice submit main` from `unit/blamed`, or \
+             marking it ready for review, submits it again."
+        ),
+        "{c}"
+    );
+    assert!(!c.contains("Push a fix"), "{c}");
+}
+
+/// Landed, merged by landing: the check is success and reads landed;
+/// `main` is sluice's landing commit, whose second parent is the pull
+/// request's head, and GitHub shows it merged. No sent-back comment is
+/// left, only the report (ADR 0044).
+#[test]
+fn landed_and_merged_by_landing() {
+    let g = OnGitHub::new("");
+    let (n, head) = g.by_hand("unit/lands", &[("l.txt", Some("l\n"))], false);
+    g.step_until("landed", |g| {
+        g.of(n).first().is_some_and(|s| s["state"] == "landed")
+    });
+    let landed = g.f.world.tip("main");
+    assert_eq!(g.f.world.parents(&landed).get(1), Some(&head));
+    let (status, title, _) = g.posted(&head).unwrap();
+    assert_eq!(status, Status::Success);
+    assert!(title.starts_with("landed as "), "{title}");
+    g.step();
+    let pull = g.forge.held().unwrap().pulls[0].clone();
+    assert!(!pull.open, "GitHub shows it merged");
+    let comments = g.comments(n);
+    assert!(
+        comments.iter().all(|c| !c.contains("told=")),
+        "{comments:?}"
+    );
+    assert!(g
+        .report(n)
+        .unwrap()
+        .contains("## sluice: landed on main as "));
+}
+
+/// 51, C.5; outcome-delivery spec, "A request's landing is posted" and "A
+/// post that fails": the driver's post of a request's outcome is a
+/// hand-over by `pull-request` to `pull/<n>` that confirms on receipt, so a
+/// landing posted is done, with its hand-over and its confirmation logged,
+/// and no inbox in a worktree on the request's head branch gives it; a
+/// blame whose post GitHub refuses stays owed to the request with no
+/// hand-over (record 0102, design D5).
+#[test]
+fn a_requests_post_confirms_its_outcome_on_receipt() {
+    let g = OnGitHub::new("");
+    let (n, head) = g.by_hand("unit/delivered", &[("t.txt", Some("t\n"))], false);
+    g.step_until("landed", |g| {
+        g.of(n).first().is_some_and(|s| s["state"] == "landed")
+    });
+    let id = g.of(n)[0]["id"].clone();
+    let key = format!("{id}:landed");
+    let reader = format!("pull/{n}");
+    g.step_until("posted", |g| !g.logged("handed", &id).is_empty());
+    let delivery = g.delivery(&id);
+    assert_eq!(delivery["key"], key.as_str(), "{delivery}");
+    assert_eq!(delivery["state"], "done", "{delivery}");
+    let handed = g.logged("handed", &id);
+    assert_eq!(handed.len(), 1, "{handed:?}");
+    assert_eq!(handed[0]["by"], "pull-request");
+    assert_eq!(handed[0]["to"], reader.as_str());
+    let confirmed = g.logged("confirmed", &id);
+    assert_eq!(confirmed.len(), 1, "{confirmed:?}");
+    assert_eq!(confirmed[0]["reader"], reader.as_str());
+    assert_eq!(confirmed[0]["by"], "pull-request");
+    g.f.world.session("unit/delivered", "unit/delivered", &head);
+    let (code, out) = g.sluice(&["inbox", "--worktree", "unit/delivered", "--json"]);
+    assert_eq!(code, 0, "{out}");
+    let doc: Value = serde_json::from_str(&out).unwrap();
+    assert_eq!(doc, serde_json::json!({ "outcomes": [] }));
+
+    let (m, _) = g.by_hand("unit/broken", &[("broken", Some("x\n"))], false);
+    g.forge.refuse_posts(true);
+    // Each step whose post GitHub refuses fails, as it says.
+    let step = || {
+        g.interval_passes();
+        g.sluice(&["step", "main"])
+    };
+    for _ in 0..20 {
+        if g.of(m).iter().any(|s| s["state"] == "failed") {
+            break;
+        }
+        step();
+    }
+    for _ in 0..2 {
+        step();
+    }
+    let id = g.of(m)[0]["id"].clone();
+    assert_eq!(g.of(m)[0]["state"], "failed", "{:?}", g.subs());
+    let delivery = g.delivery(&id);
+    assert_eq!(
+        delivery["reader"],
+        format!("pull/{m}").as_str(),
+        "{delivery}"
+    );
+    assert_eq!(delivery["state"], "owed", "{delivery}");
+    assert_eq!(delivery["handed"], serde_json::json!([]), "{delivery}");
+    assert!(g.logged("handed", &id).is_empty());
+}
+
+/// D1: the queue a check's summary carries in its block, as a program
+/// reads it.
+fn block(summary: &str) -> Value {
+    let q = sluice::profiles::github::pulls::queue_of(summary)
+        .unwrap_or_else(|| panic!("no queue block: {summary}"));
+    serde_json::to_value(q).unwrap()
+}
+
+/// A submission's number on this host.
+fn id_of(subs: &[Value]) -> u64 {
+    subs.first()
+        .and_then(|s| s["id"].as_u64())
+        .unwrap_or_else(|| panic!("not taken in: {subs:?}"))
+}
+
+/// pull-request-status, "Queued behind another", "A queued submission's
+/// block", "Waiting for a review" and "Nothing in it changed": host `b`
+/// takes main's pull requests in, one at a time. The check on the second
+/// request's head names `b`, its submission there and the one ahead of it
+/// with its pull request, in its words and its block; the check of one
+/// needing a review says it waits to be taken in on `b`, and for what.
+/// Once the second round has posted the first as under test and the
+/// forecast behind both, a round where neither moved posts nothing on
+/// either (D1; rule core.32).
+#[test]
+fn the_check_names_its_host_and_queue() {
+    let g = OnGitHub::unled("reviews = 1", "parallel = 1\n");
+    g.leads("b");
+    g.f.world.hold_runs(true);
+    let (a, a_head) = g.by_hand("unit/ahead", &[("a.txt", Some("a\n"))], false);
+    let (b, b_head) = g.by_hand("unit/behind", &[("b.txt", Some("b\n"))], false);
+    let (_, c_head) = g.by_hand("unit/unreviewed", &[("c.txt", Some("c\n"))], false);
+    for (n, head) in [(a, &a_head), (b, &b_head)] {
+        g.gh().review(n, "reviewer", "APPROVED", &head.0).unwrap();
+    }
+    g.step();
+    let (ahead, behind) = (id_of(&g.of(a)), id_of(&g.of(b)));
+    let (status, title, summary) = g.posted(&b_head).unwrap();
+    assert_eq!(status, Status::Queued);
+    assert_eq!(title, format!("queued behind #{a}"));
+    assert!(
+        summary.starts_with(&format!("Submission {behind} on b.\n\n")),
+        "{summary}"
+    );
+    assert_eq!(
+        block(&summary),
+        serde_json::json!({
+            "host": "b", "taken_in": true, "submission": behind, "state": "queued",
+            "ahead": [{ "submission": ahead, "pull_request": a }], "waits_for": [],
+        })
+    );
+    let (_, title, summary) = g.posted(&c_head).unwrap();
+    assert_eq!(title, "waiting: needs 1 review");
+    assert!(
+        summary.starts_with("Waiting to be taken in on b.\n\n"),
+        "{summary}"
+    );
+    assert_eq!(
+        block(&summary),
+        serde_json::json!({
+            "host": "b", "taken_in": false, "submission": null, "state": null,
+            "ahead": [], "waits_for": ["1 review"],
+        })
+    );
+    g.step();
+    let (on_b, on_c) = (g.posts_on(&b_head), g.posts_on(&c_head));
+    g.step();
+    assert_eq!(g.posts_on(&b_head), on_b, "{:?}", g.posted(&b_head));
+    assert_eq!(g.posts_on(&c_head), on_c, "{:?}", g.posted(&c_head));
+}
+
+/// pull-request-status, "The queue ahead moves": once the submission ahead
+/// lands, host `b` posts the check of the one behind it again, the same
+/// submission with nothing ahead of it (D1).
+#[test]
+fn the_queue_block_moves_with_the_queue_ahead() {
+    let g = OnGitHub::unled("", "parallel = 1\n");
+    g.leads("b");
+    g.f.world.hold_runs(true);
+    let (a, _) = g.by_hand("unit/first", &[("f.txt", Some("f\n"))], false);
+    let (b, b_head) = g.by_hand("unit/second", &[("s.txt", Some("s\n"))], false);
+    g.step();
+    let (ahead, behind) = (id_of(&g.of(a)), id_of(&g.of(b)));
+    let before = block(&g.posted(&b_head).unwrap().2);
+    assert_eq!(
+        before["ahead"],
+        serde_json::json!([{ "submission": ahead, "pull_request": a }])
+    );
+    g.f.world.complete_all();
+    g.step_until("the first landed", |g| {
+        g.of(a).first().is_some_and(|s| s["state"] == "landed")
+    });
+    g.step();
+    let (_, title, summary) = g.posted(&b_head).unwrap();
+    assert!(
+        title == "queued: next on main" || title == format!("testing main + #{b}"),
+        "{title}"
+    );
+    assert!(
+        summary.starts_with(&format!("Submission {behind} on b.\n\n")),
+        "{summary}"
+    );
+    let after = block(&summary);
+    assert_eq!(after["submission"], behind, "{after}");
+    assert_eq!(after["ahead"], serde_json::json!([]), "{after}");
+}
+
+/// pull-request-status, "each submission ahead of it": the check's block
+/// and title name what is ahead in the order host `b`'s rounds take its
+/// queue, not the order of submission. With the first request under test,
+/// a planner gives the third priority 5, and the second's check names it
+/// ahead; then the third lands after the second, and the second's check
+/// names only the first again, the third's both (6, 7; D1).
+#[test]
+fn the_queue_block_follows_the_queues_order() {
+    let g = OnGitHub::unled("", "parallel = 1\n");
+    g.leads("b");
+    g.f.world.hold_runs(true);
+    let (a, _) = g.by_hand("unit/tested", &[("t.txt", Some("t\n"))], false);
+    let (b, b_head) = g.by_hand("unit/second", &[("b.txt", Some("b\n"))], false);
+    let (c, c_head) = g.by_hand("unit/third", &[("c.txt", Some("c\n"))], false);
+    g.step();
+    let (first, second, third) = (id_of(&g.of(a)), id_of(&g.of(b)), id_of(&g.of(c)));
+    let amend = |args: &[&str]| {
+        let (code, said) = g.sluice(&[&["amend", &third.to_string()], args].concat());
+        assert_eq!(code, 0, "{said}");
+    };
+    let shown = |head: &Rev| {
+        let (_, title, summary) = g.posted(head).unwrap();
+        (title, block(&summary)["ahead"].clone())
+    };
+    let entry = |submission: u64, n: u64| serde_json::json!({ "submission": submission, "pull_request": n });
+    amend(&["--priority", "5"]);
+    g.step();
+    assert_eq!(
+        shown(&b_head),
+        (
+            format!("queued behind #{a}, #{c}"),
+            serde_json::json!([entry(first, a), entry(third, c)])
+        )
+    );
+    assert_eq!(
+        shown(&c_head),
+        (
+            format!("queued behind #{a}"),
+            serde_json::json!([entry(first, a)])
+        )
+    );
+    amend(&["--after", &second.to_string()]);
+    g.step();
+    assert_eq!(
+        shown(&b_head),
+        (
+            format!("queued behind #{a}"),
+            serde_json::json!([entry(first, a)])
+        )
+    );
+    assert_eq!(
+        shown(&c_head),
+        (
+            format!("queued behind #{a}, #{b}"),
+            serde_json::json!([entry(first, a), entry(second, b)])
+        )
     );
 }
