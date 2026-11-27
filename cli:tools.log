@@ -1,0 +1,52 @@
+--- stderr ---
+    Blocking waiting for file lock on build directory
+   Compiling sluice v0.0.0 (/Users/chuck/.local/share/boomdrive/repositories/boomdrivedev/sluice/sluice.git/sluice/.places/sluice+2Ftry+2Fmain+2F87/crates/sluice)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 1m 20s
+────────────
+ Nextest run ID b5f6037b-89bb-4251-a202-d0f866f87b47 with nextest profile: default
+    Starting 768 tests across 19 binaries (7 tests skipped)
+        PASS [   0.478s] (  1/768) sluice::conformance a_branch_is_held_as_the_host_last_read_it
+        PASS [   1.396s] (  2/768) sluice::conformance a_place_holding_more_than_its_commits_is_refused_and_named
+        PASS [   1.855s] (  3/768) sluice::conformance a_branch_is_forecast_with_no_place_of_it
+        FAIL [   5.880s] (  4/768) sluice::conformance a_run_is_ended_at_its_limit_after_the_step_that_started_it
+  stdout ───
+
+    running 1 test
+    test a_run_is_ended_at_its_limit_after_the_step_that_started_it ... FAILED
+
+    failures:
+
+    failures:
+        a_run_is_ended_at_its_limit_after_the_step_that_started_it
+
+    test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 59 filtered out; finished in 5.87s
+
+  stderr ───
+
+    thread 'a_run_is_ended_at_its_limit_after_the_step_that_started_it' (653095599) panicked at crates/sluice/tests/profiles/conformance.rs:1153:5:
+    the step after the run's end recorded no timed-out result: [Submitted { id: 1, head: Rev("136c59351d61e53e737ea39a1994c1c18cf3bb94") }, Opened { combination: Rev("1262b95fc71cf6e7a880b3e10a01bac4839bf96d"), system: None, run: 0 }, Claimed { combination: Rev("1262b95fc71cf6e7a880b3e10a01bac4839bf96d"), system: None, host: "this-host", unanswered: None }, Testing { combination: Rev("1262b95fc71cf6e7a880b3e10a01bac4839bf96d"), submissions: [1], place: "sluice/try/bolt/x/1" }, Running { combination: Rev("1262b95fc71cf6e7a880b3e10a01bac4839bf96d"), system: None, run: 0 }]
+    note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+  Cancelling due to test failure: 17 tests still running
+        PASS [   6.383s] (  5/768) sluice::conformance a_failed_release_is_held_with_what_failed
+        PASS [   6.803s] (  6/768) sluice::conformance a_release_that_succeeds_on_a_retry_is_listed_no_more
+        PASS [   6.979s] (  7/768) sluice::conformance a_removed_worktrees_place_is_freed_by_the_next_round
+        PASS [   7.072s] (  8/768) sluice::conformance a_removed_worktrees_failing_release_is_freed_and_never_run_again
+        PASS [   7.103s] (  9/768) sluice::conformance a_failed_release_is_tried_a_bounded_number_of_times
+        PASS [   7.167s] ( 10/768) sluice::conformance a_refusal_names_the_revision_this_host_holds
+        LEAK [   7.312s] ( 11/768) sluice::conformance a_failed_release_is_held_after_the_retries_its_branch_names
+        PASS [   7.354s] ( 12/768) sluice::conformance a_read_of_a_mended_branch_leaves_its_state_as_it_was
+        PASS [   7.363s] ( 13/768) sluice::conformance a_quiet_branch_mended_outside_sluice_is_read_whole
+        PASS [   7.455s] ( 14/768) sluice::conformance a_last_result_decides_nothing
+        PASS [   6.060s] ( 15/768) sluice::conformance a_submission_names_its_after_priority_and_submitter_and_does_nothing_more
+        PASS [   8.304s] ( 16/768) sluice::conformance a_landed_change_to_the_gate_runs_every_check_it_now_requires
+        PASS [   8.329s] ( 17/768) sluice::conformance a_conflict_names_every_submission_it_is_contested_with
+        PASS [   8.457s] ( 18/768) sluice::conformance a_held_checkout_never_holds_its_branch
+        PASS [   8.589s] ( 19/768) sluice::conformance a_resubmission_withdraws_the_earlier_submission_which_stays_readable
+        PASS [   8.113s] ( 20/768) sluice::conformance a_session_runs_last_result_says_whether_it_was_recorded
+        PASS [   6.843s] ( 21/768) sluice::conformance a_submission_waits_for_its_after_and_holds_no_one
+────────────
+     Summary [   8.698s] 21/768 tests run: 20 passed (1 leaky), 1 failed, 7 skipped
+        FAIL [   5.880s] (  4/768) sluice::conformance a_run_is_ended_at_its_limit_after_the_step_that_started_it
+warning: 747/768 tests were not run due to test failure (run with --no-fail-fast to run all tests, or run with --max-fail)
+error: test run failed
