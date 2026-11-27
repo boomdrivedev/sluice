@@ -58,11 +58,12 @@ const FLOOR: (u64, u64) = (2, 6);
 
 pub struct Moon;
 
-/// 147: one of the runner's steps of equipping a working copy, with how
-/// far an equip goes before it is run.
+/// 147: one of the runner's steps of equipping a working copy, the name
+/// its record gives it, with how far an equip goes before it is run.
 pub struct Step {
+    pub name: &'static str,
     pub through: Through,
-    pub run: fn(&Moon, &Context) -> EquipStep,
+    pub run: fn(&Moon, &Context, &str) -> EquipStep,
 }
 
 /// A task as `moon query tasks` lists it.
@@ -403,18 +404,26 @@ impl Moon {
     /// `.prototools`, and `moon --version`, before moon is asked anything;
     /// then `moon setup`, before moon runs a task.
     pub fn steps(&self, working_copy: &Path) -> Vec<Step> {
+        Moon::sequence(working_copy.join(".prototools").exists())
+    }
+
+    /// [`Moon::steps`] of a working copy that pins its tools or not.
+    pub fn sequence(pinned: bool) -> Vec<Step> {
         let mut steps = Vec::new();
-        if working_copy.join(".prototools").exists() {
+        if pinned {
             steps.push(Step {
+                name: "proto install",
                 through: Through::Reading,
                 run: Moon::install,
             });
         }
         steps.push(Step {
+            name: "moon --version",
             through: Through::Reading,
             run: Moon::check_version,
         });
         steps.push(Step {
+            name: "moon setup",
             through: Through::Running,
             run: Moon::setup,
         });
@@ -423,16 +432,16 @@ impl Moon {
 
     /// The tool versions the place's `.prototools` lists, installed. Only
     /// the repository's own file is read, not the user's global one.
-    fn install(&self, cx: &Context) -> EquipStep {
+    fn install(&self, cx: &Context, name: &str) -> EquipStep {
         let argv = ["proto", "install", "--config-mode", "upwards"];
-        self.step(cx, "proto install", &argv).0
+        self.step(cx, name, &argv).0
     }
 
     /// The workspace's toolchains, installed in the place, outside the
     /// executor, where a download and a write to the user's home are
     /// allowed: the run inside only uses them.
-    fn setup(&self, cx: &Context) -> EquipStep {
-        self.step(cx, "moon setup", &["moon", "setup"]).0
+    fn setup(&self, cx: &Context, name: &str) -> EquipStep {
+        self.step(cx, name, &["moon", "setup"]).0
     }
 
     /// 147: `argv` run as [`Moon::run`] runs it, as the step `name`, with
@@ -442,12 +451,7 @@ impl Moon {
             Ok(out) => out,
             Err(e) => return (failed(name, &format!("could not be run: {e}"), ""), None),
         };
-        let said = printed(&[&out.stdout, &out.stderr]);
-        let step = match why(out.status) {
-            None => passed(name, said),
-            Some(reason) => failed(name, &reason, &said),
-        };
-        (step, Some(out))
+        (judged(name, &out), Some(out))
     }
 
     fn command(
@@ -533,23 +537,15 @@ impl Moon {
     /// The moon the toolchain puts first, refused below `FLOOR`. Its
     /// reasons are its own and quote what it printed on its output, so
     /// only its error stream follows them.
-    fn check_version(&self, cx: &Context) -> EquipStep {
-        const NAME: &str = "moon --version";
-        let (step, out) = self.step(cx, NAME, &["moon", "--version"]);
+    fn check_version(&self, cx: &Context, name: &str) -> EquipStep {
+        let (step, out) = self.step(cx, name, &["moon", "--version"]);
         let Some(out) = out.filter(|_| step.passed) else {
             return step;
         };
-        let text = String::from_utf8_lossy(&out.stdout);
-        let text = text.trim();
-        let reason = match parse_version(text) {
-            None => format!("moon --version said {text:?}"),
-            Some(version) if version < FLOOR => format!(
-                "{text} is below moon {}.{}, the oldest the moon runner reads",
-                FLOOR.0, FLOOR.1
-            ),
-            Some(_) => return step,
-        };
-        failed(NAME, &reason, &printed(&[&out.stderr]))
+        match refused_version(&out.stdout) {
+            Some(reason) => failed(name, &reason, &printed(&[&out.stderr])),
+            None => step,
+        }
     }
 
     /// Design D1 of `the-gate-runs-in-five-minutes`: the tasks a changed
@@ -787,6 +783,34 @@ fn own_setting(path: &str) -> bool {
         || path.ends_with("/.prototools")
         || path == sluice_core::policy::POLICY_PATH
         || TOOLCHAIN.contains(&path)
+}
+
+/// 147: the step `name` as `out` judges it: its words are what it
+/// printed, its output then its error stream, each trimmed, and one that
+/// did not pass is given its exit, or the signal that ended it, before
+/// them.
+fn judged(name: &str, out: &Output) -> EquipStep {
+    let said = printed(&[&out.stdout, &out.stderr]);
+    match why(out.status) {
+        None => passed(name, said),
+        Some(reason) => failed(name, &reason, &said),
+    }
+}
+
+/// 147, C.2: why the version check refuses what `moon --version` printed
+/// on its output, quoting it: a version it cannot read, or one below
+/// `FLOOR`; `None` where the runner reads it.
+fn refused_version(stdout: &[u8]) -> Option<String> {
+    let text = String::from_utf8_lossy(stdout);
+    let text = text.trim();
+    match parse_version(text) {
+        None => Some(format!("moon --version said {text:?}")),
+        Some(version) if version < FLOOR => Some(format!(
+            "{text} is below moon {}.{}, the oldest the moon runner reads",
+            FLOOR.0, FLOOR.1
+        )),
+        Some(_) => None,
+    }
 }
 
 /// `moon 2.6.1` → `(2, 6)`.
@@ -3254,8 +3278,8 @@ mod tests {
         assert!((2, 5) < FLOOR && (2, 6) >= FLOOR && (3, 0) > FLOOR && (2, 10) > FLOOR);
     }
 
-    /// 147: a working copy of a test's own, with a stand-in `moon` first
-    /// on the path that runs `moon`, and a request whose place it is.
+    /// 147: a working copy of a test's own, and a request whose place it
+    /// is.
     struct Copy {
         dir: PathBuf,
         request: sluice_seams::RunRequest,
@@ -3263,16 +3287,11 @@ mod tests {
     }
 
     impl Copy {
-        fn new(name: &str, moon: &str) -> Copy {
-            use std::os::unix::fs::PermissionsExt as _;
+        fn new(name: &str) -> Copy {
             let dir = std::env::temp_dir()
                 .join(format!("sluice-moon-step-{name}-{}", std::process::id()));
             let _ = std::fs::remove_dir_all(&dir);
-            let bin = dir.join("bin");
-            std::fs::create_dir_all(&bin).unwrap();
-            let stand_in = bin.join("moon");
-            std::fs::write(&stand_in, format!("#!/bin/sh\n{moon}\n")).unwrap();
-            std::fs::set_permissions(&stand_in, std::fs::Permissions::from_mode(0o755)).unwrap();
+            std::fs::create_dir_all(&dir).unwrap();
             let request = sluice_seams::RunRequest {
                 place: sluice_seams::Place {
                     name: "equip".into(),
@@ -3291,10 +3310,7 @@ mod tests {
                 replay: false,
                 system: None,
             };
-            let env = BTreeMap::from([(
-                "PATH".to_string(),
-                format!("{}:/usr/bin:/bin", bin.display()),
-            )]);
+            let env = BTreeMap::from([("PATH".to_string(), "/usr/bin:/bin".to_string())]);
             Copy { dir, request, env }
         }
 
@@ -3306,11 +3322,6 @@ mod tests {
                 jobs: 1,
             }
         }
-
-        /// The step `name`, running `script` by `sh`.
-        fn step(&self, name: &str, script: &str) -> EquipStep {
-            Moon.step(&self.cx(), name, &["/bin/sh", "-c", script]).0
-        }
     }
 
     impl Drop for Copy {
@@ -3319,16 +3330,26 @@ mod tests {
         }
     }
 
+    /// What a step's command left: its wait status, as the kernel gives
+    /// it, and what it printed.
+    fn left(status: i32, stdout: &str, stderr: &str) -> Output {
+        use std::os::unix::process::ExitStatusExt as _;
+        Output {
+            status: std::process::ExitStatus::from_raw(status),
+            stdout: stdout.into(),
+            stderr: stderr.into(),
+        }
+    }
+
     /// 147: a step's words are what it printed, its output then its error
-    /// stream, each trimmed; one that failed is given its exit before them.
+    /// stream, each trimmed; one that did not pass is given its exit, or
+    /// the signal that ended it, before them, or alone where it printed
+    /// nothing.
     #[test]
-    fn a_step_that_exited_is_given_its_exit_then_what_it_printed() {
-        let copy = Copy::new("exited", "");
+    fn a_step_is_given_its_exit_then_what_it_printed() {
+        let step = |status, out, err| judged("moon setup", &left(status, out, err));
         assert_eq!(
-            copy.step(
-                "moon setup",
-                "echo ' out '; echo 'error: no such toolchain' >&2; exit 3"
-            ),
+            step(3 << 8, " out \n", "error: no such toolchain\n"),
             EquipStep {
                 step: "moon setup".into(),
                 passed: false,
@@ -3336,37 +3357,23 @@ mod tests {
             }
         );
         assert_eq!(
-            copy.step("moon setup", "echo set up; echo warned >&2"),
+            step(0, "set up\n", "warned\n"),
             EquipStep {
                 step: "moon setup".into(),
                 passed: true,
                 words: "set up\nwarned".into(),
             }
         );
-    }
-
-    /// 147: a step that failed printing nothing is given its exit alone.
-    #[test]
-    fn a_step_that_printed_nothing_is_given_its_exit_alone() {
-        let copy = Copy::new("silent", "");
-        let step = copy.step("moon setup", "exit 1");
-        assert!(!step.passed);
-        assert_eq!(step.words, "exited 1");
-    }
-
-    /// 147: a step a signal ended says which.
-    #[test]
-    fn a_step_ended_by_a_signal_says_which() {
-        let copy = Copy::new("signal", "");
-        let step = copy.step("moon setup", "kill -9 $$");
-        assert!(!step.passed);
-        assert_eq!(step.words, "ended by signal 9");
+        assert_eq!(step(1 << 8, "", "").words, "exited 1");
+        let killed = step(9, "", "");
+        assert!(!killed.passed);
+        assert_eq!(killed.words, "ended by signal 9");
     }
 
     /// 147: a step whose program could not be started says why.
     #[test]
     fn a_step_whose_program_could_not_be_run_says_why() {
-        let copy = Copy::new("unrun", "");
+        let copy = Copy::new("unrun");
         let missing = copy.dir.join("no-such-proto");
         let (step, out) = Moon.step(&copy.cx(), "proto install", &[missing.to_str().unwrap()]);
         assert!(out.is_none());
@@ -3378,31 +3385,19 @@ mod tests {
         );
     }
 
-    /// 147, C.2: a moon below 2.6 fails the version check, in words that
-    /// name it and the oldest the runner reads.
+    /// 147, C.2: the version check refuses a moon below 2.6 in words that
+    /// name it and the oldest the runner reads, and a version moon cannot
+    /// say quoting what it said; it reads 2.6 and later.
     #[test]
-    fn a_moon_below_the_floor_fails_its_version_check() {
-        let copy = Copy::new("old", "echo 'moon 2.5.3'");
+    fn a_moon_below_the_floor_or_unread_is_refused_quoting_it() {
         assert_eq!(
-            Moon.check_version(&copy.cx()),
-            EquipStep {
-                step: "moon --version".into(),
-                passed: false,
-                words: "moon 2.5.3 is below moon 2.6, the oldest the moon runner reads".into(),
-            }
+            refused_version(b"moon 2.5.3\n").as_deref(),
+            Some("moon 2.5.3 is below moon 2.6, the oldest the moon runner reads")
         );
-        let copy = Copy::new("new", "echo 'moon 2.6.1'");
-        assert!(Moon.check_version(&copy.cx()).passed);
-    }
-
-    /// 147: a version moon cannot say fails the version check, quoting
-    /// what it said, and what it printed on its error stream after it.
-    #[test]
-    fn a_version_that_cannot_be_read_fails_its_version_check() {
-        let copy = Copy::new("unread", "echo 'not a version'; echo 'no workspace' >&2");
         assert_eq!(
-            Moon.check_version(&copy.cx()).words,
-            r#"moon --version said "not a version": no workspace"#
+            refused_version(b"not a version\n").as_deref(),
+            Some(r#"moon --version said "not a version""#)
         );
+        assert_eq!(refused_version(b"moon 2.6.1\n"), None);
     }
 }

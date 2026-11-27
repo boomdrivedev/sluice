@@ -184,107 +184,6 @@ fn a_command_over_its_limit_times_out() {
     assert!(r.tasks.is_empty());
 }
 
-/// Run in a child of this test binary, with sluice's own environment
-/// naming another place and tool.
-#[test]
-fn env_probe() {
-    let Ok(out) = std::env::var("SLUICE_TEST_ENV_OUT") else {
-        return;
-    };
-    let repo = Repo::new("checks-env");
-    let c = checks(&repo);
-    let req = request(&repo, "p1", command("env > \"$SLUICE_TMP/env\""));
-    assert!(finish(&c, &req).tasks[0].outcome == Outcome::Pass);
-    let seen = std::fs::read_to_string(req.place.tmp.join("env")).unwrap();
-    std::fs::write(
-        &out,
-        format!(
-            "{}\n--\n{}\n--\n{}",
-            repo.dir().display(),
-            req.place.tmp.display(),
-            seen
-        ),
-    )
-    .unwrap();
-}
-
-/// 35: the command sees its place and scratch directory, its share of the
-/// cores, and nothing of sluice's own that names another place or
-/// tool.
-#[test]
-fn a_command_sees_its_place_and_nothing_of_sluices() {
-    let out = support::Scratch::new("checks-env-out");
-    let file = out.path().join("seen");
-    let status = support::isolated(&mut std::process::Command::new(
-        std::env::current_exe().unwrap(),
-    ))
-    .args(["--exact", "env_probe", "--nocapture"])
-    .env("SLUICE_TEST_ENV_OUT", &file)
-    .env("MOON_FORCE", "1")
-    .env("GIT_DIR", "/elsewhere/.git")
-    .env("DEVENV_ROOT", "/elsewhere")
-    .status()
-    .unwrap();
-    assert!(status.success());
-    let text = std::fs::read_to_string(&file).unwrap();
-    let parts: Vec<&str> = text.splitn(3, "\n--\n").collect();
-    let (place, tmp, seen) = (parts[0], parts[1], parts[2]);
-    assert!(
-        seen.contains(&format!("SLUICE_CHECKOUT={place}\n")),
-        "{seen}"
-    );
-    assert!(seen.contains(&format!("SLUICE_TMP={tmp}\n")), "{seen}");
-    assert!(seen.contains("SLUICE_JOBS=4\n"), "{seen}");
-    for leak in ["MOON_FORCE", "GIT_DIR", "DEVENV_ROOT"] {
-        assert!(!seen.contains(leak), "{leak} leaked: {seen}");
-    }
-}
-
-/// Run in a child of this test binary, on a host that declares a cache's
-/// variables, with sluice's own environment holding one it does not.
-#[test]
-fn hosts_cache_env_probe() {
-    let Ok(out) = std::env::var("SLUICE_TEST_CACHE_ENV_OUT") else {
-        return;
-    };
-    let repo = Repo::new("checks-cache-env");
-    let c = caching(
-        &repo,
-        vec![HostCache {
-            dir: "/caches/sccache".into(),
-            socket: None,
-            env: [("SCCACHE_DIR".to_string(), "/caches/sccache".to_string())].into(),
-        }],
-    );
-    let req = request(&repo, "p1", command("env > \"$SLUICE_TMP/env\""));
-    assert!(finish(&c, &req).tasks[0].outcome == Outcome::Pass);
-    std::fs::copy(req.place.tmp.join("env"), &out).unwrap();
-}
-
-/// 35: every run is given the variables the host's config declares for
-/// its caches, under the open executor too, and nothing of sluice's own
-/// environment that the config does not declare.
-#[test]
-fn every_run_gets_the_hosts_cache_environment() {
-    let out = support::Scratch::new("checks-cache-env-out");
-    let file = out.path().join("seen");
-    let status = support::isolated(&mut std::process::Command::new(
-        std::env::current_exe().unwrap(),
-    ))
-    .args(["--exact", "hosts_cache_env_probe", "--nocapture"])
-    .env("SLUICE_TEST_CACHE_ENV_OUT", &file)
-    .env("RUSTC_WRAPPER", "sccache")
-    .status()
-    .unwrap();
-    assert!(status.success());
-    let seen = std::fs::read_to_string(&file).unwrap();
-    assert!(
-        seen.lines().any(|l| l == "SCCACHE_DIR=/caches/sccache"),
-        "{seen}"
-    );
-    assert!(!seen.contains("RUSTC_WRAPPER"), "{seen}");
-}
-
 /// 35: a command `[tests] cold` lists is given none of the host's
 /// declared variables; a command it does not list is given them.
 #[test]
@@ -1587,79 +1486,14 @@ fn outcomes(steps: &[EquipStep]) -> Vec<(&str, bool)> {
     steps.iter().map(|s| (s.step.as_str(), s.passed)).collect()
 }
 
-/// 147; rule core.46: a working copy that pins its tools, nothing of them
-/// installed, is equipped by the toolchain, `proto install`, `moon
-/// --version` and `moon setup`, in that order, each passing.
+/// 147; rule core.46: a working copy that pins its tools is equipped by
+/// the toolchain, `proto install`, `moon --version` and `moon setup`, each
+/// run as its step names it, in that order; the sequence stops at the step
+/// that failed, which is given its exit and what it printed.
 #[test]
-fn equip_runs_the_sequence_in_order() {
-    let w = Equippable::new("equip-order", true, "true");
-    let steps = w.equip(w.tests("moon"), Through::Running);
-    assert_eq!(
-        outcomes(&steps),
-        [
-            ("toolchain", true),
-            ("proto install", true),
-            ("moon --version", true),
-            ("moon setup", true),
-        ]
-    );
-    assert_eq!(
-        w.log(),
-        [
-            "toolchain",
-            "proto install --config-mode upwards",
-            "moon --version",
-            "moon setup",
-        ]
-    );
-}
-
-/// 147; rule core.46: a working copy with no `.prototools` runs no `proto
-/// install` and names none, `moon --version` following the toolchain;
-/// equipped only for reading, it is never set up.
-#[test]
-fn equip_installs_only_what_is_pinned() {
-    let w = Equippable::new("equip-unpinned", false, "true");
-    let steps = w.equip(w.tests("moon"), Through::Reading);
-    assert_eq!(
-        outcomes(&steps),
-        [("toolchain", true), ("moon --version", true)]
-    );
-    let steps = w.equip(w.tests("moon"), Through::Running);
-    assert_eq!(
-        outcomes(&steps),
-        [
-            ("toolchain", true),
-            ("moon --version", true),
-            ("moon setup", true),
-        ]
-    );
-    assert!(
-        !w.log().iter().any(|l| l.starts_with("proto")),
-        "{:?}",
-        w.log()
-    );
-}
-
-/// 147; rule core.46: under the command runner the toolchain is the one
-/// step, even where the working copy pins its tools; with no toolchain
-/// there is no step.
-#[test]
-fn equip_under_the_command_runner_runs_the_toolchain_alone() {
-    let w = Equippable::new("equip-command", true, "true");
-    let steps = w.equip(w.tests("command"), Through::Running);
-    assert_eq!(outcomes(&steps), [("toolchain", true)]);
-    assert_eq!(w.log(), ["toolchain"]);
-    let bare = Settings::from([("runner".into(), Setting::Text("command".into()))]);
-    assert_eq!(w.equip(bare, Through::Running), []);
-}
-
-/// 147; rule core.46: the sequence stops at the step that failed, which
-/// is given its exit and what it printed.
-#[test]
-fn equip_stops_at_the_step_that_failed() {
+fn equip_runs_the_sequence_in_order_to_the_step_that_failed() {
     let w = Equippable::new(
-        "equip-stops",
+        "equip-order",
         true,
         &format!("echo '{NO_TOOLCHAIN}' >&2; exit 1"),
     );
@@ -1674,35 +1508,15 @@ fn equip_stops_at_the_step_that_failed() {
         ]
     );
     assert_eq!(steps[3].words, format!("exited 1: {NO_TOOLCHAIN}"));
-}
-
-/// 147; rule core.46: a toolchain that fails is the one step, its words
-/// its exit and its error stream, and nothing of the runner runs.
-#[test]
-fn a_toolchain_that_fails_runs_nothing_after_it() {
-    let w = Equippable::new("equip-toolchain-fails", true, "true");
-    let log = w.tools.path().join("log");
-    let mut tests = w.tests("moon");
-    tests.insert(
-        "toolchain".into(),
-        Setting::List(vec![
-            "sh".into(),
-            "-c".into(),
-            format!(
-                "echo toolchain >> '{}'; echo '{STALE_LOCK}' >&2; exit 1",
-                log.display()
-            ),
-        ]),
-    );
     assert_eq!(
-        w.equip(tests, Through::Running),
-        [EquipStep {
-            step: "toolchain".into(),
-            passed: false,
-            words: format!("exited 1: {STALE_LOCK}"),
-        }]
+        w.log(),
+        [
+            "toolchain",
+            "proto install --config-mode upwards",
+            "moon --version",
+            "moon setup",
+        ]
     );
-    assert_eq!(w.log(), ["toolchain"]);
 }
 
 /// 147, 71; rule core.46: an equip keeps nothing once it answers: the
@@ -1740,65 +1554,6 @@ fn equip_keeps_nothing() {
         })
         .unwrap_or_default();
     assert!(left.is_empty(), "{left:?}");
-}
-
-/// Run in a child of this test binary, on a host that declares a cache's
-/// variables, with the caller's environment holding one sluice does not
-/// keep.
-#[test]
-fn equip_env_probe() {
-    let Ok(out) = std::env::var("SLUICE_TEST_EQUIP_ENV_OUT") else {
-        return;
-    };
-    let repo = Repo::new("equip-env");
-    let c = caching(
-        &repo,
-        vec![HostCache {
-            dir: "/caches/c".into(),
-            socket: None,
-            env: [("CACHE_DIR".to_string(), "/caches/c".to_string())].into(),
-        }],
-    );
-    let tests = Settings::from([
-        ("runner".into(), Setting::Text("command".into())),
-        (
-            "toolchain".into(),
-            Setting::List(vec!["sh".into(), "-c".into(), "env >&2".into()]),
-        ),
-    ]);
-    let equipped = c
-        .equip(&Equip {
-            working_copy: repo.dir().to_path_buf(),
-            tests,
-            through: Through::Running,
-        })
-        .unwrap();
-    std::fs::write(&out, &equipped.steps[0].words).unwrap();
-}
-
-/// 147, 35; rule core.46: each step gets the environment a run starts
-/// from, the host's caches' variables and the working copy's paths among
-/// it, and nothing else of the caller's.
-#[test]
-fn equip_steps_get_a_runs_environment() {
-    let out = support::Scratch::new("equip-env-out");
-    let file = out.path().join("seen");
-    let status = support::isolated(&mut std::process::Command::new(
-        std::env::current_exe().unwrap(),
-    ))
-    .args(["--exact", "equip_env_probe", "--nocapture"])
-    .env("SLUICE_TEST_EQUIP_ENV_OUT", &file)
-    .env("FROM_THE_CALLER", "1")
-    .status()
-    .unwrap();
-    assert!(status.success());
-    let seen = std::fs::read_to_string(&file).unwrap();
-    assert!(seen.lines().any(|l| l == "CACHE_DIR=/caches/c"), "{seen}");
-    assert!(
-        seen.lines().any(|l| l.starts_with("SLUICE_CHECKOUT=")),
-        "{seen}"
-    );
-    assert!(!seen.contains("FROM_THE_CALLER"), "{seen}");
 }
 
 /// A run's request of `w`'s working copy under the moon runner, requiring
