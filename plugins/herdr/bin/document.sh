@@ -136,10 +136,29 @@ fields() {
   done
 }
 
+# Keep the forecast of a line `forecast` in $out, from a forecast the
+# watcher asked on the source's input, on the record forecast.sh wrote for
+# its worktree, where that record still asks it: the same branch and head.
+# The servers' tokens are then set again (D2).
+forecast_kept() {
+  fields "$out"
+  fk_f=$state/checks/$(sum "$f2")
+  [ -f "$fk_f" ] || return 0
+  jq -c --arg b "$f3" --arg r "$f4" --arg h "$f5" --argjson w "$f6" --argjson p "$f7" \
+    'select(.branch == $b and .head == $h) | .result = $r | .with = $w | .paths = $p' "$fk_f" 2>/dev/null |
+    put "$fk_f" || return 0
+  { printf '\n' >>"$state/dirty"; } 2>/dev/null
+  rouse
+}
+
 # Keep one line a source printed.
 keep() {
   read_line "$1"
   case $out in
+  forecast"$tab"*)
+    forecast_kept
+    return 0
+    ;;
   folder"$tab"*)
     fd_l=${out%%"$nl"*}
     fields "$fd_l"

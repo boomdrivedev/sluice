@@ -3,7 +3,14 @@
 # The plugin's one watcher for all of a user's herdr servers on a host
 # (0094). `--ensure` registers the server in its environment and wakes the
 # lease's watcher where it lives and runs this plugin folder and version,
-# else starts one. Running, it finds the repositories every server's panes
+# else becomes the watcher itself: the command herdr started, herdr's own
+# child for its life, which ends when that herdr server ends, and asks
+# another server it serves to start the next watcher (the change
+# `sluices-herdr-plugin-leaves-no-process-and-forecasts-from-its-subscription`,
+# D1; `nothing-detached@f807c7f5fcea`). `--register`, a popup's, registers
+# and wakes the watcher, and where none runs has the herdr server start
+# one by the plugin's action `watch`; it never becomes the watcher. Running, it
+# finds the repositories every server's panes
 # are in, and runs each source once, its command and its reader,
 # document.sh (D7). A source that names its folders, the default one among
 # them, is told each repository's folder on its input, `add <folder>`, and
@@ -97,15 +104,28 @@ copy_segment() {
 }
 
 case ${1:-} in
---ensure)
+--ensure | --register)
   register
   touch "$state/nudge"
   # The lease's watcher, woken, reads this server's panes at once (D4).
   if ours && kill -USR1 "$lpid" 2>/dev/null; then exit 0; fi
-  nohup sh "$root/bin/watch.sh" </dev/null >>"$state/watch.log" 2>&1 &
-  exit 0
+  if [ "$1" = --register ]; then
+    # None runs: the herdr server starts one as its own child, by the
+    # plugin's action, so none is the child of a popup that closes.
+    [ -n "${HERDR_SOCKET_PATH:-}" ] &&
+      hd plugin action invoke watch --plugin "${HERDR_PLUGIN_ID:-agentplot.sluice}" >/dev/null 2>&1
+    exit 0
+  fi
+  # None: this command is the watcher, herdr's child, which herdr runs
+  # with no wait for its end; what it says goes to the log.
+  exec </dev/null >>"$state/watch.log" 2>&1
+  shift
   ;;
 esac
+
+# The process that started this watcher: the herdr server whose command it
+# is. Read by the shell's `kill -0` alone, at each tick and wake.
+started_by=$PPID
 
 # An ensure's signal, trapped before the lease can name this watcher.
 woke=0
@@ -432,9 +452,10 @@ take_dirty() {
 # reader, document.sh, which keeps each document it prints, wakes the
 # watcher for each kept, and marks the source ended at its input's end, for
 # the next tick to start it again (D4). The command's pid is kept as it
-# starts, so a stop in its first second still ends it, and its identity
-# once it has become the source's command, by a helper that runs that once;
-# the reader's, as the watcher's child. A source that names its folders
+# starts, so a stop before its identity is read still ends it, and its
+# identity is read by the watcher itself at its next tick
+# (settle_started), with no process started for it; the reader's, as the
+# watcher's child. A source that names its folders
 # reads a named pipe beside its run file, which the watcher holds open for
 # writing on the descriptor $4 while the source runs, so its input stays
 # open between looks (D2); any other's input is closed. Neither process
@@ -461,10 +482,6 @@ start() {
     eval "set -- $(printf '%s' "$argv" | jq -r 'map(@sh) | join(" ")')"
     me=$(exec sh -c 'echo $PPID')
     printf '%s\tpid:%s:%s\n' "$me" "$me" $$ >>"$run.pids"
-    (
-      sleep "${SLUICE_HERDR_IDENTITY_DELAY:-1}"
-      settle "$me" "$run.pids"
-    ) </dev/null >/dev/null 2>&1 &
     exec "$@"
   ) <"$st_in" | sh "$root/bin/document.sh" "$name" "$run" $$ 3>&- 4>&- 5>&- 6>&- 7>&- 8>&- 9>&- &
   remember $! "$run.pids"
@@ -727,6 +744,35 @@ among() {
   return 1
 }
 
+# Ask each forecast of the lines $1, a repository, a branch and a
+# worktree each, on the input of the source that serves the repository:
+# `forecast <branch> <worktree>`, whose answer its reader keeps (D2). One
+# no source serves, or whose source has ended, has its forecast's record
+# removed, so the next forecast asks it again.
+ask_forecasts() {
+  af_ifs=$IFS
+  IFS=$nl
+  set -f
+  for af_l in $1; do
+    af_r=${af_l%%	*}
+    af_l=${af_l#*	}
+    af_b=${af_l%%	*}
+    af_t=${af_l#*	}
+    af_run=
+    set +f
+    for af_f in "$runs"/*."$(sum "$af_r")".folder; do
+      [ -e "$af_f" ] && af_run=${af_f%.*.folder} && break
+    done
+    set -f
+    if [ -z "$af_run" ] || [ -e "$af_run.ended" ] || ! send "$af_run" "forecast $af_b $af_t"; then
+      rm -f "$state/checks/$(sum "$af_t")"
+    fi
+  done
+  set +f
+  IFS=$af_ifs
+  return 0
+}
+
 # Do what the reads, the markers and the heads ask (D4, D5, D6, D9, D10).
 # The panes of each server in $rd are read and kept; each server in
 # $shown, the minute's pass, has its panes read and every token it shows
@@ -775,7 +821,7 @@ act() {
   ac_dirty=false
   take_dirty && ac_dirty=true
   if [ "$ac_panes" = true ] || [ -n "$moved" ] || [ "$ac_dirty" = true ]; then
-    sh "$root/bin/forecast.sh"
+    ask_forecasts "$(sh "$root/bin/forecast.sh")"
   fi
   if [ "$ac_panes" = true ] || [ -n "$moved" ]; then
     each_tokens
@@ -785,6 +831,43 @@ act() {
     done
   fi
   return 0
+}
+
+# Each source's command kept by its pid alone as it started, given its
+# identity by this watcher at the tick after, once it has become the
+# command; no process is started for it. Where no identity can be read,
+# none is tried.
+settle_started() {
+  [ "$knowable" = true ] || return 0
+  for ss_f in "$runs"/*.pids; do
+    [ -e "$ss_f" ] || continue
+    ss_l=
+    while IFS='	' read -r ss_p ss_id; do
+      case $ss_id in "pid:$ss_p:"*) ss_l="$ss_l $ss_p" ;; esac
+    done <"$ss_f"
+    for ss_p in $ss_l; do settle "$ss_p" "$ss_f"; done
+  done
+  return 0
+}
+
+# Whether the herdr server that started this watcher still runs. Where it
+# has ended, the watcher stops with its sources, and, where it serves
+# another server, asks the first that answers to start the next watcher by
+# the plugin's action `watch`, as that server's own child (D1).
+owned() {
+  kill -0 "$started_by" 2>/dev/null && return 0
+  say "the herdr server that started this watcher has ended; stopping"
+  stop
+  trap - EXIT INT TERM
+  for ow_d in "$state"/servers/*; do
+    [ -f "$ow_d/socket" ] || continue
+    gone "$ow_d" && continue
+    if as "$ow_d" hd plugin action invoke watch --plugin "${HERDR_PLUGIN_ID:-agentplot.sluice}" >/dev/null 2>&1; then
+      say "the herdr server at $as_s starts the next watcher"
+      break
+    fi
+  done
+  exit 0
 }
 
 # Whether the lease names this watcher still: one that reads another pid
@@ -824,6 +907,7 @@ asked() {
 # repository set, and what moved forecast. A source's end waits for the
 # tick.
 wake() {
+  owned
   mine
   rd=
   shown=
@@ -852,7 +936,9 @@ tock() {
     say "the plugin in $root was replaced or removed; stopping"
     exit 0
   fi
+  owned
   mine
+  settle_started
   if [ "$former" = true ] && { formers_ended || [ "$ticked" -ge 2 ]; }; then clear_formers; fi
   check_servers
   enough

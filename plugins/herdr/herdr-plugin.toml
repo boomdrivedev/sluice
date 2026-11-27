@@ -6,8 +6,8 @@ description = "sluice's merge queue beside your agents: a status popup, toasts w
 platforms = ["linux", "macos"]
 
 # One watcher for all of the user's herdr servers on a host: each server's
-# startup and events register that server with it and wake it, and start
-# it only where none runs.
+# startup and events register that server with it and wake it, and, where
+# none runs, the command becomes the watcher.
 [[startup]]
 command = ["sh", "bin/watch.sh", "--ensure"]
 
@@ -17,6 +17,15 @@ command = ["sh", "bin/watch.sh", "--ensure"]
 
 [[events]]
 on = "worktree.created"
+command = ["sh", "bin/watch.sh", "--ensure"]
+
+# The watcher runs as the command herdr started it with, herdr's own child.
+# When that herdr server ends, its watcher asks another server it serves to
+# start the next one by this action.
+[[actions]]
+id = "watch"
+title = "sluice: keep the queue current in this herdr server"
+contexts = ["global"]
 command = ["sh", "bin/watch.sh", "--ensure"]
 
 [[actions]]

@@ -181,6 +181,7 @@ tokio-util = { version = "0.7", features = ["rt", "codec"] }
 tokio-stream = { version = "0.1", features = ["sync"] }
 # A subscription's lines sent to a `FramedWrite` (design D6).
 futures-util = { version = "0.3", default-features = false, features = [
+  "alloc",
   "sink",
 ] }
 notify-debouncer-full = "=0.6.0"

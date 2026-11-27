@@ -4,9 +4,14 @@
 # server is in, by the panes each server's folder keeps (D6), with commits
 # ahead of the branch it would land on and nothing else to show, how many,
 # and, when its head, the branch's revision or the submissions waiting on
-# it moved since the last forecast, `sluice submit <branch> --check --json`
-# run again. One at a time, and each worktree once, whichever servers'
-# panes are in it (D10).
+# it moved since the last forecast, a forecast asked again. Each worktree
+# once, whichever servers' panes are in it (D10). A forecast is asked on
+# the subscription, never by a sluice of its own: this prints a line for
+# each, its repository, branch and worktree tab-separated, which the
+# watcher writes on the input of the source that serves the repository,
+# and the source's reader keeps the forecast that comes back (the change
+# `sluices-herdr-plugin-leaves-no-process-and-forecasts-from-its-subscription`,
+# D2). Until it comes, the worktree's token says how many ahead alone.
 set -u
 . "$(dirname "$0")/../lib/common.sh"
 . "$lib/sources.sh"
@@ -77,23 +82,9 @@ EOF
     [ "$(jq -r '.checked' "$out")" = "$check" ]; then
     continue
   fi
-  result=none
-  with='[]'
-  conflicted='[]'
-  if [ "$check" = true ]; then
-    got=$(cd "$top" && sluice submit "$branch" --check --json 2>/dev/null)
-    case $(printf '%s' "$got" | jq -r 'if has("conflict") then (if .conflict == null then "clean" else "conflicts" end) else "none" end' 2>/dev/null) in
-    clean) result=clean ;;
-    conflicts)
-      result=conflicts
-      with=$(printf '%s' "$got" | jq -c '[.conflict.with // [] | .[] | .id]')
-      conflicted=$(printf '%s' "$got" | jq -c '.conflict.paths // []')
-      ;;
-    esac
-  fi
   jq -n -c --arg path "$top" --arg head "$head" --arg key "$key" --arg branch "$branch" \
-    --argjson count "$count" --arg result "$result" --argjson with "$with" --argjson paths "$conflicted" \
-    --argjson checked "$check" \
-    '{path: $path, head: $head, key: $key, branch: $branch, count: $count, result: $result, with: $with, paths: $paths, checked: $checked}' | put "$out"
+    --argjson count "$count" --argjson checked "$check" \
+    '{path: $path, head: $head, key: $key, branch: $branch, count: $count, result: "none", with: [], paths: [], checked: $checked}' | put "$out"
+  [ "$check" = true ] && printf '%s\t%s\t%s\n' "$repo" "$branch" "$top"
 done
 IFS=$old_ifs

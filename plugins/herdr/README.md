@@ -16,9 +16,12 @@ Needs herdr 0.9.3 or later, the `sluice` of the same release and `jq` on
 `sluice overview --json --watch --stdin`, which it tells the folder of
 each repository that a pane of any of your herdr servers is in, and shows
 the repositories with sluice's records. One watcher does this for all of
-your herdr servers on a host: the first server's startup starts it, each
-server's startup and new panes and worktrees have it serve that server,
-and it stops once none of them runs. It never submits, withdraws or lands
+your herdr servers on a host: the first server's startup command becomes
+the watcher, a child of that herdr server, and each server's startup and
+new panes and worktrees have it serve that server. When the herdr server
+that started it stops, the watcher stops too, and another server it
+serves starts the next one by the action `agentplot.sluice.watch`. The
+watcher stops once no server runs. It never submits, withdraws or lands
 anything.
 
 ## What you get
@@ -85,7 +88,9 @@ anything.
   | landed in the last 30 minutes | `#94 landed 12m` |
   | none of these | no line |
 
-  The ahead line forecasts with `sluice submit <branch> --check --json`.
+  The ahead line's forecast is asked on the same subscription, as a
+  `forecast <branch> <worktree>` line on its input; the plugin starts no
+  other `sluice` for it.
   A conflict names what it is with, a submission or the branch itself, and
   the first file in conflict, with how many more. The forecast runs again
   only when the worktree's head, the branch's revision or the submissions
@@ -242,7 +247,11 @@ command = ["my-overview-stream", "app"]
 ```
 
 A source with `folders = true` gets the `add` and `remove` lines on its
-input, and prints each document with its `folder`. The key
+input, and prints each document with its `folder`. It also gets a line
+`forecast <branch> <worktree>` for each ahead forecast, and prints the
+forecast as `{"folder", "branch", "forecast"}`, `forecast` being what
+`sluice submit <branch> --check --json` prints. A source that prints none
+leaves the ahead count alone on the line. The key
 `each_repository` is no key of the file: a file that names it runs no
 source, and the plugin's log and the popup say
 `sources.toml line <n>: each_repository is not a key: use folders = true`.

@@ -5,7 +5,11 @@
 #            or "" before the reader knows;
 #   $told    the told list's text, "" where there is none: a first sight;
 #   $paths   the learned worktrees' text.
-# Prints `bad` for a line it cannot read as sluice/overview@1, `folder`
+# Prints `forecast` with the worktree, the branch, the result (`clean`,
+# `conflicts` or `none`), the head forecast and the conflict's entries
+# and paths as JSON, for a forecast the source sent (the change
+# `sluices-herdr-plugin-leaves-no-process-and-forecasts-from-its-subscription`,
+# D2); `bad` for a line it cannot read as sluice/overview@1; `folder`
 # with the line's folder and how its repository stands for a line of a
 # source that names its folders (`unset` where sluice is not set up there
 # or the repository is gone, which takes the folder off the subscription;
@@ -67,7 +71,14 @@ def records: (.branches | length) + (.sessions | length) > 0;
 | ($raw | [normalized] | first) as $d
 # A folder sluice is not set up in, or whose repository is gone: no
 # document to keep (D4).
-| if $folder != null and ($raw.set_up == false or $raw.gone == true) then ["folder", $folder, "unset"] | row
+| if $folder != null and ($raw.forecast | type) == "object" then
+    $raw.forecast as $f
+    | ["forecast", $folder, ($raw.branch // "" | tostring),
+        (if $f | has("conflict") then (if $f.conflict == null then "clean" else "conflicts" end) else "none" end),
+        ($f.head // "" | tostring),
+        ([$f.conflict.with? // [] | .[] | .id?] | tojson),
+        ($f.conflict.paths? // [] | tojson)] | row
+  elif $folder != null and ($raw.set_up == false or $raw.gone == true) then ["folder", $folder, "unset"] | row
   elif $d == null then "bad"
   else
     (select($folder != null) | ["folder", $folder, (if $d | records then "records" else "none" end)] | row),
