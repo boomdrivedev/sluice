@@ -54,6 +54,8 @@ pub struct FileForge {
     failing: Mutex<Failing>,
     /// How many times the app's login was asked.
     logins: std::sync::atomic::AtomicUsize,
+    /// How many times each read was asked, by what it read.
+    calls: Mutex<BTreeMap<String, usize>>,
     /// Each branch of the repository as last pushed, by name, where a
     /// test pushes through it.
     branches: Mutex<BTreeMap<String, String>>,
@@ -87,6 +89,7 @@ impl FileForge {
             at: Mutex::new(None),
             failing: Mutex::new(Failing::default()),
             logins: std::sync::atomic::AtomicUsize::new(0),
+            calls: Mutex::new(BTreeMap::new()),
             branches: Mutex::new(BTreeMap::new()),
         }
     }
@@ -111,6 +114,19 @@ impl FileForge {
             self.push(n, head)?;
         }
         Ok(())
+    }
+
+    /// How many times the read `what` was asked: `list`, the open pull
+    /// requests; `query/<base>`, a branch's pull requests whole;
+    /// `pull/<n>`, `reviews/<n>`, `readied/<n>` and `comments/<n>`, of a
+    /// pull request; `checks/<rev>` and `posted/<rev>`, other systems' and
+    /// sluice's checks on a revision.
+    pub fn calls(&self, what: &str) -> usize {
+        self.calls.lock().unwrap().get(what).copied().unwrap_or(0)
+    }
+
+    fn called(&self, what: String) {
+        *self.calls.lock().unwrap().entry(what).or_default() += 1;
     }
 
     /// How many times the app's login was asked.
@@ -319,6 +335,7 @@ impl Forge for FileForge {
     }
 
     fn open_pulls(&self, _: &Repo) -> Result<Vec<Pull>> {
+        self.called("list".into());
         if self.failing.lock().unwrap().pulls {
             bail!("GitHub answered 502 Bad Gateway for the list of pull requests");
         }
@@ -329,6 +346,7 @@ impl Forge for FileForge {
     /// reads them: each reviewer's latest review that decides anything,
     /// and the last ten ready marks.
     fn requests(&self, _: &Repo, base: &str) -> Result<Vec<Request>> {
+        self.called(format!("query/{base}"));
         {
             let f = self.failing.lock().unwrap();
             if f.query || !f.reviews.is_empty() {
@@ -361,10 +379,12 @@ impl Forge for FileForge {
     }
 
     fn pull(&self, _: &Repo, number: u64) -> Result<Option<Pull>> {
+        self.called(format!("pull/{number}"));
         Ok(self.held()?.pulls.into_iter().find(|p| p.number == number))
     }
 
     fn reviews(&self, _: &Repo, number: u64) -> Result<Vec<Review>> {
+        self.called(format!("reviews/{number}"));
         if self.failing.lock().unwrap().reviews.contains(&number) {
             bail!("GitHub answered 502 Bad Gateway for pull request {number}'s reviews");
         }
@@ -372,14 +392,17 @@ impl Forge for FileForge {
     }
 
     fn checks(&self, _: &Repo, rev: &str) -> Result<Vec<Check>> {
+        self.called(format!("checks/{rev}"));
         Ok(self.held()?.checks.remove(rev).unwrap_or_default())
     }
 
     fn readied(&self, _: &Repo, number: u64) -> Result<Vec<DateTime<Utc>>> {
+        self.called(format!("readied/{number}"));
         Ok(self.held()?.readied.remove(&number).unwrap_or_default())
     }
 
     fn posted_all(&self, _: &Repo, rev: &str) -> Result<Vec<Posted>> {
+        self.called(format!("posted/{rev}"));
         Ok(self.held()?.posted.remove(rev).unwrap_or_default())
     }
 
@@ -428,6 +451,7 @@ impl Forge for FileForge {
     }
 
     fn comment_list(&self, _: &Repo, number: u64) -> Result<Vec<Comment>> {
+        self.called(format!("comments/{number}"));
         Ok(self.held()?.comments.remove(&number).unwrap_or_default())
     }
 
