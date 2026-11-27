@@ -4906,82 +4906,35 @@ fn starts_no_host(said: &str, version: &str, newest: &Path) {
     }
 }
 
-/// host-process, "A host process records the newest sluice that has run"
-/// (design D1 of `an-older-client-starts-no-older-host`): a host process
-/// that starts writes its own version and executable in `host/newest`,
-/// where the file names none or cannot be read.
+/// No sluice older than the newest that has run replaces the host
+/// process (design D1 to D3 of `an-older-client-starts-no-older-host`).
+/// host-process, "A host process records the newest sluice that has run":
+/// one that starts writes its own version and executable in `host/newest`
+/// where the file cannot be read. With a newer sluice recorded and the
+/// host process running: "An older daemon starts while a newer host
+/// process runs", it asks nothing and ends with exit 3; "An older sluice
+/// asks a host process to hand over", the host process answers a
+/// hand-over and a daemon's ask to end with an error naming both versions,
+/// says so in its log, and goes on as it was; "An older `sluice
+/// hand-over`" asks nothing and exits 3; "A command between the host
+/// process and the newest" asks no hand-over and uses the host process as
+/// it is. With none running: "An older command finds no host process
+/// answering", the command starts none and says why, its binary exiting
+/// 3; "An older `sluice host` or `sluice daemon` starts", each ends at
+/// once with exit 3, saying why, and takes no lock.
 #[test]
-fn a_host_process_records_the_newest_sluice_that_has_run() {
+fn no_sluice_older_than_the_newest_replaces_the_host_process() {
+    use sluice::host_process::protocol::{Answer, Request};
     let d = OnDisk::new("host-newest", POLICY);
     let client = d.client(d.repo.dir());
     let paths = client.paths().clone();
     std::fs::write(paths.newest(), "not a record").unwrap();
-    let c = client.reach().expect("started");
-    let newest = paths.newest_run().expect("it names the newest");
-    assert_eq!(newest.version, sluice::VERSION);
-    assert_eq!(newest.program, c.named.program);
-    assert!(newest.program.is_some());
-    drop(c);
-    stop_host(&d);
-}
-
-/// host-process, "An older command finds no host process answering"
-/// (design D2 of `an-older-client-starts-no-older-host`): a command older
-/// than the newest sluice that has run starts no host process, and says
-/// why, naming the newer version; through the binary, it exits 3.
-#[test]
-fn an_older_command_starts_no_host_process() {
-    let d = OnDisk::new("host-older-starts-none", POLICY);
-    let newest = newer_has_run(&d);
-    let failed = d
-        .client(d.repo.dir())
-        .reach()
-        .err()
-        .expect("it starts no host process");
-    starts_no_host(&format!("{failed:#}"), sluice::VERSION, &newest);
-    assert_eq!(answering(&d), None, "it started a host process");
-
-    let out = d
-        .command(d.repo.dir())
-        .args(["overview", "--json"])
-        .output()
-        .unwrap();
-    assert_eq!(out.status.code(), Some(3), "{}", text(&out));
-    starts_no_host(&text(&out), sluice::VERSION, &newest);
-    assert_eq!(answering(&d), None, "it started a host process");
-    assert_eq!(d.client(d.repo.dir()).paths().named(), None);
-}
-
-/// host-process, "An older `sluice host` or `sluice daemon` starts" (design
-/// D2 of `an-older-client-starts-no-older-host`): each ends at once with
-/// exit 3, says why on standard error, and takes no lock.
-#[test]
-fn an_older_host_or_daemon_starts_no_host_process() {
-    let d = OnDisk::new("host-older-host", POLICY);
-    let newest = newer_has_run(&d);
-    let out = d.command(d.repo.dir()).arg("host").output().unwrap();
-    assert_eq!(out.status.code(), Some(3), "{}", text(&out));
-    starts_no_host(&text(&out), sluice::VERSION, &newest);
-    let mut daemon = Daemon::start(&d, d.repo.dir());
-    within(30, "the older daemon ends", || !daemon.runs());
-    assert_eq!(daemon.child.wait().unwrap().code(), Some(3));
-    starts_no_host(&daemon.said(), sluice::VERSION, &newest);
-    assert_eq!(answering(&d), None, "it started a host process");
-    let lock = std::fs::OpenOptions::new()
-        .create(true)
-        .write(true)
-        .truncate(false)
-        .open(d.client(d.repo.dir()).paths().lock())
-        .unwrap();
-    assert!(lock.try_lock().is_ok(), "the host's lock is held");
-}
-
-/// host-process, "An older daemon starts while a newer host process runs"
-/// (design D2, D3 of `an-older-client-starts-no-older-host`): it asks the
-/// host process nothing and ends, and the host process goes on as it was.
-#[test]
-fn an_older_daemon_ends_no_newer_host_process() {
-    let d = OnDisk::new("host-older-daemon", POLICY);
+    let held = client.reach().expect("started");
+    let recorded = paths.newest_run().expect("it names the newest");
+    assert_eq!(recorded.version, sluice::VERSION);
+    assert_eq!(recorded.program, held.named.program);
+    assert!(recorded.program.is_some());
+    let first = held.named.clone();
     let follow = d
         .client(d.repo.dir())
         .subscribe(vec![sluice::host_process::protocol::Added {
@@ -4989,36 +4942,19 @@ fn an_older_daemon_ends_no_newer_host_process() {
             kind: FollowKind::Wait,
         }])
         .unwrap();
-    let first = follow.named.clone();
+    drop(held);
     let newest = newer_has_run(&d);
+    let unchanged = |what: &str| {
+        let now = named(&d).expect("the host process answers");
+        assert_eq!((now.pid, &now.since), (first.pid, &first.since), "{what}");
+    };
+
     let mut daemon = Daemon::start(&d, d.repo.dir());
     within(30, "the older daemon ends", || !daemon.runs());
     assert_eq!(daemon.child.wait().unwrap().code(), Some(3));
     starts_no_host(&daemon.said(), sluice::VERSION, &newest);
-    let now = named(&d).expect("the host process answers");
-    assert_eq!((now.pid, &now.since), (first.pid, &first.since));
-    drop(follow);
-    stop_host(&d);
-}
+    unchanged("an older daemon");
 
-/// host-process, "An older sluice asks a host process to hand over"
-/// (design D3 of `an-older-client-starts-no-older-host`): the host
-/// process answers with an error naming both versions, says so in its
-/// log, and goes on as it was, for a hand-over and for a daemon's ask to
-/// end.
-#[test]
-fn a_host_process_hands_over_to_no_older_sluice() {
-    use sluice::host_process::protocol::{Answer, Request};
-    let d = OnDisk::new("host-no-older-hand-over", POLICY);
-    let follow = d
-        .client(d.repo.dir())
-        .subscribe(vec![sluice::host_process::protocol::Added {
-            folder: std::path::PathBuf::from(d.repository(d.repo.dir())),
-            kind: FollowKind::Wait,
-        }])
-        .unwrap();
-    let first = follow.named.clone();
-    newer_has_run(&d);
     for ends in [false, true] {
         let mut c = d
             .client(d.repo.dir())
@@ -5042,51 +4978,19 @@ fn a_host_process_hands_over_to_no_older_sluice() {
             "{words}"
         );
     }
-    let now = named(&d).expect("the host process answers");
-    assert_eq!((now.pid, &now.since), (first.pid, &first.since));
+    unchanged("an older hand-over");
     assert!(
         host_logs(&d).contains("warning: sluice 1.0.0 asked this host process"),
         "{}",
         host_logs(&d)
     );
-    drop(follow);
-    stop_host(&d);
-}
 
-/// host-process, "An older `sluice hand-over`" (design D3 of
-/// `an-older-client-starts-no-older-host`): it asks nothing, exits 3 and
-/// says why.
-#[test]
-fn an_older_hand_over_asks_nothing() {
-    let d = OnDisk::new("host-older-hand-over-cmd", POLICY);
-    let follow = d
-        .client(d.repo.dir())
-        .subscribe(vec![sluice::host_process::protocol::Added {
-            folder: std::path::PathBuf::from(d.repository(d.repo.dir())),
-            kind: FollowKind::Wait,
-        }])
-        .unwrap();
-    let first = follow.named.clone();
-    let newest = newer_has_run(&d);
     let out = d.command(d.repo.dir()).arg("hand-over").output().unwrap();
     assert_eq!(out.status.code(), Some(3), "{}", text(&out));
     starts_no_host(&text(&out), sluice::VERSION, &newest);
-    let now = named(&d).expect("the host process answers");
-    assert_eq!((now.pid, &now.since), (first.pid, &first.since));
+    unchanged("an older sluice hand-over");
     assert!(!host_logs(&d).contains("asked this one to hand over"));
-    drop(follow);
-    stop_host(&d);
-}
 
-/// host-process, "A command between the host process and the newest"
-/// (design D3 of `an-older-client-starts-no-older-host`): a command newer
-/// than the host process, and older than the newest sluice that has run,
-/// asks no hand-over and uses the host process as it is.
-#[test]
-fn a_command_older_than_the_newest_uses_the_host_process_as_it_is() {
-    let d = OnDisk::new("host-between", POLICY);
-    let first = d.client(d.repo.dir()).reach().expect("started").named;
-    newer_has_run(&d);
     let reached = d
         .client(d.repo.dir())
         .with_version("1.0.0")
@@ -5097,7 +5001,39 @@ fn a_command_older_than_the_newest_uses_the_host_process_as_it_is() {
         (first.pid, &first.since)
     );
     drop(reached);
+    drop(follow);
     stop_host(&d);
+    within(30, "the host process ends", || answering(&d).is_none());
+
+    let failed = d
+        .client(d.repo.dir())
+        .reach()
+        .err()
+        .expect("it starts no host process");
+    starts_no_host(&format!("{failed:#}"), sluice::VERSION, &newest);
+    assert_eq!(answering(&d), None, "it started a host process");
+    let out = d
+        .command(d.repo.dir())
+        .args(["overview", "--json"])
+        .output()
+        .unwrap();
+    assert_eq!(out.status.code(), Some(3), "{}", text(&out));
+    starts_no_host(&text(&out), sluice::VERSION, &newest);
+    let out = d.command(d.repo.dir()).arg("host").output().unwrap();
+    assert_eq!(out.status.code(), Some(3), "{}", text(&out));
+    starts_no_host(&text(&out), sluice::VERSION, &newest);
+    let mut daemon = Daemon::start(&d, d.repo.dir());
+    within(30, "the older daemon ends", || !daemon.runs());
+    assert_eq!(daemon.child.wait().unwrap().code(), Some(3));
+    starts_no_host(&daemon.said(), sluice::VERSION, &newest);
+    assert_eq!(answering(&d), None, "it started a host process");
+    let lock = std::fs::OpenOptions::new()
+        .create(true)
+        .write(true)
+        .truncate(false)
+        .open(paths.lock())
+        .unwrap();
+    assert!(lock.try_lock().is_ok(), "the host's lock is held");
 }
 
 /// host-process, "A newer command's hand-over is refused" (design D3 of
