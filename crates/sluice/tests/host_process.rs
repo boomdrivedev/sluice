@@ -638,14 +638,20 @@ fn keeps_the_hosts_lock(d: &OnDisk, older: &sluice::host_process::protocol::Name
     let client = d.client(d.repo.dir());
     let lock = client.paths().lock();
     let stop = Arc::new(AtomicBool::new(false));
+    // The lock is asked for on one descriptor, opened once: an open of a
+    // file in the host's folder is a file event on Linux, and notify's
+    // inotify loop reads events until none is left, so a new open at each
+    // ask kept it from adding the watches the image started afresh asks
+    // for, and that image never answered. A lock taken makes no event.
     let asking = {
         let stop = stop.clone();
         std::thread::spawn(move || {
+            let file = std::fs::OpenOptions::new().write(true).open(&lock).unwrap();
             let mut took = 0u32;
             while !stop.load(Ordering::SeqCst) {
-                let file = std::fs::OpenOptions::new().write(true).open(&lock).unwrap();
                 if file.try_lock().is_ok() {
                     took += 1;
+                    file.unlock().unwrap();
                 }
             }
             took
