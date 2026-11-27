@@ -13,11 +13,14 @@
 #                 pushes the tag alone, with no branch and no force, and
 #                 publishes the GitHub release at the tag it pushed;
 #   version       reckons the next version from the newest tag, which is off
-#                 main's history (git-cliff --unreleased --bumped-version);
+#                 main's history, by next-version.sh, which
+#                 root:next-version tests;
 #   conventional  checks the commits since the newest v* tag by version,
 #                 never `git describe`'s;
-# and no line of the workflow names SLUICE_VERSION or --impure, so no build
-# is given its version. actionlint, under root:format, reads the workflow's
+# the workflow's runs of pushes go one at a time in one group, queued and
+# never cancelled for a later push's, and no job names a group of its own,
+# which would wait on its own run; and no line of the workflow names
+# SLUICE_VERSION or --impure, so no build is given its version. actionlint, under root:format, reads the workflow's
 # keys, expressions and shell; it cannot say what a release's steps must
 # be. Each failure is one line, release: <job>: <what>.
 set -u
@@ -142,12 +145,28 @@ if printf '%s\n' "$release" | grep -qF -- '--target'; then
 fi
 
 # version and conventional: reckoned from the newest tag by version.
-[ -n "$(at "$version" 'git-cliff --unreleased --bumped-version' in)" ] ||
-  fail version "runs no git-cliff --unreleased --bumped-version"
+[ -n "$(at "$version" 'sh next-version.sh' in)" ] ||
+  fail version "runs no sh next-version.sh"
 [ -n "$(at "$conventional" "git tag --list 'v*' --sort=-v:refname" in)" ] ||
   fail conventional "does not start at the first of git tag --list 'v*' --sort=-v:refname"
 if printf '%s\n' "$conventional" | grep -qF 'git describe'; then
   fail conventional "runs git describe: the newest tag is off main's history"
+fi
+
+# The whole workflow: a push's run waits for the one before it, in one
+# group, so its version job reckons from the tags the release before it
+# pushed; a pull request's run waits for none.
+group="group: \${{ github.event_name == 'push' && 'release' || format('pull-request-{0}', github.run_id) }}"
+concurrency=$(awk '/^concurrency:$/ { on = 1; next } on && /^[^ ]/ { exit } on { sub(/^ +/, ""); print }' "$workflow")
+[ -n "$(at "$concurrency" "$group")" ] ||
+  fail workflow "puts the runs of pushes in no one group: concurrency's $group"
+[ -n "$(at "$concurrency" 'cancel-in-progress: false')" ] ||
+  fail workflow "cancels a push's run for a later push's: concurrency's cancel-in-progress: false"
+grep -nE '^    concurrency:' "$workflow" | while IFS= read -r line; do
+  echo "release: workflow: a job names a group of its own, at line ${line%%:*}, which waits on its own run" >&2
+done
+if grep -qE '^    concurrency:' "$workflow"; then
+  status=1
 fi
 
 # The whole workflow: no build given its version.

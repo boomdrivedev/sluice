@@ -81,6 +81,16 @@ tasks:
     inputs: ['/.github/workflows/ci.yml', '/check-release.sh']
     tags: [check-fast]
     options: {runFromWorkspaceRoot: true}
+  # The next version, reckoned by next-version.sh on scratch repositories
+  # laid out as the releases lay out sluice's: a second push reckoned once
+  # the first's tag is pushed is the next version, a run its release
+  # already holds releases nothing (check-next-version.sh). git-cliff is
+  # devenv's (core.24).
+  next-version:
+    command: 'sh check-next-version.sh'
+    inputs: ['/next-version.sh', '/check-next-version.sh', '/cliff.toml', '/devenv.nix', '/devenv.lock']
+    tags: [check-fast]
+    options: {runFromWorkspaceRoot: true}
   # Every spec under openspec/specs passes openspec validate --strict, which
   # fails a warning as an error, by the openspec devenv.nix pins (core.24).
   # It sends no usage statistics and asks for no newer release.
