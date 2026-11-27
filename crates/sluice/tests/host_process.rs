@@ -2729,8 +2729,21 @@ fn a_stopped_daemon_ends_its_runs() {
 }
 
 /// The pid of the run's check that `marks` holds: the shell whose command
-/// names its marks, where one runs.
+/// names its marks and that leads its process group, where one runs.
 fn check_of(marks: &support::Scratch) -> Option<u32> {
+    // The run's supervisor starts the checks' shell in a process group of
+    // its own, so the shell leads it. A copy that the shell forked to run
+    // `sleep` has the shell's command line until it is replaced, and is in
+    // the shell's group: it is not the check.
+    matching(marks).into_iter().find(|&pid| {
+        let pid = nix::unistd::Pid::from_raw(pid as i32);
+        nix::unistd::getpgid(Some(pid)).is_ok_and(|group| group == pid)
+    })
+}
+
+/// Every process that runs the held command's line, a check's shell and
+/// any copy of it that the shell forked and has not yet replaced.
+fn matching(marks: &support::Scratch) -> Vec<u32> {
     use sysinfo::{ProcessRefreshKind, ProcessStatus, ProcessesToUpdate, System, UpdateKind};
     let began = marks.path().join("began").display().to_string();
     let mut system = System::new();
@@ -2743,7 +2756,7 @@ fn check_of(marks: &support::Scratch) -> Option<u32> {
         .processes()
         .iter()
         .filter(|(_, p)| !matches!(p.status(), ProcessStatus::Zombie))
-        .find(|(_, p)| {
+        .filter(|(_, p)| {
             let words: Vec<String> = p
                 .cmd()
                 .iter()
@@ -2753,6 +2766,37 @@ fn check_of(marks: &support::Scratch) -> Option<u32> {
             line.contains(&began) && line.contains("while")
         })
         .map(|(pid, _)| pid.as_u32())
+        .collect()
+}
+
+/// test-children, "A check's shell between a fork and an exec": a check
+/// whose shell has a copy of itself that it forked, which runs the same
+/// command line, is named by the leader of its process group, the shell
+/// that the run's supervisor started. The copy is held, so every read sees
+/// both.
+#[test]
+fn a_checks_forked_copy_is_not_the_check() {
+    use std::os::unix::process::CommandExt;
+    let marks = support::Scratch::new("check-of-copy-marks");
+    let command = format!(
+        "echo run >> {began}; (while [ ! -f {go} ] && [ -d {dir} ]; do sleep 0.1; done); :",
+        began = marks.path().join("began").display(),
+        go = marks.path().join("go").display(),
+        dir = marks.path().display()
+    );
+    let mut shell = std::process::Command::new("/bin/sh")
+        .args(["-c", &command])
+        .current_dir(marks.path())
+        .process_group(0)
+        .spawn()
+        .unwrap();
+    let leader = shell.id();
+    within(30, "the shell's copy runs", || matching(&marks).len() == 2);
+    for _ in 0..20 {
+        assert_eq!(check_of(&marks), Some(leader));
+    }
+    std::fs::write(marks.path().join("go"), "").unwrap();
+    shell.wait().unwrap();
 }
 
 /// The process groups that `d`'s host state names as workers.
