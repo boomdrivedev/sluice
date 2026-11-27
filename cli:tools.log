@@ -1,0 +1,493 @@
+--- stderr ---
+    Blocking waiting for file lock on build directory
+   Compiling sluice v0.0.0 (/Users/chuck/.local/share/boomdrive/repositories/boomdrivedev/sluice/sluice.git/sluice/.places/sluice+2Ftry+2Fmain+2F83/crates/sluice)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 2m 21s
+────────────
+ Nextest run ID 7b2af149-284e-4d58-b973-d1645c1f2ab4 with nextest profile: default
+    Starting 768 tests across 19 binaries (7 tests skipped)
+        PASS [   0.642s] (  1/768) sluice::conformance a_branch_is_held_as_the_host_last_read_it
+        PASS [   1.493s] (  2/768) sluice::conformance a_place_holding_more_than_its_commits_is_refused_and_named
+        PASS [   1.975s] (  3/768) sluice::conformance a_branch_is_forecast_with_no_place_of_it
+        PASS [   5.348s] (  4/768) sluice::conformance a_run_is_ended_at_its_limit_after_the_step_that_started_it
+        PASS [   5.369s] (  5/768) sluice::conformance a_failed_release_is_held_with_what_failed
+        PASS [   5.416s] (  6/768) sluice::conformance a_failed_release_is_held_after_the_retries_its_branch_names
+        PASS [   5.419s] (  7/768) sluice::conformance a_release_that_succeeds_on_a_retry_is_listed_no_more
+        PASS [   5.424s] (  8/768) sluice::conformance a_failed_release_is_tried_a_bounded_number_of_times
+        PASS [   5.537s] (  9/768) sluice::conformance a_refusal_names_the_revision_this_host_holds
+        PASS [   5.608s] ( 10/768) sluice::conformance a_removed_worktrees_failing_release_is_freed_and_never_run_again
+        PASS [   5.633s] ( 11/768) sluice::conformance a_last_result_decides_nothing
+        PASS [   5.648s] ( 12/768) sluice::conformance a_quiet_branch_mended_outside_sluice_is_read_whole
+        PASS [   5.688s] ( 13/768) sluice::conformance a_read_of_a_mended_branch_leaves_its_state_as_it_was
+        PASS [   5.752s] ( 14/768) sluice::conformance a_removed_worktrees_place_is_freed_by_the_next_round
+        PASS [   6.525s] ( 15/768) sluice::conformance a_submission_names_its_after_priority_and_submitter_and_does_nothing_more
+        PASS [   8.727s] ( 16/768) sluice::conformance a_landed_change_to_the_gate_runs_every_check_it_now_requires
+        PASS [   9.274s] ( 17/768) sluice::conformance a_resubmission_withdraws_the_earlier_submission_which_stays_readable
+        PASS [   9.309s] ( 18/768) sluice::conformance a_held_checkout_never_holds_its_branch
+        PASS [   4.014s] ( 19/768) sluice::conformance a_withdrawn_combinations_failed_release_holds_its_checkout
+        PASS [   4.035s] ( 20/768) sluice::conformance a_withdrawn_combinations_passed_run_is_read_for_nothing
+        PASS [   9.065s] ( 21/768) sluice::conformance a_session_runs_last_result_says_whether_it_was_recorded
+        PASS [   4.214s] ( 22/768) sluice::conformance every_run_is_recorded_before_its_verdict_a_fail_exactly_as_a_pass
+        PASS [   4.480s] ( 23/768) sluice::conformance a_worktree_that_changes_while_its_run_runs_records_nothing
+        PASS [   4.300s] ( 24/768) sluice::conformance every_observed_result_records_what_its_executor_enforced
+        PASS [  10.494s] ( 25/768) sluice::conformance a_conflict_names_every_submission_it_is_contested_with
+        PASS [   8.946s] ( 26/768) sluice::conformance a_submission_waits_for_its_after_and_holds_no_one
+        PASS [   5.726s] ( 27/768) sluice::conformance a_withdrawn_combinations_run_is_ended_and_its_checkout_released
+        PASS [   3.269s] ( 28/768) sluice::conformance peers_held
+        PASS [   5.898s] ( 29/768) sluice::conformance deepest_first_the_longest_passes_and_all_land_on_its_verdict
+        PASS [   7.649s] ( 30/768) sluice::conformance every_submission_is_tested_on_top_of_every_one_ahead
+        PASS [   3.732s] ( 31/768) sluice::conformance records_held_after_a_refresh_are_the_records_read
+        PASS [   3.415s] ( 32/768) sluice::conformance s11_a_landing_names_its_verdict_and_leaves_the_session_place
+        PASS [   3.373s] ( 33/768) sluice::conformance s12_a_submission_cannot_loosen_the_gate_it_is_judged_by
+        PASS [   9.474s] ( 34/768) sluice::conformance a_withdrawn_combinations_failed_run_blames_no_one
+        PASS [   9.270s] ( 35/768) sluice::conformance every_record_written_is_the_real_format_and_names_its_schema
+        PASS [   5.125s] ( 36/768) sluice::conformance s1_two_heads_pass_and_land_in_order
+        PASS [   2.259s] ( 37/768) sluice::conformance s28_a_dirty_session_run_records_nothing
+        PASS [   5.709s] ( 38/768) sluice::conformance s16_a_forecast_names_the_file_and_the_work_and_writes_nothing
+        PASS [   1.404s] ( 39/768) sluice::conformance s32_asking_again_gives_back_the_same_preview
+        PASS [   4.407s] ( 40/768) sluice::conformance s2_a_conflict_is_told_before_any_check_runs
+        PASS [   5.626s] ( 41/768) sluice::conformance s26_a_clean_session_run_is_replayed_by_its_submission
+        PASS [   9.716s] ( 42/768) sluice::conformance peers_recorded
+        PASS [   5.142s] ( 43/768) sluice::conformance s30_a_landed_revision_is_previewed_at_its_addresses
+        PASS [   5.140s] ( 44/768) sluice::conformance s31_the_next_landings_preview_replaces_the_last
+        PASS [   1.330s] ( 45/768) sluice::conformance work_another_landing_took_is_landed_as_the_commit_that_landed_it
+        PASS [   6.586s] ( 46/768) sluice::conformance s27_a_sessions_place_stays_until_it_is_released
+        PASS [  11.663s] ( 47/768) sluice::conformance peers_records_held
+        PASS [  11.396s] ( 48/768) sluice::conformance peers_state_read
+        PASS [   1.528s] ( 49/768) sluice::equip_tools equip_adopts_nothing
+        PASS [   1.345s] ( 50/768) sluice::equip_tools equip_installs_the_pins_before_moon_runs
+        PASS [   1.010s] ( 51/768) sluice::equip_tools equip_refuses_a_folder_in_no_worktree
+        PASS [   0.841s] ( 52/768) sluice::equip_tools equip_refuses_a_revision_it_cannot_read
+        PASS [   3.448s] ( 53/768) sluice::conformance state_and_status_read_the_records_with_no_step_running
+        PASS [   1.261s] ( 54/768) sluice::equip_tools equip_runs_at_the_top_of_the_worktree
+        PASS [   3.953s] ( 55/768) sluice::conformance status_of_a_submission_on_a_mended_branch_answers_for_it
+        PASS [   6.070s] ( 56/768) sluice::conformance s4_the_first_fails_and_the_second_is_formed_again_without_it
+        PASS [   1.457s] ( 57/768) sluice::equip_tools sluice_equip_with_no_tools_of_its_own
+        PASS [   1.841s] ( 58/768) sluice::equip_tools exec_equips_before_its_command
+        PASS [   0.467s] ( 59/768) sluice::exec a_command_whose_host_process_ends_before_it_answers_exits_3
+        PASS [  18.460s] ( 60/768) sluice::conformance peers_a_finished_try_is_released_while_another_run_tests
+        PASS [   1.224s] ( 61/768) sluice::exec a_command_runs_under_the_raised_limit_on_open_files
+        PASS [   4.713s] ( 62/768) sluice::equip_tools a_preview_is_equipped_before_its_command
+        PASS [   1.673s] ( 63/768) sluice::exec a_command_gets_the_worktrees_environment_and_its_exit
+        PASS [   3.031s] ( 64/768) sluice::exec a_check_that_fails_after_the_engine_went_is_not_run_and_a_pass_is_recorded
+        PASS [   1.946s] ( 65/768) sluice::exec a_clean_run_of_the_checks_is_recorded_and_a_dirty_one_is_not
+        PASS [   3.140s] ( 66/768) sluice::exec a_check_that_fails_after_the_hosts_system_was_switched_is_not_run_and_a_pass_is_recorded
+        PASS [   1.233s] ( 67/768) sluice::exec a_killed_client_ends_its_checks
+        PASS [   2.857s] ( 68/768) sluice::exec a_check_that_says_the_system_was_switched_while_it_stood_is_recorded_as_failed
+        PASS [   3.051s] ( 69/768) sluice::exec a_check_that_says_the_engine_is_down_while_it_answers_is_recorded_as_failed
+        PASS [   1.090s] ( 70/768) sluice::exec a_sessions_checks_are_a_worker_of_sluice_host
+        PASS [  16.413s] ( 71/768) sluice::conformance peers_s1
+        PASS [   1.010s] ( 72/768) sluice::exec a_stopped_sluice_host_ends_a_sessions_checks
+        PASS [  17.154s] ( 73/768) sluice::conformance peers_push_only_the_branch_and_refs_sluice
+        PASS [   1.298s] ( 74/768) sluice::exec a_session_run_takes_its_callers_path
+        PASS [  17.119s] ( 75/768) sluice::conformance peers_read_the_last_fetched_state_when_the_remote_is_unreachable
+        PASS [   9.819s] ( 76/768) sluice::conformance s3_the_second_fails_and_only_its_session_hears
+        PASS [   1.551s] ( 77/768) sluice::exec a_worktree_at_its_branchs_revision_runs_no_check
+        PASS [   8.965s] ( 78/768) sluice::conformance s9_deepest_first_finds_the_culprit_by_testing_what_it_skipped
+        PASS [   0.533s] ( 79/768) sluice::exec an_unheld_release_with_nothing_to_free_makes_nothing
+        PASS [   1.579s] ( 80/768) sluice::exec a_worktrees_release_runs_in_sluice_host
+        PASS [   1.123s] ( 81/768) sluice::exec an_exec_hands_its_checks_its_own_span_in_the_caller_s_trace
+        PASS [   2.652s] ( 82/768) sluice::exec a_worktrees_checks_leave_out_what_its_branch_landed_since
+        PASS [   1.210s] ( 83/768) sluice::exec an_unheld_worktrees_release_runs_its_release_command
+        PASS [   2.556s] ( 84/768) sluice::exec a_worktrees_unstaged_edit_runs_the_checks_it_affects
+        PASS [   3.013s] ( 85/768) sluice::exec a_worktrees_own_moon_yml_runs_its_project
+        PASS [   1.357s] ( 86/768) sluice::exec ctrl_c_ends_a_sessions_checks
+        PASS [   2.712s] ( 87/768) sluice::exec a_worktrees_untracked_file_runs_the_checks_it_affects
+        PASS [   3.002s] ( 88/768) sluice::exec a_worktrees_toolchain_runs_every_check
+        PASS [   2.550s] ( 89/768) sluice::exec an_exec_waits_for_another_repositorys_run_on_the_host
+        PASS [   4.128s] ( 90/768) sluice::exec a_sessions_checks_take_a_slot_of_the_bound
+        PASS [   5.289s] ( 91/768) sluice::exec a_second_run_on_the_same_files_replays_and_records_nothing
+        PASS [   0.273s] ( 92/768) sluice::forge a_429_waits_as_long_as_github_says
+        PASS [  20.095s] ( 93/768) sluice::conformance peers_s4
+        PASS [   0.023s] ( 94/768) sluice::forge a_bundle_from_a_pull_requests_ref_counts_for_nothing
+        PASS [   0.016s] ( 95/768) sluice::forge a_bundle_from_the_signers_workflow_counts
+        PASS [   0.018s] ( 96/768) sluice::forge a_bundle_no_carried_root_verifies_counts_for_nothing
+        PASS [   0.027s] ( 97/768) sluice::forge a_bundle_of_githubs_own_instance_counts
+        PASS [   0.029s] ( 98/768) sluice::forge a_call_refused_its_token_is_made_on_a_fresh_one
+        PASS [   2.542s] ( 99/768) sluice::exec exec_looks_for_the_engine_at_a_tcp_address
+        PASS [   2.050s] (100/768) sluice::exec exec_records_the_open_executors_grant
+        PASS [   0.171s] (101/768) sluice::forge a_command_that_gives_no_token_fails_the_call
+        PASS [   0.281s] (102/768) sluice::forge a_call_refused_a_commands_token_is_made_on_one_got_afresh
+        PASS [   0.226s] (103/768) sluice::forge a_command_that_gives_the_refused_token_back_gives_none_afresh
+        PASS [   1.722s] (104/768) sluice::exec sluice_exec_gets_the_hosts_cache_environment
+        PASS [   0.161s] (105/768) sluice::forge a_commands_token_for_another_repository_is_refused
+        PASS [   1.954s] (106/768) sluice::exec exec_refuses_the_tests_of_a_branch_whose_engine_does_not_answer
+        PASS [   0.199s] (107/768) sluice::forge a_commands_credentials_say_what_their_token_is
+        PASS [   0.070s] (108/768) sluice::forge a_comment_whose_first_try_cannot_connect_is_posted_once
+        PASS [   6.244s] (109/768) sluice::exec a_pass_sluice_never_recorded_runs_again_and_is_recorded
+        PASS [   0.191s] (110/768) sluice::forge a_commands_token_honours_the_pause
+        PASS [   0.025s] (111/768) sluice::forge a_redirect_is_githubs_answer_and_says_what_to_do
+        PASS [   0.106s] (112/768) sluice::forge a_kept_author_stands_while_github_cannot_be_read
+        PASS [   0.074s] (113/768) sluice::forge a_read_answered_503_until_the_bound_fails_unanswered
+        PASS [   0.017s] (114/768) sluice::forge a_refused_token_says_why
+        PASS [   1.563s] (115/768) sluice::exec the_output_reaches_the_client_as_it_comes
+        PASS [   0.145s] (116/768) sluice::forge a_dispatch_answered_502_is_made_once
+        PASS [   0.221s] (117/768) sluice::forge a_commands_token_with_no_end_is_held_until_refused
+        PASS [   0.019s] (118/768) sluice::forge a_token_for_another_repository_is_refused
+        PASS [   0.090s] (119/768) sluice::forge a_read_github_could_not_answer_is_made_again
+        PASS [   0.072s] (120/768) sluice::forge a_refused_query_fails_in_githubs_words
+        PASS [   0.031s] (121/768) sluice::forge a_token_is_bought_once_an_hour
+        PASS [   0.074s] (122/768) sluice::forge a_write_that_sets_a_state_is_made_again
+        PASS [   0.120s] (123/768) sluice::forge a_secondary_limit_naming_no_time_doubles
+        PASS [   0.092s] (124/768) sluice::forge a_write_that_makes_something_is_read_back_before_it_is_made_again
+        PASS [   0.130s] (125/768) sluice::forge a_spent_allowance_is_waited_out_to_its_reset
+        PASS [   0.362s] (126/768) sluice::forge a_commands_token_is_got_once_before_each_end
+        PASS [   0.030s] (127/768) sluice::forge credentials_say_what_their_token_is_and_renew_buys_one
+        PASS [   0.028s] (128/768) sluice::forge forge_check_all_set
+        PASS [   0.063s] (129/768) sluice::forge forge_check_names_a_pools_missing_workflow
+        PASS [   0.094s] (130/768) sluice::forge every_process_on_the_host_honours_the_pause
+        PASS [   0.030s] (131/768) sluice::forge forge_check_names_an_extra_bypass
+        PASS [   0.221s] (132/768) sluice::forge a_token_got_afresh_is_the_one_another_refused_takes
+        PASS [   0.119s] (133/768) sluice::forge every_read_is_conditional
+        PASS [   0.092s] (134/768) sluice::forge forge_check_names_an_environment_any_branch_may_use
+        PASS [   5.341s] (135/768) sluice::exec a_worktrees_last_result_says_its_head_outcome_and_whether_it_was_recorded
+        PASS [   0.214s] (136/768) sluice::forge an_author_github_did_not_give_is_kept_nowhere
+        PASS [   0.034s] (137/768) sluice::forge forge_check_names_own_steps_that_leave_the_run_job
+        PASS [   0.033s] (138/768) sluice::forge forge_check_reads_a_workflow_with_the_repositorys_own_steps
+        PASS [   0.114s] (139/768) sluice::forge forge_check_names_each_failure
+        PASS [   0.268s] (140/768) sluice::forge apps_holding_one_store_get_a_repositorys_token_once
+        PASS [   0.013s] (141/768) sluice::forge live_pull_request_calls
+        PASS [   0.019s] (142/768) sluice::forge no_installation_withholds_the_credentials_and_says_what_to_do
+        PASS [   0.083s] (143/768) sluice::forge one_query_reads_the_open_pull_requests_whole
+        PASS [   0.109s] (144/768) sluice::forge no_token_is_kept_on_the_host
+        PASS [   0.180s] (145/768) sluice::forge forge_check_with_a_command_names_each_failure
+        PASS [   0.190s] (146/768) sluice::forge forge_check_with_a_command_all_set
+        PASS [   0.016s] (147/768) sluice::forge the_apps_login_is_read_once
+        PASS [   0.195s] (148/768) sluice::forge graphqls_allowance_is_its_own
+        PASS [   2.017s] (149/768) sluice::exec the_overview_counts_another_repositorys_combination_in_its_room
+        PASS [   0.077s] (150/768) sluice::forge the_apps_author_is_its_bot_kept_on_the_host
+        PASS [   0.117s] (151/768) sluice::forge the_apps_pull_request_calls
+        PASS [   0.101s] (152/768) sluice::forge the_last_call_of_an_allowance_starts_the_pause
+        PASS [   0.150s] (153/768) sluice::forge the_apps_author_under_a_command_is_the_viewers_bot
+        PASS [   0.107s] (154/768) sluice::forge the_list_says_whether_it_changed
+        PASS [   0.180s] (155/768) sluice::forge the_bot_under_a_command_is_the_viewers
+        PASS [   0.113s] (156/768) sluice::forge the_pause_outlives_the_process
+        PASS [   0.107s] (157/768) sluice::forge the_pools_calls
+        PASS [   0.111s] (158/768) sluice::forge the_query_reads_fifty_to_a_page
+        PASS [   0.115s] (159/768) sluice::instance a_reserve_that_leaves_no_run_is_refused
+        PASS [   0.624s] (160/768) sluice::forge forge_check_runs_the_hosts_command
+        PASS [   0.665s] (161/768) sluice::forge forge_check_tells_a_commands_words_without_its_token
+        PASS [   5.610s] (162/768) sluice::exec after_a_fix_exec_runs_the_fixed_check_and_replays_the_rest
+        PASS [   3.270s] (163/768) sluice::exec exec_runs_from_a_worktree_at_a_long_path
+        PASS [   0.783s] (164/768) sluice::forge status_says_who_pushes_the_branch
+        PASS [   3.296s] (165/768) sluice::exec exec_tells_a_conflict_before_it_runs_and_runs_anyway
+        PASS [   1.126s] (166/768) sluice::forge forge_check_exits_by_what_it_finds
+        PASS [   0.055s] (167/768) sluice::instance guarding_reads_only_the_forge
+        PASS [   0.064s] (168/768) sluice::instance the_reserve_is_none_by_default
+        PASS [   0.106s] (169/768) sluice::instance the_reserve_is_read_beside_the_bound
+        PASS [   0.316s] (170/768) sluice::instance discovery_is_read_from_the_forge
+        PASS [   3.441s] (171/768) sluice::exec the_next_exec_runs_a_removed_worktrees_stored_release_once
+        PASS [   0.497s] (172/768) sluice::local_refs a_branch_in_this_hosts_refs_has_no_copy_apart
+        PASS [   0.504s] (173/768) sluice::local_refs a_landing_beside_reads_as_passed_to_git
+        PASS [   0.751s] (174/768) sluice::local_refs a_bare_repositorys_default_branch_is_its_own_heads
+        PASS [   5.513s] (175/768) sluice::exec exec_json_gives_since_and_each_tasks_replayed
+        PASS [   0.549s] (176/768) sluice::local_refs a_refusing_hook_does_not_stop_move_to
+        PASS [   2.170s] (177/768) sluice::forge forge_check_reads_the_pool_the_policy_names
+        PASS [   0.636s] (178/768) sluice::local_refs a_merge_base_is_where_two_revisions_part
+        PASS [   0.464s] (179/768) sluice::local_refs a_repository_is_named_by_the_origin_it_configures
+        PASS [   0.551s] (180/768) sluice::local_refs commit_as_names_its_author
+        PASS [   0.311s] (181/768) sluice::local_refs contains_answers_no_for_a_commit_this_host_lacks
+        PASS [   0.441s] (182/768) sluice::local_refs commit_writes_the_landing
+        PASS [   0.440s] (183/768) sluice::local_refs form_clean_is_gits_merge_with_both_parents
+        PASS [   0.518s] (184/768) sluice::local_refs contains_answers_ancestry
+        PASS [   0.208s] (185/768) sluice::local_refs form_errors_are_not_conflicts
+        PASS [   0.508s] (186/768) sluice::local_refs form_a_chain_of_three
+        PASS [   0.164s] (187/768) sluice::local_refs the_common_dir_is_one_from_every_worktree
+        PASS [   0.219s] (188/768) sluice::local_refs read_existing_missing_and_packed
+        PASS [   0.233s] (189/768) sluice::local_refs read_file_reads_the_revision_not_the_worktree
+        PASS [   0.472s] (190/768) sluice::local_refs move_to_from_expected_only
+        PASS [   0.444s] (191/768) sluice::local_refs the_default_branch_and_the_branches_read_as_git_names_them
+        PASS [   0.359s] (192/768) sluice::local_refs two_moves_from_one_revision_one_wins
+        PASS [   0.917s] (193/768) sluice::local_refs form_conflicts_name_every_path
+        PASS [   7.568s] (194/768) sluice::exec exec_opens_with_where_the_worktree_left_its_branch
+        PASS [   1.691s] (195/768) sluice::moon a_cleanup_dependency_that_fails_fails_no_check
+        PASS [   1.652s] (196/768) sluice::moon a_failure_and_its_dependent
+        PASS [   1.682s] (197/768) sluice::moon a_finished_moon_run_s_checks_are_timed
+        PASS [   1.876s] (198/768) sluice::moon a_failed_task_whose_manifest_is_gone_is_not_unkept
+        PASS [   1.753s] (199/768) sluice::moon a_key_is_checked_against_the_tree_without_running
+        PASS [   0.938s] (200/768) sluice::moon a_key_run_in_a_bare_repositorys_worktree_is_proven
+        PASS [   2.729s] (201/768) sluice::moon a_cold_test_gets_no_cache
+        PASS [  26.929s] (202/768) sluice::conformance peers_s3
+        PASS [   1.579s] (203/768) sluice::moon a_key_is_read_under_the_home_the_toolchain_gives_moon
+        PASS [   1.643s] (204/768) sluice::moon a_key_whose_input_is_a_link_is_proven
+        PASS [   1.545s] (205/768) sluice::moon a_manifest_moon_kept_in_the_checkout_proves_its_key
+        PASS [   1.655s] (206/768) sluice::moon a_noop_check_is_failed_by_the_task_it_depends_on
+        PASS [   1.155s] (207/768) sluice::moon a_pass_whose_manifest_is_gone_is_unkept_naming_the_store
+        PASS [   1.733s] (208/768) sluice::moon a_moon_yml_no_check_reads_lands_beside
+        PASS [   0.504s] (209/768) sluice::moon a_required_task_kept_out_of_ci_is_named_before_any_run
+        PASS [   1.372s] (210/768) sluice::moon a_plan_reads_the_paths_a_worktree_holds_beyond_its_revision
+        PASS [   1.604s] (211/768) sluice::moon a_project_whose_id_holds_a_slash
+        PASS [  28.676s] (212/768) sluice::conformance peers_s9
+        PASS [   1.186s] (213/768) sluice::moon a_run_shows_each_task_as_it_ends
+        PASS [   1.566s] (214/768) sluice::moon a_run_jobs_kept_proof_proves_its_keys_and_no_forged_one
+        PASS [   1.126s] (215/768) sluice::moon a_task_kept_out_of_ci_is_not_run
+        PASS [   1.646s] (216/768) sluice::moon a_session_run_shows_each_task_as_it_ends
+        PASS [   1.926s] (217/768) sluice::moon a_second_run_replays_under_the_same_keys
+        PASS [   2.004s] (218/768) sluice::moon a_run_without_replay_runs_every_task
+        PASS [   7.827s] (219/768) sluice::landed a_release_failing_after_the_landing_leaves_the_submit_landed
+        PASS [   0.010s] (220/768) sluice::moon moon_env_probe
+        PASS [   0.916s] (221/768) sluice::moon an_old_moon_is_refused
+        PASS [   2.897s] (222/768) sluice::moon a_projects_moon_yml_runs_its_project_and_its_dependents
+        PASS [   0.499s] (223/768) sluice::moon asking_moon_leaves_the_worktree_clean
+        PASS [   1.664s] (224/768) sluice::moon a_task_moon_does_not_cache_and_its_dependent_are_proven
+        PASS [   0.222s] (225/768) sluice::moon the_command_runner_reads_every_check
+        PASS [   1.226s] (226/768) sluice::moon an_unaffected_candidate_runs_nothing
+        PASS [   1.582s] (227/768) sluice::moon a_task_that_could_not_run_records_no_fail
+        PASS [   1.056s] (228/768) sluice::moon proven_drops_a_key_the_tree_does_not_bear_out
+        PASS [   1.043s] (229/768) sluice::moon proven_names_the_file_a_key_names_that_the_tree_does_not_hold
+        PASS [   1.280s] (230/768) sluice::moon moon_is_given_the_runs_share_of_the_cores
+        PASS [   0.943s] (231/768) sluice::moon the_reading_names_the_checks_a_change_reads
+        PASS [   1.925s] (232/768) sluice::moon every_required_task_of_every_tag
+        PASS [   2.071s] (233/768) sluice::moon moon_options_in_sluices_environment_change_nothing
+        PASS [   0.514s] (234/768) sluice::overview_watch a_watch_ends_where_no_branch_holds_the_policy
+        PASS [   2.030s] (235/768) sluice::moon the_workspaces_settings_and_the_policy_run_every_check
+        PASS [   0.526s] (236/768) sluice::overview_watch a_watch_ends_where_the_policy_is_in_the_working_copy_alone
+        PASS [   1.620s] (237/768) sluice::overview_watch a_followers_overview_carries_refused_writes
+        PASS [   1.660s] (238/768) sluice::overview_watch a_watch_ends_once_the_policy_is_removed_while_it_runs
+        PASS [   3.301s] (239/768) sluice::moon helpers_are_not_results_and_allowed_failures_fail
+        PASS [   0.543s] (240/768) sluice::overview_watch a_watch_of_one_folder_prints_as_before
+        PASS [   0.696s] (241/768) sluice::overview_watch the_watch_exits_3_when_sluice_host_ends
+        PASS [   3.395s] (242/768) sluice::moon the_tasks_a_range_affects
+        PASS [   0.882s] (243/768) sluice::overview_watch the_watch_ends_when_its_input_ends_with_no_folder
+        PASS [   3.191s] (244/768) sluice::overview_watch a_set_up_repository_with_nothing_submitted_is_watched_with_no_git
+        PASS [   1.528s] (245/768) sluice::overview_watch the_watch_serves_the_folders_on_its_input
+        PASS [   3.558s] (246/768) sluice::overview_watch a_watch_goes_on_where_the_policy_is_on_a_branch_other_than_heads
+        PASS [   3.506s] (247/768) sluice::overview_watch a_watch_goes_on_where_the_policy_is_only_on_a_remotes_branch
+        PASS [   3.305s] (248/768) sluice::overview_watch the_watch_goes_on_when_its_input_ends_with_folders
+        PASS [   4.436s] (249/768) sluice::overview_watch a_watch_with_nothing_queued_names_held_worktrees_with_no_git
+        PASS [   7.047s] (250/768) sluice::overview_watch a_readers_marks_move_while_its_document_stands
+        PASS [   8.512s] (251/768) sluice::peers a_daemon_lands_what_another_host_submits
+        PASS [   8.253s] (252/768) sluice::peers a_host_whose_own_main_is_refused_counts_the_remotes_signers
+        PASS [  16.304s] (253/768) sluice::moon a_task_the_time_limit_cut_off_has_no_outcome
+        PASS [  13.405s] (254/768) sluice::overview_watch a_watch_reads_the_policy_again_once_the_branch_moves
+        PASS [  26.555s] (255/768) sluice::instance bound::a_daemon_takes_up_a_changed_telemetry_table_in_place
+        PASS [  11.079s] (256/768) sluice::peers a_run_is_claimed_and_run_by_the_other_host
+        PASS [   8.762s] (257/768) sluice::peers a_submission_lands_by_another_host
+        PASS [   0.381s] (258/768) sluice::places a_block_with_a_port_in_use_is_passed_over
+        PASS [   0.504s] (259/768) sluice::places a_checkout_git_left_locked_initializing_is_made_again
+        PASS [  16.755s] (260/768) sluice::peers a_one_shot_overview_beside_a_current_reading_asks_origin_nothing
+        PASS [   0.384s] (261/768) sluice::places a_checkout_git_left_locked_initializing_is_released
+        PASS [   0.392s] (262/768) sluice::places a_checkout_git_no_longer_lists_is_gone
+        PASS [   7.940s] (263/768) sluice::peers an_outcome_on_the_remote_is_collected_on_another_host
+        PASS [   0.381s] (264/768) sluice::places a_checkout_locked_for_another_reason_is_held
+        PASS [  17.334s] (265/768) sluice::peers a_refused_ask_shows_both_branches_as_last_fetched
+        PASS [   1.044s] (266/768) sluice::places a_checkout_git_no_longer_lists_is_freed
+        PASS [   0.688s] (267/768) sluice::places a_checkout_starts_with_nothing_but_its_revision
+        PASS [   0.751s] (268/768) sluice::places a_container_left_keeps_the_preview_and_its_ports
+        PASS [   0.685s] (269/768) sluice::places a_deleted_checkout_is_gone_and_freed_with_nothing_run
+        PASS [   0.727s] (270/768) sluice::places a_deleted_checkouts_stored_release_runs_once_from_its_scratch_directory
+        PASS [  32.588s] (271/768) sluice::instance bound::the_host_process_takes_up_a_changed_bound_at_its_next_pass
+        PASS [  32.802s] (272/768) sluice::instance bound::the_host_process_hands_a_changed_telemetry_table_to_a_fresh_one
+        PASS [   0.695s] (273/768) sluice::places a_failed_preview_is_kept_holding_nothing
+        PASS [  10.952s] (274/768) sluice::peers a_wait_follows_its_submission_to_its_queues_new_home
+        PASS [   0.442s] (275/768) sluice::places a_former_scratch_that_cannot_be_moved_is_removed
+        PASS [   0.620s] (276/768) sluice::places a_failed_session_release_keeps_its_place_with_what_failed
+        PASS [   0.733s] (277/768) sluice::places a_failed_preview_release_is_held_once_its_retries_are_spent
+        PASS [   0.495s] (278/768) sluice::places a_git_worktree_place_is_the_candidate_and_leaves_nothing
+        PASS [  16.550s] (279/768) sluice::peers a_status_beside_a_current_reading_asks_origin_nothing
+        PASS [   0.598s] (280/768) sluice::places a_git_worktree_place_left_by_a_crash
+        PASS [   0.346s] (281/768) sluice::places a_place_from_before_takes_the_short_scratch_at_its_next_run
+        PASS [  33.525s] (282/768) sluice::instance bound::the_host_process_keeps_its_settings_when_a_change_it_hands_over_for_does_not_bind
+        PASS [   0.382s] (283/768) sluice::places a_place_names_its_scratch_on_its_record
+        PASS [   0.562s] (284/768) sluice::places a_name_another_preview_holds_takes_the_longer_revision
+        PASS [   0.481s] (285/768) sluice::places a_place_with_a_run_going_keeps_its_former_scratch_for_it
+        PASS [   0.539s] (286/768) sluice::places a_place_in_the_repository_takes_the_short_scratch_at_its_next_run
+        PASS [   0.389s] (287/768) sluice::places a_places_ports_are_read_from_its_record
+        PASS [   0.775s] (288/768) sluice::places a_gone_previews_containers_end_after_its_stored_release
+        PASS [   0.647s] (289/768) sluice::places a_policy_need_not_name_the_method
+        PASS [   0.483s] (290/768) sluice::places a_preview_naming_an_unlisted_port_is_refused
+        PASS [   0.450s] (291/768) sluice::places a_scratch_directory_not_the_users_own_is_refused
+        PASS [   1.174s] (292/768) sluice::places a_gone_checkout_is_freed_whatever_its_stored_release_did
+        PASS [   0.469s] (293/768) sluice::places a_scratch_the_system_emptied_is_made_again
+        PASS [   0.781s] (294/768) sluice::places a_preview_is_made_kept_apart_and_released
+        PASS [  34.277s] (295/768) sluice::instance bound::the_host_process_keeps_its_settings_when_the_new_ones_do_not_bind
+        PASS [   0.210s] (296/768) sluice::places a_users_directory_not_its_own_is_not_swept
+        PASS [   0.711s] (297/768) sluice::places a_release_frees_the_ports_its_record_names
+        PASS [   0.192s] (298/768) sluice::places an_empty_scratch_root_reads_no_record
+        PASS [   0.862s] (299/768) sluice::places a_released_preview_ends_its_containers_before_its_ports_go
+        PASS [   0.380s] (300/768) sluice::places an_unknown_method_is_refused
+        PASS [   0.391s] (301/768) sluice::places another_repositorys_scratch_is_left
+        PASS [   0.906s] (302/768) sluice::places a_sessions_place_is_released_under_the_policy_read_now
+        PASS [  21.905s] (303/768) sluice::peers a_host_runs_a_branch_only_where_its_policy_lists_the_hosts_key
+        PASS [   0.593s] (304/768) sluice::places a_worktree_keeps_one_short_scratch
+        PASS [   0.476s] (305/768) sluice::places an_unreadable_record_keeps_its_scratch
+        PASS [   0.681s] (306/768) sluice::places a_sessions_worktree_is_adopted_with_ports_it_keeps
+        PASS [   0.715s] (307/768) sluice::places an_accepted_previews_containers_end_with_nothing_run
+        PASS [   0.569s] (308/768) sluice::places checked_out_reads_the_worktrees_as_git_lists_them
+        PASS [   0.668s] (309/768) sluice::places checked_out_lists_the_worktrees_on_a_branch
+        PASS [   0.415s] (310/768) sluice::places ports_with_bad_names_are_refused
+        PASS [   0.421s] (311/768) sluice::places the_users_scratch_directory_is_made_its_own
+        PASS [   0.764s] (312/768) sluice::places freeing_a_sessions_place_leaves_its_worktree
+        PASS [   0.606s] (313/768) sluice::places scratch_no_record_names_is_removed
+        PASS [   0.737s] (314/768) sluice::places places_alive_at_once_hold_their_own_ports
+        PASS [   0.729s] (315/768) sluice::places releasing_a_place_ends_its_run
+        PASS [   0.980s] (316/768) sluice::places two_repositories_keep_their_scratch_apart
+        PASS [   1.039s] (317/768) sluice::places releasing_a_sessions_place_leaves_its_worktree
+        PASS [   0.820s] (318/768) sluice::previews_tools a_previews_command_is_a_worker_of_sluice_host
+        PASS [   2.921s] (319/768) sluice::previews_tools a_preview_stays_after_its_client_ends
+        PASS [   3.918s] (320/768) sluice::previews_tools a_container_the_engine_will_not_remove_keeps_its_preview
+        PASS [   3.919s] (321/768) sluice::previews_tools a_failed_command_is_released_and_kept_listed
+        PASS [   3.903s] (322/768) sluice::previews_tools a_failed_previews_labelled_container_ends_with_it
+        PASS [   3.902s] (323/768) sluice::previews_tools a_gone_previews_refused_container_is_tried_again_by_the_next_listing
+        PASS [   3.854s] (324/768) sluice::previews_tools a_preview_is_released_after_its_branch_is_gone
+        PASS [   3.802s] (325/768) sluice::previews_tools a_released_previews_container_ends_with_it
+        PASS [   3.904s] (326/768) sluice::previews_tools a_preview_on_a_host_with_no_engine_is_released_as_before
+        PASS [   3.649s] (327/768) sluice::previews_tools a_removed_checkouts_container_ends_with_its_preview
+        PASS [   3.688s] (328/768) sluice::previews_tools a_removed_checkout_is_freed_by_the_next_listing
+        PASS [   3.654s] (329/768) sluice::previews_tools an_accepted_previews_container_ends_with_it
+        PASS [   1.288s] (330/768) sluice::protect a_check_that_writes_main_is_refused
+        PASS [   1.014s] (331/768) sluice::protect a_hook_already_there_still_runs
+        PASS [   1.967s] (332/768) sluice::protect a_commit_during_a_long_round_ends_at_once
+        PASS [   2.262s] (333/768) sluice::protect a_command_with_no_git_has_sluice_host_put_back_the_hook
+        PASS [   1.374s] (334/768) sluice::protect a_hook_with_no_sluice_host_running_starts_it
+        PASS [   2.475s] (335/768) sluice::protect a_branch_with_submissions_in_its_queue_is_not_deleted
+        PASS [   2.237s] (336/768) sluice::protect a_copy_is_judged_under_fields_the_hook_does_not_know
+        PASS [   2.734s] (337/768) sluice::protect a_copy_apart_from_its_remote_is_judged_by_its_own_value
+        PASS [  17.211s] (338/768) sluice::peers each_pass_asks_origin_once_for_both_branches
+        PASS [   3.729s] (339/768) sluice::previews_tools the_previews_are_answered_by_sluice_host
+        PASS [   1.805s] (340/768) sluice::protect a_name_that_an_ended_sluice_host_gave_is_asked
+        PASS [   1.195s] (341/768) sluice::protect a_persons_write_is_judged_by_sluice_host
+        PASS [   1.279s] (342/768) sluice::protect a_policy_field_the_hook_does_not_know_changes_nothing_it_guards
+        PASS [   0.455s] (343/768) sluice::protect a_tracked_hooks_directory_is_not_written
+        PASS [   2.577s] (344/768) sluice::protect a_local_branchs_refusals_say_the_command
+        PASS [   1.057s] (345/768) sluice::protect a_sluice_on_the_callers_path_is_not_the_one_that_judges
+        PASS [   1.201s] (346/768) sluice::protect a_removed_hook_is_not_put_back_by_a_reading_command
+        PASS [   2.209s] (347/768) sluice::protect a_newer_sluices_next_command_puts_back_the_hook
+        PASS [   0.932s] (348/768) sluice::protect apples_git_is_refused_too
+        PASS [   2.197s] (349/768) sluice::protect a_refusal_names_the_command_and_both_revisions
+        PASS [   0.884s] (350/768) sluice::protect every_other_command_refuses_a_setting_it_does_not_know
+        PASS [   2.234s] (351/768) sluice::protect a_refused_writes_count_is_in_the_state_not_the_log
+        PASS [   0.996s] (352/768) sluice::protect protect_names_a_worktree_holding_a_protected_branch
+        PASS [   4.953s] (353/768) sluice::protect a_fetch_whose_packing_runs_the_hook_asks_nothing
+        PASS [   2.240s] (354/768) sluice::protect a_timers_writes_are_one_cause
+        PASS [   0.061s] (355/768) sluice::protect the_hook_says_what_sluice_host_answers
+        PASS [   2.075s] (356/768) sluice::protect a_transaction_the_protection_cannot_read_passes_said_once
+        PASS [   0.317s] (357/768) sluice::protect the_hook_reads_its_whole_transaction_before_it_leaves
+        PASS [   1.009s] (358/768) sluice::protect sluices_own_move_is_not_refused
+        PASS [   1.389s] (359/768) sluice::protect settings_the_hook_does_not_know_change_nothing_it_guards
+        PASS [  18.588s] (360/768) sluice::peers each_watch_tick_asks_origin_once_for_both_branches
+        PASS [   2.319s] (361/768) sluice::protect installing_is_idempotent_and_follows_the_binary
+        PASS [   1.153s] (362/768) sluice::protect the_refused_write_is_logged_by_sluice_host
+        PASS [   1.482s] (363/768) sluice::protect the_protection_judges_the_repository_git_names
+        PASS [   2.401s] (364/768) sluice::protect settings_or_a_policy_the_hook_cannot_read_pass_said_once
+        PASS [   2.925s] (365/768) sluice::protect packing_a_protected_branch_is_allowed
+        PASS [   2.398s] (366/768) sluice::protect sluice_protect_is_made_by_sluice_host
+        PASS [   2.576s] (367/768) sluice::protect the_branchs_own_revision_decides
+        PASS [   2.340s] (368/768) sluice::protect what_moves_no_protected_branch_is_allowed
+        PASS [  46.911s] (369/768) sluice::instance bound::the_keepers_cores_set_each_runs_share
+        PASS [  48.016s] (370/768) sluice::instance bound::three_repositories_share_the_hosts_bound
+        PASS [  32.973s] (371/768) sluice::peers a_signed_record_is_verified_once
+        PASS [  22.641s] (372/768) sluice::peers the_other_host_runs_the_other_branch
+        PASS [   4.839s] (373/768) sluice::pull_requests a_bolt_submitted_with_no_subject_is_titled_by_its_branch
+        PASS [   4.830s] (374/768) sluice::pull_requests a_bolt_too_long_for_one_description
+        PASS [  11.419s] (375/768) sluice::protect a_hook_whose_sluice_host_does_not_answer_refuses
+        PASS [   5.557s] (376/768) sluice::pull_requests a_forks_pull_request_is_never_submitted
+        PASS [   6.448s] (377/768) sluice::pull_requests a_conflict_seen_early
+        PASS [   9.231s] (378/768) sluice::protect every_way_git_moves_a_protected_branch_is_refused
+        PASS [   6.625s] (379/768) sluice::pull_requests a_draft_whose_head_cannot_be_fetched_is_only_a_draft
+        PASS [   1.875s] (380/768) sluice::pull_requests a_group_submit_with_a_dirty_worktree_pushes_nothing
+        PASS [   8.214s] (381/768) sluice::pull_requests a_draft_is_read_from_the_list_alone
+        PASS [  54.857s] (382/768) sluice::instance bound::one_run_holds_three_branches_to_its_bound
+        PASS [   8.348s] (383/768) sluice::pull_requests a_group_submit_answers_with_each_submission_in_json
+        PASS [  11.212s] (384/768) sluice::pull_requests a_draft_waits
+        PASS [   9.233s] (385/768) sluice::pull_requests a_group_submit_leaves_a_forks_pull_request_alone
+        PASS [  11.936s] (386/768) sluice::pull_requests a_group_act_stopped_names_each_open_pull_requests_wait
+        PASS [  13.771s] (387/768) sluice::pull_requests a_failed_list_ends_intake_and_the_queue_still_lands
+        PASS [   8.888s] (388/768) sluice::pull_requests a_host_the_branch_does_not_accept_takes_no_request_in
+        PASS [  11.552s] (389/768) sluice::pull_requests a_group_submit_refused_then_reviewed_is_taken
+        PASS [  14.258s] (390/768) sluice::pull_requests a_group_submit_opens_every_pull_request_marked
+        PASS [  12.852s] (391/768) sluice::pull_requests a_landing_and_its_records_name_the_apps_bot
+        PASS [   9.538s] (392/768) sluice::pull_requests a_new_head_is_read_again
+        PASS [  12.422s] (393/768) sluice::pull_requests a_new_commit_submitted_again_is_described
+        PASS [  21.618s] (394/768) sluice::pull_requests a_group_act_names_each_pull_requests_wait
+        PASS [  20.235s] (395/768) sluice::pull_requests a_group_submit_one_short_of_a_review_is_refused
+        PASS [  15.922s] (396/768) sluice::pull_requests a_landing_stands_when_its_release_then_fails
+        PASS [  16.768s] (397/768) sluice::pull_requests a_landing_asks_at_once
+        PASS [  17.039s] (398/768) sluice::pull_requests a_merged_request_leaves_the_follows
+        PASS [   3.528s] (399/768) sluice::pull_requests a_refused_main_leaves_a_bolt_landing
+        PASS [   6.697s] (400/768) sluice::pull_requests a_pull_request_opened_by_hand
+        PASS [   9.354s] (401/768) sluice::pull_requests a_one_shot_overview_lists_requests_taken_in_elsewhere
+        PASS [  12.588s] (402/768) sluice::pull_requests a_new_head_with_a_subject_retitles_it
+        PASS [  12.263s] (403/768) sluice::pull_requests a_new_head_with_no_subject_keeps_the_title
+        PASS [  19.507s] (404/768) sluice::pull_requests a_new_commit_while_queued
+        PASS [   9.551s] (405/768) sluice::pull_requests a_pull_request_waiting_on_a_check_is_read_at_each_asking
+        PASS [  29.209s] (406/768) sluice::pull_requests a_group_submit_queues_three_pull_requests_in_order
+        PASS [  19.508s] (407/768) sluice::pull_requests a_new_head_submitted_while_queued
+        PASS [  11.546s] (408/768) sluice::pull_requests a_refused_query_falls_back_to_the_reads_per_pull_request
+        PASS [   7.880s] (409/768) sluice::pull_requests a_request_opened_before_titles_changed_is_retitled
+        PASS [  22.316s] (410/768) sluice::pull_requests a_new_head_no_submit_pushed
+        PASS [  12.395s] (411/768) sluice::pull_requests a_request_a_person_opened_lands_named_by_its_title
+        PASS [  11.240s] (412/768) sluice::pull_requests a_request_closed_under_test_drops_its_combination
+        PASS [   5.799s] (413/768) sluice::pull_requests a_session_submitted_with_a_subject_is_titled_by_it
+        PASS [  17.278s] (414/768) sluice::pull_requests a_queued_pull_request_that_stands_is_read_by_the_list_alone
+        PASS [  34.929s] (415/768) sluice::pull_requests a_group_submit_takes_a_pull_request_held_as_a_draft
+        PASS [  16.515s] (416/768) sluice::pull_requests a_repository_github_no_longer_finds_is_said_once_with_what_to_do
+        PASS [   4.356s] (417/768) sluice::pull_requests a_submit_by_name_names_its_pull_requests_wait
+        PASS [   6.961s] (418/768) sluice::pull_requests a_step_prints_what_its_intake_met
+        PASS [  16.546s] (419/768) sluice::pull_requests a_request_by_name_is_collected_by_no_worktree
+        PASS [   1.494s] (420/768) sluice::pull_requests a_submit_that_does_not_wait_fails_at_once_on_the_pause
+        PASS [   8.733s] (421/768) sluice::pull_requests a_status_says_a_merged_request_landed_once
+        PASS [   7.817s] (422/768) sluice::pull_requests a_subject_on_a_request_opened_by_hand_leaves_its_title
+        PASS [  11.809s] (423/768) sluice::pull_requests a_run_github_keeps_completed_reads_by_its_block
+        PASS [  17.637s] (424/768) sluice::pull_requests a_request_sluice_opened_with_a_subject_lands_named_by_it
+        PASS [  15.379s] (425/768) sluice::pull_requests a_round_lands_through_the_pause_and_says_it_once
+        PASS [  11.739s] (426/768) sluice::pull_requests a_standing_intake_failure_is_said_once_for_each_cause_and_host
+        PASS [   1.588s] (427/768) sluice::pull_requests a_wait_by_pull_request_into_another_branch_is_not_found
+        PASS [  49.922s] (428/768) sluice::pull_requests a_bolts_landing_worktree_submits_the_bolt_as_github_holds_it
+        PASS [  12.306s] (429/768) sluice::pull_requests a_submit_on_the_host_asks_at_once
+        PASS [  10.813s] (430/768) sluice::pull_requests a_submit_to_a_branch_that_takes_pull_requests_reads_no_forge
+        PASS [  12.903s] (431/768) sluice::pull_requests a_wait_beside_a_driver_reads_a_request_another_queue_landed_from_the_branch
+        PASS [  12.212s] (432/768) sluice::pull_requests a_wait_by_pull_request_from_the_main_checkout_follows_it_on_another_host
+        PASS [  53.968s] (433/768) sluice::pull_requests a_host_that_stopped_passes_main_on_after_its_lease
+        PASS [  30.278s] (434/768) sluice::pull_requests a_round_between_a_groups_opens_submits_none
+        PASS [   8.111s] (435/768) sluice::pull_requests a_wait_on_a_request_the_operator_withdrew_exits_withdrawn
+        PASS [  35.027s] (436/768) sluice::pull_requests a_requests_post_confirms_its_outcome_on_receipt
+        PASS [  14.273s] (437/768) sluice::pull_requests a_wait_on_a_request_taken_in_here_out_of_time_prints_its_record
+        PASS [  24.768s] (438/768) sluice::pull_requests a_submit_leaves_a_request_queued_on_another_host
+        PASS [  19.387s] (439/768) sluice::pull_requests a_wait_by_pull_request_taken_in_here_prints_its_record
+        PASS [   7.426s] (440/768) sluice::pull_requests a_wait_whose_timeout_comes_first_calls_nothing
+        PASS [  25.346s] (441/768) sluice::pull_requests a_submits_pull_request_sent_back_says_so
+        PASS [  29.063s] (442/768) sluice::pull_requests a_submit_by_name_opens_the_request_from_the_branch
+        FAIL [  21.713s] (443/768) sluice::pull_requests a_wait_exits_withdrawn_when_the_request_carrying_its_work_closes
+  stdout ───
+
+    running 1 test
+    test a_wait_exits_withdrawn_when_the_request_carrying_its_work_closes ... FAILED
+
+    failures:
+
+    failures:
+        a_wait_exits_withdrawn_when_the_request_carrying_its_work_closes
+
+    test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 170 filtered out; finished in 21.70s
+
+  stderr ───
+
+    thread 'a_wait_exits_withdrawn_when_the_request_carrying_its_work_closes' (605725977) panicked at crates/sluice/tests/profiles/pull_requests.rs:1071:5:
+    assertion `left == right` failed: {"after":[],"attempt":1,"branch":"main","carried_by":{"id":2,"state":"withdrawn"},"from":{"agent":"unit/follow-closed","head":"unit/follow-closed","worktree":"pull/1"},"head":"fd7ce90f238beb63d653a3c6397ea90675a9afab","id":1,"priority":0,"schema":"sluice/submission@1","state":"withdrawn","subject":"unit/follow-closed","submitted":"2026-11-27T03:06:37Z","withdrawn":{"at":"2026-11-27T03:06:43Z","by":"unit/follow-closed"}}
+      left: Object {"id": Number(2), "state": String("withdrawn")}
+     right: Object {"pull_request": Number(1), "state": String("closed")}
+    note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+  Cancelling due to test failure: 17 tests still running
+        PASS [  15.585s] (444/768) sluice::pull_requests a_wait_on_a_request_that_lands_reads_no_forge
+        PASS [  29.519s] (445/768) sluice::pull_requests a_submit_marks_ready_a_request_another_host_sent_back_not_a_draft
+        PASS [  27.485s] (446/768) sluice::pull_requests a_wait_by_another_worktrees_pull_request_hands_nothing_over
+        PASS [  15.968s] (447/768) sluice::pull_requests a_wait_on_an_older_hand_over_follows_its_pull_request
+        PASS [  13.643s] (448/768) sluice::pull_requests a_waiting_submit_by_name_in_a_bare_clone_reports_another_queues_landing
+        PASS [  13.512s] (449/768) sluice::pull_requests a_waiting_submit_reads_again_through_githubs_503
+        PASS [  12.129s] (450/768) sluice::pull_requests a_waiting_submit_waits_out_the_pause
+        PASS [  31.106s] (451/768) sluice::pull_requests a_wait_follows_the_new_head_its_submit_withdrew_it_for
+        PASS [  52.593s] (452/768) sluice::pull_requests a_request_keeps_one_number_while_other_hosts_pass
+        PASS [  37.005s] (453/768) sluice::pull_requests a_wait_across_hosts_reads_at_its_pace
+        PASS [  15.499s] (454/768) sluice::pull_requests a_watch_reads_no_followed_request_itself
+        PASS [  16.411s] (455/768) sluice::pull_requests a_waits_words_across_hosts
+        PASS [  21.109s] (456/768) sluice::pull_requests a_waiting_submit_ends_with_its_own_submission_when_the_branch_moves_under_it
+        PASS [  27.070s] (457/768) sluice::pull_requests a_wait_reads_its_pull_request_once_in_a_quarter_of_the_interval
+        PASS [  21.432s] (458/768) sluice::pull_requests a_withdrawn_submission_whose_work_landed_is_reported_landed
+        PASS [  29.350s] (459/768) sluice::pull_requests a_waiting_group_submit_follows_each_pull_request
+        PASS [  30.904s] (460/768) sluice::pull_requests a_waiting_submit_follows_its_pull_request
+────────────
+     Summary [ 171.398s] 460/768 tests run: 459 passed, 1 failed, 7 skipped
+        FAIL [  21.713s] (443/768) sluice::pull_requests a_wait_exits_withdrawn_when_the_request_carrying_its_work_closes
+warning: 308/768 tests were not run due to test failure (run with --no-fail-fast to run all tests, or run with --max-fail)
+error: test run failed
