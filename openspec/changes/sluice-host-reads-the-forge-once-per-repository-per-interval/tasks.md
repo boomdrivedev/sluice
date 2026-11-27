@@ -18,5 +18,5 @@ Each check runs through sluice: `sluice exec main -- <command>`. A test of `crat
 
 ## 3. The change
 
-- [ ] 3.1 Run `openspec validate sluice-host-reads-the-forge-once-per-repository-per-interval --strict`, and lint each Markdown file of the change with ste-lint, 0 hard findings. Check: `sluice exec main -- moon run root:specs root:changes`.
-- [ ] 3.2 Run the crate's and the root's tasks: `sluice exec main -- moon run cli:test cli:tools root:format root:lint root:specs root:changes`.
+- [x] 3.1 Run `openspec validate sluice-host-reads-the-forge-once-per-repository-per-interval --strict`, and lint each Markdown file of the change with ste-lint, 0 hard findings. Check: `sluice exec main -- moon run root:specs root:changes`.
+- [x] 3.2 Run the crate's and the root's tasks: `sluice exec main -- moon run cli:test cli:tools root:format root:lint root:specs root:changes`.
