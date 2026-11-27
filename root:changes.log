@@ -1,0 +1,31 @@
+--- stderr ---
+changes: the open changes fail openspec validate --changes --strict:
+  ✓ change/a-places-scratch-fits-a-socket
+  ✓ change/clickable-rows
+  ✓ change/finished-submissions
+  ✓ change/overview
+  ✓ change/session-runs
+  ✓ change/sluice-host-makes-each-change
+  ✓ change/sluice-host-runs-a-sessions-checks
+  ✓ change/sluices-actions-pool-is-proven-live
+  ✓ change/sluices-github-check-covers-every-permission-it-uses
+  ✓ change/the-gate-runs-in-five-minutes
+  ✗ change/the-gate-sandbox-lets-the-tools-write
+    ✗ [ERROR] host-events/spec.md: MODIFIED "A change to a repository's files starts a reading" omits scenario(s) the current spec still has: "The host process reads a repository on Linux". The modified block has 3 scenarios; the current spec has 3 scenarios. It adds 1 scenario not in the current spec: "Another process writes the records, on a quiet host". Copy the omitted scenarios into the MODIFIED block (a MODIFIED requirement replaces the whole block, so archive refuses to drop them).
+  ✓ change/the-git-hook-asks-sluice-host
+  ✓ change/the-plugins-hold-one-subscription-each
+  Totals: 12 passed, 1 failed (13 items)
+  Details: openspec validate the-gate-sandbox-lets-the-tools-write --type change
+changes: the-gate-sandbox-lets-the-tools-write would not archive: openspec archive refuses it:
+  
+  Proposal warnings in proposal.md (non-blocking):
+    ⚠ Why section should not exceed 1000 characters
+  Task status: ✓ Complete
+  
+  Specs to update:
+    host-caches: update
+    host-events: update
+    moon-runner: update
+    run-outcome: update
+  host-events MODIFIED failed for header "### Requirement: A change to a repository's files starts a reading" - current spec contains scenario(s) not present in the modified block: "The host process reads a repository on Linux". The modified block has 3 scenarios; the current spec has 3 scenarios. It adds 1 scenario not in the current spec: "Another process writes the records, on a quiet host". Refresh the change spec before archiving to avoid dropping scenarios.
+  Aborted. No files were changed.
