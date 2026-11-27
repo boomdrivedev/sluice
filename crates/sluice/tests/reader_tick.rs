@@ -162,3 +162,63 @@ fn a_held_landing_is_pushed_once_a_minute() {
     pass();
     assert_eq!(pushes(), before + 2, "pushed again a minute on");
 }
+
+/// 129, 137: a pass of a repository with nothing in play builds no
+/// overview to learn whether the repository has sluice: it reads a
+/// branch's revision once, for its intake, and no file of it, where an
+/// overview reads the revision again for the branch's view (deneb, 2026-11-27: `sluice daemon`
+/// at about half a core, each pass building every repository's overview
+/// and parsing its log).
+#[test]
+fn an_idle_pass_reads_no_branchs_view() {
+    use sluice_core::ops::{SubmitHead, SubmitRequest};
+    const BRANCH: &str = "bolt/x";
+    let f = sluice_fakes::Fakes::new();
+    f.world.init(
+        BRANCH,
+        &[
+            (
+                ".config/sluice.toml",
+                "[branches.\"bolt/*\"]\nrequired = [\"#gate\"]\ntrust = [\"open\", \"sandbox\", \"container\"]\n",
+            ),
+            ("lib/a.py", "a"),
+        ],
+    );
+    f.world.task("lib:test", "lib/");
+    let head = f
+        .world
+        .work(&f.world.tip(BRANCH), &[("lib/a.py", Some("b"))]);
+    f.world.session("unit/a", "agent-a", &head);
+    let host = support::FakeHost::new(f.world.clone(), 0);
+    let s = sluice_core::Sluice::new(f.seams(), &f.clock).as_peer(sluice::exec::Host::peer(&host));
+    s.submit(&SubmitRequest {
+        head: SubmitHead::Worktree("unit/a".into()),
+        branch: BRANCH.into(),
+        after: vec![],
+        priority: 0,
+        subject: None,
+        trace: None,
+    })
+    .unwrap()
+    .unwrap();
+    let mut kept = sluice::host_process::pass::Kept::handed(Default::default(), Default::default());
+    let mut pass =
+        || sluice::host_process::pass::pass(&s, &host, &(), &f.clock, false, &mut kept).unwrap();
+    for _ in 0..20 {
+        if !pass().in_play {
+            break;
+        }
+    }
+    assert!(!s.in_play(BRANCH).unwrap(), "the submission landed");
+    let (revisions, files) = (f.world.revision_reads(), f.world.file_reads());
+    let report = pass();
+    assert!(!report.in_play && !report.no_sluice, "{report:?}");
+    assert_eq!(
+        (
+            f.world.revision_reads() - revisions,
+            f.world.file_reads() - files
+        ),
+        (1, 0),
+        "an idle pass read a branch's revision past its intake's, or a file of it"
+    );
+}

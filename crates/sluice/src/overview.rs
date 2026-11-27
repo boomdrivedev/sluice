@@ -48,7 +48,8 @@ fn document_held(
     // another host takes in carries them, as `sluice status` gives them; one
     // this host has no records of is listed with its empty queue, as status
     // shows it, after the others.
-    for (branch, a) in followed(s, clock, follows, &branches) {
+    let names: Vec<String> = branches.iter().map(|b| b.branch.clone()).collect();
+    for (branch, a) in followed(s, clock, follows, &names) {
         let views = views.as_array_mut().expect("the branches are a list");
         let at = match views.iter().position(|v| v["branch"] == branch.as_str()) {
             Some(at) => at,
@@ -187,7 +188,7 @@ fn followed(
     s: &Sluice<'_>,
     clock: &dyn Clock,
     follows: Follows<'_>,
-    views: &[BranchView],
+    names: &[String],
 ) -> Vec<(String, Across)> {
     let (pulls, asked) = match follows {
         Follows::Asked(pulls) => (pulls, true),
@@ -198,7 +199,7 @@ fn followed(
             telemetry::warn(&format!("sluice: warning: {e:#}"));
         }
     };
-    let mut branches: BTreeSet<String> = views.iter().map(|b| b.branch.clone()).collect();
+    let mut branches: BTreeSet<String> = names.iter().cloned().collect();
     match pulls.branches(s.seams()) {
         Ok(b) => branches.extend(b),
         Err(e) => warn(e),
@@ -307,9 +308,38 @@ pub(crate) fn read_held(
     asked: &mut Option<Asked>,
 ) -> Result<serde_json::Value> {
     let (branches, mut doc) = document_held(s, host, clock, follows)?;
-    if !branches.is_empty() {
+    if !set_up(host, !branches.is_empty(), asked)? {
+        doc["set_up"] = false.into();
+    }
+    Ok(doc)
+}
+
+/// 129, 137: what a pass reads of what an overview says, with no overview
+/// built: each request this host follows into `records`, the branches the
+/// records list, or a branch the forge's requests name, read as it falls
+/// due, and whether the repository has no sluice, as [`read_held`] reads
+/// it. A pass reads no branch's view, its log or its policy, for it,
+/// which a reader's document reads afresh when asked.
+pub(crate) fn pass_reads(
+    s: &Sluice<'_>,
+    host: &dyn Host,
+    clock: &dyn Clock,
+    pulls: &dyn PullRequests,
+    records: &[String],
+    asked: &mut Option<Asked>,
+) -> Result<bool> {
+    followed(s, clock, Follows::Asked(pulls), records);
+    Ok(!set_up(host, !records.is_empty(), asked)?)
+}
+
+/// 129: whether the repository has sluice: records that list a branch,
+/// else a tip the host holds with the policy, looked for again only once
+/// the tips changed since `asked`. A list with a branch in it forgets what
+/// was asked, so its emptying asks again.
+fn set_up(host: &dyn Host, listed: bool, asked: &mut Option<Asked>) -> Result<bool> {
+    if listed {
         *asked = None;
-        return Ok(doc);
+        return Ok(true);
     }
     let tips = host.tips()?;
     let holds = match asked.take() {
@@ -317,10 +347,7 @@ pub(crate) fn read_held(
         _ => host.holds_policy(&tips)?,
     };
     *asked = Some(Asked { tips, holds });
-    if !holds {
-        doc["set_up"] = false.into();
-    }
-    Ok(doc)
+    Ok(holds)
 }
 
 /// The overview as text: a line per branch, its combinations under test,
