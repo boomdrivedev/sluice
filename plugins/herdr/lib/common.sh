@@ -130,7 +130,7 @@ enlist() {
   if [ -f "$server/socket" ] && { [ ! -e "$server/link" ] || [ "$HERDR_SOCKET_PATH" -ef "$server/link" ]; }; then
     return 0
   fi
-  sh "$root/bin/watch.sh" --ensure
+  sh "$root/bin/watch.sh" --register
 }
 
 # Every document the watcher holds, as one array.

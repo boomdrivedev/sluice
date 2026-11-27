@@ -49,16 +49,16 @@ case "$*" in
       grep -vxF -- "${l#remove }" "$served" >"$served.tmp"
       mv -f "$served.tmp" "$served"
       ;;
+    "forecast "*)
+      f=${l#forecast }
+      sh "$(dirname "$0")/../forecast-answer.sh" "${f%% *}" "${f#* }"
+      ;;
     esac
   done
   # Its input closed: held open while the test wants it, as a watch that
   # serves folders goes on.
   while [ -f "$FAKE/hold" ]; do sleep 1; done
   rm -f "$served"
-  ;;
-"submit "*" --check --json")
-  [ -f "$FAKE/check-sleep" ] && sleep "$(cat "$FAKE/check-sleep")"
-  cat "$FAKE/check.json" 2>/dev/null || echo '{"conflict":null}'
   ;;
 *) exit 2 ;;
 esac

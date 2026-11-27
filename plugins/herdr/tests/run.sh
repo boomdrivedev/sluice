@@ -50,6 +50,23 @@ hold_lease() {
   printf '%s\n%s\n%s\n%s\n' $$ "$(procs identity $$)" "$plugin" "$plugin_version" >"$S/watch.lease"
 }
 
+# An ensure, run as herdr runs its commands, with no wait for its end:
+# waited on until it has given way, its exit returned, or has become the
+# watcher, which holds the lease, as the child of this test's shell.
+ensured() {
+  en_n=300
+  while [ "$en_n" -gt 0 ]; do
+    if ! kill -0 "$1" 2>/dev/null; then
+      wait "$1"
+      return
+    fi
+    [ "$(holder_of "$S/watch.lease")" = "$1" ] && return 0
+    sleep 0.1
+    en_n=$((en_n - 1))
+  done
+  return 1
+}
+
 # Wait up to $1 seconds for the shell condition $2, checking it every
 # tenth of a second: a test waits on what it checks, never on the clock.
 within() {
@@ -102,7 +119,8 @@ settled() {
 looks() {
   for i in 1 2 3; do
     : >"$FAKE/herdr-calls"
-    PATH="$1:$PATH" sh "$plugin/bin/watch.sh" --ensure
+    PATH="$1:$PATH" sh "$plugin/bin/watch.sh" --ensure &
+    ensured $!
     within 10 'grep -q ": pane list$" "$FAKE/herdr-calls"' || fail "the watcher did not look at ensure $i"
   done
   sleep 2
@@ -443,10 +461,23 @@ kept() {
 
 # The server's tokens, its panes read first, as at the minute's pass.
 tokens() { sh "$plugin/bin/tokens.sh" --read "$@"; }
+# Each forecast forecast.sh asks, answered as the source answers it on the
+# subscription and kept by the reader, as the watcher has them; each ask
+# logged with the source's input lines.
+asked() {
+  sh "$plugin/bin/forecast.sh" | while IFS='	' read -r _ a_b a_w; do
+    printf 'forecast.sh forecast %s %s\n' "$a_b" "$a_w" >>"$FAKE/stdin-lines"
+    sh "$here/forecast-answer.sh" "$a_b" "$a_w" | sh "$plugin/bin/document.sh" local
+  done
+}
 # The forecasts from every server's kept panes, the environment's read first.
 forecast() {
   kept
-  sh "$plugin/bin/forecast.sh"
+  asked
+}
+# How many forecasts were asked on main of the worktree $1.
+forecasts_of() {
+  grep -c " forecast main $1\$" "$FAKE/stdin-lines"
 }
 
 testing95=$(doc ".branches[0].depth = 1 | .branches[0].submissions = [$(sub 95 '$work' testing)]
@@ -519,7 +550,8 @@ pass
 
 fresh 'watch: started twice'
 hold_lease
-sh "$plugin/bin/watch.sh" --ensure || fail "ensure exited non-zero"
+sh "$plugin/bin/watch.sh" --ensure &
+ensured $! || fail "ensure exited non-zero"
 [ "$woken" -ge 1 ] || fail "the lease's watcher was not woken"
 [ "$(cat "$(folder_of herdr)/socket" 2>/dev/null)" = "$HERDR_SOCKET_PATH" ] || fail "the server is not registered with the watcher"
 sleep 1
@@ -534,7 +566,8 @@ touch "$FAKE/hold"
 for s in one two; do
   serve "$s"
   panes front-none
-  SLUICE_HERDR_TICK=1 sh "$plugin/bin/watch.sh" --ensure || fail "the ensure in $s exited non-zero"
+  SLUICE_HERDR_TICK=1 sh "$plugin/bin/watch.sh" --ensure &
+  ensured $! || fail "the ensure in $s exited non-zero"
 done
 within 20 'grep -q "^one.sock: pane report-metadata p1 .*--token sluice=#95 testing" "$FAKE/herdr-calls" &&
   grep -q "^two.sock: pane report-metadata p1 .*--token sluice=#95 testing" "$FAKE/herdr-calls"' ||
@@ -552,7 +585,8 @@ fresh 'watch: watcher gone'
 # The lease names a watcher that has ended.
 dead=$(sh -c 'echo $$')
 printf '%s\n%s\n%s\n%s\n' "$dead" "pid:$dead" "$plugin" "$plugin_version" >"$S/watch.lease"
-SLUICE_HERDR_TICK=1 sh "$plugin/bin/watch.sh" --ensure
+SLUICE_HERDR_TICK=1 sh "$plugin/bin/watch.sh" --ensure &
+ensured $!
 within 15 'w=$(holder_of "$S/watch.lease") && [ "$w" != "$dead" ] && kill -0 "$w" 2>/dev/null' ||
   fail "no new watcher took the lease: $(cat "$S/watch.lease")"
 within 15 'grep -q "overview --json" "$FAKE/sluice-calls"' || fail "the new watcher did not look for repositories"
@@ -561,7 +595,8 @@ ends_within "$w" 10 || fail "the new watcher did not stop"
 # Then one naming a pid another process has since: this one, with another
 # start time.
 printf '%s\n%s\n%s\n%s\n' $$ "start:1" "$plugin" "$plugin_version" >"$S/watch.lease"
-SLUICE_HERDR_TICK=1 sh "$plugin/bin/watch.sh" --ensure
+SLUICE_HERDR_TICK=1 sh "$plugin/bin/watch.sh" --ensure &
+ensured $!
 [ "$woken" = 0 ] || fail "the process given the lease's pid was signalled"
 within 15 'w=$(holder_of "$S/watch.lease") && [ "$w" != $$ ] && kill -0 "$w" 2>/dev/null' ||
   fail "no new watcher took a lease naming another process: $(cat "$S/watch.lease")"
@@ -646,18 +681,96 @@ if needs_ps; then
   pass
 fi
 
-fresh 'watch: a watcher stopped in its source'"'"'s first second ends it'
+fresh 'watch: a watcher stopped as its source starts leaves no process'
 doc >"$FAKE/watch-work.jsonl"
 touch "$FAKE/hold"
-# The source's identity is read only after ten seconds here.
-SLUICE_HERDR_IDENTITY_DELAY=10 SLUICE_HERDR_TICK=1 sh "$plugin/bin/watch.sh" --ticks 60 2>/dev/null &
+# A copy of its own, so every process that runs the copy's watch.sh is this
+# test's: the watcher, and any subshell it forked.
+again=$t/copy
+cp -R "$plugin" "$again"
+HERDR_PLUGIN_ROOT=$again SLUICE_HERDR_TICK=1 sh "$again/bin/watch.sh" --ticks 60 2>/dev/null &
 w=$!
-within 15 'grep -q " add $work\$" "$FAKE/stdin-lines"' || fail "no source started"
+# Stopped as soon as its source's command is kept by its pid.
+within 15 'cat "$S/run/$w"/*.pids 2>/dev/null | grep -q "	pid:"' || fail "no source started"
 kill -TERM "$w"
 wait "$w" 2>/dev/null
+# Once the watcher has ended, nothing it forked runs: read at once.
+left=$(pgrep -f "$again/bin/watch.sh" 2>/dev/null)
+[ -z "$left" ] || fail "processes of the watcher outlive it: $left"
 within 5 '[ -z "$(watching)" ]' || fail "the source outlived its watcher"
 rm -f "$FAKE/hold"
 for p in $(watching); do kill "$p" 2>/dev/null; done
+end_copy "$again" || fail "a process of the copy still runs after 20s"
+pass
+
+fresh 'watch: a source'"'"'s command is left no child of the watcher'"'"'s'
+doc >"$FAKE/watch-work.jsonl"
+touch "$FAKE/hold"
+SLUICE_HERDR_TICK=1 sh "$plugin/bin/watch.sh" --ticks 60 2>/dev/null &
+w=$!
+# The stand-in reads its input once its own one child runs.
+within 15 'grep -q " add $work\$" "$FAKE/stdin-lines"' || fail "no source started"
+src=$(watching)
+kids=$(pgrep -P "$src" 2>/dev/null)
+if [ $? -gt 1 ]; then
+  echo "skip: $name: pgrep can't run here"
+  skips=$((skips + 1))
+else
+  # Its one child is its own: nothing the watcher forked before the
+  # command started is left as the command's child, running or ended and
+  # never reaped, as `sluice overview --json --watch --stdin` would hold.
+  [ "$(printf '%s\n' "$kids" | grep -c .)" = 1 ] || fail "the source's command holds children it did not start: $kids"
+fi
+rm -f "$FAKE/hold"
+kill "$w" 2>/dev/null
+wait "$w" 2>/dev/null
+for p in $(watching); do kill "$p" 2>/dev/null; done
+pass
+
+fresh 'watch: a watcher ends with the herdr server that started it'
+doc >"$FAKE/watch-work.jsonl"
+touch "$FAKE/hold"
+# Server one's command is the watcher, under a process that stands for
+# server one; server two's ensure finds it running and wakes it.
+serve one
+panes front-none
+one=$HERDR_SOCKET_PATH
+sh -c 'SLUICE_HERDR_TICK=1 sh "$1/bin/watch.sh" --ensure; :' _ "$plugin" &
+herdr_one=$!
+within 15 'w=$(holder_of "$S/watch.lease") && [ -n "$w" ] && [ "$w" != "$herdr_one" ] && kill -0 "$w" 2>/dev/null' ||
+  fail "server one's command did not become the watcher"
+w=$(holder_of "$S/watch.lease")
+within 15 '[ -n "$(watching)" ]' || fail "no source started"
+serve two
+panes front-none
+sh "$plugin/bin/watch.sh" --ensure &
+ensured $! || fail "server two's ensure exited non-zero"
+[ "$(holder_of "$S/watch.lease")" = "$w" ] || fail "server two's ensure became a second watcher"
+# Server one ends, and its socket with it.
+kill -KILL "$herdr_one"
+wait "$herdr_one" 2>/dev/null
+rm -f "$one"
+within 15 '! kill -0 "$w" 2>/dev/null' || fail "the watcher outlived the herdr server that started it"
+within 5 '[ -z "$(watching)" ]' || fail "the watcher's source outlived it"
+grep -q "^two.sock: plugin action invoke watch --plugin agentplot.sluice$" "$FAKE/herdr-calls" ||
+  fail "server two was not asked to start the next watcher: $(calls)"
+rm -f "$FAKE/hold"
+for p in $(watching); do kill "$p" 2>/dev/null; done
+pass
+
+fresh 'watch: a forecast is asked on the subscription'
+doc >"$FAKE/watch-work.jsonl"
+touch "$FAKE/hold"
+SLUICE_HERDR_TICK=1 sh "$plugin/bin/watch.sh" --ticks 60 2>"$t/log" &
+w=$!
+within 15 'grep -q "pane report-metadata p1 .*--token sluice=3 ahead · clean" "$FAKE/herdr-calls"' || fail "no forecast's token: $(calls)"
+[ "$(forecasts_of "$work")" = 1 ] || fail "not one forecast asked on the source's input: $(cat "$FAKE/stdin-lines")"
+if grep -v -e 'overview --json --watch --stdin' "$FAKE/sluice-calls" | grep -q .; then
+  fail "a sluice of its own ran: $(cat "$FAKE/sluice-calls")"
+fi
+rm -f "$FAKE/hold"
+kill "$w" 2>/dev/null
+wait "$w" 2>/dev/null
 pass
 
 fresh 'watch: a pid kept alone and used again is left alone'
@@ -730,7 +843,8 @@ sleep 2
 again=$t/reinstalled
 cp -R "$plugin" "$again"
 echo '# reinstalled' >>"$again/bin/segment.sh"
-HERDR_PLUGIN_ROOT=$again SLUICE_HERDR_TICK=1 sh "$again/bin/watch.sh" --ensure
+HERDR_PLUGIN_ROOT=$again SLUICE_HERDR_TICK=1 sh "$again/bin/watch.sh" --ensure &
+ensured $!
 if ! ends_within "$a" 20; then
   fail "the old watcher kept running after ${took}s"
 elif [ "$took" -gt 4 ]; then
@@ -760,7 +874,8 @@ ends_within "$a" 10 || fail "the watcher still runs ${took}s after its plugin wa
 within 5 'ended $theirs' || fail "its sources outlived it"
 [ -f "$S/watch.lease" ] && fail "it left its lease"
 # The next server's event starts the watcher of the folder installed.
-HERDR_PLUGIN_ROOT=$again SLUICE_HERDR_TICK=1 sh "$again/bin/watch.sh" --ensure
+HERDR_PLUGIN_ROOT=$again SLUICE_HERDR_TICK=1 sh "$again/bin/watch.sh" --ensure &
+ensured $!
 within 15 'b=$(holder_of "$S/watch.lease") && [ -n "$b" ] && [ "$b" != "$a" ] && kill -0 "$b" 2>/dev/null' ||
   fail "no watcher started after the plugin was put back"
 # A plugin folder removed stops it too.
@@ -814,7 +929,8 @@ within 15 'sources_of "$w" | grep -q .' || fail "no source started"
 theirs=$(sources_of "$w")
 serve two
 panes front-none
-sh "$plugin/bin/watch.sh" --ensure
+sh "$plugin/bin/watch.sh" --ensure &
+ensured $!
 within 10 'grep -q "^two.sock: pane list" "$FAKE/herdr-calls"' || fail "the second server is not served"
 rm -f "$t/one.sock"
 within 10 '[ ! -e "$(folder_of one)/socket" ]' || fail "the stopped server is still served"
@@ -850,7 +966,8 @@ theirs=$(sources_of "$a")
 rm -f "$sock"
 : >"$sock"
 : >"$FAKE/herdr-calls"
-sh "$plugin/bin/watch.sh" --ensure
+sh "$plugin/bin/watch.sh" --ensure &
+ensured $!
 within 10 'grep -q "pane report-metadata p1 .*--token sluice=#95 testing" "$FAKE/herdr-calls"' ||
   fail "the new server was not given the tokens the old one had: $(calls)"
 grep -q 'pane list' "$FAKE/herdr-calls" || fail "the new server's panes were not read"
@@ -954,7 +1071,8 @@ if [ "$ps_runs" = true ]; then
   printf '%s\t%s\n' "$orphan" "$(procs identity "$orphan")" >"$S/servers/3/run/$dead/x.pids"
 fi
 serve one
-SLUICE_HERDR_TICK=1 sh "$plugin/bin/watch.sh" --ensure
+SLUICE_HERDR_TICK=1 sh "$plugin/bin/watch.sh" --ensure &
+ensured $!
 for s in one two; do
   ends_within "$(cat "$t/former-$s")" 10 || fail "the former watcher of $s still runs after ${took}s"
 done
@@ -964,7 +1082,8 @@ if [ "$ps_runs" = true ]; then
   kill "$orphan" 2>/dev/null
 fi
 serve two
-sh "$plugin/bin/watch.sh" --ensure
+sh "$plugin/bin/watch.sh" --ensure &
+ensured $!
 within 10 '[ ! -e "$(folder_of one)/docs" ] && [ ! -e "$(folder_of two)/run" ]' || fail "the former folders are left: $(ls "$(folder_of one)")"
 for s in one two; do
   [ "$(cat "$(folder_of "$s")/watch.log" 2>/dev/null)" = "its log" ] || fail "the former watch.log of $s is gone"
@@ -1043,10 +1162,12 @@ doc "$queued3" >"$FAKE/watch-work.jsonl"
 doc_in plain "$queued3" >"$FAKE/watch-plain.jsonl"
 touch "$FAKE/hold"
 panes_at p1 "$work"
-SLUICE_HERDR_TICK=1 sh "$plugin/bin/watch.sh" --ensure
+SLUICE_HERDR_TICK=1 sh "$plugin/bin/watch.sh" --ensure &
+ensured $!
 within 15 '[ "$(adds_of "$work")" = 1 ]' || fail "work was not added"
 panes_at p1 "$work" p4 "$scratch/plain"
-sh "$plugin/bin/watch.sh" --ensure
+sh "$plugin/bin/watch.sh" --ensure &
+ensured $!
 within 10 '[ "$(adds_of "$scratch/plain")" = 1 ]' || fail "plain was not added: $(cat "$FAKE/stdin-lines")"
 [ "$(cut -d' ' -f1 "$FAKE/stdin-lines" | sort -u | wc -l | tr -d ' ')" = 1 ] || fail "not one input: $(cat "$FAKE/stdin-lines")"
 [ "$(grep -c 'overview --json --watch --stdin' "$FAKE/sluice-calls")" = 1 ] || fail "a second source started: $(cat "$FAKE/sluice-calls")"
@@ -1064,16 +1185,19 @@ serve one
 panes_at p1 "$work"
 serve two
 panes_at p2 "$other"
-SLUICE_HERDR_TICK=1 sh "$plugin/bin/watch.sh" --ensure
+SLUICE_HERDR_TICK=1 sh "$plugin/bin/watch.sh" --ensure &
+ensured $!
 serve one
-sh "$plugin/bin/watch.sh" --ensure
+sh "$plugin/bin/watch.sh" --ensure &
+ensured $!
 within 15 '[ -n "$(watching)" ]' || fail "no watch started"
 within 10 'grep -q "^one.sock: pane list" "$FAKE/herdr-calls" && grep -q "^two.sock: pane list" "$FAKE/herdr-calls"' ||
   fail "not both servers' panes were read: $(calls)"
 # Looked at again at each server's ensure and at the ticks.
 for s in two one; do
   serve "$s"
-  sh "$plugin/bin/watch.sh" --ensure
+  sh "$plugin/bin/watch.sh" --ensure &
+  ensured $!
   sleep 2
 done
 [ "$(grep -c 'overview --json --watch --stdin' "$FAKE/sluice-calls")" = 1 ] || fail "watch ran other than once: $(cat "$FAKE/sluice-calls")"
@@ -1095,9 +1219,11 @@ for s in one two; do
 done
 # Long ticks: only the servers' ensures have it read their panes.
 serve one
-SLUICE_HERDR_TICK=60 sh "$plugin/bin/watch.sh" --ensure
+SLUICE_HERDR_TICK=60 sh "$plugin/bin/watch.sh" --ensure &
+ensured $!
 serve two
-sh "$plugin/bin/watch.sh" --ensure
+sh "$plugin/bin/watch.sh" --ensure &
+ensured $!
 within 15 'grep -q "notification show sluice: #87 blamed on main --body tests:t-cards failed." "$FAKE/herdr-calls"' ||
   fail "the blame was not told with its tests: $(calls)"
 src=$(watching)
@@ -1106,7 +1232,8 @@ src=$(watching)
 serve one
 panes_at p3 "$scratch/home"
 : >"$FAKE/herdr-calls"
-sh "$plugin/bin/watch.sh" --ensure
+sh "$plugin/bin/watch.sh" --ensure &
+ensured $!
 within 10 'grep -q "^one.sock: pane list" "$FAKE/herdr-calls"' || fail "server one's panes were not read again"
 sleep 2
 grep -q ' remove ' "$FAKE/stdin-lines" && fail "removed while a pane of another server is in it: $(cat "$FAKE/stdin-lines")"
@@ -1114,7 +1241,8 @@ grep -q ' remove ' "$FAKE/stdin-lines" && fail "removed while a pane of another 
 # Then server two's: no pane of any server is in the repository.
 serve two
 panes_at p3 "$scratch/home"
-sh "$plugin/bin/watch.sh" --ensure
+sh "$plugin/bin/watch.sh" --ensure &
+ensured $!
 within 10 'grep -q " remove $work\$" "$FAKE/stdin-lines"' || fail "its folder was not removed: $(cat "$FAKE/stdin-lines")"
 within 5 '[ -z "$(find "$S/docs" "$S/told" -type f)" ]' ||
   fail "the repository's state is left: $(find "$S/docs" "$S/told" -type f)"
@@ -1131,7 +1259,8 @@ kill -0 "$w" 2>/dev/null || fail "the watcher stopped with the repository's fold
 doc "$blamed87" >"$FAKE/watch-work.jsonl"
 : >"$FAKE/herdr-calls"
 panes_at p1 "$work"
-sh "$plugin/bin/watch.sh" --ensure
+sh "$plugin/bin/watch.sh" --ensure &
+ensured $!
 within 15 '[ -n "$(ls "$S"/docs/*.json 2>/dev/null)" ]' || fail "the repository was not read again"
 [ "$(adds_of "$work")" = 2 ] || fail "not added again on the same input: $(cat "$FAKE/stdin-lines")"
 settled
@@ -1144,11 +1273,13 @@ doc "$queued3" >"$FAKE/watch-work.jsonl"
 doc_in plain "$queued3" >"$FAKE/watch-plain.jsonl"
 touch "$FAKE/hold"
 panes_at p1 "$work" p4 "$scratch/plain"
-SLUICE_HERDR_TICK=60 sh "$plugin/bin/watch.sh" --ensure
+SLUICE_HERDR_TICK=60 sh "$plugin/bin/watch.sh" --ensure &
+ensured $!
 within 15 '[ "$(docs_kept)" = 2 ]' || fail "not both documents kept"
 src=$(watching)
 panes_at p1 "$work"
-sh "$plugin/bin/watch.sh" --ensure
+sh "$plugin/bin/watch.sh" --ensure &
+ensured $!
 within 10 'grep -q " remove $scratch/plain\$" "$FAKE/stdin-lines"' || fail "plain was not removed: $(cat "$FAKE/stdin-lines")"
 grep -q " remove $work\$" "$FAKE/stdin-lines" && fail "work was removed"
 for p in $src; do kill -0 "$p" 2>/dev/null || fail "the source stopped"; done
@@ -1173,7 +1304,8 @@ if needs_children; then
   panes_at p2 "$other" p4 "$scratch/plain"
   for s in one two three; do
     serve "$s"
-    SLUICE_HERDR_TICK=1 sh "$plugin/bin/watch.sh" --ensure
+    SLUICE_HERDR_TICK=1 sh "$plugin/bin/watch.sh" --ensure &
+    ensured $!
   done
   within 15 '[ "$(grep -c " add " "$FAKE/stdin-lines")" = 2 ]' || fail "not two folders: $(cat "$FAKE/stdin-lines")"
   w=$(holder_of "$S/watch.lease")
@@ -1213,7 +1345,8 @@ if needs_children; then
   done
   panes_at "$@"
   touch "$FAKE/hold"
-  SLUICE_HERDR_TICK=1 sh "$plugin/bin/watch.sh" --ensure
+  SLUICE_HERDR_TICK=1 sh "$plugin/bin/watch.sh" --ensure &
+  ensured $!
   within 20 '[ "$(docs_kept)" = 10 ]' || fail "not ten documents: $(ls "$S/docs")"
   w=$(holder_of "$S/watch.lease")
   settled || fail "the watcher did not settle"
@@ -1262,7 +1395,8 @@ fresh 'watch: a repository with no sluice is added again five minutes on'
 doc_in plain '.set_up = false | .branches = []' >"$FAKE/watch-plain.jsonl"
 touch "$FAKE/hold"
 panes_at p4 "$scratch/plain"
-SLUICE_HERDR_TICK=1 sh "$plugin/bin/watch.sh" --ensure
+SLUICE_HERDR_TICK=1 sh "$plugin/bin/watch.sh" --ensure &
+ensured $!
 within 15 '[ "$(mark_of "$plain_common")" = none ]' || fail "plain is not marked as having no records"
 # A look with no nudge, as the popup's ask makes, within five minutes.
 want=$S/want/$(sh -c '. "$HERDR_PLUGIN_ROOT/lib/common.sh"; sum "$1"' "$plugin/bin/x" "$plain_common")
@@ -1283,7 +1417,8 @@ fresh "watch: a repository's first submission shows at its next document"
 doc_in plain '.branches = []' >"$FAKE/watch-plain.jsonl"
 touch "$FAKE/hold"
 panes_at p4 "$scratch/plain"
-SLUICE_HERDR_TICK=1 sh "$plugin/bin/watch.sh" --ensure
+SLUICE_HERDR_TICK=1 sh "$plugin/bin/watch.sh" --ensure &
+ensured $!
 within 15 '[ "$(mark_of "$plain_common")" = none ]' || fail "plain is not marked as having no records"
 doc_in plain "$queued3" >"$FAKE/next-plain.tmp" && mv "$FAKE/next-plain.tmp" "$FAKE/next-plain.jsonl"
 within 10 '[ -n "$(ls "$S"/docs/*.json 2>/dev/null)" ]' || fail "the next document is not kept"
@@ -1473,7 +1608,8 @@ doc "$queued3" >"$FAKE/watch-work.jsonl"
 doc_in plain "$queued3" >"$FAKE/watch-plain.jsonl"
 touch "$FAKE/hold"
 panes_at p1 "$work" p4 "$scratch/plain"
-SLUICE_HERDR_TICK=1 sh "$plugin/bin/watch.sh" --ensure
+SLUICE_HERDR_TICK=1 sh "$plugin/bin/watch.sh" --ensure &
+ensured $!
 within 15 '[ "$(grep -c " add " "$FAKE/stdin-lines")" = 2 ]' || fail "not both added: $(cat "$FAKE/stdin-lines")"
 first=$(head -1 "$FAKE/watch-pids")
 kill "$first"
@@ -1503,7 +1639,8 @@ if needs_ps; then
   kill -KILL "$a"
   wait "$a" 2>/dev/null
   # A pane event starts the next watcher.
-  SLUICE_HERDR_TICK=1 sh "$plugin/bin/watch.sh" --ensure
+  SLUICE_HERDR_TICK=1 sh "$plugin/bin/watch.sh" --ensure &
+  ensured $!
   within 10 'ended $src' || fail "the killed watcher's source still runs"
   within 5 '[ "$(watching | wc -l | tr -d " ")" = 1 ]' || fail "not one source runs: $(watching)"
   rm -f "$FAKE/hold"
@@ -1517,7 +1654,7 @@ doc '.branches[0].recent += [{schema: "sluice/log@1", at: "2026-10-16T19:44:00Z"
 panes_at p1 "$work"
 SLUICE_HERDR_TICK=1 sh "$plugin/bin/watch.sh" --ticks 2 2>/dev/null
 grep -q 'notification show sluice: #9 blamed' "$FAKE/herdr-calls" || fail "the blame was not told: $(calls)"
-if grep -v -e 'overview --json --watch --stdin' -e 'submit main --check --json' "$FAKE/sluice-calls" | grep -q .; then
+if grep -v -e 'overview --json --watch --stdin' "$FAKE/sluice-calls" | grep -q .; then
   fail "other sluice commands ran: $(cat "$FAKE/sluice-calls")"
 fi
 pass
@@ -2322,7 +2459,8 @@ hold_lease
 for s in a b c; do
   serve "$s"
   if [ "$s" = c ]; then panes_at p3 "$scratch/home"; else panes front-none; fi
-  sh "$plugin/bin/watch.sh" --ensure
+  sh "$plugin/bin/watch.sh" --ensure &
+  ensured $!
   kept
 done
 feed "$(doc)" "$(doc "$blamed87")"
@@ -2343,7 +2481,8 @@ hold_lease
 for s in one two; do
   serve "$s"
   panes_at p3 "$scratch/home"
-  sh "$plugin/bin/watch.sh" --ensure
+  sh "$plugin/bin/watch.sh" --ensure &
+  ensured $!
   kept
 done
 # A source of the user's prints a repository no pane of either server is
@@ -2364,11 +2503,13 @@ hold_lease
 # in server b.
 serve a
 panes p1
-sh "$plugin/bin/watch.sh" --ensure
+sh "$plugin/bin/watch.sh" --ensure &
+ensured $!
 kept
 serve b
 panes p2
-sh "$plugin/bin/watch.sh" --ensure
+sh "$plugin/bin/watch.sh" --ensure &
+ensured $!
 kept
 feed "$(doc ".branches[0].depth = 1 | .branches[0].submissions = [$(sub 94 '$work' testing)]")" "$(doc "$landed94")"
 [ "$(grep -c '^b.sock: notification show sluice: #94 landed on main --body as 46cc429' "$FAKE/herdr-calls")" = 1 ] ||
@@ -2521,14 +2662,14 @@ feed "$(doc)"
 forecast
 tokens
 has '--token sluice=3 ahead · clean'
-[ "$(grep -c 'work: submit main --check --json' "$FAKE/sluice-calls")" = 1 ] || fail "not one forecast: $(cat "$FAKE/sluice-calls")"
+[ "$(forecasts_of "$work")" = 1 ] || fail "not one forecast: $(cat "$FAKE/stdin-lines")"
 pass
 
 fresh 'sidebar: ahead again after a landing'
 feed "$(doc ".branches[0].depth = 1 | .branches[0].submissions = [$(sub 94 '$work' testing)]")" "$(doc "$landed94")"
 forecast
 tokens
-[ "$(grep -c 'work: submit main --check --json' "$FAKE/sluice-calls")" = 1 ] || fail "no forecast for a worktree whose last submission landed"
+[ "$(forecasts_of "$work")" = 1 ] || fail "no forecast for a worktree whose last submission landed"
 has '--token sluice=3 ahead · clean'
 pass
 
@@ -2562,16 +2703,16 @@ feed "$(doc)"
 forecast
 feed "$(doc '.at = "2026-10-16T19:46:00Z"')"
 forecast
-[ "$(grep -c 'submit main --check' "$FAKE/sluice-calls")" = 1 ] || fail "forecast again: $(cat "$FAKE/sluice-calls")"
+[ "$(forecasts_of "$work")" = 1 ] || fail "forecast again: $(cat "$FAKE/stdin-lines")"
 # A combination starting moves the branch's version, not what the forecast
 # rests on.
 feed "$(doc '.branches[0].version = 2 | .branches[0].candidates = [{id: "c1", submissions: [], revision: "x", state: "testing"}]')"
 forecast
-[ "$(grep -c 'submit main --check' "$FAKE/sluice-calls")" = 1 ] || fail "forecast on a new version alone"
+[ "$(forecasts_of "$work")" = 1 ] || fail "forecast on a new version alone"
 # A submission waiting on the branch does.
 feed "$(doc ".branches[0].version = 3 | .branches[0].depth = 1 | .branches[0].submissions = [$(sub 96 '$other' queued)]")"
 forecast
-[ "$(grep -c 'submit main --check' "$FAKE/sluice-calls")" = 2 ] || fail "no forecast on a new submission waiting"
+[ "$(forecasts_of "$work")" = 2 ] || fail "no forecast on a new submission waiting"
 pass
 
 fresh 'sidebar: forecasts off'
@@ -2579,7 +2720,7 @@ echo 'ahead_check = false' >"$HERDR_PLUGIN_CONFIG_DIR/sources.toml"
 feed "$(doc)"
 forecast
 tokens
-grep -q 'submit' "$FAKE/sluice-calls" && fail "a forecast ran"
+grep -q ' forecast ' "$FAKE/stdin-lines" && fail "a forecast was asked"
 has '--token sluice=3 ahead'
 hasnt '3 ahead ·'
 pass
@@ -2646,13 +2787,13 @@ fresh 'sidebar: no forecast for a named pane'
 named p1 release
 feed "$(doc "$release_idle | .sessions = [{worktree: \$work, branch: \"main\"}]")"
 forecast
-grep -q 'submit' "$FAKE/sluice-calls" && fail "a forecast ran for a named pane: $(cat "$FAKE/sluice-calls")"
+grep -q ' forecast ' "$FAKE/stdin-lines" && fail "a forecast was asked for a named pane: $(cat "$FAKE/stdin-lines")"
 # Another pane in the same worktree, with no branch named, has one.
 jq -c --arg work "$work" '.result.panes += [{pane_id: "p4", tab_id: "t1", workspace_id: "w1", cwd: $work, foreground_cwd: $work, focused: false}]' \
   "$H/panes.json" >"$H/panes.next" && mv "$H/panes.next" "$H/panes.json"
 forecast
 tokens
-[ "$(grep -c 'work: submit main --check --json' "$FAKE/sluice-calls")" = 1 ] || fail "no forecast for the pane with no branch named: $(cat "$FAKE/sluice-calls")"
+[ "$(forecasts_of "$work")" = 1 ] || fail "no forecast for the pane with no branch named: $(cat "$FAKE/stdin-lines")"
 has 'pane report-metadata p4 --source agentplot.sluice'
 has '--token sluice=3 ahead · clean'
 has '--token sluice=release · nothing queued'
@@ -2665,13 +2806,14 @@ touch "$FAKE/hold"
 for s in one two; do
   serve "$s"
   panes front-none
-  SLUICE_HERDR_TICK=1 sh "$plugin/bin/watch.sh" --ensure
+  SLUICE_HERDR_TICK=1 sh "$plugin/bin/watch.sh" --ensure &
+  ensured $!
 done
 within 20 'grep -q "^one.sock: pane report-metadata p1 .*--token sluice=3 ahead · clean" "$FAKE/herdr-calls" &&
   grep -q "^two.sock: pane report-metadata p1 .*--token sluice=3 ahead · clean" "$FAKE/herdr-calls"' ||
   fail "not both servers' panes say 3 ahead · clean: $(calls)"
 settled
-[ "$(grep -c '^work: submit main --check --json' "$FAKE/sluice-calls")" = 1 ] || fail "not one forecast: $(cat "$FAKE/sluice-calls")"
+[ "$(forecasts_of "$work")" = 1 ] || fail "not one forecast: $(cat "$FAKE/stdin-lines")"
 rm -f "$FAKE/hold"
 pass
 
@@ -2686,9 +2828,9 @@ kept
 serve two
 panes front-none
 kept
-sh "$plugin/bin/forecast.sh"
-sh "$plugin/bin/forecast.sh"
-[ "$(grep -c '^work: submit main --check --json' "$FAKE/sluice-calls")" = 1 ] || fail "not one forecast: $(cat "$FAKE/sluice-calls")"
+asked
+asked
+[ "$(forecasts_of "$work")" = 1 ] || fail "not one forecast: $(cat "$FAKE/stdin-lines")"
 tokens
 grep -q '^two.sock: pane report-metadata p1 .*--token sluice=3 ahead · clean' "$FAKE/herdr-calls" || fail "server two's pane: $(calls)"
 serve one
@@ -2773,13 +2915,13 @@ SLUICE_HERDR_TICK=1 sh "$plugin/bin/watch.sh" --ticks 60 2>"$t/log" &
 w=$!
 within 15 'grep -q "pane report-metadata p1 .*--token sluice=3 ahead · clean" "$FAKE/herdr-calls"' || fail "no token: $(calls)"
 sleep 2
-: >"$FAKE/sluice-calls"
+: >"$FAKE/stdin-lines"
 # One more commit, and no document or herdr event follows.
 git -C "$work" commit -q --allow-empty -m w4
 within 5 'grep -q "pane report-metadata p1 .*--token sluice=4 ahead · clean" "$FAKE/herdr-calls"' || fail "the token did not follow the commit: $(calls)"
 # Forecast once: the ticks after see the head no newer than its stamp.
 sleep 3
-[ "$(grep -c '^work: submit main --check --json' "$FAKE/sluice-calls")" = 1 ] || fail "not one forecast: $(cat "$FAKE/sluice-calls")"
+[ "$(forecasts_of "$work")" = 1 ] || fail "not one forecast: $(cat "$FAKE/stdin-lines")"
 rm -f "$FAKE/hold"
 kill "$w" 2>/dev/null
 wait "$w" 2>/dev/null
@@ -2793,7 +2935,8 @@ touch "$FAKE/hold"
 for s in one two; do
   serve "$s"
   panes front-none
-  SLUICE_HERDR_TICK=1 sh "$plugin/bin/watch.sh" --ensure
+  SLUICE_HERDR_TICK=1 sh "$plugin/bin/watch.sh" --ensure &
+  ensured $!
 done
 within 20 'grep -q "^one.sock: pane report-metadata p1 .*--token sluice=#95 testing 3m/15m" "$FAKE/herdr-calls" &&
   grep -q "^two.sock: pane report-metadata p1 .*--token sluice=#95 testing 3m/15m" "$FAKE/herdr-calls"' ||
@@ -2813,7 +2956,8 @@ touch "$FAKE/hold"
 for s in one two; do
   serve "$s"
   panes front-none
-  SLUICE_HERDR_TICK=1 sh "$plugin/bin/watch.sh" --ensure
+  SLUICE_HERDR_TICK=1 sh "$plugin/bin/watch.sh" --ensure &
+  ensured $!
 done
 within 20 'grep -q "^one.sock: pane report-metadata p1 .*--token sluice=#95 testing" "$FAKE/herdr-calls" &&
   grep -q "^two.sock: pane report-metadata p1 .*--token sluice=#95 testing" "$FAKE/herdr-calls"' ||
@@ -2838,13 +2982,15 @@ doc "$release_idle" >"$FAKE/watch-work.jsonl"
 touch "$FAKE/hold"
 # At first the server's one pane is outside git.
 panes_at p3 "$scratch/home"
-SLUICE_HERDR_TICK=2 sh "$plugin/bin/watch.sh" --ensure
+SLUICE_HERDR_TICK=2 sh "$plugin/bin/watch.sh" --ensure &
+ensured $!
 within 10 'grep -q "^herdr.sock: pane list$" "$FAKE/herdr-calls"' || fail "the server's panes were not read"
 settled
 # A pane opens in the repository, and its branch is named a second after
 # the event, with none following.
 panes_at p3 "$scratch/home" p1 "$work"
-sh "$plugin/bin/watch.sh" --ensure
+sh "$plugin/bin/watch.sh" --ensure &
+ensured $!
 sleep 1
 named p1 release
 within 5 'grep -q "pane report-metadata p1 .*--token sluice=release · nothing queued" "$FAKE/herdr-calls"' ||
@@ -2856,7 +3002,8 @@ fresh 'sidebar: named later'
 doc "$release_idle" >"$FAKE/watch-work.jsonl"
 touch "$FAKE/hold"
 named p1 release
-SLUICE_HERDR_TICK=1 sh "$plugin/bin/watch.sh" --ensure
+SLUICE_HERDR_TICK=1 sh "$plugin/bin/watch.sh" --ensure &
+ensured $!
 within 15 'grep -q "pane report-metadata p1 .*--token sluice=release · nothing queued" "$FAKE/herdr-calls"' ||
   fail "no token for the named branch: $(calls)"
 # Past the ticks that read the panes again after the ensure.
