@@ -1703,7 +1703,12 @@ fn a_status_beside_a_slow_look_reads_as_held_and_says_so() {
     assert!(out.status.success(), "{}", text(&out));
     assert!(!asked, "the status asked origin");
     let bound = sluice::host_process::read_for();
-    assert!(took >= bound, "answered in {took:?}, within {bound:?}");
+    assert!(
+        took >= bound,
+        "answered in {took:?}, within {bound:?}: {}\n{}",
+        text(&out),
+        host_logs(&d)
+    );
     let err = String::from_utf8_lossy(&out.stderr);
     assert!(
         err.contains("sluice's host process last read it at"),
