@@ -2,6 +2,13 @@ $schema: 'https://moonrepo.dev/schemas/project.json'
 
 dependsOn: [seams, core, fakes]
 
+# Each task that builds sluice's binary builds it in a target folder of its
+# own: cargo writes `target/debug/sluice` again at each build, one with
+# nothing to do among them, and a gate runs its tasks at once in one
+# checkout, so a test that runs the binary while another task's cargo
+# writes it finds no file there (#183, 2026-11-27). sccache, which a run's
+# environment names, keeps each folder's build cheap. `test` keeps cargo's
+# `target`; `tests/gate_targets.rs` holds the tasks to this.
 tasks:
   # Everything but the tests that start a sandbox (`sandbox` task) and the
   # bounds on speed (`speed` task).
@@ -11,7 +18,7 @@ tasks:
     # reads the host's settings (record 0098), and the module's options,
     # whose `prefixes` a unit test holds to the scrub's GitHub token
     # prefixes (record 0108), among them.
-    inputs: ['/crates/sluice/**/*', '/crates/sluice-seams/**/*', '/crates/sluice-core/**/*', '/crates/sluice-fakes/**/*', '/plugins/sluice/skills/**/*', '/nix/tests/files/**/*', '/nix/modules/options.nix', '/Cargo.toml', '/Cargo.lock', '/.config/nextest.toml', '/devenv.nix', '/devenv.lock']
+    inputs: ['/crates/sluice/**/*', '/crates/sluice-seams/**/*', '/crates/sluice-core/**/*', '/crates/sluice-fakes/**/*', '/plugins/sluice/skills/**/*', '/e2e/check.sh', '/nix/tests/files/**/*', '/nix/modules/options.nix', '/Cargo.toml', '/Cargo.lock', '/.config/nextest.toml', '/devenv.nix', '/devenv.lock']
     tags: [cargo-test, check-fast]
     options: {runFromWorkspaceRoot: true}
   # The profiles against real tools (git, moon, wt, a container engine,
@@ -21,6 +28,7 @@ tasks:
     command: 'cargo nextest run -p sluice --features tools --test instance --test local_refs --test pushed_refs --test remote_refs --test peers --test forge --test pull_requests --test remote_branch --test moon --test places --test worktrunk --test protect --test conformance --test stack --test exec --test previews_tools --test equip_tools --test landed --test overview_watch -E "not test(sandbox)"'
     inputs: ['/crates/sluice/**/*', '/crates/sluice-seams/**/*', '/crates/sluice-core/**/*', '/crates/sluice-fakes/**/*', '/crates/sluice-conformance/src/**/*', '/crates/sluice-conformance/Cargo.toml', '/Cargo.toml', '/Cargo.lock', '/.config/nextest.toml', '/devenv.nix', '/devenv.lock']
     tags: [check-tools]
+    env: {CARGO_TARGET_DIR: 'target/tools'}
     options: {runFromWorkspaceRoot: true}
   # The tests of the sandbox executor start a sandbox themselves, which
   # macOS refuses inside another one, so no branch checked under the
@@ -31,6 +39,7 @@ tasks:
     command: "cargo nextest run -p sluice --features tools --test checks --test moon --test stack --test exec -E 'test(sandbox)'"
     inputs: ['/crates/sluice/**/*', '/crates/sluice-seams/**/*', '/crates/sluice-core/**/*', '/crates/sluice-fakes/**/*', '/Cargo.toml', '/Cargo.lock', '/.config/nextest.toml', '/devenv.nix', '/devenv.lock']
     tags: [cargo-test, starts-a-sandbox, needs-localhost]
+    env: {CARGO_TARGET_DIR: 'target/sandbox'}
     options: {runFromWorkspaceRoot: true}
   # The bounds on speed of the host process, every test whose name holds
   # `speed`, here and nowhere else. A gate runs beside the host's other
@@ -40,6 +49,7 @@ tasks:
   speed:
     command: "cargo nextest run -p sluice --test host_process -E 'test(speed)'"
     inputs: ['/crates/sluice/**/*', '/crates/sluice-seams/**/*', '/crates/sluice-core/**/*', '/crates/sluice-fakes/**/*', '/Cargo.toml', '/Cargo.lock', '/.config/nextest.toml', '/devenv.nix', '/devenv.lock']
+    env: {CARGO_TARGET_DIR: 'target/speed'}
     options: {runFromWorkspaceRoot: true}
   # S1 to S4 through wt submit on scratch repositories: the check-e2e tier.
   # It reads the tools it drives from outside the tree, so it never replays.
@@ -49,4 +59,5 @@ tasks:
     # keep a key that passed before it (15).
     inputs: ['/e2e/**/*', '/tests/leaks.sh', '/crates/sluice/**/*', '/crates/sluice-seams/**/*', '/crates/sluice-core/**/*', '/Cargo.toml', '/Cargo.lock', '/devenv.nix', '/devenv.lock']
     tags: [check-e2e]
+    env: {CARGO_TARGET_DIR: 'target/e2e'}
     options: {runFromWorkspaceRoot: true, cache: false}
