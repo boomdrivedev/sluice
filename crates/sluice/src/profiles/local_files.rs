@@ -380,12 +380,63 @@ fn walk(dir: &Path, base: &Path, out: &mut BTreeMap<String, Vec<u8>>) -> Result<
             .map_err(|e| anyhow!("{e}"))?
             .to_string_lossy()
             .replace(std::path::MAIN_SEPARATOR, "/");
-        out.insert(
-            rel,
-            std::fs::read(&path).with_context(|| format!("reading {}", path.display()))?,
-        );
+        // A file listed and gone before it is read is a write's, which
+        // the read it is part of finds and walks again past ([`whole`]).
+        match std::fs::read(&path) {
+            Ok(bytes) => {
+                out.insert(rel, bytes);
+            }
+            Err(e) if e.kind() == ErrorKind::NotFound => {}
+            Err(e) => return Err(e).with_context(|| format!("reading {}", path.display())),
+        }
     }
     Ok(())
+}
+
+/// How many times a read walks a branch's records before it gives up on
+/// writes that each ended while it walked.
+const WALKS: usize = 100;
+
+/// The write pending in `dir`, if one stands.
+fn pending_in(dir: &Path) -> Result<Option<Pending>> {
+    match std::fs::read(dir.join(PENDING)) {
+        Ok(bytes) => Ok(Some(
+            serde_json::from_slice(&bytes).context("parsing a pending write")?,
+        )),
+        Err(e) if e.kind() == ErrorKind::NotFound => Ok(None),
+        Err(e) => Err(e).with_context(|| format!("reading {}", dir.join(PENDING).display())),
+    }
+}
+
+/// 129, 131: what `walk` reads of `branch`'s records in `dir`, read at one
+/// version: the version it stands at, the files as `walk` gave them, and
+/// the write pending over them. A read takes no lock, so a write may run
+/// while it walks. Each write puts its pending write first, moves the
+/// version once its files are in place, and takes its pending write away
+/// last. So where the version stands across the walk, and the write
+/// pending after it is none, or one at that version or the next, no write
+/// ended during the walk: each file walked is that version's, or the
+/// pending write's, which the caller lays over them. Otherwise a write
+/// ended during the walk, and the files may be of two versions, or a file
+/// listed may have gone, so the read walks again.
+fn whole<T>(
+    dir: &Path,
+    branch: &str,
+    mut walk: impl FnMut() -> Result<T>,
+) -> Result<(u64, T, Option<Pending>)> {
+    for _ in 0..WALKS {
+        let at = read_version(dir)?;
+        let walked = walk()?;
+        let pending = pending_in(dir)?;
+        let after = read_version(dir)?;
+        let standing = pending
+            .as_ref()
+            .is_none_or(|p| p.version == at || p.version == at + 1);
+        if after == at && standing {
+            return Ok((at, walked, pending));
+        }
+    }
+    bail!("{branch}'s records moved during each of {WALKS} reads of them")
 }
 
 fn read_version(dir: &Path) -> Result<u64> {
@@ -439,15 +490,17 @@ impl State for LocalFiles {
                 return Ok(kept.clone());
             }
         }
-        let mut files = BTreeMap::new();
-        walk(&dir, &dir, &mut files)?;
-        let mut version = read_version(&dir)?;
-        let mut pending = false;
+        // One version whole, whatever a write does meanwhile (131).
+        let (walked_at, mut files, p) = whole(&dir, branch, || {
+            let mut files = BTreeMap::new();
+            walk(&dir, &dir, &mut files)?;
+            Ok(files)
+        })?;
+        let mut version = walked_at;
+        let pending = p.is_some();
         // With no lock held, a write a crash left part done is read as
         // whole: what is read is what sluice last wrote (51).
-        if let Ok(bytes) = std::fs::read(dir.join(PENDING)) {
-            pending = true;
-            let p: Pending = serde_json::from_slice(&bytes).context("parsing a pending write")?;
+        if let Some(p) = p {
             for (name, t) in &p.put {
                 if finished_name(name).is_none() {
                     files.insert(name.clone(), t.clone().into_bytes());
@@ -466,7 +519,7 @@ impl State for LocalFiles {
         let read = Snapshot { version, files };
         // Kept only when no write was pending, or finished, while it was
         // walked: nothing kept is part of a write.
-        if !pending_at && !pending && version == at {
+        if !pending_at && !pending && walked_at == at {
             self.kept
                 .borrow_mut()
                 .insert(branch.to_string(), read.clone());
@@ -491,29 +544,34 @@ impl State for LocalFiles {
     fn read_all_finished(&self, branch: &str) -> Result<BTreeMap<String, Vec<u8>>> {
         let dir = self.dir(branch)?;
         let here = dir.join(FINISHED);
-        let mut files = BTreeMap::new();
-        match std::fs::read_dir(&here) {
-            Ok(entries) => {
-                for entry in entries {
-                    let entry = entry?;
-                    let name = entry.file_name().to_string_lossy().into_owned();
-                    if name.starts_with('.') || !entry.file_type()?.is_file() {
-                        continue;
+        // As `read`: one version whole, whatever a write does meanwhile
+        // (131).
+        let (_, mut files, pending) = whole(&dir, branch, || {
+            let mut files = BTreeMap::new();
+            let entries = match std::fs::read_dir(&here) {
+                Ok(entries) => entries,
+                Err(e) if e.kind() == ErrorKind::NotFound => return Ok(files),
+                Err(e) => return Err(e).with_context(|| format!("listing {}", here.display())),
+            };
+            for entry in entries {
+                let entry = entry?;
+                let name = entry.file_name().to_string_lossy().into_owned();
+                if name.starts_with('.') || !entry.file_type()?.is_file() {
+                    continue;
+                }
+                let path = entry.path();
+                match std::fs::read(&path) {
+                    Ok(bytes) => {
+                        files.insert(name, bytes);
                     }
-                    let path = entry.path();
-                    files.insert(
-                        name,
-                        std::fs::read(&path)
-                            .with_context(|| format!("reading {}", path.display()))?,
-                    );
+                    Err(e) if e.kind() == ErrorKind::NotFound => {}
+                    Err(e) => return Err(e).with_context(|| format!("reading {}", path.display())),
                 }
             }
-            Err(e) if e.kind() == ErrorKind::NotFound => {}
-            Err(e) => return Err(e).with_context(|| format!("listing {}", here.display())),
-        }
+            Ok(files)
+        })?;
         // As `read`: a write a crash left part done is read as whole (51).
-        if let Ok(bytes) = std::fs::read(dir.join(PENDING)) {
-            let p: Pending = serde_json::from_slice(&bytes).context("parsing a pending write")?;
+        if let Some(p) = pending {
             for (name, t) in &p.put {
                 if let Some(n) = finished_name(name) {
                     files.insert(n.to_string(), t.clone().into_bytes());
