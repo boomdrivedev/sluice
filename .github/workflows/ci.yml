@@ -17,6 +17,17 @@ on:
     branches: [main]
   pull_request:
 
+# The runs of pushes to main go one at a time, in the order they were
+# pushed, each waiting for the one before it to end: so a run's version
+# job reckons from the tags the release before it pushed, and two pushes
+# never reckon one tag. GitHub keeps one run waiting: a push that comes
+# while one waits takes its place, and the run it replaces is cancelled,
+# its commits released by the later run, whose range runs from the newest
+# tag. A pull request's run waits for no other.
+concurrency:
+  group: ${{ github.event_name == 'push' && 'release' || format('pull-request-{0}', github.run_id) }}
+  cancel-in-progress: false
+
 permissions:
   contents: read
 
@@ -133,8 +144,9 @@ jobs:
           last="$(git tag --list 'v*' --sort=-v:refname | head -n 1)"
           nix shell --inputs-from . nixpkgs#convco -c convco check --ignore-reverts ${last:+"$last..HEAD"}
 
-  # The next version from the commits since the newest v* tag; empty when
-  # it is already tagged. `--unreleased` starts the range at the newest tag,
+  # The next version from the commits since the newest v* tag, the tags
+  # the run holds as it starts; empty when it is already tagged
+  # (next-version.sh). `--unreleased` starts the range at the newest tag,
   # which is off main's history.
   version:
     if: github.event_name == 'push'
@@ -148,12 +160,8 @@ jobs:
       - uses: cachix/install-nix-action@v31
       - id: next
         run: |
-          tag="$(nix shell --inputs-from . nixpkgs#git-cliff -c git-cliff --unreleased --bumped-version)"
-          if git rev-parse -q --verify "refs/tags/$tag" >/dev/null; then
-            echo "$tag is already released"
-          else
-            echo "tag=$tag" >> "$GITHUB_OUTPUT"
-          fi
+          tag="$(nix shell --inputs-from . nixpkgs#git-cliff -c sh next-version.sh)"
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
 
   # Each platform's binaries, built from the tree the release's tag will
   # name: the pushed commit with the release's version written
@@ -222,7 +230,6 @@ jobs:
     if: ${{ !cancelled() && needs.binaries.result == 'success' }}
     needs: [version, binaries]
     runs-on: ubuntu-latest
-    concurrency: release
     permissions:
       contents: write
     steps:
