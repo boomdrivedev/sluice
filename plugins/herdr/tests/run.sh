@@ -1445,8 +1445,11 @@ SLUICE_HERDR_TICK=1 sh "$plugin/bin/watch.sh" --ensure
 within 15 '[ "$(grep -c " add " "$FAKE/stdin-lines")" = 2 ]' || fail "not both added: $(cat "$FAKE/stdin-lines")"
 first=$(head -1 "$FAKE/watch-pids")
 kill "$first"
-within 10 '[ "$(watching | wc -l | tr -d " ")" = 1 ] && [ "$(watching)" != "$first" ]' || fail "no new source runs: $(cat "$FAKE/sluice-calls")"
-next=$(watching)
+# One read for each look: the killed source runs as a zombie until the
+# watcher reaps it, and the next source starts later, so two reads may see
+# it and then none.
+next=
+within 10 'next=$(watching); [ -n "$next" ] && [ "$(echo "$next" | wc -l | tr -d " ")" = 1 ] && [ "$next" != "$first" ]' || fail "no new source runs: $(cat "$FAKE/sluice-calls")"
 within 15 '[ "$(grep -c "^$next add " "$FAKE/stdin-lines")" = 2 ]' || fail "the new source's input: $(cat "$FAKE/stdin-lines")"
 for f in "$work" "$scratch/plain"; do
   grep -q "^$next add $f\$" "$FAKE/stdin-lines" || fail "$f not added again"
