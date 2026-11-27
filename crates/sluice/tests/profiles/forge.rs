@@ -1974,7 +1974,7 @@ fn a_comment_whose_first_try_cannot_connect_is_posted_once() {
     use sluice::profiles::github::forge::Forge as _;
     let (_dir, gh, app, n) = on_github("forge-unconnected", policy());
     let unreachable = Unreachable::default();
-    let app = app.resolving(unreachable.clone());
+    let app = app.rerouting(unreachable.reroute());
     app.token(&repo()).unwrap();
     // The comment's first try is sent to port 0 of GitHub's host, where
     // no socket listens or can: its connection is never made, whatever
@@ -1990,10 +1990,10 @@ fn a_comment_whose_first_try_cannot_connect_is_posted_once() {
     assert_eq!(app.comments(&repo(), n).unwrap(), ["posted"]);
 }
 
-/// A lookup of each call's host that gives, for the next calls it is
-/// told of, the host's addresses at port 0, which no socket can listen
-/// on: a connection to them is refused, or the address is not one a
-/// connection can be made to, and never reaches anything.
+/// Where each call's connection goes: for the next calls it is told of,
+/// the host at port 0, which no socket can listen on: a connection there
+/// is refused, or the address is not one a connection can be made to,
+/// and never reaches anything.
 #[derive(Clone, Debug, Default)]
 struct Unreachable(Arc<std::sync::atomic::AtomicUsize>);
 
@@ -2009,24 +2009,27 @@ impl Unreachable {
     }
 }
 
-impl ureq::unversioned::resolver::Resolver for Unreachable {
-    fn resolve(
-        &self,
-        uri: &ureq::http::Uri,
-        config: &ureq::config::Config,
-        timeout: ureq::unversioned::transport::NextTimeout,
-    ) -> Result<ureq::unversioned::resolver::ResolvedSocketAddrs, ureq::Error> {
-        use std::sync::atomic::Ordering::SeqCst;
-        let mut addrs = ureq::unversioned::resolver::DefaultResolver::default()
-            .resolve(uri, config, timeout)?;
-        if self
-            .0
-            .fetch_update(SeqCst, SeqCst, |n| n.checked_sub(1))
-            .is_ok()
-        {
-            addrs.iter_mut().for_each(|a| a.set_port(0));
-        }
-        Ok(addrs)
+impl Unreachable {
+    /// Each call's address, at port 0 for the next calls it is told of.
+    fn reroute(&self) -> sluice::profiles::github::client::Reroute {
+        let left = self.0.clone();
+        std::sync::Arc::new(move |uri: http::Uri| {
+            use std::sync::atomic::Ordering::SeqCst;
+            if left
+                .fetch_update(SeqCst, SeqCst, |n| n.checked_sub(1))
+                .is_err()
+            {
+                return uri;
+            }
+            let mut parts = uri.into_parts();
+            let host = parts
+                .authority
+                .as_ref()
+                .map(|a| a.host().to_string())
+                .unwrap_or_default();
+            parts.authority = Some(format!("{host}:0").parse().unwrap());
+            http::Uri::from_parts(parts).unwrap()
+        })
     }
 }
 
@@ -2430,7 +2433,7 @@ fn the_last_call_of_an_allowance_starts_the_pause() {
 fn every_read_is_conditional() {
     use sluice::profiles::github::forge::Forge as _;
     let (_dir, state, gh, _) = kept_github("reads-conditional");
-    let list = "/repos/o/r/pulls?state=open&base=main";
+    let list = "/repos/o/r/pulls?state=open";
     let run = kept_app(&gh, state.path(), policy());
     let first = run.pulls(&repo(), "main").unwrap();
     let second = run.pulls(&repo(), "main").unwrap();
@@ -2615,14 +2618,14 @@ fn the_list_says_whether_it_changed() {
     use sluice::profiles::github::forge::Forge as _;
     let (_dir, state, gh, _) = kept_github("list-changed");
     let app = kept_app(&gh, state.path(), policy());
-    assert!(app.listed(&repo(), "main").unwrap().changed);
-    let again = app.listed(&repo(), "main").unwrap();
+    assert!(app.listed(&repo()).unwrap().changed);
+    let again = app.listed(&repo()).unwrap();
     assert!(!again.changed);
     assert_eq!(again.pulls.len(), 1);
     gh.forge
         .open_by("bob", "main", "unit/b", "bbb", false, None)
         .unwrap();
-    let moved = app.listed(&repo(), "main").unwrap();
+    let moved = app.listed(&repo()).unwrap();
     assert!(moved.changed);
     assert_eq!(moved.pulls.len(), 2);
 }

@@ -219,13 +219,8 @@ impl Forge for FileForge {
         Ok(LOGIN.into())
     }
 
-    fn pulls(&self, _: &Repo, base: &str) -> Result<Vec<Pull>> {
-        Ok(self
-            .held()?
-            .pulls
-            .into_iter()
-            .filter(|p| p.open && p.base == base)
-            .collect())
+    fn open_pulls(&self, _: &Repo) -> Result<Vec<Pull>> {
+        Ok(self.held()?.pulls.into_iter().filter(|p| p.open).collect())
     }
 
     /// Every open pull request into `base` whole, as GitHub's one query

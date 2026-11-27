@@ -331,6 +331,47 @@ pub struct Pulls {
     /// of the pull requests into each branch the host follows, by branch,
     /// read again only once the kept file or the mark moved.
     kept_across: RefCell<BTreeMap<String, KeptAcross>>,
+    /// The repository's open pull requests as this process last listed
+    /// them, by repository: one list that every branch reads its own from
+    /// (`one-forge-read-per-repository-per-interval@b3b6757cea2d`).
+    listings: RefCell<BTreeMap<String, Listing>>,
+    /// The repositories listed this pass: a pass lists each once at most.
+    listed_this_pass: RefCell<std::collections::BTreeSet<String>>,
+    /// The branches taken in this pass. A branch taken in again starts a
+    /// new pass, as each `sluice step` of one branch does.
+    taken_this_pass: RefCell<std::collections::BTreeSet<String>>,
+}
+
+/// A repository's open pull requests as one list of them answered: when
+/// it was asked, every open pull request, and whether GitHub sent the
+/// list afresh.
+#[derive(Clone)]
+struct Listing {
+    at: DateTime<Utc>,
+    pulls: Vec<Pull>,
+    changed: bool,
+}
+
+impl Listing {
+    /// The open pull requests into `base`, and whether they changed from
+    /// what `kept` last read of them: a list GitHub answered unchanged
+    /// changed none, and a changed one changed only the branches whose own
+    /// requests moved.
+    fn of(&self, base: &str, kept: &Readings) -> (Vec<Pull>, bool) {
+        let pulls: Vec<Pull> = self
+            .pulls
+            .iter()
+            .filter(|p| p.base == base)
+            .cloned()
+            .collect();
+        let moved = pulls.len() != kept.requests.len()
+            || pulls.iter().any(|p| {
+                kept.requests.get(&p.number).is_none_or(|r| {
+                    r.head != p.head || r.updated_at != p.updated_at || r.draft != p.draft
+                })
+            });
+        (pulls, self.changed && moved)
+    }
 }
 
 /// 137, design D5: a branch's followed pull requests as a reader's
@@ -482,6 +523,9 @@ impl Pulls {
             asked: std::cell::Cell::new(false),
             away: RefCell::default(),
             kept_across: RefCell::default(),
+            listings: RefCell::default(),
+            listed_this_pass: RefCell::default(),
+            taken_this_pass: RefCell::default(),
         }
     }
 
@@ -489,6 +533,8 @@ impl Pulls {
     /// not use are forgotten.
     pub fn next_pass(&self) {
         self.policies.next_pass();
+        self.listed_this_pass.borrow_mut().clear();
+        self.taken_this_pass.borrow_mut().clear();
     }
 
     fn forge(&self, branch: &str) -> Result<&dyn Forge> {
@@ -707,6 +753,36 @@ impl Pulls {
         Ok(())
     }
 
+    /// `repo`'s open pull requests: asked of `forge` where `ask` and this
+    /// pass has not listed it yet, kept as the repository's last asking;
+    /// else the list this pass took, or none.
+    fn listing(
+        &self,
+        forge: &dyn Forge,
+        repo: &Repo,
+        now: DateTime<Utc>,
+        ask: bool,
+    ) -> Result<Option<Listing>> {
+        let key = repo.to_string();
+        if self.listed_this_pass.borrow().contains(&key) {
+            return Ok(self.listings.borrow().get(&key).cloned());
+        }
+        if !ask {
+            return Ok(None);
+        }
+        self.asked.set(true);
+        let listed = forge.listed(repo)?;
+        let listing = Listing {
+            at: now,
+            pulls: listed.pulls,
+            changed: listed.changed,
+        };
+        self.kept.keep_listed(repo, now)?;
+        self.listed_this_pass.borrow_mut().insert(key.clone());
+        self.listings.borrow_mut().insert(key, listing.clone());
+        Ok(Some(listing))
+    }
+
     /// One intake pass over `branch`, reading the branch once: nothing
     /// asked of GitHub unless the host's interval has passed since any
     /// process on the host asked, a submit on the host moved one of its
@@ -726,17 +802,42 @@ impl Pulls {
         self.log_lines
             .borrow_mut()
             .insert(branch.to_string(), held.conditions.log_lines);
+        // A branch taken in a second time is in a new pass, which lists
+        // its repository afresh.
+        if !self.taken_this_pass.borrow_mut().insert(branch.to_string()) {
+            self.listed_this_pass.borrow_mut().clear();
+            let mut taken = self.taken_this_pass.borrow_mut();
+            taken.clear();
+            taken.insert(branch.to_string());
+        }
         let now = clock.now();
         let kept = self.kept.readings(&held.repo, branch);
         let records = s.seams().state.read_held(branch)?;
         let version = records.version;
-        let due = kept.asked.is_none_or(|a| now - a >= self.discovery)
-            || self.kept.moved_since(&held.repo, branch, kept.asked);
+        // The repository's one list, asked at the host's interval by any
+        // process of it, or at once after a move on the host; a list this
+        // process holds that is newer than the branch's last reading is
+        // read with nothing asked
+        // (`one-forge-read-per-repository-per-interval@b3b6757cea2d`).
+        let key = held.repo.to_string();
+        let newer = self
+            .listings
+            .borrow()
+            .get(&key)
+            .filter(|l| kept.asked.is_none_or(|a| l.at > a))
+            .cloned();
+        let interval = self
+            .kept
+            .listed(&held.repo)
+            .is_none_or(|a| now - a >= self.discovery);
+        let due = interval
+            || self.kept.moved_since(&held.repo, branch, kept.asked)
+            || (kept.asked.is_none() && newer.is_none());
         // Whether the branch as held, and its records, stand as at the last
         // asking.
         let still =
             kept.tip.as_deref() == Some(held.tip.0.as_str()) && kept.version == Some(version);
-        if !due && still {
+        if !due && still && newer.is_none() {
             // A notification of this round finds its pull request.
             let line = Line::load(branch, records)?;
             let subs: Vec<Submission> = line.subs.into_values().collect();
@@ -774,9 +875,13 @@ impl Pulls {
         self.away.borrow_mut().remove(branch);
         let at_tip = kept.tip.as_deref() == Some(t.tip.0.as_str());
         let still = at_tip && kept.version == Some(version);
-        self.asked.set(true);
-        let listed = forge.listed(&t.repo, branch)?;
-        let (pulls, changed) = (listed.pulls, listed.changed);
+        let listing = self.listing(forge, &t.repo, now, due || !still)?;
+        let Some(listing) = listing.or(newer) else {
+            return Ok(true);
+        };
+        // The branch's readings are of the list it read, as of its asking.
+        let asked = listing.at;
+        let (pulls, changed) = listing.of(branch, &kept);
         let mut status = s.status(branch)?;
         self.register(&t.repo, &status.submissions);
         let mut names = names(&status.submissions);
@@ -862,7 +967,7 @@ impl Pulls {
                 // GraphQL's allowance spent: the round passes the forge's
                 // part by, and the next discovery asks again (134).
                 Err(e) if retry::limited(&e).is_some() => {
-                    self.keep_readings(s, &t, branch, now, &open, work.into_inner())?;
+                    self.keep_readings(s, &t, branch, asked, &open, work.into_inner())?;
                     return Err(e);
                 }
                 // Refused otherwise: each is read alone this pass.
@@ -884,7 +989,7 @@ impl Pulls {
         } = match groups {
             Ok(g) => g,
             Err(e) => {
-                self.keep_readings(s, &t, branch, now, &open, work.into_inner())?;
+                self.keep_readings(s, &t, branch, asked, &open, work.into_inner())?;
                 return Err(e);
             }
         };
@@ -947,7 +1052,7 @@ impl Pulls {
                 Ok(Some(e)) | Err(e) => self.met(&place(p.number), format!("{e:#}")),
             }
         }
-        self.keep_readings(s, &t, branch, now, &open, work.into_inner())?;
+        self.keep_readings(s, &t, branch, asked, &open, work.into_inner())?;
         Ok(true)
     }
 
@@ -4150,6 +4255,71 @@ fn lock_name(branch: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A pull request `number` into `base` at `head`, ready.
+    fn open_into(number: u64, base: &str, head: &str) -> Pull {
+        Pull {
+            number,
+            node_id: String::new(),
+            title: String::new(),
+            body: String::new(),
+            author: "person".into(),
+            draft: false,
+            open: true,
+            head: head.into(),
+            head_ref: format!("unit/{number}"),
+            head_repo: "o/r".into(),
+            base: base.into(),
+            updated_at: None,
+            merged: false,
+        }
+    }
+
+    /// forge-reads, "Another branch's request moves": the repository's
+    /// list, sent afresh because a bolt's request got a new head, changes
+    /// main's list only where main's own requests moved; a list GitHub
+    /// answered unchanged changes none.
+    #[test]
+    fn a_branchs_list_changed_only_where_its_requests_moved() {
+        let main = Readings {
+            requests: [(
+                1,
+                Reading {
+                    head: "a1".into(),
+                    ..Reading::default()
+                },
+            )]
+            .into(),
+            ..Readings::default()
+        };
+        let bolt = Readings {
+            requests: [(
+                2,
+                Reading {
+                    head: "b1".into(),
+                    ..Reading::default()
+                },
+            )]
+            .into(),
+            ..Readings::default()
+        };
+        let listing = Listing {
+            at: Utc::now(),
+            pulls: vec![open_into(1, "main", "a1"), open_into(2, "bolt/x", "b2")],
+            changed: true,
+        };
+        let (mains, changed) = listing.of("main", &main);
+        assert_eq!(mains.iter().map(|p| p.number).collect::<Vec<_>>(), [1]);
+        assert!(!changed, "main's own request stands");
+        let (bolts, changed) = listing.of("bolt/x", &bolt);
+        assert_eq!(bolts.iter().map(|p| p.number).collect::<Vec<_>>(), [2]);
+        assert!(changed, "the bolt's request has a new head");
+        let unchanged = Listing {
+            changed: false,
+            ..listing
+        };
+        assert!(!unchanged.of("bolt/x", &bolt).1, "GitHub's 304");
+    }
     use crate::profiles::github::fake::FileForge;
     use crate::PullRequests as _;
     use sluice_core::verdict_view::{Row, RowResult};
@@ -4467,8 +4637,8 @@ mod tests {
         fn login(&self, repo: &Repo) -> Result<String> {
             Forge::login(self.forge, repo)
         }
-        fn pulls(&self, repo: &Repo, base: &str) -> Result<Vec<Pull>> {
-            Forge::pulls(self.forge, repo, base)
+        fn open_pulls(&self, repo: &Repo) -> Result<Vec<Pull>> {
+            Forge::open_pulls(self.forge, repo)
         }
         fn requests(&self, repo: &Repo, base: &str) -> Result<Vec<Request>> {
             Forge::requests(self.forge, repo, base)

@@ -1627,7 +1627,7 @@ fn a_failed_list_ends_intake_and_the_queue_still_lands() {
         assert!(
             said.contains(
                 "sluice: warning: taking in main's pull requests: main's pull requests: tried "
-            ) && said.contains(": GET /repos/o/r/pulls?state=open&base=main")
+            ) && said.contains(": GET /repos/o/r/pulls?state=open")
                 && said.contains("500 Server Error")
                 && !said.contains(&format!("pull/{n}: ")),
             "{said}"
@@ -5409,6 +5409,106 @@ fn nothing_moved_asks_once_a_minute() {
     assert_eq!(g.beside_reads(n, &head), beside);
     assert_eq!(g.posts(), posts);
 }
+
+impl OnGitHub {
+    /// `main` on GitHub taking pull requests, and `bolt/x` and `bolt/y`
+    /// beside it, branches on GitHub that take pull requests too, each
+    /// stepped until nothing on the host moves.
+    fn with_bolts_taking_requests(name: &str) -> OnGitHub {
+        let g = OnGitHub::checked_policy(
+            name,
+            "",
+            "1m",
+            "",
+            &format!("{BOLTS}\n[branches.\"bolt/*\".pull_requests]\n"),
+        );
+        for bolt in ["bolt/x", "bolt/y"] {
+            g.repo.git(&["branch", bolt, "main"]);
+            g.repo
+                .git(&["push", "-q", "origin", &format!("{bolt}:refs/heads/{bolt}")]);
+        }
+        for branch in ["main", "bolt/x", "bolt/y"] {
+            for _ in 0..2 {
+                let out = g.sluice(&["step", branch]);
+                assert!(out.status.success(), "{}", text(&out));
+            }
+        }
+        g
+    }
+}
+
+/// forge-reads, "Three branches, one list": main and two bolts take pull
+/// requests. Twenty passes of `sluice run` over a minute, with nothing on
+/// the host moving, ask GitHub for the repository's open pull requests
+/// once, in one list that serves all three branches
+/// (`one-forge-read-per-repository-per-interval@b3b6757cea2d`).
+#[test]
+fn a_repositorys_branches_share_one_list_each_interval() {
+    let g = OnGitHub::with_bolts_taking_requests("pr-one-list");
+    g.on_main();
+    g.discovery_passes();
+    let lists = g.lists();
+    let out = g.skipping(g.repo.dir(), &["run", "--rounds", "20"]);
+    assert!(out.status.success(), "{}", text(&out));
+    assert_eq!(g.lists(), lists + 1, "{}", text(&out));
+    assert_eq!(
+        g.gh.calls("GET", "/repos/o/r/pulls?state=open&base="),
+        0,
+        "no list of one branch"
+    );
+}
+
+/// The fault "A `sluice submit --no-wait` exits 3 when the GitHub App's
+/// hourly requests are spent": main and two bolts take pull requests,
+/// and the installation's allowance holds what one list of the
+/// repository in each interval and a submit need, with room for the
+/// order the submit's calls and the host's pass fall in. A hundred and
+/// sixty passes of `sluice run` over eight minutes, with nothing on the
+/// host moving, leave the allowance for the submit, which opens its pull
+/// request and exits 0
+/// (`one-forge-read-per-repository-per-interval@b3b6757cea2d`).
+#[test]
+fn idle_branches_leave_the_allowance_for_a_submit() {
+    let g = OnGitHub::with_bolts_taking_requests("pr-allowance");
+    g.on_main();
+    g.discovery_passes();
+    let w = g.session("allowed", &[("a.txt", "a\n")]);
+    let before = g.repo_calls();
+    let asked = g.gh.fake.requests().len();
+    g.gh.allow(ALLOWED);
+    let out = g.skipping(g.repo.dir(), &["run", "--rounds", "160"]);
+    assert!(out.status.success(), "{}", text(&out));
+    let idle = g.repo_calls() - before;
+    // The run's host process ends, so no pass of its own, a real minute
+    // on, takes a call before the submit's: the submit's host process
+    // starts afresh and reads the last asking the host keeps.
+    support::kill_host_process(&mut g.command(env!("CARGO_BIN_EXE_sluice"), g.repo.dir()));
+    let out = g
+        .command(env!("CARGO_BIN_EXE_sluice"), &w)
+        .args(["submit", "main", "--no-wait"])
+        .output()
+        .unwrap();
+    let calls: Vec<String> = g.gh.fake.requests()[asked..]
+        .iter()
+        .map(|r| format!("{} {}", r.method, r.path))
+        .collect();
+    assert_eq!(
+        out.status.code(),
+        Some(0),
+        "idle {idle}, calls {calls:#?}: {}",
+        text(&out)
+    );
+    assert_eq!(idle, 8, "one list in each minute: {calls:#?}");
+    assert!(g.gh.forge.by_ref("unit/allowed").unwrap().is_some());
+}
+
+/// The calls the installation's allowance holds in
+/// [`idle_branches_leave_the_allowance_for_a_submit`]: the repository's
+/// one list in each of eight minutes, and ten for the submit and the
+/// pass it moves, which take three to six as they fall. A list of each
+/// branch in each minute spends the allowance before the submit, at its
+/// eighteenth list, and the submit exits 3.
+const ALLOWED: usize = 18;
 
 /// reader-tick, "A branch that takes pull requests between discoveries":
 /// none open and the host's interval a minute, six passes of `sluice run`

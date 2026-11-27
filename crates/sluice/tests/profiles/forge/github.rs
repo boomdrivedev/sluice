@@ -67,6 +67,9 @@ pub struct GitHub {
     troubles: Arc<Mutex<Vec<Troubled>>>,
     /// Each call's method, path and the status it was answered.
     answered: Arc<Mutex<Vec<(String, String, u16)>>>,
+    /// How many calls the installation's allowance has left, where a test
+    /// gave it a number.
+    allowance: Arc<Mutex<Option<usize>>>,
 }
 
 /// What the fake does to a call it is told to trouble.
@@ -128,9 +131,34 @@ impl GitHub {
         let troubling = troubles.clone();
         let answered: Arc<Mutex<Vec<(String, String, u16)>>> = Arc::default();
         let answering = answered.clone();
+        let allowance: Arc<Mutex<Option<usize>>> = Arc::default();
+        let allowing = allowance.clone();
         let respond = move |r: &Request| -> Answer {
             if let Some(b) = &bare {
                 sync(&held, b);
+            }
+            // The installation's allowance: every call to the repository
+            // and every GraphQL call but finding the installation.
+            let counted = (r.path.starts_with(REPO) && r.path != format!("{REPO}/installation"))
+                || r.path == "/graphql";
+            if let Some(left) = allowing.lock().unwrap().as_mut().filter(|_| counted) {
+                if *left == 0 {
+                    let reset = chrono::Utc::now() + chrono::TimeDelta::minutes(20);
+                    let (code, mut h, body) = json(
+                        403,
+                        json!({ "message": "API rate limit exceeded for installation ID 7." }),
+                    );
+                    h.extend([
+                        ("x-ratelimit-remaining".to_string(), "0".to_string()),
+                        (
+                            "x-ratelimit-reset".to_string(),
+                            reset.timestamp().to_string(),
+                        ),
+                        ("x-ratelimit-resource".to_string(), "core".to_string()),
+                    ]);
+                    return (code, h, body);
+                }
+                *left -= 1;
             }
             let trouble = troubling.lock().unwrap().iter_mut().find_map(|t| {
                 let hit = t.left > 0 && r.method == t.method && r.path.starts_with(&t.path);
@@ -205,7 +233,14 @@ impl GitHub {
             unavailable,
             troubles,
             answered,
+            allowance,
         }
+    }
+
+    /// The installation's allowance holds `calls` more calls, and is spent
+    /// after them, until twenty minutes from the first call it refuses.
+    pub fn allow(&self, calls: usize) {
+        *self.allowance.lock().unwrap() = Some(calls);
     }
 
     /// How many calls of `method` to a path starting `path` the fake
@@ -692,8 +727,10 @@ fn answer(forge: &FileForge, bare: Option<&Path>, failing: &Failing, r: &Request
             server_error()
         }
         ("GET", ["pulls"]) => {
-            let base = param("base").unwrap_or_default();
-            let ps = forge.pulls(&repo, &base).unwrap();
+            let ps = match param("base") {
+                Some(base) => forge.pulls(&repo, &base).unwrap(),
+                None => forge.open_pulls(&repo).unwrap(),
+            };
             json(200, Value::Array(ps.iter().map(pull_json).collect()))
         }
         ("POST", ["pulls"]) | ("PATCH", ["pulls", _])

@@ -83,10 +83,38 @@ opentelemetry-otlp = { version = "0.33", default-features = false, features = [
 # What a failure's output is scrubbed of before it is sent (ADR 0022).
 regex = "1"
 
-# sluice's identity on a forge: a JWT signed with the app's key (RS256)
-# and a blocking HTTPS client for the forge's API.
+# sluice's identity on a forge: a JWT signed with the app's key (RS256).
 jsonwebtoken = "9"
+# The container engine's API over its socket or TLS.
 ureq = { version = "3", default-features = false, features = ["rustls"] }
+# GitHub's API, read and written by sluice host through octocrab over a
+# tower stack of its own: one limit on the calls in flight for the
+# process, a timeout, and a layer that reads GitHub's budget from its
+# headers, on hyper's client over rustls on ring with the webpki roots,
+# following no redirect
+# (`sluice-host-reads-github-through-octocrab-with-tower-layers@57c2759bda97`).
+octocrab = { version = "0.54", default-features = false, features = [
+  "default-client",
+  "rustls",
+  "rustls-ring",
+] }
+tower = { version = "0.5", default-features = false, features = [
+  "limit",
+  "timeout",
+  "util",
+] }
+hyper-util = { version = "0.1", default-features = false, features = [
+  "client-legacy",
+  "http1",
+  "tokio",
+] }
+hyper-rustls = { version = "0.27", default-features = false, features = [
+  "http1",
+  "ring",
+  "tls12",
+  "webpki-roots",
+] }
+http-body-util = "0.1"
 
 # Every call to a remote runs under one retry policy (ADR 0062): a
 # maintained crate's backoff, blocking, with no async runtime.

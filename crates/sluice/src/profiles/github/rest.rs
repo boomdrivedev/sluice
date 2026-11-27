@@ -435,12 +435,12 @@ impl Forge for App {
         self.bot(repo)
     }
 
-    fn pulls(&self, repo: &Repo, base: &str) -> Result<Vec<Pull>> {
-        Ok(self.listed(repo, base)?.pulls)
+    fn open_pulls(&self, repo: &Repo) -> Result<Vec<Pull>> {
+        Ok(self.listed(repo)?.pulls)
     }
 
-    fn listed(&self, repo: &Repo, base: &str) -> Result<Listed> {
-        let path = Self::repo_path(repo, &format!("/pulls?state=open&base={base}"));
+    fn listed(&self, repo: &Repo) -> Result<Listed> {
+        let path = Self::repo_path(repo, "/pulls?state=open");
         let (items, changed) = self.pages(repo, &path, Value::as_array)?;
         Ok(Listed {
             pulls: items.iter().map(pull).collect::<Result<_>>()?,

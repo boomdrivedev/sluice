@@ -62,6 +62,7 @@ use serde::Serialize;
 use serde_json::Value;
 use sluice_seams::Unanswered;
 
+use super::client::{Budget, Client, Reroute};
 use super::kept::{self, Allowance, Bot, Kept, Pause};
 use crate::identity::{Asked, Author, CredentialCommand};
 use crate::instance::{Forge, Source};
@@ -276,7 +277,12 @@ pub struct App {
     /// Where git reaches the repositories: [`GIT`], or a test's fake.
     git: String,
     now: Now,
-    http: ureq::Agent,
+    /// The client its calls go through, made at its first call
+    /// ([`super::client`]).
+    client: std::cell::OnceCell<Client>,
+    /// Where its connections go in place of the address a call names: a
+    /// test's; none, where the call names.
+    reroute: Option<Reroute>,
     /// The tokens it holds, its own or shared with the process's other
     /// apps ([`App::holding`]).
     tokens: Tokens,
@@ -340,7 +346,8 @@ impl App {
             api: api.trim_end_matches('/').into(),
             git: GIT.into(),
             now,
-            http: http_config().into(),
+            client: std::cell::OnceCell::new(),
+            reroute: None,
             tokens: Tokens::default(),
             login: RefCell::default(),
             bot: RefCell::default(),
@@ -412,15 +419,11 @@ impl App {
         self
     }
 
-    /// `self`, finding the address of each call's host with `resolver`
-    /// instead of the host's own lookup: a test's, which can give an
-    /// address no connection is ever made to.
-    pub fn resolving(mut self, resolver: impl ureq::unversioned::resolver::Resolver) -> App {
-        self.http = ureq::Agent::with_parts(
-            http_config(),
-            ureq::unversioned::transport::DefaultConnector::default(),
-            resolver,
-        );
+    /// `self`, each connection given to `reroute` first: a test's, which
+    /// can send a call where no connection is ever made.
+    pub fn rerouting(mut self, reroute: Reroute) -> App {
+        self.reroute = Some(reroute);
+        self.client = std::cell::OnceCell::new();
         self
     }
 
@@ -590,16 +593,17 @@ impl App {
         let auth = format!("Basic {basic}");
         self.policy
             .run(Kind::Read, |_| {
-                let resp = self
-                    .http
-                    .get(&url)
+                let unread = |f: Failed<anyhow::Error>| {
+                    Failed::new(f.judged, f.error.context(format!("GET {path}")))
+                };
+                let req = http::Request::get(&url)
                     .header("Authorization", &auth)
                     .header("Git-Protocol", "version=2")
-                    .call()
-                    .map_err(|e| {
-                        Failed::new(sent(&e), anyhow!(e).context(format!("GET {path}")))
-                    })?;
-                match resp.status().as_u16() {
+                    .header("User-Agent", "sluice")
+                    .body(String::new())
+                    .map_err(|e| unread(Failed::new(Judged::Never, e.into())))?;
+                let raw = self.client().map_err(unread)?.send(req).map_err(unread)?;
+                match raw.status {
                     s @ 500..=599 => Err(Failed::new(
                         Judged::Never,
                         Unanswered(format!("GET {path}: {s}")).into(),
@@ -1279,6 +1283,16 @@ impl App {
         }
     }
 
+    /// The client its calls go through, made at its first call; one that
+    /// could not be made sent nothing.
+    fn client(&self) -> Result<&Client, Failed<anyhow::Error>> {
+        if let Some(c) = self.client.get() {
+            return Ok(c);
+        }
+        let c = Client::new(self.reroute.clone()).map_err(|e| Failed::new(Judged::Never, e))?;
+        Ok(self.client.get_or_init(|| c))
+    }
+
     /// One call, conditional on `kept` when it is given: its answer; a
     /// call that got no answer read, how it stands.
     fn call(
@@ -1290,63 +1304,61 @@ impl App {
         kept: Option<&kept::Answer>,
     ) -> Result<Reply, Failed<anyhow::Error>> {
         let url = format!("{}{path}", self.api);
-        let auth = format!("Bearer {bearer}");
-        let resp = match (method, body) {
+        let unread = |judged: Judged, e: anyhow::Error| {
+            Failed::new(judged, e.context(format!("{method} {path}")))
+        };
+        let mut req = http::Request::builder()
+            .uri(&url)
+            .header("Accept", "application/vnd.github+json")
+            .header("X-GitHub-Api-Version", "2022-11-28")
+            .header("User-Agent", "sluice")
+            .header("Authorization", format!("Bearer {bearer}"));
+        let req = match (method, body) {
             ("GET", _) => {
-                let mut req = self
-                    .http
-                    .get(&url)
-                    .header("Accept", "application/vnd.github+json")
-                    .header("X-GitHub-Api-Version", "2022-11-28")
-                    .header("Authorization", &auth);
+                req = req.method(http::Method::GET);
                 if let Some(etag) = kept.and_then(|k| k.etag.as_deref()) {
                     req = req.header("If-None-Match", etag);
                 }
                 if let Some(at) = kept.and_then(|k| k.last_modified.as_deref()) {
                     req = req.header("If-Modified-Since", at);
                 }
-                req.call()
+                req.body(String::new())
             }
-            (_, body) => {
-                let req = match method {
-                    "POST" => self.http.post(&url),
-                    "PATCH" => self.http.patch(&url),
-                    other => {
-                        let e = anyhow!("sluice makes no {other} call");
-                        return Err(Failed::new(Judged::Answered, e));
-                    }
-                };
-                req.header("Accept", "application/vnd.github+json")
-                    .header("X-GitHub-Api-Version", "2022-11-28")
-                    .header("Authorization", &auth)
-                    .header("Content-Type", "application/json")
-                    .send(body.unwrap_or(""))
+            ("POST" | "PATCH", body) => req
+                .method(method)
+                .header("Content-Type", "application/json")
+                .body(body.unwrap_or("").to_string()),
+            (other, _) => {
+                let e = anyhow!("sluice makes no {other} call");
+                return Err(Failed::new(Judged::Answered, e));
             }
-        };
-        let unread = |judged: Judged, e: anyhow::Error| {
-            Failed::new(judged, e.context(format!("{method} {path}")))
-        };
-        let mut resp = resp.map_err(|e| unread(sent(&e), e.into()))?;
-        let status = resp.status().as_u16();
+        }
+        .map_err(|e| unread(Judged::Never, e.into()))?;
+        let raw = self
+            .client()
+            .and_then(|c| c.send(req))
+            .map_err(|f| unread(f.judged, f.error))?;
         let header = |name: &str| {
-            resp.headers()
+            raw.headers
                 .get(name)
                 .and_then(|v| v.to_str().ok())
                 .map(str::to_string)
         };
-        let number = |name: &str| header(name).and_then(|v| v.trim().parse::<u64>().ok());
+        let Budget {
+            remaining,
+            reset,
+            resource,
+            retry_after,
+        } = raw.budget.clone();
         let heard = Heard {
-            remaining: number("x-ratelimit-remaining"),
-            reset: number("x-ratelimit-reset").and_then(|t| DateTime::from_timestamp(t as i64, 0)),
-            resource: header("x-ratelimit-resource"),
-            retry_after: number("retry-after"),
+            remaining,
+            reset,
+            resource,
+            retry_after,
             etag: header("etag"),
             last_modified: header("last-modified"),
         };
-        let text = resp
-            .body_mut()
-            .read_to_string()
-            .map_err(|e| unread(Judged::Unknown, e.into()))?;
+        let (status, text) = (raw.status, raw.text);
         let v: Value = serde_json::from_str(&text).unwrap_or(Value::Null);
         Ok(Reply {
             status,
@@ -1354,42 +1366,6 @@ impl App {
             text,
             heard,
         })
-    }
-}
-
-/// How every call is made: a status GitHub answers is read, not an error,
-/// a redirect among them, which is never followed, since a call followed
-/// to another address goes without its token; and no try of a call takes
-/// longer than any try of a call to a remote may,
-/// [`crate::retry::TRY_FOR`].
-fn http_config() -> ureq::config::Config {
-    ureq::Agent::config_builder()
-        .http_status_as_error(false)
-        .max_redirects(0)
-        .timeout_global(Some(crate::retry::TRY_FOR))
-        .user_agent("sluice")
-        .build()
-}
-
-/// How a call that got no answer stands: never judged when no connection
-/// was made, and not known otherwise, since GitHub may have taken it.
-fn sent(e: &ureq::Error) -> Judged {
-    use std::io::ErrorKind;
-    match e {
-        ureq::Error::HostNotFound | ureq::Error::ConnectionFailed => Judged::Never,
-        ureq::Error::Timeout(ureq::Timeout::Resolve | ureq::Timeout::Connect) => Judged::Never,
-        ureq::Error::Io(io)
-            if matches!(
-                io.kind(),
-                ErrorKind::ConnectionRefused
-                    | ErrorKind::AddrNotAvailable
-                    | ErrorKind::HostUnreachable
-                    | ErrorKind::NetworkUnreachable
-            ) =>
-        {
-            Judged::Never
-        }
-        _ => Judged::Unknown,
     }
 }
 

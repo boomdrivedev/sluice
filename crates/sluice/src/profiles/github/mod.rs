@@ -7,6 +7,7 @@
 pub mod actions;
 pub mod app;
 pub mod check;
+pub mod client;
 pub mod fake;
 pub mod forge;
 pub mod kept;
