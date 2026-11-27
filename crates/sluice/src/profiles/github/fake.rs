@@ -11,7 +11,7 @@ use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 
-use anyhow::{anyhow, Context, Result};
+use anyhow::{anyhow, bail, Context, Result};
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
@@ -47,7 +47,29 @@ pub struct FileForge {
     path: PathBuf,
     repo: String,
     lock: Mutex<()>,
+    /// The time a change is stamped with, where a test's clock sets it;
+    /// the system's time otherwise.
+    at: Mutex<Option<DateTime<Utc>>>,
+    /// What it answers an error for, as GitHub may.
+    failing: Mutex<Failing>,
 }
+
+/// What a [`FileForge`] answers an error for.
+#[derive(Default)]
+struct Failing {
+    /// The pull requests whose reviews it cannot read; the query of every
+    /// pull request whole fails while one of them does.
+    reviews: std::collections::BTreeSet<u64>,
+    /// The list of open pull requests.
+    pulls: bool,
+    /// Each mark of a pull request as a draft or ready for review.
+    drafts: bool,
+    /// The query of a branch's pull requests whole.
+    query: bool,
+}
+
+/// GitHub's words for a request its app may not make.
+pub const NOT_ACCESSIBLE: &str = "Resource not accessible by integration";
 
 impl FileForge {
     /// The fake GitHub of `repo` kept in `path`, empty when it does not
@@ -57,7 +79,48 @@ impl FileForge {
             path: path.to_path_buf(),
             repo: repo.to_string(),
             lock: Mutex::new(()),
+            at: Mutex::new(None),
+            failing: Mutex::new(Failing::default()),
         }
+    }
+
+    /// Answer an error for pull request `n`'s reviews, or give them again:
+    /// the query of every pull request whole fails while one fails.
+    pub fn fail_reviews(&self, n: u64, fail: bool) {
+        let mut f = self.failing.lock().unwrap();
+        match fail {
+            true => f.reviews.insert(n),
+            false => f.reviews.remove(&n),
+        };
+    }
+
+    /// Answer an error for the list of open pull requests, or give it
+    /// again.
+    pub fn fail_pulls(&self, fail: bool) {
+        self.failing.lock().unwrap().pulls = fail;
+    }
+
+    /// Refuse, or take again, a mark of a pull request as a draft or ready
+    /// for review, in GitHub's words for what its app may not do.
+    pub fn refuse_drafts(&self, refuse: bool) {
+        self.failing.lock().unwrap().drafts = refuse;
+    }
+
+    /// Refuse, or answer again, the query of a branch's pull requests
+    /// whole, as GitHub refuses one it cannot answer.
+    pub fn refuse_query(&self, refuse: bool) {
+        self.failing.lock().unwrap().query = refuse;
+    }
+
+    /// From now, each change is stamped `at`, as GitHub would stamp it at
+    /// that time by the test's clock.
+    pub fn stamp_at(&self, at: DateTime<Utc>) {
+        *self.at.lock().unwrap() = Some(at);
+    }
+
+    /// The time a change is stamped with now.
+    fn now(&self) -> DateTime<Utc> {
+        self.at.lock().unwrap().unwrap_or_else(Utc::now)
     }
 
     pub fn held(&self) -> Result<Held> {
@@ -95,7 +158,7 @@ impl FileForge {
                 .iter_mut()
                 .find(|p| p.number == number)
                 .ok_or_else(|| anyhow!("no pull request {number}"))?;
-            p.updated_at = Some(Utc::now());
+            p.updated_at = Some(self.now());
             Ok(f(p))
         })
     }
@@ -128,7 +191,7 @@ impl FileForge {
                 head_ref: head_ref.into(),
                 head_repo: from.map_or(repo, str::to_string),
                 base: base.into(),
-                updated_at: Some(Utc::now()),
+                updated_at: Some(self.now()),
                 merged: false,
             });
             Ok(number)
@@ -150,10 +213,10 @@ impl FileForge {
                 .find(|p| p.number == number)
                 .ok_or_else(|| anyhow!("no pull request {number}"))?;
             if p.draft && !draft {
-                h.readied.entry(number).or_default().push(Utc::now());
+                h.readied.entry(number).or_default().push(self.now());
             }
             p.draft = draft;
-            p.updated_at = Some(Utc::now());
+            p.updated_at = Some(self.now());
             Ok(())
         })
     }
@@ -171,16 +234,16 @@ impl FileForge {
     }
 
     /// Pull request `number` changed on GitHub in a way sluice reads.
-    fn touch(h: &mut Held, number: u64) {
+    fn touch(&self, h: &mut Held, number: u64) {
         if let Some(p) = h.pulls.iter_mut().find(|p| p.number == number) {
-            p.updated_at = Some(Utc::now());
+            p.updated_at = Some(self.now());
         }
     }
 
     /// `user` reviews pull request `number` on `commit`.
     pub fn review(&self, number: u64, user: &str, state: &str, commit: &str) -> Result<()> {
         self.change(|h| {
-            FileForge::touch(h, number);
+            self.touch(h, number);
             h.reviews.entry(number).or_default().push(Review {
                 user: user.into(),
                 state: state.into(),
@@ -220,6 +283,9 @@ impl Forge for FileForge {
     }
 
     fn open_pulls(&self, _: &Repo) -> Result<Vec<Pull>> {
+        if self.failing.lock().unwrap().pulls {
+            bail!("GitHub answered 502 Bad Gateway for the list of pull requests");
+        }
         Ok(self.held()?.pulls.into_iter().filter(|p| p.open).collect())
     }
 
@@ -227,6 +293,12 @@ impl Forge for FileForge {
     /// reads them: each reviewer's latest review that decides anything,
     /// and the last ten ready marks.
     fn requests(&self, _: &Repo, base: &str) -> Result<Vec<Request>> {
+        {
+            let f = self.failing.lock().unwrap();
+            if f.query || !f.reviews.is_empty() {
+                bail!("GitHub could not answer the query of {base}'s pull requests");
+            }
+        }
         let mut held = self.held()?;
         let pulls: Vec<Pull> = held
             .pulls
@@ -257,6 +329,9 @@ impl Forge for FileForge {
     }
 
     fn reviews(&self, _: &Repo, number: u64) -> Result<Vec<Review>> {
+        if self.failing.lock().unwrap().reviews.contains(&number) {
+            bail!("GitHub answered 502 Bad Gateway for pull request {number}'s reviews");
+        }
         Ok(self.held()?.reviews.remove(&number).unwrap_or_default())
     }
 
@@ -322,7 +397,7 @@ impl Forge for FileForge {
 
     fn comment(&self, repo: &Repo, number: u64, body: &str) -> Result<u64> {
         self.change(|h| {
-            FileForge::touch(h, number);
+            self.touch(h, number);
             let id = h.next;
             h.next += 1;
             h.comments.entry(number).or_default().push(Comment {
@@ -378,6 +453,9 @@ impl Forge for FileForge {
     }
 
     fn set_draft(&self, _: &Repo, number: u64, draft: bool) -> Result<()> {
+        if self.failing.lock().unwrap().drafts {
+            bail!("{NOT_ACCESSIBLE}");
+        }
         FileForge::set_draft(self, number, draft)
     }
 }

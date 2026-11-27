@@ -638,6 +638,16 @@ impl World {
         rev
     }
 
+    /// The world's time, read without moving it.
+    pub fn now(&self) -> DateTime<Utc> {
+        self.0.borrow().now
+    }
+
+    /// The branches the repository holds, by name.
+    pub fn branches(&self) -> Vec<String> {
+        self.0.borrow().refs.keys().cloned().collect()
+    }
+
     pub fn tip(&self, branch: &str) -> Rev {
         self.0.borrow().refs[branch].clone()
     }
