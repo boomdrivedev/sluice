@@ -4432,31 +4432,23 @@ fn landed_in(doc: &serde_json::Value, id: u64) -> bool {
     })
 }
 
-/// resident-subscriptions, "A watch's folder is read each second" (design
-/// D6): each overview that a subscription following a folder as a watch
-/// gets, while a submission of its repository is in play, holds `"tick":
-/// 1`.
+/// One subscription's folders as they come and go (resident-subscriptions,
+/// design D6). "Two folders on one connection": a client subscribed to
+/// worktrees of two repositories gets each folder's overview at the start,
+/// and once a submission is in play in the second, overviews of the second
+/// alone. "A watch's folder is read each second": each such overview,
+/// while the submission is in play, holds `"tick": 1`. "A folder added
+/// later": a third folder added on the same connection gets its overview.
+/// "A folder removed": once the client removes the first folder, a landing
+/// in the first repository brings no overview of it. "A repository
+/// removed": the second repository removed, the client gets an overview of
+/// its folder that says it is gone, in the words its read failed with, and
+/// later overviews of the third alone.
 #[test]
-fn a_watchs_folder_is_read_each_second() {
-    let d = OnDisk::new("host-sub-watch", POLICY);
-    let dir = d.session("a");
-    let mut sub = subscribed(&d, &[d.repo.dir()], FollowKind::Watch);
-    queued_live(&d, &dir);
-    let docs = documents_until(&mut sub, 30, |got| got.len() >= 2);
-    assert!(docs.len() >= 2, "{docs:?}");
-    for (_, doc) in &docs {
-        assert_eq!(doc["tick"], 1, "{doc}");
-    }
-}
-
-/// resident-subscriptions, "Two folders on one connection" (design D6): a
-/// client subscribes to worktrees of two repositories; it gets each
-/// folder's overview at the start, and once a submission lands in the
-/// second repository, new overviews for the second folder only.
-#[test]
-fn a_subscription_serves_two_folders() {
-    let d = OnDisk::new("host-sub-two", POLICY);
-    let b = d.another("host-sub-two-b", POLICY);
+fn a_subscription_serves_its_folders_as_they_come_and_go() {
+    let d = OnDisk::new("host-sub", POLICY);
+    let b = d.another("host-sub-b", POLICY);
+    let c = d.another("host-sub-c", POLICY);
     let theirs = session_of(&d, &b, "theirs");
     let mut sub = subscribed(&d, &[d.repo.dir(), b.dir()], FollowKind::Watch);
     let first = documents_until(&mut sub, 30, |got| got.len() >= 2);
@@ -4466,88 +4458,66 @@ fn a_subscription_serves_two_folders() {
         BTreeSet::from([folder(d.repo.dir()), folder(b.dir())]),
         "{first:?}"
     );
+
     let id = queued_live(&d, &theirs);
+    let ticking = documents_until(&mut sub, 30, |got| got.len() >= 2);
+    assert!(ticking.len() >= 2, "{ticking:?}");
+    for (f, doc) in &ticking {
+        assert_eq!(*f, folder(b.dir()), "{doc}");
+        if !landed_in(doc, id) {
+            assert_eq!(doc["tick"], 1, "{doc}");
+        }
+    }
     let after = documents_until(&mut sub, 60, |got| {
         got.iter().any(|(_, doc)| landed_in(doc, id))
     });
-    assert!(after.iter().any(|(_, doc)| landed_in(doc, id)), "{after:?}");
+    assert!(
+        ticking
+            .iter()
+            .chain(&after)
+            .any(|(_, doc)| landed_in(doc, id)),
+        "{after:?}"
+    );
     assert!(
         after.iter().all(|(f, _)| *f == folder(b.dir())),
-        "an overview for the first folder: {after:?}"
+        "an overview of the first folder: {after:?}"
     );
-}
 
-/// resident-subscriptions, "A folder added later" (design D6): a
-/// subscription serves one folder, the client adds a second on the same
-/// connection, and gets the second folder's overview.
-#[test]
-fn a_folder_added_later_shares_the_connection() {
-    let d = OnDisk::new("host-sub-later", POLICY);
-    let b = d.another("host-sub-later-b", POLICY);
-    let mut sub = subscribed(&d, &[d.repo.dir()], FollowKind::Watch);
-    let first = documents_until(&mut sub, 30, |got| !got.is_empty());
-    assert_eq!(first[0].0, folder(d.repo.dir()));
     sub.say(&sluice::host_process::protocol::SubscriptionAsk::Add {
-        add: folder(b.dir()),
+        add: folder(c.dir()),
         kind: None,
     })
     .unwrap();
     let later = documents_until(&mut sub, 30, |got| {
-        got.iter().any(|(f, _)| *f == folder(b.dir()))
+        got.iter().any(|(f, _)| *f == folder(c.dir()))
     });
     assert!(
         later
             .iter()
-            .any(|(f, doc)| *f == folder(b.dir()) && doc["schema"] == "sluice/overview@1"),
+            .any(|(f, doc)| *f == folder(c.dir()) && doc["schema"] == "sluice/overview@1"),
         "{later:?}"
     );
-}
 
-/// resident-subscriptions, "A folder removed" (design D6): a subscription
-/// serves two folders, the client removes the first, and a submission
-/// then lands in the first folder's repository: the client gets no
-/// overview for the first folder.
-#[test]
-fn a_removed_folder_gets_no_overview() {
-    let d = OnDisk::new("host-sub-removed", POLICY);
-    let b = d.another("host-sub-removed-b", POLICY);
-    let mine = d.session("mine");
-    let mut sub = subscribed(&d, &[d.repo.dir(), b.dir()], FollowKind::Watch);
-    documents_until(&mut sub, 30, |got| got.len() >= 2);
     sub.say(&sluice::host_process::protocol::SubscriptionAsk::Remove {
         remove: folder(d.repo.dir()),
     })
     .unwrap();
-    let id = queued_live(&d, &mine);
+    let mine = d.session("mine");
+    let landed = queued_live(&d, &mine);
     within(60, "the submission lands", || {
-        state(&d, d.repo.dir(), id) == "landed"
+        state(&d, d.repo.dir(), landed) == "landed"
     });
     let after = documents_until(&mut sub, 3, |_| false);
     assert!(
         after.iter().all(|(f, _)| *f != folder(d.repo.dir())),
         "{after:?}"
     );
-}
 
-/// resident-subscriptions, "A repository removed" (design D6): a
-/// subscription serves two folders, and the first folder's repository is
-/// removed: the client gets an overview for the first folder that says it
-/// is gone, and later overviews for the second.
-#[test]
-fn a_gone_repository_leaves_the_subscription() {
-    let d = OnDisk::new("host-sub-gone", POLICY);
-    let b = d.another("host-sub-gone-a", POLICY);
-    let theirs = session_of(&d, &b, "theirs");
+    // The second repository goes in one step, while work is in play in it.
     let gone = folder(b.dir());
-    let mut sub = subscribed(&d, &[b.dir(), d.repo.dir()], FollowKind::Watch);
-    documents_until(&mut sub, 30, |got| got.len() >= 2);
-    // Its worker holds the repository while work is in play, and finds it
-    // gone at its next pass.
-    queued_live(&d, &theirs);
-    // The repository goes in one step: its round writes in `.git` while
-    // the round goes, so a removal that walks `.git` can meet a folder that
-    // the round wrote in after the walk emptied it.
-    let removed = support::Scratch::new("host-sub-gone-removed");
+    let more = session_of(&d, &b, "more");
+    queued_live(&d, &more);
+    let removed = support::Scratch::new("host-sub-removed");
     std::fs::rename(b.dir().join(".git"), removed.path().join("git")).unwrap();
     let said = documents_until(&mut sub, 60, |got| {
         got.iter().any(|(f, doc)| *f == gone && doc["gone"] == true)
@@ -4556,17 +4526,16 @@ fn a_gone_repository_leaves_the_subscription() {
         .iter()
         .find(|(f, doc)| *f == gone && doc["gone"] == true)
         .unwrap_or_else(|| panic!("no gone document: {said:?}\n{}", host_logs(&d)));
-    // It says so in the words its read failed with.
     assert!(doc["error"]["message"].is_string(), "{doc}");
-    let mine = d.session("mine");
-    let id = queued_live(&d, &mine);
+    let ours = session_of(&d, &c, "ours");
+    let id = queued_live(&d, &ours);
     let later = documents_until(&mut sub, 60, |got| {
         got.iter().any(|(_, doc)| landed_in(doc, id))
     });
     assert!(
         later
             .iter()
-            .any(|(f, doc)| *f == folder(d.repo.dir()) && landed_in(doc, id)),
+            .any(|(f, doc)| *f == folder(c.dir()) && landed_in(doc, id)),
         "{later:?}"
     );
     assert!(later.iter().all(|(f, _)| *f != gone), "{later:?}");
