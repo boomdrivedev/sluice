@@ -3977,84 +3977,6 @@ fn host_git_running(d: &OnDisk, pid: u32) -> bool {
         .unwrap_or(false)
 }
 
-/// resident-reads, "A status in text and in JSON" (design D1): `sluice
-/// status main` and its `--json` show `main`'s queue with `#4` as
-/// `sluice host` answers it; the status process starts no git but the
-/// branch protection's look at its hook.
-#[test]
-fn a_status_is_answered_by_sluice_host() {
-    let (_origin, d) = on_origin("host-answers-status");
-    let id = queued(&d, "mine");
-    let mut sub = held(&d);
-    settled(&mut sub);
-    for json in [false, true] {
-        let before = d.git.count();
-        let mut c = d.command(d.repo.dir());
-        c.env("SLUICE_ROUND_SLEEP", "record")
-            .args(["status", "main"]);
-        if json {
-            c.arg("--json");
-        }
-        let child = c
-            .stdout(std::process::Stdio::piped())
-            .stderr(std::process::Stdio::piped())
-            .spawn()
-            .unwrap();
-        let pid = child.id();
-        let out = child.wait_with_output().unwrap();
-        assert!(out.status.success(), "{}", text(&out));
-        let shown = String::from_utf8_lossy(&out.stdout);
-        match json {
-            true => {
-                let doc: serde_json::Value = serde_json::from_str(&shown).unwrap();
-                assert_eq!(doc["branch"], "main", "{doc}");
-                assert!(
-                    doc["submissions"]
-                        .as_array()
-                        .is_some_and(|s| s.iter().any(|x| x["id"].as_u64() == Some(id))),
-                    "{doc}"
-                );
-            }
-            false => assert!(shown.contains(&format!("#{id}")), "{shown}"),
-        }
-        let own: Vec<String> = d.git.parented()[before..]
-            .iter()
-            .filter(|(p, args)| {
-                *p == pid && !args.contains(" rev-parse ") && !args.contains(" worktree list")
-            })
-            .map(|(_, a)| a.clone())
-            .collect();
-        assert!(own.is_empty(), "the status ran git: {own:?}");
-    }
-}
-
-/// resident-reads, "A status with no git" (design D2): with `sluice host`
-/// running, `sluice status main --json` with no git on its path shows the
-/// queue and exits 0.
-#[test]
-fn a_status_runs_with_no_git() {
-    let (_origin, d) = on_origin("host-status-no-git");
-    let id = queued(&d, "mine");
-    let mut sub = held(&d);
-    settled(&mut sub);
-    let empty = support::Scratch::new("host-status-no-git-path");
-    let mut c = d.command(d.repo.dir());
-    let out = no_git(&mut c, &empty)
-        .env("SLUICE_ROUND_SLEEP", "record")
-        .args(["status", "main", "--json"])
-        .output()
-        .unwrap();
-    assert!(out.status.success(), "{}", text(&out));
-    let doc: serde_json::Value =
-        serde_json::from_slice(&out.stdout).unwrap_or_else(|_| panic!("{}", text(&out)));
-    assert!(
-        doc["submissions"]
-            .as_array()
-            .is_some_and(|s| s.iter().any(|x| x["id"].as_u64() == Some(id))),
-        "{doc}"
-    );
-}
-
 /// resident-reads, "A folder in no repository" (design D2): a status in a
 /// folder that is in no repository prints what a status printed there
 /// before, `sluice: opening the repository at <folder>: ...`, and exits 3;
@@ -4088,27 +4010,6 @@ fn a_status_in_no_repository_says_as_before() {
         serde_json::from_slice(&out.stdout).unwrap_or_else(|_| panic!("{}", text(&out)));
     assert_eq!(doc["error"]["kind"], "internal", "{doc}");
     stop_host(&d);
-}
-
-/// resident-reads, "The home view" (design D1, D2): `sluice` with no
-/// command in a worktree that submitted `#n` shows it, as `sluice host`
-/// answers it, with no git on its path.
-#[test]
-fn the_home_view_is_answered_by_sluice_host() {
-    let (_origin, d) = on_origin("host-answers-home");
-    let dir = d.session("mine");
-    let id = queued_from(&d, &dir);
-    let mut sub = held(&d);
-    settled(&mut sub);
-    let empty = support::Scratch::new("host-answers-home-path");
-    let mut c = d.command(&dir);
-    let out = no_git(&mut c, &empty)
-        .env("SLUICE_ROUND_SLEEP", "record")
-        .output()
-        .unwrap();
-    assert!(out.status.success(), "{}", text(&out));
-    let shown = String::from_utf8_lossy(&out.stdout);
-    assert!(shown.contains(&format!("#{id}")), "{shown}");
 }
 
 /// design D3: a status while a step of the repository is long under way
@@ -4803,197 +4704,6 @@ fn sluice_run_prints_the_passes_of_its_subscription() {
     let _ = id;
 }
 
-/// A client of sluice 0.97.0 says `hello` on `d`'s socket and asks
-/// `line`: the answer.
-fn older_asks(d: &OnDisk, line: &str) -> serde_json::Value {
-    let socket = d.client(d.repo.dir()).paths().socket.clone();
-    let stream = UnixStream::connect(&socket).unwrap();
-    let mut reader = BufReader::new(stream.try_clone().unwrap());
-    let mut writer = stream;
-    writeln!(writer, "{{\"hello\":\"0.97.0\"}}").unwrap();
-    let mut named = String::new();
-    reader.read_line(&mut named).unwrap();
-    writeln!(writer, "{line}").unwrap();
-    let mut answer = String::new();
-    reader.read_line(&mut answer).unwrap();
-    serde_json::from_str(&answer).unwrap_or_else(|_| panic!("{answer}"))
-}
-
-/// resident-workers, "An older hold" (the change
-/// `sluice-host-runs-a-sessions-checks`, design D5): a client that says
-/// `hello` as the version of `sluice host` and asks `hold` gets the error
-/// that names both versions and says to run sluice of that version.
-#[test]
-fn an_older_hold_gets_the_host_processs_version() {
-    let d = OnDisk::new("host-older-hold", POLICY);
-    let mut sub = held(&d);
-    settled(&mut sub);
-    let repository = d.repository(d.repo.dir());
-    let socket = d.client(d.repo.dir()).paths().socket.clone();
-    let stream = UnixStream::connect(&socket).unwrap();
-    let mut reader = BufReader::new(stream.try_clone().unwrap());
-    let mut writer = stream;
-    writeln!(writer, "{{\"hello\":\"{}\"}}", sluice::VERSION).unwrap();
-    let mut named = String::new();
-    reader.read_line(&mut named).unwrap();
-    let hold = serde_json::json!({
-        "ask": "hold",
-        "kind": "session",
-        "repository": repository,
-        "place": "unit/a",
-        "branch": "main",
-    });
-    writeln!(writer, "{hold}").unwrap();
-    let mut answer = String::new();
-    reader.read_line(&mut answer).unwrap();
-    let answer: serde_json::Value =
-        serde_json::from_str(&answer).unwrap_or_else(|_| panic!("{answer}"));
-    let words = answer["error"]
-        .as_str()
-        .unwrap_or_else(|| panic!("{answer}"));
-    assert!(
-        words.starts_with(&format!(
-            "sluice {} asked what this host process, sluice {}, does not know: ",
-            sluice::VERSION,
-            sluice::VERSION
-        )),
-        "{words}"
-    );
-    assert!(words.contains("\"hold\""), "{words}");
-    assert!(
-        words.ends_with(&format!(". Run sluice {}.", sluice::VERSION)),
-        "{words}"
-    );
-}
-
-/// The error a client of 0.97.0 is answered, naming both versions and the
-/// sluice to run.
-fn assert_names_versions(answer: &serde_json::Value) {
-    let words = answer["error"]
-        .as_str()
-        .unwrap_or_else(|| panic!("{answer}"));
-    assert!(
-        words.starts_with("sluice 0.97.0 asked what this host process, sluice "),
-        "{words}"
-    );
-    assert!(
-        words.ends_with(&format!(". Run sluice {}.", sluice::VERSION)),
-        "{words}"
-    );
-}
-
-/// resident-reads, "An older one-shot read" (the change
-/// `sluice-host-answers-every-read`, design D9): a client that says
-/// `hello` as sluice 0.97.0 and asks `read` gets an error that names 0.97.0
-/// and the version of `sluice host`, and says to run that sluice; `sluice
-/// host` reads nothing for it.
-#[test]
-fn an_older_read_gets_the_host_processs_version() {
-    let d = OnDisk::new("host-older-read", POLICY);
-    let mut sub = held(&d);
-    settled(&mut sub);
-    let repository = d.repository(d.repo.dir());
-    let before = reads_logged(&d, "status") + reads_logged(&d, "overview");
-    let answer = older_asks(
-        &d,
-        &serde_json::json!({"ask": "read", "repository": repository}).to_string(),
-    );
-    assert_names_versions(&answer);
-    assert_eq!(
-        reads_logged(&d, "status") + reads_logged(&d, "overview"),
-        before,
-        "{}",
-        host_logs(&d)
-    );
-}
-
-/// resident-reads, "An older watch" (design D9): a client of 0.97.0 that
-/// asks `follow` as a watch gets the same error, and `sluice host` writes
-/// no file under `readers/`.
-#[test]
-fn an_older_follow_gets_the_host_processs_version() {
-    let d = OnDisk::new("host-older-follow", POLICY);
-    let mut sub = held(&d);
-    settled(&mut sub);
-    let repository = d.repository(d.repo.dir());
-    let answer = older_asks(
-        &d,
-        &serde_json::json!({"ask": "follow", "repository": repository, "kind": "watch"})
-            .to_string(),
-    );
-    assert_names_versions(&answer);
-    std::thread::sleep(Duration::from_secs(1));
-    assert!(
-        !d.state.path().join("sluice/readers").exists(),
-        "a file under readers/"
-    );
-}
-
-/// overview-reader, "Landed while followed" (the change
-/// `sluice-host-answers-every-read`, design D8): `sluice wait <n>` with no
-/// git on its path follows `sluice host`, prints `passed · landed as
-/// <rev>` once `sluice host` answers its record landed, and exits 0: it
-/// read no file of the records.
-#[test]
-fn a_wait_landed_while_followed_reads_no_record() {
-    let d = OnDisk::new("host-wait-landed", POLICY);
-    let dir = d.session("a");
-    let mut sub = subscribed(&d, &[d.repo.dir()], FollowKind::Watch);
-    documents_until(&mut sub, 30, |got| !got.is_empty());
-    let id = queued_live(&d, &dir);
-    let empty = support::Scratch::new("host-wait-landed-path");
-    let out = d
-        .command(&dir)
-        .env("PATH", empty.path())
-        .args(["wait", &id.to_string()])
-        .output()
-        .unwrap();
-    assert_eq!(out.status.code(), Some(0), "{}", text(&out));
-    let landed = d.repo.rev("main");
-    assert!(
-        String::from_utf8_lossy(&out.stdout)
-            .contains(&format!("passed · landed as {}", &landed[..7])),
-        "{}",
-        text(&out)
-    );
-}
-
-/// overview-reader, "Withdrawn while followed" (design D8): a wait with no
-/// git on its path follows `sluice host`; its submission is withdrawn, and
-/// the wait exits 4, as a wait that read the records did.
-#[test]
-fn a_wait_withdrawn_while_followed_reads_no_record() {
-    let marks = support::Scratch::new("host-wait-withdrawn-marks");
-    let go = marks.path().join("go");
-    let policy = format!(
-        "[tests]\nrunner = \"command\"\ncommand = \"i=0; while [ ! -f '{}' ] && [ $i -lt 600 ]; do sleep 0.1; i=$((i+1)); done\"\n\n[branches.main]\ntimeout = \"1m\"\n",
-        go.display()
-    );
-    let d = OnDisk::new("host-wait-withdrawn", &policy);
-    let dir = d.session("a");
-    let mut sub = subscribed(&d, &[d.repo.dir()], FollowKind::Watch);
-    documents_until(&mut sub, 30, |got| !got.is_empty());
-    let id = queued_live(&d, &dir);
-    let empty = support::Scratch::new("host-wait-withdrawn-path");
-    let wait = d
-        .command(&dir)
-        .env("PATH", empty.path())
-        .args(["wait", &id.to_string(), "--json"])
-        .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::piped())
-        .spawn()
-        .unwrap();
-    std::thread::sleep(Duration::from_secs(2));
-    let out = d.sluice(&["withdraw", &id.to_string()]);
-    assert!(out.status.success(), "{}", text(&out));
-    let out = wait.wait_with_output().unwrap();
-    std::fs::write(&go, "").unwrap();
-    assert_eq!(out.status.code(), Some(sluice::WITHDRAWN), "{}", text(&out));
-    let doc: serde_json::Value =
-        serde_json::from_slice(&out.stdout).unwrap_or_else(|_| panic!("{}", text(&out)));
-    assert_eq!(doc["state"], "withdrawn", "{doc}");
-}
-
 /// Each git that the process `pid` started after `before` that is no part
 /// of the branch protection's upkeep of its hook, `protect.rs`'s `git`:
 /// what a change command ran for its change.
@@ -5020,57 +4730,93 @@ fn run_child(c: &mut std::process::Command) -> (std::process::Output, u32) {
     (child.wait_with_output().unwrap(), pid)
 }
 
-/// resident-changes, "A withdrawal" (the change
-/// `sluice-host-makes-each-change`, design D1): with `sluice host`
-/// running, `sluice withdraw <n> --json` prints the document a withdrawal
-/// printed, exits 0, and `sluice status <n>` says it is withdrawn; the log
-/// of `sluice host` names the withdrawal, and the command ran no git but
-/// the upkeep of the branch protection's hook.
+/// Each command a session runs reaches `sluice host`, which reads and
+/// changes the records for it; the command runs no git but the upkeep of
+/// the branch protection's hook, and works with no git on its path (the
+/// changes `sluice-host-answers-every-read`, design D1, D2, D8, and
+/// `sluice-host-makes-each-change`, design D1, D2, D5).
+///
+/// resident-changes, "A submit names its agent" and host-process, "A
+/// submit with no git": a submit from a worktree names the worktree's
+/// head and the agent its command names, whatever `sluice host` was
+/// started with. resident-reads, "A status in text and in JSON", "A
+/// status with no git" and "The home view": a status and the home view
+/// show the queue as `sluice host` answers. resident-changes, "An amend
+/// and a confirmation", "A withdrawal" and "A step from a folder", and
+/// overview-reader, "Withdrawn while followed" and "Landed while
+/// followed": an amend, a withdrawal, a step, a wait and a confirmation
+/// each print what they printed, and the records hold each change.
 #[test]
-fn a_withdrawal_runs_no_git() {
-    let slow = "[tests]\nrunner = \"command\"\ncommand = \"sleep 30\"\n\n[branches.main]\ntimeout = \"5m\"\n";
-    let d = OnDisk::new("host-withdraw-no-git", slow);
-    let id = queued(&d, "a");
+fn a_sessions_commands_reach_sluice_host_and_run_no_git() {
+    let marks = support::Scratch::new("host-commands-marks");
+    let go = marks.path().join("go");
+    let policy = format!(
+        "[tests]\nrunner = \"command\"\ncommand = \"i=0; while [ ! -f '{}' ] && [ $i -lt 600 ]; do sleep 0.1; i=$((i+1)); done\"\n\n[branches.main]\ntimeout = \"1m\"\n",
+        go.display()
+    );
+    let d = OnDisk::new("host-commands", &policy);
+    let empty = support::Scratch::new("host-commands-path");
+    let dir = d.session("a");
+    let mut sub = held(&d);
+    settled(&mut sub);
+
+    // A submit, naming its agent.
     let before = d.git.count();
-    let mut c = d.command(d.repo.dir());
+    let mut c = d.command(&dir);
     c.env("SLUICE_ROUND_SLEEP", "record")
-        .args(["withdraw", &id.to_string(), "--json"]);
+        .env("SLUICE_AGENT", "feat")
+        .args(["submit", "main", "--no-wait", "--json"]);
     let (out, pid) = run_child(&mut c);
     assert_eq!(out.status.code(), Some(0), "{}", text(&out));
     let doc: serde_json::Value =
         serde_json::from_slice(&out.stdout).unwrap_or_else(|_| panic!("{}", text(&out)));
-    assert_eq!(doc, serde_json::json!({ "id": id, "state": "withdrawn" }));
-    assert_eq!(state(&d, d.repo.dir(), id), "withdrawn");
-    let logs = host_logs(&d);
-    assert!(
-        logs.lines()
-            .any(|l| l.contains(": change {") && l.contains("\"ask\":\"withdraw\"")),
-        "{logs}"
-    );
+    let id = doc["id"].as_u64().expect("a number");
     let own = own_git(&d, pid, before);
-    assert!(own.is_empty(), "the withdrawal ran git: {own:?}");
-    stop_host(&d);
-}
+    assert!(own.is_empty(), "the submit ran git: {own:?}");
+    let out = d.sluice(&["status", &id.to_string(), "--json"]);
+    let doc: serde_json::Value =
+        serde_json::from_slice(&out.stdout).unwrap_or_else(|_| panic!("{}", text(&out)));
+    assert_eq!(doc["head"], d.repo.rev("unit/a").as_str(), "{doc}");
+    assert_eq!(doc["from"]["agent"], "feat", "{doc}");
 
-/// resident-changes, "An amend and a confirmation" (design D1): with
-/// `sluice host` running, `sluice amend` and `sluice confirm` each print
-/// what they printed and exit 0, the records hold the change, and neither
-/// ran git but the upkeep of the branch protection's hook.
-#[test]
-fn an_amend_and_a_confirmation_run_no_git() {
-    let d = OnDisk::new("host-amend-confirm", POLICY);
-    let dir = d.session("a");
-    let out = d
-        .command(&dir)
+    // A status, in text and in JSON, and the home view, with no git.
+    for json in [false, true] {
+        let mut c = d.command(d.repo.dir());
+        no_git(&mut c, &empty)
+            .env("SLUICE_ROUND_SLEEP", "record")
+            .args(["status", "main"]);
+        if json {
+            c.arg("--json");
+        }
+        let out = c.output().unwrap();
+        assert!(out.status.success(), "{}", text(&out));
+        let shown = String::from_utf8_lossy(&out.stdout);
+        match json {
+            true => {
+                let doc: serde_json::Value = serde_json::from_str(&shown).unwrap();
+                assert!(
+                    doc["submissions"]
+                        .as_array()
+                        .is_some_and(|s| s.iter().any(|x| x["id"].as_u64() == Some(id))),
+                    "{doc}"
+                );
+            }
+            false => assert!(shown.contains(&format!("#{id}")), "{shown}"),
+        }
+    }
+    let mut c = d.command(&dir);
+    let out = no_git(&mut c, &empty)
         .env("SLUICE_ROUND_SLEEP", "record")
-        .args(["submit", "main"])
         .output()
         .unwrap();
     assert!(out.status.success(), "{}", text(&out));
-    let landed = 1;
-    // A second submission, queued: the tests' host process passes only
-    // when asked, so it stays queued to amend.
-    let id = queued(&d, "b");
+    assert!(
+        String::from_utf8_lossy(&out.stdout).contains(&format!("#{id}")),
+        "{}",
+        text(&out)
+    );
+
+    // An amend.
     let before = d.git.count();
     let mut c = d.command(d.repo.dir());
     c.env("SLUICE_ROUND_SLEEP", "record").args([
@@ -5087,16 +4833,84 @@ fn an_amend_and_a_confirmation_run_no_git() {
         String::from_utf8_lossy(&out.stdout),
         format!("amended #{id}\n")
     );
+    let own = own_git(&d, pid, before);
+    assert!(own.is_empty(), "the amend ran git: {own:?}");
     let out = d.sluice(&["status", &id.to_string(), "--json"]);
     let doc: serde_json::Value =
         serde_json::from_slice(&out.stdout).unwrap_or_else(|_| panic!("{}", text(&out)));
     assert_eq!(doc["priority"], 5, "{doc}");
+
+    // A withdrawal, while a wait with no git follows the submission.
+    let b = d.session("b");
+    let withdrawn = queued_from(&d, &b);
+    let wait = d
+        .command(&b)
+        .env("PATH", empty.path())
+        .args(["wait", &withdrawn.to_string(), "--json"])
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .unwrap();
+    std::thread::sleep(Duration::from_secs(2));
+    let before = d.git.count();
+    let mut c = d.command(d.repo.dir());
+    c.env("SLUICE_ROUND_SLEEP", "record")
+        .args(["withdraw", &withdrawn.to_string(), "--json"]);
+    let (out, pid) = run_child(&mut c);
+    assert_eq!(out.status.code(), Some(0), "{}", text(&out));
+    let doc: serde_json::Value =
+        serde_json::from_slice(&out.stdout).unwrap_or_else(|_| panic!("{}", text(&out)));
+    assert_eq!(
+        doc,
+        serde_json::json!({ "id": withdrawn, "state": "withdrawn" })
+    );
     let own = own_git(&d, pid, before);
-    assert!(own.is_empty(), "the amend ran git: {own:?}");
+    assert!(own.is_empty(), "the withdrawal ran git: {own:?}");
+    let logs = host_logs(&d);
+    assert!(
+        logs.lines()
+            .any(|l| l.contains(": change {") && l.contains("\"ask\":\"withdraw\"")),
+        "{logs}"
+    );
+    let out = wait.wait_with_output().unwrap();
+    assert_eq!(out.status.code(), Some(sluice::WITHDRAWN), "{}", text(&out));
+    let doc: serde_json::Value =
+        serde_json::from_slice(&out.stdout).unwrap_or_else(|_| panic!("{}", text(&out)));
+    assert_eq!(doc["state"], "withdrawn", "{doc}");
+
+    // A step from the worktree, then a wait with no git to the landing.
+    std::fs::write(&go, "").unwrap();
     let before = d.git.count();
     let mut c = d.command(&dir);
     c.env("SLUICE_ROUND_SLEEP", "record")
-        .args(["confirm", &format!("{landed}:landed"), "--json"]);
+        .args(["step", "main", "--json"]);
+    let (out, pid) = run_child(&mut c);
+    assert_eq!(out.status.code(), Some(0), "{}", text(&out));
+    let doc: serde_json::Value =
+        serde_json::from_slice(&out.stdout).unwrap_or_else(|_| panic!("{}", text(&out)));
+    assert_eq!(doc["branch"], "main", "{doc}");
+    let own = own_git(&d, pid, before);
+    assert!(own.is_empty(), "the step ran git: {own:?}");
+    let out = d
+        .command(&dir)
+        .env("PATH", empty.path())
+        .args(["wait", &id.to_string()])
+        .output()
+        .unwrap();
+    assert_eq!(out.status.code(), Some(0), "{}", text(&out));
+    let landed = d.repo.rev("main");
+    assert!(
+        String::from_utf8_lossy(&out.stdout)
+            .contains(&format!("passed · landed as {}", &landed[..7])),
+        "{}",
+        text(&out)
+    );
+
+    // A confirmation, after which the inbox holds nothing.
+    let before = d.git.count();
+    let mut c = d.command(&dir);
+    c.env("SLUICE_ROUND_SLEEP", "record")
+        .args(["confirm", &format!("{id}:landed"), "--json"]);
     let (out, pid) = run_child(&mut c);
     assert_eq!(out.status.code(), Some(0), "{}", text(&out));
     let doc: serde_json::Value =
@@ -5116,6 +4930,7 @@ fn an_amend_and_a_confirmation_run_no_git() {
     let doc: serde_json::Value =
         serde_json::from_slice(&out.stdout).unwrap_or_else(|_| panic!("{}", text(&out)));
     assert_eq!(doc["outcomes"], serde_json::json!([]), "{doc}");
+    drop(sub);
     stop_host(&d);
 }
 
@@ -5142,110 +4957,6 @@ fn a_change_with_no_host_process_that_answers_exits_3() {
     let socket = d.client(d.repo.dir()).paths().socket.clone();
     let _ = std::fs::remove_file(&socket);
     assert_ne!(state(&d, d.repo.dir(), id), "withdrawn");
-    stop_host(&d);
-}
-
-/// host-process, "A submit with no git" (design D2): with `sluice host`
-/// running, `sluice submit main --no-wait` in a worktree exits 0 with the
-/// submission's number, which names the worktree's head, and ran no git
-/// but the upkeep of the branch protection's hook.
-#[test]
-fn a_submit_runs_no_git_and_names_the_worktrees_head() {
-    let d = OnDisk::new("host-submit-no-git", POLICY);
-    let dir = d.session("a");
-    let mut sub = held(&d);
-    settled(&mut sub);
-    let before = d.git.count();
-    let mut c = d.command(&dir);
-    c.env("SLUICE_ROUND_SLEEP", "record")
-        .args(["submit", "main", "--no-wait", "--json"]);
-    let (out, pid) = run_child(&mut c);
-    assert_eq!(out.status.code(), Some(0), "{}", text(&out));
-    let doc: serde_json::Value =
-        serde_json::from_slice(&out.stdout).unwrap_or_else(|_| panic!("{}", text(&out)));
-    let id = doc["id"].as_u64().expect("a number");
-    let own = own_git(&d, pid, before);
-    assert!(own.is_empty(), "the submit ran git: {own:?}");
-    let head = d.repo.rev("unit/a");
-    let out = d.sluice(&["status", &id.to_string(), "--json"]);
-    let doc: serde_json::Value =
-        serde_json::from_slice(&out.stdout).unwrap_or_else(|_| panic!("{}", text(&out)));
-    assert_eq!(doc["head"], head.as_str(), "{doc}");
-    drop(sub);
-    stop_host(&d);
-}
-
-/// resident-changes, "A submit names its agent" (design D1): `sluice
-/// host`, started by a command with no `SLUICE_AGENT`, writes the
-/// submission of `sluice submit main --no-wait` run with `SLUICE_AGENT=feat`
-/// naming the agent `feat`.
-#[test]
-fn a_submit_names_its_agent() {
-    let d = OnDisk::new("host-submit-agent", POLICY);
-    let dir = d.session("a");
-    let mut sub = held(&d);
-    settled(&mut sub);
-    let out = d
-        .command(&dir)
-        .env("SLUICE_ROUND_SLEEP", "record")
-        .env("SLUICE_AGENT", "feat")
-        .args(["submit", "main", "--no-wait", "--json"])
-        .output()
-        .unwrap();
-    assert!(out.status.success(), "{}", text(&out));
-    let doc: serde_json::Value =
-        serde_json::from_slice(&out.stdout).unwrap_or_else(|_| panic!("{}", text(&out)));
-    let id = doc["id"].as_u64().expect("a number");
-    let out = d.sluice(&["status", &id.to_string(), "--json"]);
-    let doc: serde_json::Value =
-        serde_json::from_slice(&out.stdout).unwrap_or_else(|_| panic!("{}", text(&out)));
-    assert_eq!(doc["from"]["agent"], "feat", "{doc}");
-    drop(sub);
-    stop_host(&d);
-}
-
-/// resident-changes, "An older step" (the change
-/// `sluice-host-makes-each-change`, design D5): a client that says `hello`
-/// as sluice 0.97.0 and asks `step` naming a repository and no folder gets
-/// the error that names both versions and says to run sluice of that
-/// version.
-#[test]
-fn an_older_step_gets_the_host_processs_version() {
-    let d = OnDisk::new("host-older-step", POLICY);
-    let mut sub = held(&d);
-    settled(&mut sub);
-    let repository = d.repository(d.repo.dir());
-    let answer = older_asks(
-        &d,
-        &serde_json::json!({"ask": "step", "repository": repository, "branch": "main"}).to_string(),
-    );
-    assert_names_versions(&answer);
-}
-
-/// resident-changes, "A step from a folder" (design D5): with `#n` queued
-/// on `main`, `sluice step main` in a worktree prints the round as it
-/// printed it, exits 0, and ran no git but the upkeep of the branch
-/// protection's hook.
-#[test]
-fn a_step_from_a_folder_runs_no_git() {
-    let d = OnDisk::new("host-step-folder", POLICY);
-    let dir = d.session("a");
-    let id = queued_from(&d, &dir);
-    let before = d.git.count();
-    let mut c = d.command(&dir);
-    c.env("SLUICE_ROUND_SLEEP", "record")
-        .args(["step", "main", "--json"]);
-    let (out, pid) = run_child(&mut c);
-    assert_eq!(out.status.code(), Some(0), "{}", text(&out));
-    let doc: serde_json::Value =
-        serde_json::from_slice(&out.stdout).unwrap_or_else(|_| panic!("{}", text(&out)));
-    assert_eq!(doc["branch"], "main", "{doc}");
-    let own = own_git(&d, pid, before);
-    assert!(own.is_empty(), "the step ran git: {own:?}");
-    within(60, "the submission lands", || {
-        let st = state(&d, d.repo.dir(), id);
-        st == "landed" || st == "testing"
-    });
     stop_host(&d);
 }
 
