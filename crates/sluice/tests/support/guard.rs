@@ -12,8 +12,19 @@
 //! of the test, and waits for it to exit. Then it lists the test's
 //! processes again. It ends each process that it found, and the test fails
 //! where it found any.
+//!
+//! A test process that a signal stops runs no drop: cargo-nextest sends
+//! `SIGINT` to each test that runs when its run is interrupted, and
+//! `SIGTERM` to a test past its time. So the guard also stops each host
+//! process of the test's live folders when the test process gets
+//! `SIGINT`, `SIGTERM` or `SIGHUP`. Then the signal ends the test process
+//! as it would have (the change `a-test-stops-the-hosts-it-starts`,
+//! design D1).
 
+use std::os::fd::{AsRawFd, IntoRawFd, OwnedFd};
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicI32, Ordering};
+use std::sync::{Mutex, Once};
 use std::time::{Duration, Instant};
 
 use sysinfo::{Pid, ProcessRefreshKind, ProcessesToUpdate, System, UpdateKind};
@@ -129,6 +140,102 @@ impl Guard {
             names.join("\n  ")
         );
     }
+}
+
+/// The folders of the tests of this process that live now: each scratch
+/// folder, from when it is made until its drop.
+static LIVE: Mutex<Vec<PathBuf>> = Mutex::new(Vec::new());
+
+/// The write end of the pipe by which the signal handler wakes the thread
+/// that stops the test's host processes.
+static WAKE: AtomicI32 = AtomicI32::new(-1);
+
+/// `folder` is a live folder of a test of this process until [`let_go`]:
+/// a signal that stops the process stops its host processes first.
+pub fn hold(folder: &Path) {
+    stop_on_signal();
+    live().push(folder.to_path_buf());
+}
+
+/// `folder` is no longer a live folder of a test of this process.
+pub fn let_go(folder: &Path) {
+    live().retain(|f| f != folder);
+}
+
+fn live() -> std::sync::MutexGuard<'static, Vec<PathBuf>> {
+    LIVE.lock().unwrap_or_else(|e| e.into_inner())
+}
+
+/// The signals by which a test runner stops a test process.
+const STOPS: [nix::sys::signal::Signal; 3] = [
+    nix::sys::signal::Signal::SIGINT,
+    nix::sys::signal::Signal::SIGTERM,
+    nix::sys::signal::Signal::SIGHUP,
+];
+
+/// Once in each test process: a thread that waits on a pipe, and a handler
+/// of each signal in [`STOPS`] that writes the signal's number to it. The
+/// thread sends `SIGTERM` to each host process of the live folders, and
+/// raises the signal again with its default action. It does not wait for
+/// the hosts to exit: the test's body would go on meanwhile. A host process
+/// stops by itself on `SIGTERM` and ends its workers. The test's other
+/// processes are in its process group, which the runner signals too.
+fn stop_on_signal() {
+    static ONCE: Once = Once::new();
+    ONCE.call_once(|| {
+        let (read, write) = nix::unistd::pipe().expect("a pipe for the test's stop");
+        for fd in [read.as_raw_fd(), write.as_raw_fd()] {
+            // SAFETY: fcntl reads and sets the flags of a descriptor this
+            // process holds.
+            unsafe { libc::fcntl(fd, libc::F_SETFD, libc::FD_CLOEXEC) };
+        }
+        WAKE.store(write.into_raw_fd(), Ordering::SeqCst);
+        std::thread::Builder::new()
+            .name("the test's stop".into())
+            .spawn(move || stop_when_woken(read))
+            .expect("the thread of the test's stop");
+        use nix::sys::signal::{sigaction, SaFlags, SigAction, SigHandler, SigSet};
+        let action = SigAction::new(
+            SigHandler::Handler(wake),
+            SaFlags::SA_RESTART,
+            SigSet::empty(),
+        );
+        for s in STOPS {
+            // SAFETY: the handler only writes one byte to a pipe.
+            unsafe { sigaction(s, &action) }.expect("a handler of the test's stop");
+        }
+    });
+}
+
+extern "C" fn wake(signal: libc::c_int) {
+    let byte = signal as u8;
+    // SAFETY: write is safe to call in a signal handler, and reads one
+    // byte of this frame.
+    unsafe {
+        libc::write(WAKE.load(Ordering::SeqCst), (&byte as *const u8).cast(), 1);
+    }
+}
+
+fn stop_when_woken(read: OwnedFd) {
+    let mut byte = [0u8; 1];
+    loop {
+        match nix::unistd::read(&read, &mut byte) {
+            Ok(1) => break,
+            Err(nix::errno::Errno::EINTR) => continue,
+            _ => return,
+        }
+    }
+    let folders = live().clone();
+    for host in find(&folders).iter().filter(|p| p.host) {
+        signal(host.pid, libc::SIGTERM);
+    }
+    let signal = nix::sys::signal::Signal::try_from(byte[0] as libc::c_int)
+        .unwrap_or(nix::sys::signal::Signal::SIGTERM);
+    // SAFETY: the default action of a signal that ends the process.
+    unsafe {
+        let _ = nix::sys::signal::signal(signal, nix::sys::signal::SigHandler::SigDfl);
+    }
+    let _ = nix::sys::signal::raise(signal);
 }
 
 /// A folder as the system names it: a process's working folder is read

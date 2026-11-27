@@ -1097,6 +1097,13 @@ impl Scheduler {
         locked(&self.tasks.0.refused).contains_key(&self.repository)
     }
 
+    /// Whether a worker holds the repository, or binds it now: the host
+    /// process's look and a file event read neither, as the worker reads
+    /// it (D14; `an_event_during_a_binding_starts_no_reading_where_passes_are_asked`).
+    fn holds_or_binds(&self) -> bool {
+        self.worker.is_some() || matches!(self.flight, Some(Flight::Bind(..)))
+    }
+
     fn watched(&self) -> bool {
         locked(&self.followers)
             .iter()
@@ -1200,8 +1207,10 @@ impl Scheduler {
             Job::Event => {
                 // While work is in play the worker passes at its tick, and
                 // where passes are taken only when asked, a worker's
-                // repository is read only at an ask (D14).
-                let held = self.worker.is_some() && (self.in_play || self.asked_only());
+                // repository is read only at an ask (D14). A worker that
+                // binds holds it so too: its binding reads it where work is
+                // in play.
+                let held = self.holds_or_binds() && (self.in_play || self.asked_only());
                 if !held && !(self.worker.is_none() && self.refused()) {
                     self.reading_due = true;
                 }
@@ -1212,7 +1221,7 @@ impl Scheduler {
                         .marks
                         .borrow()
                         .asks(Stamp::now(), self.tasks.0.idle_ask);
-                if self.worker.is_none() && !self.refused() && due {
+                if !self.holds_or_binds() && !self.refused() && due {
                     self.reading_due = true;
                 }
             }
@@ -2356,6 +2365,68 @@ mod tests {
         assert_eq!(fakes.seen.looks(&repo).len(), 3);
         assert!(asked.read(&repo, tick, within, true).await.current);
         assert_eq!(fakes.seen.looks(&repo).len(), 4);
+    }
+
+    /// 129 (design D14, D16): where passes are taken only when asked, a
+    /// file event or the host's look at its index while a worker binds the
+    /// repository starts no reading, as none starts while a worker holds
+    /// it: the repository is read only at an ask. A look that such an
+    /// event started, held up, was under way and had begun within a tick
+    /// of the last reading's end, so it counted as current, and a read
+    /// after it was answered at once from the reading before
+    /// (`a_status_beside_a_slow_look_reads_as_held_and_says_so`, #187 on
+    /// main, 2026-11-27: answered in 35 ms).
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn an_event_during_a_binding_starts_no_reading_where_passes_are_asked() {
+        type Gate = Arc<(Mutex<bool>, std::sync::Condvar)>;
+        fn wait(gate: &Gate) {
+            let (shut, opened) = &**gate;
+            let mut s = locked(shut);
+            while *s {
+                s = opened.wait(s).unwrap_or_else(|e| e.into_inner());
+            }
+        }
+        fn set(gate: &Gate, shut: bool) {
+            *locked(&gate.0) = shut;
+            gate.1.notify_all();
+        }
+        let repo = PathBuf::from("/host/binding.git");
+        let fakes = Fakes::default();
+        let binding: Gate = Arc::new((Mutex::new(true), std::sync::Condvar::new()));
+        let looks: Gate = Arc::new((Mutex::new(false), std::sync::Condvar::new()));
+        let (bind, gate) = (fakes.bind(), binding.clone());
+        let bind: Bind = Arc::new(move |r: &Path| {
+            wait(&gate);
+            bind(r)
+        });
+        let (look, gate) = (fakes.look(None), looks.clone());
+        let look: InPlay = Arc::new(move |r: &Path, asks: bool| {
+            wait(&gate);
+            look(r, asks)
+        });
+        let tasks = Tasks::new(bind, look).passes_when_asked();
+        let (tick, within) = (Duration::from_millis(300), Duration::from_secs(1));
+        let _follow = tasks.handle(&repo).follow(FollowKind::Wait);
+        let first = tasks.read(&repo, tick, within, false).await;
+        assert!(first.current, "{first:?}");
+        assert_eq!(fakes.seen.binds(&repo), 0, "the binding is held");
+
+        set(&looks, true);
+        tasks.event(&repo);
+        tasks.look(&repo);
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        let started = tasks.looking(&repo);
+        tokio::time::sleep(tick).await;
+        let began = Instant::now();
+        let second = tasks.read(&repo, tick, within, false).await;
+        let took = began.elapsed();
+        set(&looks, false);
+        set(&binding, false);
+        assert!(!started, "a look started while the worker binds");
+        assert!(
+            !second.current && took >= within,
+            "answered in {took:?}: {second:?}"
+        );
     }
 
     /// 129 (design D15, D16): a reading begun before a command told of a

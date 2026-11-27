@@ -136,6 +136,35 @@ watching() {
   done <"$FAKE/watch-pids"
 }
 
+# End every process run from the plugin copy $1, a folder this test made,
+# so each is this test's own: its watchers, found by their command line,
+# which names the copy, whether or not one holds a lease, and the
+# subshells a watcher forks, which carry its command line. A watcher ended
+# as it starts a source leaves that source's subshell for up to a second
+# (its `settle`), so it ends what it finds until none is found for a
+# moment, twenty seconds at most, SIGTERM for five seconds and SIGKILL
+# after, as tests/leaks.sh ends what a test leaves; 1 where one still
+# runs. A test that copies the plugin calls it before it passes or fails,
+# so no path leaves a watcher its ensure started, or a subshell of one, to
+# the next test (the change `a-test-stops-the-hosts-it-starts`).
+end_copy() {
+  ec_quiet=0
+  ec_n=200
+  while [ "$ec_quiet" -lt 3 ] && [ "$ec_n" -gt 0 ]; do
+    ec_pids=$(pgrep -f "$1/bin/watch.sh" 2>/dev/null || true)
+    if [ -z "$ec_pids" ]; then
+      ec_quiet=$((ec_quiet + 1))
+    else
+      ec_quiet=0
+      if [ "$ec_n" -gt 150 ]; then ec_sig=TERM; else ec_sig=KILL; fi
+      for p in $ec_pids; do kill -s "$ec_sig" "$p" 2>/dev/null; done
+    fi
+    sleep 0.1
+    ec_n=$((ec_n - 1))
+  done
+  [ "$ec_quiet" -ge 3 ]
+}
+
 # The pids of the sources a watcher started.
 sources_of() {
   cat "$S/run/$1"/*.pids 2>/dev/null | cut -f1
@@ -577,6 +606,7 @@ if needs_ps; then
   done
   rm -f "$FAKE/hold"
   kill "$b" 2>/dev/null
+  end_copy "$again" || fail "a process of the second copy still runs after 20s"
   wait 2>/dev/null
   pass
 fi
@@ -710,6 +740,7 @@ within 20 '[ "$(sed -n 3p "$S/watch.lease")" = "$again" ]' || fail "the lease is
 within 20 'grep -q "# reinstalled" "$HERDR_PLUGIN_STATE_DIR/segment/bin/segment.sh"' || fail "the segment was not copied again"
 rm -f "$FAKE/hold"
 kill "$a" 2>/dev/null
+end_copy "$again" || fail "a process of the reinstalled copy still runs after 20s"
 pass
 
 fresh 'watch: a plugin put back stops the host'"'"'s watcher'
@@ -736,6 +767,7 @@ within 15 'b=$(holder_of "$S/watch.lease") && [ -n "$b" ] && [ "$b" != "$a" ] &&
 rm -f "$again/herdr-plugin.toml"
 ends_within "$b" 10 || fail "the watcher still runs ${took}s after its plugin was removed"
 rm -f "$FAKE/hold"
+end_copy "$again" || fail "a process of the installed copy still runs after 20s"
 pass
 
 fresh 'watch: herdr gone'
