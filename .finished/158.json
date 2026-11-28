@@ -1,0 +1,27 @@
+{
+  "schema": "sluice/submission@1",
+  "id": 158,
+  "branch": "main",
+  "head": "4b617e8947f36659bb31e26b9789006683f953ea",
+  "from": {
+    "agent": "change/the-git-hook-asks-sluice-host",
+    "worktree": "pull/319",
+    "head": "change/the-git-hook-asks-sluice-host"
+  },
+  "submitted": "2026-11-24T16:55:51Z",
+  "after": [],
+  "priority": 0,
+  "attempt": 3,
+  "state": "landed",
+  "tested": {
+    "combination": "544fff747aaa89c55962cfacaf2d34a4a4eac3b6",
+    "on": "610a696b6d7393c330951340aa8af075b3241f38",
+    "submissions": [
+      158
+    ]
+  },
+  "result": "passed",
+  "landed_as": "6dd1dade7472a821ac4ca2132d9fceb7778ca63d",
+  "subject": "the git hook asks sluice host",
+  "under_test_ms": 816000
+}

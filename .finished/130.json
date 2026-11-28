@@ -1,0 +1,27 @@
+{
+  "schema": "sluice/submission@1",
+  "id": 130,
+  "branch": "main",
+  "head": "198a6112232afd36fdde990bfa4b03d7588f3c73",
+  "from": {
+    "agent": "fix/main--the-host-process-keeps-one-token-per-repository",
+    "worktree": "pull/306",
+    "head": "fix/main--the-host-process-keeps-one-token-per-repository"
+  },
+  "submitted": "2026-11-20T20:34:46Z",
+  "after": [],
+  "priority": 0,
+  "attempt": 1,
+  "state": "landed",
+  "tested": {
+    "combination": "d2ee1ec0286ca4a61c459f2a04e605fb6ec9534d",
+    "on": "035547ea416f12c70e6dc029f489641f7f8ed082",
+    "submissions": [
+      130
+    ]
+  },
+  "result": "passed",
+  "landed_as": "c2c1359caf991b2dd517e39908f12c0dadc6ccd9",
+  "subject": "the host process keeps one token per repository",
+  "under_test_ms": 1518000
+}

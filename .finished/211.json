@@ -1,0 +1,37 @@
+{
+  "schema": "sluice/submission@1",
+  "id": 211,
+  "branch": "main",
+  "head": "cfecc0c26ebc37f1f21f3f0559ebcd0fa047365b",
+  "from": {
+    "agent": "change/sluice-tests-its-logic-as-units",
+    "worktree": "pull/354",
+    "head": "change/sluice-tests-its-logic-as-units"
+  },
+  "submitted": "2026-11-27T23:36:03Z",
+  "after": [],
+  "priority": 0,
+  "attempt": 1,
+  "state": "withdrawn",
+  "tested": {
+    "combination": "6e395634c966e67988b38c2a396bb0fe284c0e72",
+    "on": "571ac20c305b992839cdac8e9f57723dab467b10",
+    "submissions": [
+      211
+    ]
+  },
+  "result": "failed",
+  "failed": [
+    {
+      "task": "cli:test",
+      "hash": "b00ef481ee52bc516957f502aac59b5364ee0519a428722a805807e1d390ef26",
+      "log": "/Users/chuck/.local/share/boomdrive/repositories/boomdrivedev/sluice/sluice.git/sluice-remote/origin/.logs/main/c100/cli:test.log"
+    }
+  ],
+  "withdrawn": {
+    "by": "resubmission",
+    "at": "2026-11-28T00:47:03Z"
+  },
+  "subject": "sluice tests its logic as units: pull request scenarios in-process, checks and pushed_refs units",
+  "under_test_ms": 532000
+}

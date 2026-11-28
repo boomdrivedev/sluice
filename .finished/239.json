@@ -1,0 +1,37 @@
+{
+  "schema": "sluice/submission@1",
+  "id": 239,
+  "branch": "main",
+  "head": "b946b4cf30afa6e7598eb41373f9a324bc16d106",
+  "from": {
+    "agent": "fix/sluice-reads-a-process-through-a-maintained-crate",
+    "worktree": "pull/378",
+    "head": "fix/sluice-reads-a-process-through-a-maintained-crate"
+  },
+  "submitted": "2026-11-28T10:51:53Z",
+  "after": [],
+  "priority": 0,
+  "attempt": 1,
+  "state": "withdrawn",
+  "tested": {
+    "combination": "c16f6733a543a77bba222d0e48b2198afade3621",
+    "on": "b2c62a9caa601bac05a9879bc7cc30a800a5eabd",
+    "submissions": [
+      239
+    ]
+  },
+  "result": "failed",
+  "failed": [
+    {
+      "task": "cli:tools",
+      "hash": "5f74281f33216d02024b4bda244ebd765d9926af116202531f0211fb140edb24",
+      "log": "/Users/chuck/.local/share/boomdrive/repositories/boomdrivedev/sluice/sluice.git/sluice-remote/origin/.logs/main/c128/cli:tools.log"
+    }
+  ],
+  "withdrawn": {
+    "by": "resubmission",
+    "at": "2026-11-28T11:10:20Z"
+  },
+  "subject": "fix/sluice-reads-a-process-through-a-maintained-crate",
+  "under_test_ms": 397000
+}

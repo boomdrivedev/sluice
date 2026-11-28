@@ -1,0 +1,27 @@
+{
+  "schema": "sluice/submission@1",
+  "id": 184,
+  "branch": "main",
+  "head": "b9be2c5bf5af53ba3edd130643df63e3884c7f18",
+  "from": {
+    "agent": "fix/each-gate-task-builds-in-its-own-target",
+    "worktree": "pull/338",
+    "head": "fix/each-gate-task-builds-in-its-own-target"
+  },
+  "submitted": "2026-11-27T07:02:10Z",
+  "after": [],
+  "priority": 0,
+  "attempt": 1,
+  "state": "landed",
+  "tested": {
+    "combination": "77c915e3b46d5264e3e4be554b86aff2d53d2f7e",
+    "on": "fca134b4d804143a1b35a4c68b697f19cc3c7467",
+    "submissions": [
+      184
+    ]
+  },
+  "result": "passed",
+  "landed_as": "7fc9ca638a5900d1a8057ae062d6f0bcc11639e5",
+  "subject": "Each gate task that builds sluice builds it in a target folder of its own",
+  "under_test_ms": 491000
+}

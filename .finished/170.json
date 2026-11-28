@@ -1,0 +1,27 @@
+{
+  "schema": "sluice/submission@1",
+  "id": 170,
+  "branch": "main",
+  "head": "35b5dafc1b312b984ad2cfa816485c3111ca0e79",
+  "from": {
+    "agent": "fix/a-status-read-is-whole-under-load",
+    "worktree": "pull/331",
+    "head": "fix/a-status-read-is-whole-under-load"
+  },
+  "submitted": "2026-11-27T02:05:36Z",
+  "after": [],
+  "priority": 0,
+  "attempt": 2,
+  "state": "landed",
+  "tested": {
+    "combination": "16311764d68e8efb202fb58f548d8985200b26e7",
+    "on": "ab0e1edf1118f48c3751c3572dc7ce061fbbd896",
+    "submissions": [
+      170
+    ]
+  },
+  "result": "passed",
+  "landed_as": "3d15673d927948e15003748979a877ab6710bf7b",
+  "subject": "fix/a-status-read-is-whole-under-load",
+  "under_test_ms": 551000
+}

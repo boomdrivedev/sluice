@@ -1,0 +1,37 @@
+{
+  "schema": "sluice/submission@1",
+  "id": 203,
+  "branch": "main",
+  "head": "bf41a45c92b2d1d2c6b5357669b7a4584b4fb316",
+  "from": {
+    "agent": "change/sluice-host-reads-the-forge-once-per-repository-per-interval",
+    "worktree": "pull/349",
+    "head": "change/sluice-host-reads-the-forge-once-per-repository-per-interval"
+  },
+  "submitted": "2026-11-27T18:37:51Z",
+  "after": [],
+  "priority": 0,
+  "attempt": 1,
+  "state": "withdrawn",
+  "tested": {
+    "combination": "b3d5f0e6a6c9ccd7f212399ec71b4c4ba7eb599c",
+    "on": "c4753b1875f68224b9bdbe87397ddac5612e7809",
+    "submissions": [
+      203
+    ]
+  },
+  "result": "failed",
+  "failed": [
+    {
+      "task": "cli:tools",
+      "hash": "bbf7a85d0af067b7c07d143b1d4539445a098708e457a437e7fe0110cc466225",
+      "log": "/Users/chuck/.local/share/boomdrive/repositories/boomdrivedev/sluice/sluice.git/sluice-remote/origin/.logs/main/c92/cli:tools.log"
+    }
+  ],
+  "withdrawn": {
+    "by": "resubmission",
+    "at": "2026-11-27T18:48:21Z"
+  },
+  "subject": "sluice host reads the forge once per repository per interval, through octocrab",
+  "under_test_ms": 440000
+}

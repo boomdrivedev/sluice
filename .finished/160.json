@@ -1,0 +1,28 @@
+{
+  "schema": "sluice/submission@1",
+  "id": 160,
+  "branch": "main",
+  "head": "66897e5b695451c4b88a4e32314bb7458aff550f",
+  "from": {
+    "agent": "change/the-gate-runs-in-five-minutes",
+    "worktree": "pull/325",
+    "head": "change/the-gate-runs-in-five-minutes"
+  },
+  "submitted": "2026-11-24T18:59:22Z",
+  "after": [],
+  "priority": 0,
+  "attempt": 1,
+  "state": "landed",
+  "tested": {
+    "combination": "9295851e21609ec49c591e12e1111a4663a8ddbd",
+    "on": "f1931d3e38969413bdda41015af0ea02c21765ec",
+    "submissions": [
+      160
+    ]
+  },
+  "result": "passed",
+  "landed_as": "578420fed5c6516023c9652f34be32ad9baa8c99",
+  "subject": "a round fetches its branch's state once from each remote",
+  "under_test_ms": 1046000,
+  "runs_with_no_outcome": 1
+}

@@ -1,0 +1,29 @@
+{
+  "schema": "sluice/submission@1",
+  "id": 101,
+  "branch": "main",
+  "head": "ad20c557be65ef852f45fd69ee0539803d729219",
+  "from": {
+    "agent": "boomdrive-design",
+    "worktree": "pull/292",
+    "head": "design/a-landing-names-the-app"
+  },
+  "submitted": "2026-11-18T19:16:10Z",
+  "after": [],
+  "priority": 0,
+  "attempt": 1,
+  "state": "landed",
+  "tested": {
+    "combination": "3532bf578d5006c8dab3f445922d28a69fa23ad4",
+    "on": "5d7d1c3d0866db732382828379110e8ee89fe1d1",
+    "submissions": [
+      101,
+      102,
+      103,
+      104
+    ]
+  },
+  "result": "passed",
+  "landed_as": "96e24df5c130ca49e62c577e9a530af88239583d",
+  "subject": "design/a-landing-names-the-app"
+}

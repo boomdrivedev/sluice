@@ -1,0 +1,27 @@
+{
+  "schema": "sluice/submission@1",
+  "id": 182,
+  "branch": "main",
+  "head": "1869d34c34bc8c7805f9b40c410a034713f5c87a",
+  "from": {
+    "agent": "fix/a-gone-repository-is-told-as-gone",
+    "worktree": "pull/337",
+    "head": "fix/a-gone-repository-is-told-as-gone"
+  },
+  "submitted": "2026-11-27T06:31:11Z",
+  "after": [],
+  "priority": 0,
+  "attempt": 1,
+  "state": "landed",
+  "tested": {
+    "combination": "8bb964853dcd79765db9388a8fb00afa8eeeb1ad",
+    "on": "7dfd302ccef9745e71f5857be713d0dd06d9b708",
+    "submissions": [
+      182
+    ]
+  },
+  "result": "passed",
+  "landed_as": "fca134b4d804143a1b35a4c68b697f19cc3c7467",
+  "subject": "A gone repository is told as gone",
+  "under_test_ms": 523000
+}

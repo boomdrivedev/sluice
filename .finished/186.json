@@ -1,0 +1,27 @@
+{
+  "schema": "sluice/submission@1",
+  "id": 186,
+  "branch": "main",
+  "head": "61a7cb9aba2806476ce8112f73f07154ff8365f6",
+  "from": {
+    "agent": "fix/its-github-checks-pass",
+    "worktree": "pull/339",
+    "head": "fix/its-github-checks-pass"
+  },
+  "submitted": "2026-11-27T09:30:48Z",
+  "after": [],
+  "priority": 0,
+  "attempt": 1,
+  "state": "landed",
+  "tested": {
+    "combination": "842b0015330cbeb27913a5114bacb16cb6ede342",
+    "on": "87ce8f0d088eaa0a4b85cb29868b487d3cf3fff3",
+    "submissions": [
+      186
+    ]
+  },
+  "result": "passed",
+  "landed_as": "a6d07d140b6bcda31414acd27dceea7b7e05b72c",
+  "subject": "Tests read processes alike on Linux and macOS",
+  "under_test_ms": 665000
+}

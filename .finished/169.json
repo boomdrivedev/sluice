@@ -1,0 +1,27 @@
+{
+  "schema": "sluice/submission@1",
+  "id": 169,
+  "branch": "main",
+  "head": "16686f8015ef830312fa689a71ee6aa06f98e41d",
+  "from": {
+    "agent": "fix/an-idle-pass-starts-nothing",
+    "worktree": "pull/332",
+    "head": "fix/an-idle-pass-starts-nothing"
+  },
+  "submitted": "2026-11-27T01:41:02Z",
+  "after": [],
+  "priority": 0,
+  "attempt": 1,
+  "state": "landed",
+  "tested": {
+    "combination": "417101b775800c7a8859c6b98fae2920559a4922",
+    "on": "d56edd6bed8811f165a190aac4821acc842ed511",
+    "submissions": [
+      169
+    ]
+  },
+  "result": "passed",
+  "landed_as": "ab0e1edf1118f48c3751c3572dc7ce061fbbd896",
+  "subject": "An idle pass starts nothing, under load as alone",
+  "under_test_ms": 583000
+}

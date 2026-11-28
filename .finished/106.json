@@ -1,0 +1,26 @@
+{
+  "schema": "sluice/submission@1",
+  "id": 106,
+  "branch": "main",
+  "head": "9614b5f2a51eec2fc69cb64cba4cdeb7809e28e6",
+  "from": {
+    "agent": "fix/main--pull-request-tests-pass-on-main",
+    "worktree": "pull/295",
+    "head": "fix/main--pull-request-tests-pass-on-main"
+  },
+  "submitted": "2026-11-18T22:44:59Z",
+  "after": [],
+  "priority": 0,
+  "attempt": 1,
+  "state": "landed",
+  "tested": {
+    "combination": "86873cf0808e7af6ca187fc97e029364b3b32f75",
+    "on": "bf21b320960d9568d6737105977db2151b8e3d9c",
+    "submissions": [
+      106
+    ]
+  },
+  "result": "passed",
+  "landed_as": "94f87f760a88fdb373c75cacc36ae27ce592887f",
+  "subject": "fix/main--pull-request-tests-pass-on-main"
+}

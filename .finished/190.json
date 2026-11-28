@@ -1,0 +1,27 @@
+{
+  "schema": "sluice/submission@1",
+  "id": 190,
+  "branch": "main",
+  "head": "b36e178e6b6a2c712d0398c626db9685471cee3b",
+  "from": {
+    "agent": "fix/its-github-checks-pass",
+    "worktree": "pull/342",
+    "head": "fix/its-github-checks-pass"
+  },
+  "submitted": "2026-11-27T10:36:26Z",
+  "after": [],
+  "priority": 0,
+  "attempt": 1,
+  "state": "landed",
+  "tested": {
+    "combination": "e25d7d2eb7a4b11ca4393a734bd88d3dc3e4060e",
+    "on": "1085f8db9a310e5d3ba8cd5706cc5d74515e838a",
+    "submissions": [
+      190
+    ]
+  },
+  "result": "passed",
+  "landed_as": "e7c200097d271a15e860ad9456ed49c0dabfab9e",
+  "subject": "The sandbox tests' helpers are macOS's alone",
+  "under_test_ms": 625000
+}

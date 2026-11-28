@@ -1,0 +1,27 @@
+{
+  "schema": "sluice/submission@1",
+  "id": 229,
+  "branch": "main",
+  "head": "dd583d2ada56904529a989c4485821378b0e5dbc",
+  "from": {
+    "agent": "change/sluice-tests-its-logic-as-units",
+    "worktree": "pull/370",
+    "head": "change/sluice-tests-its-logic-as-units"
+  },
+  "submitted": "2026-11-28T06:49:46Z",
+  "after": [],
+  "priority": 0,
+  "attempt": 1,
+  "state": "landed",
+  "tested": {
+    "combination": "ca8354238bbf400235717ec92f92186f42f58ede",
+    "on": "3f315b93b8028ee64ad3dd38b6f8552c284268e0",
+    "submissions": [
+      229
+    ]
+  },
+  "result": "passed",
+  "landed_as": "1f75fb4a71cb36eecb6151fa81d0462c531a18ef",
+  "subject": "sluice tests its logic as units: the pushed refs' call loop is proven as units",
+  "under_test_ms": 297000
+}

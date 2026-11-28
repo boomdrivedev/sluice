@@ -1,0 +1,27 @@
+{
+  "schema": "sluice/submission@1",
+  "id": 155,
+  "branch": "main",
+  "head": "4b287f1c86647ba76db83b08c917ab5f40f2ba07",
+  "from": {
+    "agent": "change/an-older-client-starts-no-older-host",
+    "worktree": "pull/322",
+    "head": "change/an-older-client-starts-no-older-host"
+  },
+  "submitted": "2026-11-24T15:42:21Z",
+  "after": [],
+  "priority": 0,
+  "attempt": 1,
+  "state": "landed",
+  "tested": {
+    "combination": "3569ebfd5596c9553fc7fc140ecffa10afb01413",
+    "on": "c16a8088d9327b03b4330c3d124d65832301ee1a",
+    "submissions": [
+      155
+    ]
+  },
+  "result": "passed",
+  "landed_as": "ef047230951359b7571420cfb3673837b73af12c",
+  "subject": "an older client starts no older host",
+  "under_test_ms": 1333000
+}

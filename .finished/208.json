@@ -1,0 +1,27 @@
+{
+  "schema": "sluice/submission@1",
+  "id": 208,
+  "branch": "main",
+  "head": "6357283bf45a02d8084b0e7488f21f7c09d87ca4",
+  "from": {
+    "agent": "change/sluice-tests-its-logic-as-units",
+    "worktree": "pull/352",
+    "head": "change/sluice-tests-its-logic-as-units"
+  },
+  "submitted": "2026-11-27T20:51:25Z",
+  "after": [],
+  "priority": 0,
+  "attempt": 1,
+  "state": "landed",
+  "tested": {
+    "combination": "9e17c558fdd422de760ffda2e76406450c101c2f",
+    "on": "8dacd62ec621b012e949124fcdb634c20fcefeaf",
+    "submissions": [
+      208
+    ]
+  },
+  "result": "passed",
+  "landed_as": "c3caaef15d9f9c0a5220b9667449b6db392fd037",
+  "subject": "sluice tests its logic as units: worktrunk and host_process moves, the router a unit",
+  "under_test_ms": 797000
+}

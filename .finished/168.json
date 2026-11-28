@@ -1,0 +1,37 @@
+{
+  "schema": "sluice/submission@1",
+  "id": 168,
+  "branch": "main",
+  "head": "a3e7358dbf49ef3fdbe4ab77091c3539b0ea076e",
+  "from": {
+    "agent": "fix/a-status-read-is-whole-under-load",
+    "worktree": "pull/331",
+    "head": "fix/a-status-read-is-whole-under-load"
+  },
+  "submitted": "2026-11-27T01:24:34Z",
+  "after": [],
+  "priority": 0,
+  "attempt": 1,
+  "state": "withdrawn",
+  "tested": {
+    "combination": "17ef182b4ce4caf31741d812475f2857f2c9ff7f",
+    "on": "d56edd6bed8811f165a190aac4821acc842ed511",
+    "submissions": [
+      168
+    ]
+  },
+  "result": "failed",
+  "failed": [
+    {
+      "task": "cli:test",
+      "hash": "7369a89641b1e56cce4ea2c8cf2e4f12a46e458a770a57c2297a2f8b50ba3353",
+      "log": "/Users/chuck/.local/share/boomdrive/repositories/boomdrivedev/sluice/sluice.git/sluice-remote/origin/.logs/main/c56/cli:test.log"
+    }
+  ],
+  "withdrawn": {
+    "by": "resubmission",
+    "at": "2026-11-27T02:05:36Z"
+  },
+  "subject": "fix/a-status-read-is-whole-under-load",
+  "under_test_ms": 572000
+}

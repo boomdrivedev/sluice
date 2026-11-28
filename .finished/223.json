@@ -1,0 +1,27 @@
+{
+  "schema": "sluice/submission@1",
+  "id": 223,
+  "branch": "main",
+  "head": "421950f31c1c1e02d3890faede5981a1111a7e1d",
+  "from": {
+    "agent": "change/sluice-tests-its-logic-as-units",
+    "worktree": "pull/364",
+    "head": "change/sluice-tests-its-logic-as-units"
+  },
+  "submitted": "2026-11-28T05:06:21Z",
+  "after": [],
+  "priority": 0,
+  "attempt": 1,
+  "state": "landed",
+  "tested": {
+    "combination": "d701c08f6e311e6355bb6924997f0344bf621ac8",
+    "on": "755bbc9f4b688babcbe4b687c066ddd1a6d06a0c",
+    "submissions": [
+      223
+    ]
+  },
+  "result": "passed",
+  "landed_as": "80be916c1e69b710ddf6c0afa296c1c3ed18b272",
+  "subject": "sluice tests its logic as units: two exec duplicates go",
+  "under_test_ms": 293000
+}

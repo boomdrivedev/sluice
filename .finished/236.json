@@ -1,0 +1,27 @@
+{
+  "schema": "sluice/submission@1",
+  "id": 236,
+  "branch": "main",
+  "head": "9a6e0e98d09d54ed4591dc72a315a11089dda8d3",
+  "from": {
+    "agent": "change/sluice-tests-its-logic-as-units",
+    "worktree": "pull/375",
+    "head": "change/sluice-tests-its-logic-as-units"
+  },
+  "submitted": "2026-11-28T07:45:59Z",
+  "after": [],
+  "priority": 0,
+  "attempt": 1,
+  "state": "landed",
+  "tested": {
+    "combination": "c38c15d8991ddcd2de150342bea683e515411ad7",
+    "on": "0c1bb22bc576f95c6f8023cb92dfed0af9a5e246",
+    "submissions": [
+      236
+    ]
+  },
+  "result": "passed",
+  "landed_as": "34fd6ce527b90343f45815a12aefbd97ec9a4a17",
+  "subject": "sluice tests its logic as units: protection and remote-branch duplicates go",
+  "under_test_ms": 413000
+}

@@ -1,0 +1,37 @@
+{
+  "schema": "sluice/submission@1",
+  "id": 198,
+  "branch": "main",
+  "head": "70d105b55ff20ff85ece1be4982905f327447ac9",
+  "from": {
+    "agent": "fix/a-read-of-a-repository-is-no-change",
+    "worktree": "pull/345",
+    "head": "fix/a-read-of-a-repository-is-no-change"
+  },
+  "submitted": "2026-11-27T13:45:17Z",
+  "after": [],
+  "priority": 0,
+  "attempt": 1,
+  "state": "withdrawn",
+  "tested": {
+    "combination": "759a77c26d20cbc72fdd59e22f81391587c3d80a",
+    "on": "7b6e1f1a209886f69d52e3e269443659336fa06d",
+    "submissions": [
+      198
+    ]
+  },
+  "result": "failed",
+  "failed": [
+    {
+      "task": "root:changes",
+      "hash": "d7f5263fde457211bbcc9ef8d4299f5e5a480fe39d137cc6f0b0f4c61eda47ac",
+      "log": "/Users/chuck/.local/share/boomdrive/repositories/boomdrivedev/sluice/sluice.git/sluice-remote/origin/.logs/main/c87/root:changes.log"
+    }
+  ],
+  "withdrawn": {
+    "by": "resubmission",
+    "at": "2026-11-27T13:57:47Z"
+  },
+  "subject": "A read of a repository is no change",
+  "under_test_ms": 614000
+}

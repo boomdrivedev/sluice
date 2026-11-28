@@ -1,0 +1,27 @@
+{
+  "schema": "sluice/submission@1",
+  "id": 234,
+  "branch": "main",
+  "head": "96dd9ca4ba317d8d82c4bf30b942bcc230d8d65e",
+  "from": {
+    "agent": "change/sluice-tests-its-logic-as-units",
+    "worktree": "pull/373",
+    "head": "change/sluice-tests-its-logic-as-units"
+  },
+  "submitted": "2026-11-28T07:27:53Z",
+  "after": [],
+  "priority": 0,
+  "attempt": 1,
+  "state": "landed",
+  "tested": {
+    "combination": "f2e0191208133b780f3fa4490d219aaad9633a22",
+    "on": "023bacdd71418980f2751a9a0f5889596382b389",
+    "submissions": [
+      234
+    ]
+  },
+  "result": "passed",
+  "landed_as": "6f57549d76a411049faa6b8af1cdd52a284f225c",
+  "subject": "sluice tests its logic as units: ready duplicates go and the idle scheduler's tests move into its module",
+  "under_test_ms": 344000
+}

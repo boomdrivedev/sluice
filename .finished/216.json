@@ -1,0 +1,27 @@
+{
+  "schema": "sluice/submission@1",
+  "id": 216,
+  "branch": "main",
+  "head": "d6f08eb3d59dd0a45718550d5597acfae232b2d9",
+  "from": {
+    "agent": "change/sluice-tests-its-logic-as-units",
+    "worktree": "pull/357",
+    "head": "change/sluice-tests-its-logic-as-units"
+  },
+  "submitted": "2026-11-28T03:57:04Z",
+  "after": [],
+  "priority": 0,
+  "attempt": 1,
+  "state": "landed",
+  "tested": {
+    "combination": "78537942d80a5d1b0d6509510f920f7515f89ab5",
+    "on": "52d32f7f646d236c319909d7e5bc9a1d3014b808",
+    "submissions": [
+      216
+    ]
+  },
+  "result": "passed",
+  "landed_as": "092e8c96ebcc46674192a4e51d521161abc03855",
+  "subject": "sluice tests its logic as units: the place profile over fakes of git and its runs",
+  "under_test_ms": 346000
+}

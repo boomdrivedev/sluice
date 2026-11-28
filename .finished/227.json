@@ -1,0 +1,27 @@
+{
+  "schema": "sluice/submission@1",
+  "id": 227,
+  "branch": "main",
+  "head": "47d4164721a23987f9bf2b5cf6af425be43c4898",
+  "from": {
+    "agent": "change/sluice-tests-its-logic-as-units",
+    "worktree": "pull/368",
+    "head": "change/sluice-tests-its-logic-as-units"
+  },
+  "submitted": "2026-11-28T06:23:30Z",
+  "after": [],
+  "priority": 0,
+  "attempt": 1,
+  "state": "landed",
+  "tested": {
+    "combination": "b8bc3fd53197306d9960dcf0ae8ed43e8bd3274d",
+    "on": "d9adea59350eefc570ee0b72c8fa4f24ff299d77",
+    "submissions": [
+      227
+    ]
+  },
+  "result": "passed",
+  "landed_as": "b42be5191e0a7ba9ca61547d98745f41d96f8ade",
+  "subject": "sluice tests its logic as units: the host process reads its folder, settings and telemetry from its start environment",
+  "under_test_ms": 296000
+}

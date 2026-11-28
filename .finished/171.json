@@ -1,0 +1,37 @@
+{
+  "schema": "sluice/submission@1",
+  "id": 171,
+  "branch": "main",
+  "head": "cd30a8a5b0740cebf8c5d0ceb32790a85a3b313f",
+  "from": {
+    "agent": "fix/a-submission-is-named-by-its-branch",
+    "worktree": "pull/330",
+    "head": "fix/a-submission-is-named-by-its-branch"
+  },
+  "submitted": "2026-11-27T02:19:03Z",
+  "after": [],
+  "priority": 0,
+  "attempt": 2,
+  "state": "withdrawn",
+  "tested": {
+    "combination": "2eadaadc90485549349355e9533836264f0cfc76",
+    "on": "3d15673d927948e15003748979a877ab6710bf7b",
+    "submissions": [
+      171
+    ]
+  },
+  "result": "failed",
+  "failed": [
+    {
+      "task": "cli:test",
+      "hash": "53b4761c321cdef14aa4d122bf0915171fa6c1243149f7c20fbaacd9a8f9ae09",
+      "log": "/Users/chuck/.local/share/boomdrive/repositories/boomdrivedev/sluice/sluice.git/sluice-remote/origin/.logs/main/c59/cli:test.log"
+    }
+  ],
+  "withdrawn": {
+    "by": "resubmission",
+    "at": "2026-11-27T05:03:37Z"
+  },
+  "subject": "fix/a-submission-is-named-by-its-branch",
+  "under_test_ms": 548000
+}

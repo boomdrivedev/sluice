@@ -1,0 +1,37 @@
+{
+  "schema": "sluice/submission@1",
+  "id": 213,
+  "branch": "main",
+  "head": "0b514b792fb2ea6df8f3bd9176c66d55051f8a42",
+  "from": {
+    "agent": "change/sluice-starts-every-process-through-tokio",
+    "worktree": "pull/355",
+    "head": "change/sluice-starts-every-process-through-tokio"
+  },
+  "submitted": "2026-11-28T02:23:42Z",
+  "after": [],
+  "priority": 0,
+  "attempt": 1,
+  "state": "withdrawn",
+  "tested": {
+    "combination": "9a267fa32227e9184f09e189e139bef813bff013",
+    "on": "d63b5e7815411d2c74edd2a21f85a21c9f84793d",
+    "submissions": [
+      213
+    ]
+  },
+  "result": "failed",
+  "failed": [
+    {
+      "task": "cli:test",
+      "hash": "7c18fadbe04d2c74bf1681b155b890cfd23d3eee91bd56fb3ea8cb51dbea804c",
+      "log": "/Users/chuck/.local/share/boomdrive/repositories/boomdrivedev/sluice/sluice.git/sluice-remote/origin/.logs/main/c102/cli:test.log"
+    }
+  ],
+  "withdrawn": {
+    "by": "resubmission",
+    "at": "2026-11-28T03:25:30Z"
+  },
+  "subject": "sluice host starts every worker through process-wrap on its edge, and a dropped or ended worker ends its whole group",
+  "under_test_ms": 347000
+}

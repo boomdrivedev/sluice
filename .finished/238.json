@@ -1,0 +1,27 @@
+{
+  "schema": "sluice/submission@1",
+  "id": 238,
+  "branch": "main",
+  "head": "25e73765adabfd5f354c7276a4e443c61639bac8",
+  "from": {
+    "agent": "change/sluice-tests-its-logic-as-units",
+    "worktree": "pull/377",
+    "head": "change/sluice-tests-its-logic-as-units"
+  },
+  "submitted": "2026-11-28T07:55:08Z",
+  "after": [],
+  "priority": 0,
+  "attempt": 1,
+  "state": "landed",
+  "tested": {
+    "combination": "18f4bfed7bddb54db1a0e335d0269319515e973f",
+    "on": "22ec43f6ad0d8621c7e4098c0ed73f0449220a4a",
+    "submissions": [
+      238
+    ]
+  },
+  "result": "passed",
+  "landed_as": "b2c62a9caa601bac05a9879bc7cc30a800a5eabd",
+  "subject": "sluice tests its logic as units: a push whose answer was lost is settled by a function of its own",
+  "under_test_ms": 368000
+}

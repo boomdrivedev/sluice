@@ -1,0 +1,27 @@
+{
+  "schema": "sluice/submission@1",
+  "id": 237,
+  "branch": "main",
+  "head": "2edf6cad48ad2b6852d1156713c6be3ef6693d90",
+  "from": {
+    "agent": "fix/a-branchs-lead-is-written-under-its-lock",
+    "worktree": "pull/376",
+    "head": "fix/a-branchs-lead-is-written-under-its-lock"
+  },
+  "submitted": "2026-11-28T07:53:43Z",
+  "after": [],
+  "priority": 0,
+  "attempt": 1,
+  "state": "landed",
+  "tested": {
+    "combination": "4593ea0d3d4d4e2f389d039027b75cee2764c01d",
+    "on": "34fd6ce527b90343f45815a12aefbd97ec9a4a17",
+    "submissions": [
+      237
+    ]
+  },
+  "result": "passed",
+  "landed_as": "22ec43f6ad0d8621c7e4098c0ed73f0449220a4a",
+  "subject": "fix/a-branchs-lead-is-written-under-its-lock",
+  "under_test_ms": 463000
+}

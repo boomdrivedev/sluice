@@ -1,0 +1,26 @@
+{
+  "schema": "sluice/submission@1",
+  "id": 128,
+  "branch": "main",
+  "head": "bd3e670d325133f90a50e61fe2372fe387cb97d4",
+  "from": {
+    "agent": "fix/main--the-idle-repository-asks-once-a-minute",
+    "worktree": "pull/305",
+    "head": "fix/main--the-idle-repository-asks-once-a-minute"
+  },
+  "submitted": "2026-11-19T23:13:40Z",
+  "after": [],
+  "priority": 0,
+  "attempt": 1,
+  "state": "landed",
+  "tested": {
+    "combination": "e99f21154c247792fedc7bb532a19558cc3e0b3b",
+    "on": "efb53f678232500ad1157af61bbcaf962e01a588",
+    "submissions": [
+      128
+    ]
+  },
+  "result": "passed",
+  "landed_as": "035547ea416f12c70e6dc029f489641f7f8ed082",
+  "subject": "fix/main--the-idle-repository-asks-once-a-minute"
+}

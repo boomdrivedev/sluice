@@ -1,0 +1,42 @@
+{
+  "schema": "sluice/submission@1",
+  "id": 193,
+  "branch": "main",
+  "head": "33c56839ab164a73fa79276a90c626c1bb8650e0",
+  "from": {
+    "agent": "fix/a-test-stops-the-hosts-it-starts",
+    "worktree": "pull/340",
+    "head": "fix/a-test-stops-the-hosts-it-starts"
+  },
+  "submitted": "2026-11-27T11:51:47Z",
+  "after": [],
+  "priority": 0,
+  "attempt": 3,
+  "state": "withdrawn",
+  "tested": {
+    "combination": "cf5827c69603a19cb5270e75a2c8cec2eac7b90d",
+    "on": "e7c200097d271a15e860ad9456ed49c0dabfab9e",
+    "submissions": [
+      193
+    ]
+  },
+  "result": "failed",
+  "failed": [
+    {
+      "task": "cli:tools",
+      "hash": "18680949d0e927f3f37ced24b86d6970c4727b78bffd21a567c77e97786af881",
+      "log": "/Users/chuck/.local/share/boomdrive/repositories/boomdrivedev/sluice/sluice.git/sluice-remote/origin/.logs/main/c83/cli:tools.log"
+    },
+    {
+      "task": "plugin-herdr:test-sh",
+      "hash": "2cf8694ac01456b273078fadf0985579c42c8a9ec33ad7603d57eb2041d5dcd4",
+      "log": "/Users/chuck/.local/share/boomdrive/repositories/boomdrivedev/sluice/sluice.git/sluice-remote/origin/.logs/main/c83/plugin-herdr:test-sh.log"
+    }
+  ],
+  "withdrawn": {
+    "by": "resubmission",
+    "at": "2026-11-27T12:34:52Z"
+  },
+  "subject": "A test stops the hosts it starts",
+  "under_test_ms": 498000
+}

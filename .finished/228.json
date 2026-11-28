@@ -1,0 +1,27 @@
+{
+  "schema": "sluice/submission@1",
+  "id": 228,
+  "branch": "main",
+  "head": "18343d4dfe97292e5f6406177b64f16eecff1f9d",
+  "from": {
+    "agent": "change/sluice-tests-its-logic-as-units",
+    "worktree": "pull/369",
+    "head": "change/sluice-tests-its-logic-as-units"
+  },
+  "submitted": "2026-11-28T06:38:14Z",
+  "after": [],
+  "priority": 0,
+  "attempt": 1,
+  "state": "landed",
+  "tested": {
+    "combination": "d9c37f896a6ad0fdc40aa3e90421430259aef7bc",
+    "on": "b42be5191e0a7ba9ca61547d98745f41d96f8ade",
+    "submissions": [
+      228
+    ]
+  },
+  "result": "passed",
+  "landed_as": "3f315b93b8028ee64ad3dd38b6f8552c284268e0",
+  "subject": "sluice tests its logic as units: the host process passes only when asked as its start environment says",
+  "under_test_ms": 292000
+}

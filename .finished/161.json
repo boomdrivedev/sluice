@@ -1,0 +1,27 @@
+{
+  "schema": "sluice/submission@1",
+  "id": 161,
+  "branch": "main",
+  "head": "5f9ac2ee69b6452f9b24d0a30b7880fb01b8259b",
+  "from": {
+    "agent": "change/the-gate-sandbox-lets-the-tools-write",
+    "worktree": "pull/326",
+    "head": "change/the-gate-sandbox-lets-the-tools-write"
+  },
+  "submitted": "2026-11-24T20:17:14Z",
+  "after": [],
+  "priority": 0,
+  "attempt": 1,
+  "state": "landed",
+  "tested": {
+    "combination": "2e86d0ad7d77c7cfedbab1426bb33dc61a662af1",
+    "on": "578420fed5c6516023c9652f34be32ad9baa8c99",
+    "submissions": [
+      161
+    ]
+  },
+  "result": "passed",
+  "landed_as": "101bddeb80005541e6aec398e36a499a81927604",
+  "subject": "a fail stands whatever the gate's sandbox refused",
+  "under_test_ms": 801000
+}

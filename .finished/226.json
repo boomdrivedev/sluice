@@ -1,0 +1,27 @@
+{
+  "schema": "sluice/submission@1",
+  "id": 226,
+  "branch": "main",
+  "head": "85acbeaeac15c2a68783b68a7cdb987db9a4c4ae",
+  "from": {
+    "agent": "change/sluice-tests-its-logic-as-units",
+    "worktree": "pull/367",
+    "head": "change/sluice-tests-its-logic-as-units"
+  },
+  "submitted": "2026-11-28T06:14:19Z",
+  "after": [],
+  "priority": 0,
+  "attempt": 1,
+  "state": "landed",
+  "tested": {
+    "combination": "6a5cd010a4b7b09993d5fa7cb32ee636c1fb4b1f",
+    "on": "a94b17c17216da27527485444d173ec3e3da40b6",
+    "submissions": [
+      226
+    ]
+  },
+  "result": "passed",
+  "landed_as": "d9adea59350eefc570ee0b72c8fa4f24ff299d77",
+  "subject": "sluice tests its logic as units: what a command asks sluice host is built in the library",
+  "under_test_ms": 288000
+}

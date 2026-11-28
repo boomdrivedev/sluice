@@ -1,0 +1,29 @@
+{
+  "schema": "sluice/submission@1",
+  "id": 94,
+  "branch": "main",
+  "head": "74f9d65d6020d2d051a84580d3fbd0c5d8362847",
+  "from": {
+    "agent": "fix/main--a-release-with-nothing-to-free-creates-nothing",
+    "worktree": "pull/288",
+    "head": "fix/main--a-release-with-nothing-to-free-creates-nothing"
+  },
+  "submitted": "2026-11-18T00:53:43Z",
+  "after": [],
+  "priority": 0,
+  "attempt": 1,
+  "state": "withdrawn",
+  "conflict": {
+    "paths": [
+      "crates/sluice/tests/profiles/places.rs",
+      "docs/architecture/core.md",
+      "openspec/specs/place-release/spec.md"
+    ],
+    "with": []
+  },
+  "withdrawn": {
+    "by": "resubmission",
+    "at": "2026-11-18T01:28:27Z"
+  },
+  "subject": "fix/main--a-release-with-nothing-to-free-creates-nothing"
+}

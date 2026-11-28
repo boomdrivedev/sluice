@@ -1,0 +1,26 @@
+{
+  "schema": "sluice/submission@1",
+  "id": 96,
+  "branch": "main",
+  "head": "a4fa694e7eda35a4402ab979761211b84d8c104f",
+  "from": {
+    "agent": "fix/main--a-release-with-nothing-to-free-creates-nothing",
+    "worktree": "pull/288",
+    "head": "fix/main--a-release-with-nothing-to-free-creates-nothing"
+  },
+  "submitted": "2026-11-18T03:18:37Z",
+  "after": [],
+  "priority": 0,
+  "attempt": 3,
+  "state": "landed",
+  "tested": {
+    "combination": "e80a885acc560ebbff4faf3d94831ffb8918f8a0",
+    "on": "317f23e6cb5fbdfb02b1b63866a8178b3b60bdd2",
+    "submissions": [
+      96
+    ]
+  },
+  "result": "passed",
+  "landed_as": "15b5cf173674e8ff2a508a94ac00d3462a2300a5",
+  "subject": "fix/main--a-release-with-nothing-to-free-creates-nothing"
+}

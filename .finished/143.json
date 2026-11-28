@@ -1,0 +1,27 @@
+{
+  "schema": "sluice/submission@1",
+  "id": 143,
+  "branch": "main",
+  "head": "c7f0b85d6745f793b5ed0b7d9cb8377ba16aa005",
+  "from": {
+    "agent": "chore/archive-the-host-process-changes",
+    "worktree": "pull/312",
+    "head": "chore/archive-the-host-process-changes"
+  },
+  "submitted": "2026-11-23T03:59:23Z",
+  "after": [],
+  "priority": 0,
+  "attempt": 1,
+  "state": "landed",
+  "tested": {
+    "combination": "367d03c17b8feca14b8a8647ba6bbffe2150348b",
+    "on": "2cd9934aaf16cbc0225651c5303678b53cfe2c6c",
+    "submissions": [
+      143
+    ]
+  },
+  "result": "passed",
+  "landed_as": "5c0d855829ef8505c3c0cc3e430f8d9fa401c313",
+  "subject": "Archive sluice-host-runs-on-a-tokio-edge, sluice-host-owns-its-workers and sluice-host-answers-every-read",
+  "under_test_ms": 54000
+}

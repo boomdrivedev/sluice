@@ -1,0 +1,27 @@
+{
+  "schema": "sluice/submission@1",
+  "id": 233,
+  "branch": "main",
+  "head": "2789ca74cd3e584cf1aab0508bde92d9564414cd",
+  "from": {
+    "agent": "change/sluice-tests-its-logic-as-units",
+    "worktree": "pull/372",
+    "head": "change/sluice-tests-its-logic-as-units"
+  },
+  "submitted": "2026-11-28T07:18:16Z",
+  "after": [],
+  "priority": 0,
+  "attempt": 2,
+  "state": "landed",
+  "tested": {
+    "combination": "6af736907b2716c25b4b2bdb37e7405ef236e4b7",
+    "on": "c70bf104b5d7ce199a3e16692bcfedce1e2a7518",
+    "submissions": [
+      233
+    ]
+  },
+  "result": "passed",
+  "landed_as": "023bacdd71418980f2751a9a0f5889596382b389",
+  "subject": "sluice tests its logic as units: a protection and a push scenario go as duplicates",
+  "under_test_ms": 312000
+}

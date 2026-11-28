@@ -1,0 +1,27 @@
+{
+  "schema": "sluice/submission@1",
+  "id": 146,
+  "branch": "main",
+  "head": "75b37434ab561dc553d4f15c1fb2b2f4d1c21f4c",
+  "from": {
+    "agent": "chore/sluice-keeps-its-design-model",
+    "worktree": "pull/315",
+    "head": "chore/sluice-keeps-its-design-model"
+  },
+  "submitted": "2026-11-23T23:59:42Z",
+  "after": [],
+  "priority": 0,
+  "attempt": 1,
+  "state": "landed",
+  "tested": {
+    "combination": "b2f8a94bf52589af57f18fe954a77733f756025c",
+    "on": "87bb89a3befbf071591a12dcf42a53e79af46dc5",
+    "submissions": [
+      146
+    ]
+  },
+  "result": "passed",
+  "landed_as": "bcb3e6925697c8f530de0a1e61c3430a4e1c8be1",
+  "subject": "sluice keeps its design model in Allium, checked in the fast tier",
+  "under_test_ms": 1050000
+}

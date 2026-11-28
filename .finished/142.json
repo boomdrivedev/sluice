@@ -1,0 +1,27 @@
+{
+  "schema": "sluice/submission@1",
+  "id": 142,
+  "branch": "main",
+  "head": "882dde7f64fa5fff152c808c7ee0946430346bd3",
+  "from": {
+    "agent": "change/sluice-host-answers-every-read",
+    "worktree": "pull/311",
+    "head": "change/sluice-host-answers-every-read"
+  },
+  "submitted": "2026-11-23T03:27:22Z",
+  "after": [],
+  "priority": 0,
+  "attempt": 1,
+  "state": "landed",
+  "tested": {
+    "combination": "80292a4e268d27fe5767eddca51343aad4490efd",
+    "on": "6c9caac83e516b5dff1b9d1d36b344e7e748c546",
+    "submissions": [
+      142
+    ]
+  },
+  "result": "passed",
+  "landed_as": "2cd9934aaf16cbc0225651c5303678b53cfe2c6c",
+  "subject": "change/sluice-host-answers-every-read",
+  "under_test_ms": 806000
+}

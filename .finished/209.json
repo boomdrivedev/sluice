@@ -1,0 +1,37 @@
+{
+  "schema": "sluice/submission@1",
+  "id": 209,
+  "branch": "main",
+  "head": "e5d4fd8d4699268d5f8308536e0f52f6218399d0",
+  "from": {
+    "agent": "fix/sluice-daemon-reads-only-what-changed",
+    "worktree": "pull/353",
+    "head": "fix/sluice-daemon-reads-only-what-changed"
+  },
+  "submitted": "2026-11-27T22:43:02Z",
+  "after": [],
+  "priority": 0,
+  "attempt": 1,
+  "state": "withdrawn",
+  "tested": {
+    "combination": "fc408553d6efd0236026c72d68f6881a215d5a17",
+    "on": "c3caaef15d9f9c0a5220b9667449b6db392fd037",
+    "submissions": [
+      209
+    ]
+  },
+  "result": "failed",
+  "failed": [
+    {
+      "task": "cli:e2e",
+      "hash": "c4d624e6cd579fd73db019a1c2fb078fa60541b6c08b2c85c44034dcaaa28e57",
+      "log": "/Users/chuck/.local/share/boomdrive/repositories/boomdrivedev/sluice/sluice.git/sluice-remote/origin/.logs/main/c98/cli:e2e.log"
+    }
+  ],
+  "withdrawn": {
+    "by": "resubmission",
+    "at": "2026-11-27T22:59:38Z"
+  },
+  "subject": "fix/sluice-daemon-reads-only-what-changed",
+  "under_test_ms": 653000
+}

@@ -1,0 +1,27 @@
+{
+  "schema": "sluice/submission@1",
+  "id": 194,
+  "branch": "main",
+  "head": "dbe8d1ddb72e51b3b462fb3e81a80203b55c10a8",
+  "from": {
+    "agent": "fix/its-github-checks-pass",
+    "worktree": "pull/343",
+    "head": "fix/its-github-checks-pass"
+  },
+  "submitted": "2026-11-27T12:04:39Z",
+  "after": [],
+  "priority": 0,
+  "attempt": 2,
+  "state": "landed",
+  "tested": {
+    "combination": "aab9c3006e9e85e1a8ff2db2d96ecf31897b5b9c",
+    "on": "e7c200097d271a15e860ad9456ed49c0dabfab9e",
+    "submissions": [
+      194
+    ]
+  },
+  "result": "passed",
+  "landed_as": "0fb72cd08b01952d1b39ed2fd8bdac283da6b738",
+  "subject": "A wait's step is at the wait's time",
+  "under_test_ms": 614000
+}

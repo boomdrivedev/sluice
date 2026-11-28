@@ -1,0 +1,33 @@
+{
+  "schema": "sluice/submission@1",
+  "id": 174,
+  "branch": "main",
+  "head": "af2406750b0e1eee4d135169b4f05936d6b60f83",
+  "from": {
+    "agent": "fix/a-hand-over-keeps-its-runs-as-children",
+    "worktree": "pull/334",
+    "head": "fix/a-hand-over-keeps-its-runs-as-children"
+  },
+  "submitted": "2026-11-27T03:01:29Z",
+  "after": [],
+  "priority": 0,
+  "attempt": 1,
+  "state": "failed",
+  "tested": {
+    "combination": "24acaa19f7f6449c224be04eee96450fcd2bd06a",
+    "on": "3d15673d927948e15003748979a877ab6710bf7b",
+    "submissions": [
+      174
+    ]
+  },
+  "result": "failed",
+  "failed": [
+    {
+      "task": "cli:tools",
+      "hash": "68b32a1e4ca2e13b72ba89d2a1f96b993692c28f4f387dad44a768f0b5a5c5cb",
+      "log": "/Users/chuck/.local/share/boomdrive/repositories/boomdrivedev/sluice/sluice.git/sluice-remote/origin/.logs/main/c62/cli:tools.log"
+    }
+  ],
+  "subject": "A test names a run's check by its group's leader",
+  "under_test_ms": 394000
+}

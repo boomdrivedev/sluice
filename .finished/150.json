@@ -1,0 +1,27 @@
+{
+  "schema": "sluice/submission@1",
+  "id": 150,
+  "branch": "main",
+  "head": "983cb60dae02b5af0dfff5c9d4fa9f1f7072dd22",
+  "from": {
+    "agent": "change/sluice-host-runs-a-sessions-checks",
+    "worktree": "pull/314",
+    "head": "change/sluice-host-runs-a-sessions-checks"
+  },
+  "submitted": "2026-11-24T04:13:36Z",
+  "after": [],
+  "priority": 0,
+  "attempt": 3,
+  "state": "landed",
+  "tested": {
+    "combination": "da851c17f77345f13217df6af2706794f0dd01e6",
+    "on": "15b2b634ae5b2d3566ec7f28af236d0784c671e5",
+    "submissions": [
+      150
+    ]
+  },
+  "result": "passed",
+  "landed_as": "78fc5a4fb515b37dc435d168a09379ab78b1a5e5",
+  "subject": "sluice host runs a session's checks",
+  "under_test_ms": 775000
+}

@@ -1,0 +1,27 @@
+{
+  "schema": "sluice/submission@1",
+  "id": 235,
+  "branch": "main",
+  "head": "cbf6126d20fe2cece8baa4c9c8f280f18b42a578",
+  "from": {
+    "agent": "change/sluice-tests-its-logic-as-units",
+    "worktree": "pull/374",
+    "head": "change/sluice-tests-its-logic-as-units"
+  },
+  "submitted": "2026-11-28T07:38:21Z",
+  "after": [],
+  "priority": 0,
+  "attempt": 1,
+  "state": "landed",
+  "tested": {
+    "combination": "7cb5baa239bdeb21486e949048e2e616fc117e15",
+    "on": "6f57549d76a411049faa6b8af1cdd52a284f225c",
+    "submissions": [
+      235
+    ]
+  },
+  "result": "passed",
+  "landed_as": "0c1bb22bc576f95c6f8023cb92dfed0af9a5e246",
+  "subject": "sluice tests its logic as units: a follower reaches the host process by the client it is given",
+  "under_test_ms": 308000
+}

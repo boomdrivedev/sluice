@@ -1,0 +1,27 @@
+{
+  "schema": "sluice/submission@1",
+  "id": 175,
+  "branch": "main",
+  "head": "fa6743a0c15212be0faac9794e9ff4613d542974",
+  "from": {
+    "agent": "fix/its-tests-hold-under-load",
+    "worktree": "pull/335",
+    "head": "fix/its-tests-hold-under-load"
+  },
+  "submitted": "2026-11-27T04:50:00Z",
+  "after": [],
+  "priority": 0,
+  "attempt": 1,
+  "state": "landed",
+  "tested": {
+    "combination": "1c05a45564b744910edb7fe188d24e4c122db7a9",
+    "on": "3d15673d927948e15003748979a877ab6710bf7b",
+    "submissions": [
+      175
+    ]
+  },
+  "result": "passed",
+  "landed_as": "7a7f06dd70a189db67ec4235e8cc3a548d063464",
+  "subject": "Its tests hold under load",
+  "under_test_ms": 526000
+}

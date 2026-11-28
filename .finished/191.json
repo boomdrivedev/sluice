@@ -1,0 +1,37 @@
+{
+  "schema": "sluice/submission@1",
+  "id": 191,
+  "branch": "main",
+  "head": "fa6c4116958d58a8a6c11a81e2c99aa2f8f3c5f1",
+  "from": {
+    "agent": "fix/its-github-checks-pass",
+    "worktree": "pull/343",
+    "head": "fix/its-github-checks-pass"
+  },
+  "submitted": "2026-11-27T11:12:28Z",
+  "after": [],
+  "priority": 0,
+  "attempt": 1,
+  "state": "withdrawn",
+  "tested": {
+    "combination": "68f371fd9b3ed35015addbe252ee543ff49747f4",
+    "on": "e7c200097d271a15e860ad9456ed49c0dabfab9e",
+    "submissions": [
+      191
+    ]
+  },
+  "result": "failed",
+  "failed": [
+    {
+      "task": "cli:tools",
+      "hash": "b47c03bf579fc49d43789e6008e2394710ac86a05cc6f90d72c8ebfca9194e76",
+      "log": "/Users/chuck/.local/share/boomdrive/repositories/boomdrivedev/sluice/sluice.git/sluice-remote/origin/.logs/main/c81/cli:tools.log"
+    }
+  ],
+  "withdrawn": {
+    "by": "resubmission",
+    "at": "2026-11-27T12:04:39Z"
+  },
+  "subject": "A wait's step is at the wait's time",
+  "under_test_ms": 785000
+}

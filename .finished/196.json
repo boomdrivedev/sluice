@@ -1,0 +1,27 @@
+{
+  "schema": "sluice/submission@1",
+  "id": 196,
+  "branch": "main",
+  "head": "cf88b6e7ac6934aefe899d9cbb06ce0a94018cc7",
+  "from": {
+    "agent": "fix/host-process-tests-pass-on-linux",
+    "worktree": "pull/344",
+    "head": "fix/host-process-tests-pass-on-linux"
+  },
+  "submitted": "2026-11-27T13:17:27Z",
+  "after": [],
+  "priority": 0,
+  "attempt": 1,
+  "state": "withdrawn",
+  "conflict": {
+    "paths": [
+      "openspec/specs/test-children/spec.md"
+    ],
+    "with": []
+  },
+  "withdrawn": {
+    "by": "resubmission",
+    "at": "2026-11-27T13:21:15Z"
+  },
+  "subject": "The host process tests pass on Linux"
+}

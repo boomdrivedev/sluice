@@ -1,0 +1,37 @@
+{
+  "schema": "sluice/submission@1",
+  "id": 187,
+  "branch": "main",
+  "head": "95d4d51e523e115738b3c952ed204b08968d8cb7",
+  "from": {
+    "agent": "fix/a-test-stops-the-hosts-it-starts",
+    "worktree": "pull/340",
+    "head": "fix/a-test-stops-the-hosts-it-starts"
+  },
+  "submitted": "2026-11-27T10:07:41Z",
+  "after": [],
+  "priority": 0,
+  "attempt": 1,
+  "state": "withdrawn",
+  "tested": {
+    "combination": "2679d3dc5fac99b57d522f3b18ff7375ad6da694",
+    "on": "a6d07d140b6bcda31414acd27dceea7b7e05b72c",
+    "submissions": [
+      187
+    ]
+  },
+  "result": "failed",
+  "failed": [
+    {
+      "task": "cli:test",
+      "hash": "ed103d33ef9d2f4431facc2584bc377e5ebf78687115f7ffa3248a5f74f34378",
+      "log": "/Users/chuck/.local/share/boomdrive/repositories/boomdrivedev/sluice/sluice.git/sluice-remote/origin/.logs/main/c78/cli:test.log"
+    }
+  ],
+  "withdrawn": {
+    "by": "resubmission",
+    "at": "2026-11-27T11:28:42Z"
+  },
+  "subject": "A test stops the hosts it starts",
+  "under_test_ms": 637000
+}

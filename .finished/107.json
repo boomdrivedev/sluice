@@ -1,0 +1,26 @@
+{
+  "schema": "sluice/submission@1",
+  "id": 107,
+  "branch": "main",
+  "head": "ffb911522b3649c1c9fb5c36397af6e6e837d682",
+  "from": {
+    "agent": "fix/main--forge-check-reads-the-pool",
+    "worktree": "pull/296",
+    "head": "fix/main--forge-check-reads-the-pool"
+  },
+  "submitted": "2026-11-18T23:42:44Z",
+  "after": [],
+  "priority": 0,
+  "attempt": 1,
+  "state": "landed",
+  "tested": {
+    "combination": "10ce9ab4f0739ef88c4ae06ee9d25ea09dffe9c0",
+    "on": "94f87f760a88fdb373c75cacc36ae27ce592887f",
+    "submissions": [
+      107
+    ]
+  },
+  "result": "passed",
+  "landed_as": "b6c30e7823d6b7ae7eb6483a4aa428d2794b0d4f",
+  "subject": "fix/main--forge-check-reads-the-pool"
+}

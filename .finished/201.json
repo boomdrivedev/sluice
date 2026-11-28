@@ -1,0 +1,27 @@
+{
+  "schema": "sluice/submission@1",
+  "id": 201,
+  "branch": "main",
+  "head": "bb4b29585249c31f3db174e446ccb20d1c7b4ad7",
+  "from": {
+    "agent": "fix/releases-never-share-a-tag",
+    "worktree": "pull/347",
+    "head": "fix/releases-never-share-a-tag"
+  },
+  "submitted": "2026-11-27T14:37:25Z",
+  "after": [],
+  "priority": 0,
+  "attempt": 1,
+  "state": "landed",
+  "tested": {
+    "combination": "0ae1a670920b88cb12ea37fd49005a00ea3b2d79",
+    "on": "62eb7c5b1ed6db59a06ba999d3b1cd1f31b5f95c",
+    "submissions": [
+      201
+    ]
+  },
+  "result": "passed",
+  "landed_as": "fa12b1cd500aba4bee0a943e471c72d2ae214c20",
+  "subject": "Two pushes to main never reckon one tag",
+  "under_test_ms": 162000
+}

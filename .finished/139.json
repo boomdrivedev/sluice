@@ -1,0 +1,27 @@
+{
+  "schema": "sluice/submission@1",
+  "id": 139,
+  "branch": "main",
+  "head": "2459329fd79cfc0640811a825438b6cc91cb1c9a",
+  "from": {
+    "agent": "bolt/sluice-checks-and-waits-on-an-agents-own-work",
+    "worktree": "pull/304",
+    "head": "bolt/sluice-checks-and-waits-on-an-agents-own-work"
+  },
+  "submitted": "2026-11-20T23:26:57Z",
+  "after": [],
+  "priority": 0,
+  "attempt": 2,
+  "state": "landed",
+  "tested": {
+    "combination": "6c99980d55f4b241241bf49c65fefb72977ca1d8",
+    "on": "4956bad34ec67044024143d896515665368a77de",
+    "submissions": [
+      139
+    ]
+  },
+  "result": "passed",
+  "landed_as": "11d7d86b77470979bf7e6c91879932c5688f4586",
+  "subject": "sluice checks and waits on an agent's own work",
+  "under_test_ms": 1588000
+}

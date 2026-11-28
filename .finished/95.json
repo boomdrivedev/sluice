@@ -1,0 +1,36 @@
+{
+  "schema": "sluice/submission@1",
+  "id": 95,
+  "branch": "main",
+  "head": "fc25c8ef73c494929eb29c2ca7139d1c9d17befc",
+  "from": {
+    "agent": "fix/main--a-release-with-nothing-to-free-creates-nothing",
+    "worktree": "pull/288",
+    "head": "fix/main--a-release-with-nothing-to-free-creates-nothing"
+  },
+  "submitted": "2026-11-18T01:28:27Z",
+  "after": [],
+  "priority": 0,
+  "attempt": 2,
+  "state": "withdrawn",
+  "tested": {
+    "combination": "f28f0cdd4a801f9ff9da2823afffdadbc12bc573",
+    "on": "317f23e6cb5fbdfb02b1b63866a8178b3b60bdd2",
+    "submissions": [
+      95
+    ]
+  },
+  "result": "failed",
+  "failed": [
+    {
+      "task": "root:screenshots-scene",
+      "log": "/Users/chuck/.local/share/boomdrive/repositories/boomdrivedev/sluice/sluice.git/sluice-remote/origin/.logs/main/c1/root:screenshots-scene.log",
+      "not_run": "sluice's sandbox refused the run file-write-create /Users/chuck/.local/share/boomdrive/repositories/boomdrivedev/sluice/sluice.git/moon-outputs/7132c7fad86ef29306d80d3b0d25b279122288c4a07b9a717dae554609345460.tar.gz (by moon), file-write-create /Users/chuck/.local/share/boomdrive/repositories/boomdrivedev/sluice/sluice.git/moon-outputs/74ec68f705b64d4a9b5fc8aecdede13dd30abbca516f43032b69fce4b21b33cf.tar.gz (by moon), file-write-create /Users/chuck/.local/share/boomdrive/repositories/boomdrivedev/sluice/sluice.git/moon-outputs/3d05b25eee89f73d5fb8ff5ee3aac547de779c538a7d9a5178003ce9a6885e19.tar.gz (by moon) and 43 more"
+    }
+  ],
+  "withdrawn": {
+    "by": "resubmission",
+    "at": "2026-11-18T03:18:37Z"
+  },
+  "subject": "fix/main--a-release-with-nothing-to-free-creates-nothing"
+}

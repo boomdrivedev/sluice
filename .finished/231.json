@@ -1,0 +1,27 @@
+{
+  "schema": "sluice/submission@1",
+  "id": 231,
+  "branch": "main",
+  "head": "729f1b281314cb95cdb6bd2656cb6759e18ce1a9",
+  "from": {
+    "agent": "change/sluice-tests-its-logic-as-units",
+    "worktree": "pull/371",
+    "head": "change/sluice-tests-its-logic-as-units"
+  },
+  "submitted": "2026-11-28T07:05:36Z",
+  "after": [],
+  "priority": 0,
+  "attempt": 2,
+  "state": "landed",
+  "tested": {
+    "combination": "30b357807433a1e36269fd7c1b58c8c934acc4a3",
+    "on": "1f75fb4a71cb36eecb6151fa81d0462c531a18ef",
+    "submissions": [
+      231
+    ]
+  },
+  "result": "passed",
+  "landed_as": "c70bf104b5d7ce199a3e16692bcfedce1e2a7518",
+  "subject": "sluice tests its logic as units: the AWS scenarios and an unheld release run in the test's own process",
+  "under_test_ms": 349000
+}

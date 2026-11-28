@@ -1,0 +1,27 @@
+{
+  "schema": "sluice/submission@1",
+  "id": 181,
+  "branch": "main",
+  "head": "65aa897e301655944d888646e04db385d1e0df57",
+  "from": {
+    "agent": "fix/overviews-reach-a-subscriber-in-order",
+    "worktree": "pull/333",
+    "head": "fix/overviews-reach-a-subscriber-in-order"
+  },
+  "submitted": "2026-11-27T05:55:11Z",
+  "after": [],
+  "priority": 0,
+  "attempt": 4,
+  "state": "landed",
+  "tested": {
+    "combination": "a96fbf389bd49bead3affb869da4b4a3820440b8",
+    "on": "eef5d354b522812db56afe107ed06a8a1bee4307",
+    "submissions": [
+      181
+    ]
+  },
+  "result": "passed",
+  "landed_as": "7dfd302ccef9745e71f5857be713d0dd06d9b708",
+  "subject": "Overviews reach a subscriber in order",
+  "under_test_ms": 542000
+}

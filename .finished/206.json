@@ -1,0 +1,28 @@
+{
+  "schema": "sluice/submission@1",
+  "id": 206,
+  "branch": "main",
+  "head": "4de468bf29ae5be0bb7baea1578e1b2c57360109",
+  "from": {
+    "agent": "fix/sluice-daemon-reaps-every-child",
+    "worktree": "pull/351",
+    "head": "fix/sluice-daemon-reaps-every-child"
+  },
+  "submitted": "2026-11-27T19:09:12Z",
+  "after": [],
+  "priority": 0,
+  "attempt": 1,
+  "state": "landed",
+  "tested": {
+    "combination": "5473d55d25feb8ac4ecb47aca05431c2426ba91f",
+    "on": "26883f41add6166e677f389ac1947546df3745cb",
+    "submissions": [
+      206,
+      207
+    ]
+  },
+  "result": "passed",
+  "landed_as": "eed739f3c03318f69a54d64984390dafae6e6c7e",
+  "subject": "sluice host reaps every child its earlier image left",
+  "under_test_ms": 642000
+}

@@ -1,0 +1,26 @@
+{
+  "schema": "sluice/submission@1",
+  "id": 114,
+  "branch": "main",
+  "head": "c931033b6cc7bdeba7130becea9ae683d54ba787",
+  "from": {
+    "agent": "bolt/sluice-is-tested-against-worktrunk-0-82-0",
+    "worktree": "pull/297",
+    "head": "bolt/sluice-is-tested-against-worktrunk-0-82-0"
+  },
+  "submitted": "2026-11-19T11:57:23Z",
+  "after": [],
+  "priority": 0,
+  "attempt": 1,
+  "state": "landed",
+  "tested": {
+    "combination": "ed79a1e88020acc8769ab74229447d44fda8a47e",
+    "on": "b6c30e7823d6b7ae7eb6483a4aa428d2794b0d4f",
+    "submissions": [
+      114
+    ]
+  },
+  "result": "passed",
+  "landed_as": "13bfe44744c535f76e828f3b82e288a1adfe5fec",
+  "subject": "bolt/sluice-is-tested-against-worktrunk-0-82-0"
+}

@@ -1,0 +1,29 @@
+{
+  "schema": "sluice/submission@1",
+  "id": 232,
+  "branch": "main",
+  "head": "e94a5a389bc282d9e9fd8aef2d59beb8de89624b",
+  "from": {
+    "agent": "change/sluice-tests-its-logic-as-units",
+    "worktree": "pull/372",
+    "head": "change/sluice-tests-its-logic-as-units"
+  },
+  "submitted": "2026-11-28T07:13:22Z",
+  "after": [],
+  "priority": 0,
+  "attempt": 1,
+  "state": "withdrawn",
+  "tested": {
+    "combination": "16a8b6bf939f38a124fcac61f492d4cb59c498d1",
+    "on": "c70bf104b5d7ce199a3e16692bcfedce1e2a7518",
+    "submissions": [
+      232
+    ]
+  },
+  "withdrawn": {
+    "by": "change/sluice-tests-its-logic-as-units",
+    "at": "2026-11-28T07:18:03Z"
+  },
+  "subject": "sluice tests its logic as units: two moon-runner scenarios run as units",
+  "under_test_ms": 266000
+}

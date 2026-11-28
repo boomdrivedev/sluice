@@ -1,0 +1,27 @@
+{
+  "schema": "sluice/submission@1",
+  "id": 197,
+  "branch": "main",
+  "head": "c4e3b46bf4ae3afeef9a5c3ff45da3bbaecb9023",
+  "from": {
+    "agent": "fix/host-process-tests-pass-on-linux",
+    "worktree": "pull/344",
+    "head": "fix/host-process-tests-pass-on-linux"
+  },
+  "submitted": "2026-11-27T13:21:15Z",
+  "after": [],
+  "priority": 0,
+  "attempt": 2,
+  "state": "landed",
+  "tested": {
+    "combination": "d9c5d1d43a0f5f731da197d6d03a80598d0ab6e5",
+    "on": "cc1a154e5043909594b4c7d0b2b393a9d82cdfd9",
+    "submissions": [
+      197
+    ]
+  },
+  "result": "passed",
+  "landed_as": "7b6e1f1a209886f69d52e3e269443659336fa06d",
+  "subject": "The host process tests pass on Linux",
+  "under_test_ms": 523000
+}

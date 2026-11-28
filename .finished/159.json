@@ -1,0 +1,27 @@
+{
+  "schema": "sluice/submission@1",
+  "id": 159,
+  "branch": "main",
+  "head": "a49cf74221769cfae83a3fa58470b9249224a79e",
+  "from": {
+    "agent": "change/the-gate-runs-in-five-minutes",
+    "worktree": "pull/324",
+    "head": "change/the-gate-runs-in-five-minutes"
+  },
+  "submitted": "2026-11-24T18:33:45Z",
+  "after": [],
+  "priority": 0,
+  "attempt": 1,
+  "state": "landed",
+  "tested": {
+    "combination": "70d5e9e128ba7fb21f671e46abf94562578078e4",
+    "on": "6dd1dade7472a821ac4ca2132d9fceb7778ca63d",
+    "submissions": [
+      159
+    ]
+  },
+  "result": "passed",
+  "landed_as": "f1931d3e38969413bdda41015af0ea02c21765ec",
+  "subject": "record 0132 moves to Boom",
+  "under_test_ms": 76000
+}

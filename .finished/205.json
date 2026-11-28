@@ -1,0 +1,27 @@
+{
+  "schema": "sluice/submission@1",
+  "id": 205,
+  "branch": "main",
+  "head": "a459909483614b266b01b77df104bc3ba51231a2",
+  "from": {
+    "agent": "change/sluices-herdr-plugin-leaves-no-process-and-forecasts-from-its-subscription",
+    "worktree": "pull/350",
+    "head": "change/sluices-herdr-plugin-leaves-no-process-and-forecasts-from-its-subscription"
+  },
+  "submitted": "2026-11-27T19:08:10Z",
+  "after": [],
+  "priority": 0,
+  "attempt": 1,
+  "state": "landed",
+  "tested": {
+    "combination": "8e54701a0dce0acf1cbda076ea28baa6f8a11eb8",
+    "on": "c4753b1875f68224b9bdbe87397ddac5612e7809",
+    "submissions": [
+      205
+    ]
+  },
+  "result": "passed",
+  "landed_as": "26883f41add6166e677f389ac1947546df3745cb",
+  "subject": "change/sluices-herdr-plugin-leaves-no-process-and-forecasts-from-its-subscription",
+  "under_test_ms": 645000
+}

@@ -1,0 +1,27 @@
+{
+  "schema": "sluice/submission@1",
+  "id": 147,
+  "branch": "main",
+  "head": "d1632a85d9073f4a7554d92a7e424a77bfe1be06",
+  "from": {
+    "agent": "chore/the-host-process-tests-hold-under-load",
+    "worktree": "pull/316",
+    "head": "chore/the-host-process-tests-hold-under-load"
+  },
+  "submitted": "2026-11-24T00:29:23Z",
+  "after": [],
+  "priority": 0,
+  "attempt": 1,
+  "state": "landed",
+  "tested": {
+    "combination": "3bf7a65d592df313010336215e1436404dabad85",
+    "on": "bcb3e6925697c8f530de0a1e61c3430a4e1c8be1",
+    "submissions": [
+      147
+    ]
+  },
+  "result": "passed",
+  "landed_as": "a6e39102c8025018408c188ad269b99e5526a3e0",
+  "subject": "chore(host-process): the host process's tests hold under load",
+  "under_test_ms": 727000
+}

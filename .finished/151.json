@@ -1,0 +1,28 @@
+{
+  "schema": "sluice/submission@1",
+  "id": 151,
+  "branch": "main",
+  "head": "7e01ca374110bc15a9b0ae962fd7ba7c54621135",
+  "from": {
+    "agent": "change/the-gate-runs-in-five-minutes",
+    "worktree": "pull/318",
+    "head": "change/the-gate-runs-in-five-minutes"
+  },
+  "submitted": "2026-11-24T14:32:50Z",
+  "after": [],
+  "priority": 0,
+  "attempt": 1,
+  "state": "landed",
+  "tested": {
+    "combination": "e38cdaf39e0d7dceed1c4b9adbb2c5dd3cf8a361",
+    "on": "78fc5a4fb515b37dc435d168a09379ab78b1a5e5",
+    "submissions": [
+      151
+    ]
+  },
+  "result": "passed",
+  "landed_as": "e2ab1f479f2c5cd7b8acd750f9941f0fc6e571e0",
+  "subject": "the gate runs what a submission affects, and its slow suites wait on events",
+  "under_test_ms": 1480000,
+  "runs_with_no_outcome": 1
+}

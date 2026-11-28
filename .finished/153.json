@@ -1,0 +1,27 @@
+{
+  "schema": "sluice/submission@1",
+  "id": 153,
+  "branch": "main",
+  "head": "4e9b80677c295bb8db6bb24f9614288f1e7889b4",
+  "from": {
+    "agent": "change/the-gate-runs-in-five-minutes",
+    "worktree": "pull/320",
+    "head": "change/the-gate-runs-in-five-minutes"
+  },
+  "submitted": "2026-11-24T15:16:37Z",
+  "after": [],
+  "priority": 0,
+  "attempt": 1,
+  "state": "landed",
+  "tested": {
+    "combination": "207e977100e9ffa40daaf6c1e4ef5014b4338fc1",
+    "on": "e2ab1f479f2c5cd7b8acd750f9941f0fc6e571e0",
+    "submissions": [
+      153
+    ]
+  },
+  "result": "passed",
+  "landed_as": "9f62923910b98d42a937b4e19ae7d4afd0362652",
+  "subject": "a herdr test that kills a watcher waits for its source's settled identity",
+  "under_test_ms": 170000
+}

@@ -1,0 +1,27 @@
+{
+  "schema": "sluice/submission@1",
+  "id": 200,
+  "branch": "main",
+  "head": "a40cc44fbec5889cb438e24acc6a48d6141781d1",
+  "from": {
+    "agent": "fix/a-fake-host-is-named-before-the-guard-looks",
+    "worktree": "pull/346",
+    "head": "fix/a-fake-host-is-named-before-the-guard-looks"
+  },
+  "submitted": "2026-11-27T14:07:42Z",
+  "after": [],
+  "priority": 0,
+  "attempt": 1,
+  "state": "landed",
+  "tested": {
+    "combination": "77f7d62dcfbea93c644641bdbd04e1803ff4fcf7",
+    "on": "bea920d1780ef3e5a9056555fdce0a7fe4c5f86b",
+    "submissions": [
+      200
+    ]
+  },
+  "result": "passed",
+  "landed_as": "62eb7c5b1ed6db59a06ba999d3b1cd1f31b5f95c",
+  "subject": "The fake host is named before the guard looks",
+  "under_test_ms": 67000
+}

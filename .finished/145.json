@@ -1,0 +1,37 @@
+{
+  "schema": "sluice/submission@1",
+  "id": 145,
+  "branch": "main",
+  "head": "d47c2e3322763c00fe94aa5d793453cd450501cf",
+  "from": {
+    "agent": "change/sluice-host-runs-a-sessions-checks",
+    "worktree": "pull/314",
+    "head": "change/sluice-host-runs-a-sessions-checks"
+  },
+  "submitted": "2026-11-23T19:17:57Z",
+  "after": [],
+  "priority": 0,
+  "attempt": 1,
+  "state": "withdrawn",
+  "tested": {
+    "combination": "c3b3f30d2d5e0ca648862405a3f7623914b22186",
+    "on": "87bb89a3befbf071591a12dcf42a53e79af46dc5",
+    "submissions": [
+      145
+    ]
+  },
+  "result": "failed",
+  "failed": [
+    {
+      "task": "cli:test",
+      "log": "/Users/chuck/.local/share/boomdrive/repositories/boomdrivedev/sluice/sluice.git/sluice-remote/origin/.logs/main/c32/cli:test.log",
+      "not_run": "sluice's sandbox refused the run network-outbound remote:*:53 (by moon), network-outbound /private/var/run/mDNSResponder (a name lookup, by moon), file-write-data /Users/chuck/.cargo/.package-cache (by cargo) and 5 more"
+    }
+  ],
+  "withdrawn": {
+    "by": "resubmission",
+    "at": "2026-11-24T03:59:20Z"
+  },
+  "subject": "sluice host runs a session's checks",
+  "under_test_ms": 1362000
+}

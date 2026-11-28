@@ -1,0 +1,37 @@
+{
+  "schema": "sluice/submission@1",
+  "id": 178,
+  "branch": "main",
+  "head": "3e14bcbaad79c499e202c4b09a54c50775dbf372",
+  "from": {
+    "agent": "fix/overviews-reach-a-subscriber-in-order",
+    "worktree": "pull/333",
+    "head": "fix/overviews-reach-a-subscriber-in-order"
+  },
+  "submitted": "2026-11-27T05:04:21Z",
+  "after": [],
+  "priority": 0,
+  "attempt": 3,
+  "state": "withdrawn",
+  "tested": {
+    "combination": "36f3608b034dc44f746b81cc0d496ace65412a34",
+    "on": "58110efc502cd4b0cf9e500813eb180378b907a5",
+    "submissions": [
+      178
+    ]
+  },
+  "result": "failed",
+  "failed": [
+    {
+      "task": "cli:tools",
+      "hash": "426d0941449dba499ea9d4f79b5775fcf5f6f6d542198fc74ab69d5da8e62c9f",
+      "log": "/Users/chuck/.local/share/boomdrive/repositories/boomdrivedev/sluice/sluice.git/sluice-remote/origin/.logs/main/c68/cli:tools.log"
+    }
+  ],
+  "withdrawn": {
+    "by": "resubmission",
+    "at": "2026-11-27T05:55:11Z"
+  },
+  "subject": "Overviews reach a subscriber in order",
+  "under_test_ms": 273000
+}

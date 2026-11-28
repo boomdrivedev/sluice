@@ -1,0 +1,26 @@
+{
+  "schema": "sluice/submission@1",
+  "id": 116,
+  "branch": "main",
+  "head": "98bbeba50afecd7b5743bc243fe5b60179fadd38",
+  "from": {
+    "agent": "boomdrive-ops",
+    "worktree": "pull/299",
+    "head": "fix/main--the-key-check-reads-a-symlink-as-moon-does"
+  },
+  "submitted": "2026-11-19T13:00:34Z",
+  "after": [],
+  "priority": 0,
+  "attempt": 1,
+  "state": "landed",
+  "tested": {
+    "combination": "1fb63e430b06e421568b90b5a1481221712757cb",
+    "on": "b359d606da01860918273c2483d456f5ac11a3a8",
+    "submissions": [
+      116
+    ]
+  },
+  "result": "passed",
+  "landed_as": "bcb3dc6e8eebdafd458e60c27e26bd413fea5e46",
+  "subject": "fix/main--the-key-check-reads-a-symlink-as-moon-does"
+}

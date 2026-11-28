@@ -1,0 +1,27 @@
+{
+  "schema": "sluice/submission@1",
+  "id": 222,
+  "branch": "main",
+  "head": "97fb01edf938c6ce587bcde8012e9a37183e1475",
+  "from": {
+    "agent": "change/sluice-tests-its-logic-as-units",
+    "worktree": "pull/363",
+    "head": "change/sluice-tests-its-logic-as-units"
+  },
+  "submitted": "2026-11-28T04:58:17Z",
+  "after": [],
+  "priority": 0,
+  "attempt": 1,
+  "state": "landed",
+  "tested": {
+    "combination": "fd51043593986281bf9d1c41897f1f2a2035bf7c",
+    "on": "92ec6fd710b75e1d48fad38b74685991cb96b0d3",
+    "submissions": [
+      222
+    ]
+  },
+  "result": "passed",
+  "landed_as": "755bbc9f4b688babcbe4b687c066ddd1a6d06a0c",
+  "subject": "sluice tests its logic as units: four moon-runner duplicates go",
+  "under_test_ms": 316000
+}

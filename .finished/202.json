@@ -1,0 +1,27 @@
+{
+  "schema": "sluice/submission@1",
+  "id": 202,
+  "branch": "main",
+  "head": "39638d18564ea372d670fdc63bf11b66df8b8892",
+  "from": {
+    "agent": "change/a-sluice-client-starts-no-host-under-a-service-manager",
+    "worktree": "pull/348",
+    "head": "change/a-sluice-client-starts-no-host-under-a-service-manager"
+  },
+  "submitted": "2026-11-27T17:24:15Z",
+  "after": [],
+  "priority": 0,
+  "attempt": 1,
+  "state": "landed",
+  "tested": {
+    "combination": "8718db8bb3fd7e8c6365e875687087148df98c88",
+    "on": "fa12b1cd500aba4bee0a943e471c72d2ae214c20",
+    "submissions": [
+      202
+    ]
+  },
+  "result": "passed",
+  "landed_as": "c4753b1875f68224b9bdbe87397ddac5612e7809",
+  "subject": "A sluice client starts no host under a service manager",
+  "under_test_ms": 793000
+}

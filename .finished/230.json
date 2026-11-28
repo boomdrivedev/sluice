@@ -1,0 +1,37 @@
+{
+  "schema": "sluice/submission@1",
+  "id": 230,
+  "branch": "main",
+  "head": "8df2235678bd0eeb7f627bf81a1e21a04e763852",
+  "from": {
+    "agent": "change/sluice-tests-its-logic-as-units",
+    "worktree": "pull/371",
+    "head": "change/sluice-tests-its-logic-as-units"
+  },
+  "submitted": "2026-11-28T06:57:22Z",
+  "after": [],
+  "priority": 0,
+  "attempt": 1,
+  "state": "withdrawn",
+  "tested": {
+    "combination": "e0f7573233f855d8a419f49281caf3130e36a9ac",
+    "on": "1f75fb4a71cb36eecb6151fa81d0462c531a18ef",
+    "submissions": [
+      230
+    ]
+  },
+  "result": "failed",
+  "failed": [
+    {
+      "task": "cli:test",
+      "hash": "25e094ee03c720f13c5a8f671682fee3be360763eed7924b12aa901a0c60a87e",
+      "log": "/Users/chuck/.local/share/boomdrive/repositories/boomdrivedev/sluice/sluice.git/sluice-remote/origin/.logs/main/c119/cli:test.log"
+    }
+  ],
+  "withdrawn": {
+    "by": "resubmission",
+    "at": "2026-11-28T07:05:36Z"
+  },
+  "subject": "sluice tests its logic as units: the AWS scenarios run in the test's own process",
+  "under_test_ms": 352000
+}

@@ -1,0 +1,27 @@
+{
+  "schema": "sluice/submission@1",
+  "id": 225,
+  "branch": "main",
+  "head": "738f1a18f653e55e9bb52c50007b007188e8c879",
+  "from": {
+    "agent": "change/sluice-tests-its-logic-as-units",
+    "worktree": "pull/366",
+    "head": "change/sluice-tests-its-logic-as-units"
+  },
+  "submitted": "2026-11-28T05:22:34Z",
+  "after": [],
+  "priority": 0,
+  "attempt": 1,
+  "state": "landed",
+  "tested": {
+    "combination": "c84c6644de5cda0da69c6c157681b5dc4b7db760",
+    "on": "b872cab2b32197a2ef135fd1ecaa2b0b28884962",
+    "submissions": [
+      225
+    ]
+  },
+  "result": "passed",
+  "landed_as": "a94b17c17216da27527485444d173ec3e3da40b6",
+  "subject": "sluice tests its logic as units: preview-container and watch duplicates go",
+  "under_test_ms": 313000
+}

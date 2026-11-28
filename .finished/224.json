@@ -1,0 +1,27 @@
+{
+  "schema": "sluice/submission@1",
+  "id": 224,
+  "branch": "main",
+  "head": "f5a3f189e9b6e8a8aa1893bc6740b155c93ada67",
+  "from": {
+    "agent": "change/sluice-tests-its-logic-as-units",
+    "worktree": "pull/365",
+    "head": "change/sluice-tests-its-logic-as-units"
+  },
+  "submitted": "2026-11-28T05:15:41Z",
+  "after": [],
+  "priority": 0,
+  "attempt": 1,
+  "state": "landed",
+  "tested": {
+    "combination": "8abb834e9deaba1acb1a7940364fa75924ebb6b9",
+    "on": "80be916c1e69b710ddf6c0afa296c1c3ed18b272",
+    "submissions": [
+      224
+    ]
+  },
+  "result": "passed",
+  "landed_as": "b872cab2b32197a2ef135fd1ecaa2b0b28884962",
+  "subject": "sluice tests its logic as units: usage tests read the command line in-process",
+  "under_test_ms": 346000
+}

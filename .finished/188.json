@@ -1,0 +1,40 @@
+{
+  "schema": "sluice/submission@1",
+  "id": 188,
+  "branch": "main",
+  "head": "f1abfdc6c6bab63e2e20ece3fe361d913498267a",
+  "from": {
+    "agent": "fix/its-github-checks-pass",
+    "worktree": "pull/341",
+    "head": "fix/its-github-checks-pass"
+  },
+  "submitted": "2026-11-27T10:16:32Z",
+  "after": [],
+  "priority": 0,
+  "attempt": 1,
+  "state": "withdrawn",
+  "conflict": {
+    "paths": [
+      "openspec/specs/test-children/spec.md"
+    ],
+    "with": [
+      {
+        "id": 187,
+        "from": {
+          "agent": "fix/a-test-stops-the-hosts-it-starts",
+          "worktree": "pull/340",
+          "head": "fix/a-test-stops-the-hosts-it-starts"
+        }
+      }
+    ]
+  },
+  "withdrawn": {
+    "by": "resubmission",
+    "at": "2026-11-27T10:19:16Z"
+  },
+  "subject": "Tests wait on what another process changes",
+  "beside": {
+    "behind": 187,
+    "why": "conflict"
+  }
+}

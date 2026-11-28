@@ -1,0 +1,29 @@
+{
+  "schema": "sluice/submission@1",
+  "id": 103,
+  "branch": "main",
+  "head": "d4dde8f662d9aafd02417e151272a04b0e053ab9",
+  "from": {
+    "agent": "boomdrive-design",
+    "worktree": "pull/291",
+    "head": "design/what-a-metric-carries"
+  },
+  "submitted": "2026-11-18T20:49:33Z",
+  "after": [],
+  "priority": 0,
+  "attempt": 2,
+  "state": "landed",
+  "tested": {
+    "combination": "3532bf578d5006c8dab3f445922d28a69fa23ad4",
+    "on": "5d7d1c3d0866db732382828379110e8ee89fe1d1",
+    "submissions": [
+      101,
+      102,
+      103,
+      104
+    ]
+  },
+  "result": "passed",
+  "landed_as": "844c1298072a035dee9d4a03b71635cd4c237acf",
+  "subject": "design/what-a-metric-carries"
+}

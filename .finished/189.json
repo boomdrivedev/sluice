@@ -1,0 +1,27 @@
+{
+  "schema": "sluice/submission@1",
+  "id": 189,
+  "branch": "main",
+  "head": "07db94a99a2aa29512cb2005556ae193eaf9a143",
+  "from": {
+    "agent": "fix/its-github-checks-pass",
+    "worktree": "pull/341",
+    "head": "fix/its-github-checks-pass"
+  },
+  "submitted": "2026-11-27T10:19:16Z",
+  "after": [],
+  "priority": 0,
+  "attempt": 2,
+  "state": "landed",
+  "tested": {
+    "combination": "3c004bd62251d003c6acc353f64f6cd44b5fedfe",
+    "on": "a6d07d140b6bcda31414acd27dceea7b7e05b72c",
+    "submissions": [
+      189
+    ]
+  },
+  "result": "passed",
+  "landed_as": "1085f8db9a310e5d3ba8cd5706cc5d74515e838a",
+  "subject": "Tests wait on what another process changes",
+  "under_test_ms": 698000
+}

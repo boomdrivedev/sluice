@@ -1,0 +1,27 @@
+{
+  "schema": "sluice/submission@1",
+  "id": 154,
+  "branch": "main",
+  "head": "5fc7d5b280011969183bcc37f44a9d5dfbc3b56f",
+  "from": {
+    "agent": "change/the-gate-runs-in-five-minutes",
+    "worktree": "pull/321",
+    "head": "change/the-gate-runs-in-five-minutes"
+  },
+  "submitted": "2026-11-24T15:28:37Z",
+  "after": [],
+  "priority": 0,
+  "attempt": 1,
+  "state": "landed",
+  "tested": {
+    "combination": "9177d7f635f1bb031fc65dd7c6bc68efc7c8fb96",
+    "on": "9f62923910b98d42a937b4e19ae7d4afd0362652",
+    "submissions": [
+      154
+    ]
+  },
+  "result": "passed",
+  "landed_as": "c16a8088d9327b03b4330c3d124d65832301ee1a",
+  "subject": "what one round of the tools tests starts, measured",
+  "under_test_ms": 82000
+}

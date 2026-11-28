@@ -1,0 +1,28 @@
+{
+  "schema": "sluice/submission@1",
+  "id": 207,
+  "branch": "main",
+  "head": "bf41a45c92b2d1d2c6b5357669b7a4584b4fb316",
+  "from": {
+    "agent": "change/sluice-host-reads-the-forge-once-per-repository-per-interval",
+    "worktree": "pull/349",
+    "head": "change/sluice-host-reads-the-forge-once-per-repository-per-interval"
+  },
+  "submitted": "2026-11-27T19:09:39Z",
+  "after": [],
+  "priority": 0,
+  "attempt": 3,
+  "state": "landed",
+  "tested": {
+    "combination": "5473d55d25feb8ac4ecb47aca05431c2426ba91f",
+    "on": "26883f41add6166e677f389ac1947546df3745cb",
+    "submissions": [
+      206,
+      207
+    ]
+  },
+  "result": "passed",
+  "landed_as": "8dacd62ec621b012e949124fcdb634c20fcefeaf",
+  "subject": "sluice host reads the forge once per repository per interval, through octocrab",
+  "under_test_ms": 642000
+}

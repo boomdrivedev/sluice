@@ -1,0 +1,27 @@
+{
+  "schema": "sluice/submission@1",
+  "id": 144,
+  "branch": "main",
+  "head": "c011391c59e98327b5bfbd6c50e3b6f3ffdd04b4",
+  "from": {
+    "agent": "change/the-plugins-hold-one-subscription-each",
+    "worktree": "pull/313",
+    "head": "change/the-plugins-hold-one-subscription-each"
+  },
+  "submitted": "2026-11-23T14:38:36Z",
+  "after": [],
+  "priority": 0,
+  "attempt": 1,
+  "state": "landed",
+  "tested": {
+    "combination": "7f02628b39ccbde1a366a1d25c1e3d49ed516924",
+    "on": "5c0d855829ef8505c3c0cc3e430f8d9fa401c313",
+    "submissions": [
+      144
+    ]
+  },
+  "result": "passed",
+  "landed_as": "87bb89a3befbf071591a12dcf42a53e79af46dc5",
+  "subject": "change/the-plugins-hold-one-subscription-each",
+  "under_test_ms": 731000
+}

@@ -1,0 +1,37 @@
+{
+  "schema": "sluice/submission@1",
+  "id": 176,
+  "branch": "main",
+  "head": "6ab32284336bf164690314069188dcd193bbcd41",
+  "from": {
+    "agent": "fix/a-run-with-no-outcome-stops-rerunning",
+    "worktree": "pull/328",
+    "head": "fix/a-run-with-no-outcome-stops-rerunning"
+  },
+  "submitted": "2026-11-27T05:01:51Z",
+  "after": [],
+  "priority": 0,
+  "attempt": 4,
+  "state": "withdrawn",
+  "tested": {
+    "combination": "84ab162bc653a9d7d819d323768e0d4449f96615",
+    "on": "7a7f06dd70a189db67ec4235e8cc3a548d063464",
+    "submissions": [
+      176
+    ]
+  },
+  "result": "failed",
+  "failed": [
+    {
+      "task": "cli:tools",
+      "hash": "f20bbc7e5793ddf0edc592873355cddd7c723ffed9f238cfdde24ad37f47b611",
+      "log": "/Users/chuck/.local/share/boomdrive/repositories/boomdrivedev/sluice/sluice.git/sluice-remote/origin/.logs/main/c64/cli:tools.log"
+    }
+  ],
+  "withdrawn": {
+    "by": "resubmission",
+    "at": "2026-11-27T05:53:45Z"
+  },
+  "subject": "a run with no outcome stops rerunning",
+  "under_test_ms": 354000
+}

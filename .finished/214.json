@@ -1,0 +1,27 @@
+{
+  "schema": "sluice/submission@1",
+  "id": 214,
+  "branch": "main",
+  "head": "ab68ae9d1e210303b983d9b6340b993fe51edadf",
+  "from": {
+    "agent": "change/sluice-starts-every-process-through-tokio",
+    "worktree": "pull/355",
+    "head": "change/sluice-starts-every-process-through-tokio"
+  },
+  "submitted": "2026-11-28T03:25:30Z",
+  "after": [],
+  "priority": 0,
+  "attempt": 2,
+  "state": "landed",
+  "tested": {
+    "combination": "eee49b62f732fbfaedbe778522c32f3acf82ff9f",
+    "on": "d63b5e7815411d2c74edd2a21f85a21c9f84793d",
+    "submissions": [
+      214
+    ]
+  },
+  "result": "passed",
+  "landed_as": "697f2fbbbfa0077ddfbf7139ba20117fb28fbc06",
+  "subject": "sluice host starts every worker through process-wrap on its edge, and a dropped or ended worker ends its whole group",
+  "under_test_ms": 409000
+}

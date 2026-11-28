@@ -1,0 +1,27 @@
+{
+  "schema": "sluice/submission@1",
+  "id": 133,
+  "branch": "main",
+  "head": "251c97667721a537bed9ab4563c7a87822f1c293",
+  "from": {
+    "agent": "bolt/sluice-merges-as-the-boomdrive-app",
+    "worktree": "pull/307",
+    "head": "bolt/sluice-merges-as-the-boomdrive-app"
+  },
+  "submitted": "2026-11-20T21:59:43Z",
+  "after": [],
+  "priority": 0,
+  "attempt": 1,
+  "state": "landed",
+  "tested": {
+    "combination": "f0dd0e1cb4a5e15570221e915b8991dd156fb02d",
+    "on": "c2c1359caf991b2dd517e39908f12c0dadc6ccd9",
+    "submissions": [
+      133
+    ]
+  },
+  "result": "passed",
+  "landed_as": "ed3a91e84602eb7825fc4cc5286801082370d5f0",
+  "subject": "sluice merges as the Boomdrive app",
+  "under_test_ms": 1458000
+}

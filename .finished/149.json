@@ -1,0 +1,34 @@
+{
+  "schema": "sluice/submission@1",
+  "id": 149,
+  "branch": "main",
+  "head": "4327302be005a3b9f5af9a35640fca275f2188cb",
+  "from": {
+    "agent": "change/sluice-host-runs-a-sessions-checks",
+    "worktree": "pull/314",
+    "head": "change/sluice-host-runs-a-sessions-checks"
+  },
+  "submitted": "2026-11-24T03:59:20Z",
+  "after": [],
+  "priority": 0,
+  "attempt": 2,
+  "state": "withdrawn",
+  "conflict": {
+    "paths": [
+      "crates/sluice/src/caller.rs",
+      "crates/sluice/src/host_process/client.rs",
+      "crates/sluice/src/host_process/mod.rs",
+      "crates/sluice/src/host_process/protocol.rs",
+      "crates/sluice/src/profiles/mod.rs",
+      "crates/sluice/tests/cli.rs",
+      "crates/sluice/tests/previews_tools.rs",
+      "docs/adr/0093-a-hosts-queues-move-in-sluices-own-host-process-started-when-work-arrives-and-pull-requests-are-queued-on-the-forge.md"
+    ],
+    "with": []
+  },
+  "withdrawn": {
+    "by": "resubmission",
+    "at": "2026-11-24T04:13:36Z"
+  },
+  "subject": "sluice host runs a session's checks"
+}

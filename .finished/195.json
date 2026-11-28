@@ -1,0 +1,27 @@
+{
+  "schema": "sluice/submission@1",
+  "id": 195,
+  "branch": "main",
+  "head": "9a94db63b11ae23d88bfbc5364a1c8a053cd78ae",
+  "from": {
+    "agent": "fix/a-test-stops-the-hosts-it-starts",
+    "worktree": "pull/340",
+    "head": "fix/a-test-stops-the-hosts-it-starts"
+  },
+  "submitted": "2026-11-27T12:34:52Z",
+  "after": [],
+  "priority": 0,
+  "attempt": 4,
+  "state": "landed",
+  "tested": {
+    "combination": "88242bb19abe92b84941a73ca892e906d851be99",
+    "on": "0fb72cd08b01952d1b39ed2fd8bdac283da6b738",
+    "submissions": [
+      195
+    ]
+  },
+  "result": "passed",
+  "landed_as": "cc1a154e5043909594b4c7d0b2b393a9d82cdfd9",
+  "subject": "A test stops the hosts it starts",
+  "under_test_ms": 614000
+}

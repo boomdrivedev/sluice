@@ -1,0 +1,38 @@
+{
+  "schema": "sluice/submission@1",
+  "id": 152,
+  "branch": "main",
+  "head": "4b8c543261ba40104ac8daa85338a77d096e823a",
+  "from": {
+    "agent": "change/the-git-hook-asks-sluice-host",
+    "worktree": "pull/319",
+    "head": "change/the-git-hook-asks-sluice-host"
+  },
+  "submitted": "2026-11-24T15:09:11Z",
+  "after": [],
+  "priority": 0,
+  "attempt": 1,
+  "state": "withdrawn",
+  "tested": {
+    "combination": "e87a0157243709a74cda3b6f6e58f1329b37db7e",
+    "on": "e2ab1f479f2c5cd7b8acd750f9941f0fc6e571e0",
+    "submissions": [
+      152
+    ]
+  },
+  "result": "failed",
+  "failed": [
+    {
+      "task": "cli:tools",
+      "log": "/Users/chuck/.local/share/boomdrive/repositories/boomdrivedev/sluice/sluice.git/sluice-remote/origin/.logs/main/c38/cli:tools.log",
+      "not_run": "sluice's sandbox refused the run network-outbound remote:*:53 (by moon), network-outbound /private/var/run/mDNSResponder (a name lookup, by moon), file-write-data /Users/chuck/.cargo/.package-cache (by cargo) and 8 more"
+    }
+  ],
+  "withdrawn": {
+    "by": "resubmission",
+    "at": "2026-11-24T16:10:20Z"
+  },
+  "subject": "the git hook asks sluice host",
+  "under_test_ms": 910000,
+  "runs_with_no_outcome": 1
+}

@@ -1,0 +1,125 @@
+{"id":94,"state":"withdrawn","worktree":"pull/288","subject":"fix/main--a-release-with-nothing-to-free-creates-nothing"}
+{"id":95,"state":"withdrawn","worktree":"pull/288","subject":"fix/main--a-release-with-nothing-to-free-creates-nothing"}
+{"id":96,"state":"landed","worktree":"pull/288","subject":"fix/main--a-release-with-nothing-to-free-creates-nothing"}
+{"id":99,"state":"landed","worktree":"pull/290","subject":"fix/main--release-binaries-run-on-a-plain-runner"}
+{"id":98,"state":"landed","worktree":"pull/289","subject":"design/a-lapsed-claim-counts-toward-the-runs-in-a-row"}
+{"id":100,"state":"withdrawn","worktree":"pull/291","subject":"design/what-a-metric-carries"}
+{"id":104,"state":"landed","worktree":"pull/294","subject":"fix/main--sluices-readme-names-boomdrivedev"}
+{"id":101,"state":"landed","worktree":"pull/292","subject":"design/a-landing-names-the-app"}
+{"id":102,"state":"landed","worktree":"pull/293","subject":"design/the-daemon-is-sluices-own-service"}
+{"id":103,"state":"landed","worktree":"pull/291","subject":"design/what-a-metric-carries"}
+{"id":106,"state":"landed","worktree":"pull/295","subject":"fix/main--pull-request-tests-pass-on-main"}
+{"id":107,"state":"landed","worktree":"pull/296","subject":"fix/main--forge-check-reads-the-pool"}
+{"id":114,"state":"landed","worktree":"pull/297","subject":"bolt/sluice-is-tested-against-worktrunk-0-82-0"}
+{"id":115,"state":"landed","worktree":"pull/298","subject":"fix/main--the-sign-job-pushes-its-record-as-the-app"}
+{"id":116,"state":"landed","worktree":"pull/299","subject":"fix/main--the-key-check-reads-a-symlink-as-moon-does"}
+{"id":118,"state":"landed","worktree":"pull/300","subject":"bolt/sluice-reports-its-work-plainly"}
+{"id":120,"state":"landed","worktree":"pull/301","subject":"bolt/sluice-keeps-a-gates-queues-moving"}
+{"id":122,"state":"landed","worktree":"pull/302","subject":"design/a-release-takes-over-what-an-earlier-one-left"}
+{"id":124,"state":"landed","worktree":"pull/303","subject":"fix/main--format-hashes-only-tracked-files"}
+{"id":128,"state":"landed","worktree":"pull/305","subject":"fix/main--the-idle-repository-asks-once-a-minute"}
+{"id":130,"state":"landed","worktree":"pull/306","subject":"the host process keeps one token per repository"}
+{"id":133,"state":"landed","worktree":"pull/307","subject":"sluice merges as the Boomdrive app"}
+{"id":137,"state":"landed","worktree":"pull/308","subject":"sluice's pools run a repository's own steps"}
+{"id":127,"state":"withdrawn","worktree":"pull/304","subject":"bolt/sluice-checks-and-waits-on-an-agents-own-work"}
+{"id":139,"state":"landed","worktree":"pull/304","subject":"sluice checks and waits on an agent's own work"}
+{"id":140,"state":"landed","worktree":"pull/309","subject":"change/sluice-host-runs-on-a-tokio-edge"}
+{"id":141,"state":"landed","worktree":"pull/310","subject":"change/sluice-host-owns-its-workers"}
+{"id":142,"state":"landed","worktree":"pull/311","subject":"change/sluice-host-answers-every-read"}
+{"id":143,"state":"landed","worktree":"pull/312","subject":"Archive sluice-host-runs-on-a-tokio-edge, sluice-host-owns-its-workers and sluice-host-answers-every-read"}
+{"id":144,"state":"landed","worktree":"pull/313","subject":"change/the-plugins-hold-one-subscription-each"}
+{"id":146,"state":"landed","worktree":"pull/315","subject":"sluice keeps its design model in Allium, checked in the fast tier"}
+{"id":147,"state":"landed","worktree":"pull/316","subject":"chore(host-process): the host process's tests hold under load"}
+{"id":148,"state":"landed","worktree":"pull/317","subject":"sluice host makes each change, and a held landing is pushed at each round"}
+{"id":145,"state":"withdrawn","worktree":"pull/314","subject":"sluice host runs a session's checks"}
+{"id":149,"state":"withdrawn","worktree":"pull/314","subject":"sluice host runs a session's checks"}
+{"id":150,"state":"landed","worktree":"pull/314","subject":"sluice host runs a session's checks"}
+{"id":151,"state":"landed","worktree":"pull/318","subject":"the gate runs what a submission affects, and its slow suites wait on events"}
+{"id":153,"state":"landed","worktree":"pull/320","subject":"a herdr test that kills a watcher waits for its source's settled identity"}
+{"id":154,"state":"landed","worktree":"pull/321","subject":"what one round of the tools tests starts, measured"}
+{"id":155,"state":"landed","worktree":"pull/322","subject":"an older client starts no older host"}
+{"id":152,"state":"withdrawn","worktree":"pull/319","subject":"the git hook asks sluice host"}
+{"id":157,"state":"landed","worktree":"pull/323","subject":"a key naming a file the tree does not hold holds the branch"}
+{"id":156,"state":"withdrawn","worktree":"pull/319","subject":"the git hook asks sluice host"}
+{"id":158,"state":"landed","worktree":"pull/319","subject":"the git hook asks sluice host"}
+{"id":159,"state":"landed","worktree":"pull/324","subject":"record 0132 moves to Boom"}
+{"id":160,"state":"landed","worktree":"pull/325","subject":"a round fetches its branch's state once from each remote"}
+{"id":161,"state":"landed","worktree":"pull/326","subject":"a fail stands whatever the gate's sandbox refused"}
+{"id":162,"state":"landed","worktree":"pull/327","subject":"fix/a-run-stuck-starting"}
+{"id":163,"state":"withdrawn","worktree":"pull/328","subject":"a run with no outcome stops rerunning"}
+{"id":164,"state":"withdrawn","worktree":"pull/328","subject":"a run with no outcome stops rerunning"}
+{"id":166,"state":"landed","worktree":"pull/329","subject":"fix/a-submission-is-named-by-its-branch"}
+{"id":169,"state":"landed","worktree":"pull/332","subject":"An idle pass starts nothing, under load as alone"}
+{"id":168,"state":"withdrawn","worktree":"pull/331","subject":"fix/a-status-read-is-whole-under-load"}
+{"id":170,"state":"landed","worktree":"pull/331","subject":"fix/a-status-read-is-whole-under-load"}
+{"id":167,"state":"withdrawn","worktree":"pull/330","subject":"fix/a-submission-is-named-by-its-branch"}
+{"id":172,"state":"withdrawn","worktree":"pull/333","subject":"Overviews reach a subscriber in order"}
+{"id":175,"state":"landed","worktree":"pull/335","subject":"Its tests hold under load"}
+{"id":165,"state":"withdrawn","worktree":"pull/328","subject":"a run with no outcome stops rerunning"}
+{"id":171,"state":"withdrawn","worktree":"pull/330","subject":"fix/a-submission-is-named-by-its-branch"}
+{"id":173,"state":"withdrawn","worktree":"pull/333","subject":"Overviews reach a subscriber in order"}
+{"id":177,"state":"landed","worktree":"pull/330","subject":"fix/a-submission-is-named-by-its-branch"}
+{"id":179,"state":"landed","worktree":"pull/336","subject":"A waiting submit says what its pass released"}
+{"id":176,"state":"withdrawn","worktree":"pull/328","subject":"a run with no outcome stops rerunning"}
+{"id":178,"state":"withdrawn","worktree":"pull/333","subject":"Overviews reach a subscriber in order"}
+{"id":181,"state":"landed","worktree":"pull/333","subject":"Overviews reach a subscriber in order"}
+{"id":182,"state":"landed","worktree":"pull/337","subject":"A gone repository is told as gone"}
+{"id":180,"state":"withdrawn","worktree":"pull/328","subject":"a run with no outcome stops rerunning"}
+{"id":184,"state":"landed","worktree":"pull/338","subject":"Each gate task that builds sluice builds it in a target folder of its own"}
+{"id":183,"state":"withdrawn","worktree":"pull/328","subject":"a run with no outcome stops rerunning"}
+{"id":185,"state":"landed","worktree":"pull/328","subject":"a run with no outcome stops rerunning"}
+{"id":186,"state":"landed","worktree":"pull/339","subject":"Tests read processes alike on Linux and macOS"}
+{"id":188,"state":"withdrawn","worktree":"pull/341","subject":"Tests wait on what another process changes"}
+{"id":189,"state":"landed","worktree":"pull/341","subject":"Tests wait on what another process changes"}
+{"id":190,"state":"landed","worktree":"pull/342","subject":"The sandbox tests' helpers are macOS's alone"}
+{"id":187,"state":"withdrawn","worktree":"pull/340","subject":"A test stops the hosts it starts"}
+{"id":192,"state":"withdrawn","worktree":"pull/340","subject":"A test stops the hosts it starts"}
+{"id":191,"state":"withdrawn","worktree":"pull/343","subject":"A wait's step is at the wait's time"}
+{"id":194,"state":"landed","worktree":"pull/343","subject":"A wait's step is at the wait's time"}
+{"id":193,"state":"withdrawn","worktree":"pull/340","subject":"A test stops the hosts it starts"}
+{"id":195,"state":"landed","worktree":"pull/340","subject":"A test stops the hosts it starts"}
+{"id":196,"state":"withdrawn","worktree":"pull/344","subject":"The host process tests pass on Linux"}
+{"id":197,"state":"landed","worktree":"pull/344","subject":"The host process tests pass on Linux"}
+{"id":198,"state":"withdrawn","worktree":"pull/345","subject":"A read of a repository is no change"}
+{"id":199,"state":"landed","worktree":"pull/345","subject":"A read of a repository is no change"}
+{"id":200,"state":"landed","worktree":"pull/346","subject":"The fake host is named before the guard looks"}
+{"id":201,"state":"landed","worktree":"pull/347","subject":"Two pushes to main never reckon one tag"}
+{"id":202,"state":"landed","worktree":"pull/348","subject":"A sluice client starts no host under a service manager"}
+{"id":203,"state":"withdrawn","worktree":"pull/349","subject":"sluice host reads the forge once per repository per interval, through octocrab"}
+{"id":204,"state":"withdrawn","worktree":"pull/349","subject":"sluice host reads the forge once per repository per interval, through octocrab"}
+{"id":205,"state":"landed","worktree":"pull/350","subject":"change/sluices-herdr-plugin-leaves-no-process-and-forecasts-from-its-subscription"}
+{"id":207,"state":"landed","worktree":"pull/349","subject":"sluice host reads the forge once per repository per interval, through octocrab"}
+{"id":206,"state":"landed","worktree":"pull/351","subject":"sluice host reaps every child its earlier image left"}
+{"id":208,"state":"landed","worktree":"pull/352","subject":"sluice tests its logic as units: worktrunk and host_process moves, the router a unit"}
+{"id":209,"state":"withdrawn","worktree":"pull/353","subject":"fix/sluice-daemon-reads-only-what-changed"}
+{"id":210,"state":"landed","worktree":"pull/353","subject":"fix/sluice-daemon-reads-only-what-changed"}
+{"id":211,"state":"withdrawn","worktree":"pull/354","subject":"sluice tests its logic as units: pull request scenarios in-process, checks and pushed_refs units"}
+{"id":212,"state":"landed","worktree":"pull/354","subject":"sluice tests its logic as units: pull request scenarios in-process, checks and pushed_refs units, a request's move marked by sluice's clock"}
+{"id":213,"state":"withdrawn","worktree":"pull/355","subject":"sluice host starts every worker through process-wrap on its edge, and a dropped or ended worker ends its whole group"}
+{"id":214,"state":"landed","worktree":"pull/355","subject":"sluice host starts every worker through process-wrap on its edge, and a dropped or ended worker ends its whole group"}
+{"id":215,"state":"landed","worktree":"pull/356","subject":"sluice tests its logic as units: pause and older-hand-over pull request scenarios in-process, the idle-allowance duplicate goes"}
+{"id":216,"state":"landed","worktree":"pull/357","subject":"sluice tests its logic as units: the place profile over fakes of git and its runs"}
+{"id":217,"state":"landed","worktree":"pull/358","subject":"sluice tests its logic as units: remote branch scenarios in-process or gone as duplicates"}
+{"id":218,"state":"landed","worktree":"pull/359","subject":"sluice tests its logic as units: the protection's judge as units over the fakes"}
+{"id":219,"state":"landed","worktree":"pull/360","subject":"sluice tests its logic as units: the check-tools tier runs only forge's and instance's git tests"}
+{"id":220,"state":"landed","worktree":"pull/361","subject":"sluice tests its logic as units: check-profile tests that run nothing start no git"}
+{"id":221,"state":"landed","worktree":"pull/362","subject":"sluice tests its logic as units: CLI tests start no child, no git and no binary"}
+{"id":222,"state":"landed","worktree":"pull/363","subject":"sluice tests its logic as units: four moon-runner duplicates go"}
+{"id":223,"state":"landed","worktree":"pull/364","subject":"sluice tests its logic as units: two exec duplicates go"}
+{"id":224,"state":"landed","worktree":"pull/365","subject":"sluice tests its logic as units: usage tests read the command line in-process"}
+{"id":225,"state":"landed","worktree":"pull/366","subject":"sluice tests its logic as units: preview-container and watch duplicates go"}
+{"id":226,"state":"landed","worktree":"pull/367","subject":"sluice tests its logic as units: what a command asks sluice host is built in the library"}
+{"id":227,"state":"landed","worktree":"pull/368","subject":"sluice tests its logic as units: the host process reads its folder, settings and telemetry from its start environment"}
+{"id":228,"state":"landed","worktree":"pull/369","subject":"sluice tests its logic as units: the host process passes only when asked as its start environment says"}
+{"id":229,"state":"landed","worktree":"pull/370","subject":"sluice tests its logic as units: the pushed refs' call loop is proven as units"}
+{"id":230,"state":"withdrawn","worktree":"pull/371","subject":"sluice tests its logic as units: the AWS scenarios run in the test's own process"}
+{"id":231,"state":"landed","worktree":"pull/371","subject":"sluice tests its logic as units: the AWS scenarios and an unheld release run in the test's own process"}
+{"id":232,"state":"withdrawn","worktree":"pull/372","subject":"sluice tests its logic as units: two moon-runner scenarios run as units"}
+{"id":233,"state":"landed","worktree":"pull/372","subject":"sluice tests its logic as units: a protection and a push scenario go as duplicates"}
+{"id":234,"state":"landed","worktree":"pull/373","subject":"sluice tests its logic as units: ready duplicates go and the idle scheduler's tests move into its module"}
+{"id":235,"state":"landed","worktree":"pull/374","subject":"sluice tests its logic as units: a follower reaches the host process by the client it is given"}
+{"id":236,"state":"landed","worktree":"pull/375","subject":"sluice tests its logic as units: protection and remote-branch duplicates go"}
+{"id":237,"state":"landed","worktree":"pull/376","subject":"fix/a-branchs-lead-is-written-under-its-lock"}
+{"id":238,"state":"landed","worktree":"pull/377","subject":"sluice tests its logic as units: a push whose answer was lost is settled by a function of its own"}
+{"id":239,"state":"withdrawn","worktree":"pull/378","subject":"fix/sluice-reads-a-process-through-a-maintained-crate"}
+{"id":240,"state":"landed","worktree":"pull/378","subject":"fix/sluice-reads-a-process-through-a-maintained-crate"}

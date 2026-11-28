@@ -1,0 +1,27 @@
+{
+  "schema": "sluice/submission@1",
+  "id": 162,
+  "branch": "main",
+  "head": "e306ebfb40d8fcf813d4d5e3b7760ce8c0122f3c",
+  "from": {
+    "agent": "fix/a-run-stuck-starting",
+    "worktree": "pull/327",
+    "head": "fix/a-run-stuck-starting"
+  },
+  "submitted": "2026-11-26T22:58:00Z",
+  "after": [],
+  "priority": 0,
+  "attempt": 1,
+  "state": "landed",
+  "tested": {
+    "combination": "4c8acbab506cb3018598ffa38e76b509744ce9b0",
+    "on": "101bddeb80005541e6aec398e36a499a81927604",
+    "submissions": [
+      162
+    ]
+  },
+  "result": "passed",
+  "landed_as": "4f4120383c11efab4aefa18dffe3a84c90d4cbb8",
+  "subject": "fix/a-run-stuck-starting",
+  "under_test_ms": 628000
+}

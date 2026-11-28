@@ -1,0 +1,27 @@
+{
+  "schema": "sluice/submission@1",
+  "id": 212,
+  "branch": "main",
+  "head": "aec8163170135551cb0c9427f435e59e0f7ea7b4",
+  "from": {
+    "agent": "change/sluice-tests-its-logic-as-units",
+    "worktree": "pull/354",
+    "head": "change/sluice-tests-its-logic-as-units"
+  },
+  "submitted": "2026-11-28T00:47:03Z",
+  "after": [],
+  "priority": 0,
+  "attempt": 2,
+  "state": "landed",
+  "tested": {
+    "combination": "db914dae1676cd9924237755e260cb54fb2b7d0b",
+    "on": "571ac20c305b992839cdac8e9f57723dab467b10",
+    "submissions": [
+      212
+    ]
+  },
+  "result": "passed",
+  "landed_as": "d63b5e7815411d2c74edd2a21f85a21c9f84793d",
+  "subject": "sluice tests its logic as units: pull request scenarios in-process, checks and pushed_refs units, a request's move marked by sluice's clock",
+  "under_test_ms": 442000
+}

@@ -1,0 +1,27 @@
+{
+  "schema": "sluice/submission@1",
+  "id": 199,
+  "branch": "main",
+  "head": "a1fcd6b4570b6475d57b4949036a2f3d0a0100a4",
+  "from": {
+    "agent": "fix/a-read-of-a-repository-is-no-change",
+    "worktree": "pull/345",
+    "head": "fix/a-read-of-a-repository-is-no-change"
+  },
+  "submitted": "2026-11-27T13:57:47Z",
+  "after": [],
+  "priority": 0,
+  "attempt": 2,
+  "state": "landed",
+  "tested": {
+    "combination": "6fbf84d641dec89aee2c4bb2de5da0b1b2c056be",
+    "on": "7b6e1f1a209886f69d52e3e269443659336fa06d",
+    "submissions": [
+      199
+    ]
+  },
+  "result": "passed",
+  "landed_as": "bea920d1780ef3e5a9056555fdce0a7fe4c5f86b",
+  "subject": "A read of a repository is no change",
+  "under_test_ms": 220000
+}

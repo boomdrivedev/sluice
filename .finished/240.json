@@ -1,0 +1,27 @@
+{
+  "schema": "sluice/submission@1",
+  "id": 240,
+  "branch": "main",
+  "head": "3d567be0fd8bdccffe79580d8ea3678651d0f658",
+  "from": {
+    "agent": "fix/sluice-reads-a-process-through-a-maintained-crate",
+    "worktree": "pull/378",
+    "head": "fix/sluice-reads-a-process-through-a-maintained-crate"
+  },
+  "submitted": "2026-11-28T11:10:20Z",
+  "after": [],
+  "priority": 0,
+  "attempt": 2,
+  "state": "landed",
+  "tested": {
+    "combination": "6825460ee29f442416d905fed8a2f9d2d07b115b",
+    "on": "b2c62a9caa601bac05a9879bc7cc30a800a5eabd",
+    "submissions": [
+      240
+    ]
+  },
+  "result": "passed",
+  "landed_as": "4a7cf4e4d0d2a958b16559794f7dfa4d465de912",
+  "subject": "fix/sluice-reads-a-process-through-a-maintained-crate",
+  "under_test_ms": 348000
+}
