@@ -29,9 +29,10 @@ tasks:
     options: {runFromWorkspaceRoot: true}
   # The profiles against real tools (git, moon, wt, a container engine,
   # Playwright), and the conformance scenarios that need no fault on them:
-  # the check-tools tier.
+  # the check-tools tier. Of `forge` and `instance`, whose other tests the
+  # fast tier runs, it runs only the `tools::` module each gates on it.
   tools:
-    command: 'sh tests/leaks.sh cargo nextest run -p sluice --features tools --test instance --test local_refs --test pushed_refs --test remote_refs --test peers --test forge --test pull_requests --test remote_branch --test moon --test places --test worktrunk --test protect --test conformance --test stack --test exec --test previews_tools --test equip_tools --test landed --test overview_watch -E "not test(sandbox)"'
+    command: 'sh tests/leaks.sh cargo nextest run -p sluice --features tools --test instance --test local_refs --test pushed_refs --test remote_refs --test peers --test forge --test pull_requests --test remote_branch --test moon --test places --test worktrunk --test protect --test conformance --test stack --test exec --test previews_tools --test equip_tools --test landed --test overview_watch -E "not test(sandbox) and (not (binary(forge) | binary(instance)) | test(/^tools::/))"'
     inputs: ['/tests/leaks.sh', '/crates/sluice/**/*', '/crates/sluice-seams/**/*', '/crates/sluice-core/**/*', '/crates/sluice-fakes/**/*', '/crates/sluice-conformance/src/**/*', '/crates/sluice-conformance/Cargo.toml', '/Cargo.toml', '/Cargo.lock', '/.config/nextest.toml', '/devenv.nix', '/devenv.lock']
     tags: [check-tools]
     env: {CARGO_TARGET_DIR: 'target/tools'}
