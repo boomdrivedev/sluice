@@ -3038,6 +3038,33 @@ fn another_host_keeps_main_and_this_hosts_step_takes_nothing_in() {
     assert_eq!(g.lead().as_deref(), Some("b"));
 }
 
+/// 136: a waiting `sluice wait main` that follows its pull request for a
+/// minute of the clock, nothing on the host moving, reads the request
+/// from GitHub no more often than once in a quarter of the host's
+/// interval: four times, at most. The host's interval has passed as it
+/// begins, so its first pass asks for main's pull requests at the wait's
+/// own time, and its last finds nothing due however long the commands
+/// before it took: deneb, 2026-11-18, main at 15b5cf173, its last passes
+/// asking again.
+#[test]
+fn a_wait_reads_its_pull_request_once_in_a_quarter_of_the_interval() {
+    let g = OnGitHub::new("reviews = 1");
+    g.discovery(Duration::from_secs(60));
+    let w = g.session("followed", &[("f.txt", "f\n")]);
+    g.submitted(&w, &["--no-wait"]);
+    let n = g.pull_from("unit/followed").number;
+    g.settle();
+    let (before, lists) = (g.calls(&format!("pull/{n}")), g.calls("list"));
+    g.interval_passes();
+    let (code, out) = g.sluice(&["wait", "main", "--worktree", &w, "--timeout", "57s"]);
+    assert_eq!(code, sluice::WAITING, "{out}");
+    let reads = g.calls(&format!("pull/{n}")) - before;
+    assert!((1..=4).contains(&reads), "{reads} reads: {out}");
+    // Its own asking asked at its first pass and found nothing due after
+    // it; beside that, only the wait's finding of it.
+    assert_eq!(g.calls("list"), lists + 2, "{out}");
+}
+
 /// request-intake-host, "Read at its pace": a wait on host A follows its
 /// pull request, which host B takes in, for a minute with `discovery` at
 /// sixty seconds; it reads the request and its check from GitHub no more

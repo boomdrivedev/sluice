@@ -1569,36 +1569,6 @@ fn passes_between_discoveries_start_no_git_and_ask_github_nothing() {
     assert!(asked_six.len() <= asked_one.len(), "{asked_six:?}");
 }
 
-/// 136: a waiting `sluice wait main` that follows its pull request for a
-/// minute of a clock its pauses move, its twenty rounds three seconds
-/// apart, nothing on the host moving, reads the request from GitHub no
-/// more often than once in a quarter of the host's interval: four times,
-/// at most. The host's interval has passed as it begins, so its first
-/// pass asks for main's pull requests at the wait's own time, and its
-/// last, fifty-seven seconds on, finds nothing due however long the
-/// commands before it took. Asked last by the step before it, at that
-/// step's time, it had three seconds of the host's minute to begin in:
-/// deneb, 2026-11-18, main at 15b5cf173, its last passes asking again.
-#[test]
-fn a_wait_reads_its_pull_request_once_in_a_quarter_of_the_interval() {
-    let g = OnGitHub::new("pr-discovery-follow", "reviews = 1");
-    let w = g.session("followed", &[("f.txt", "f\n")]);
-    let out = g.wt_submit(&w, &["--no-wait"]);
-    assert_eq!(out.status.code(), Some(0), "{}", text(&out));
-    let n = g.pull_from("unit/followed").number;
-    g.settle();
-    let before = g.pull_reads(n);
-    let lists = g.lists();
-    g.discovery_passes();
-    let out = g.skipping(&w, &["wait", "main", "--timeout", "57s"]);
-    assert_eq!(out.status.code(), Some(sluice::WAITING), "{}", text(&out));
-    let reads = g.pull_reads(n) - before;
-    assert!((1..=4).contains(&reads), "{reads} reads: {}", text(&out));
-    // Its own asking asked at its first pass and found nothing due after
-    // it; beside that, only the wait's finding of it.
-    assert_eq!(g.lists(), lists + 2, "{}", text(&out));
-}
-
 /// Another host over `main`'s remote and GitHub: its own clone, config and
 /// state, its name among its peers given (137).
 struct Other<'a> {

@@ -4060,7 +4060,7 @@ impl Pulls {
         };
         // 136: the host's next pass asks for the branch's pull requests at
         // once, the ones this act opened, updated or marked ready among them.
-        if let Err(e) = self.kept.moved(&t.repo, branch) {
+        if let Err(e) = self.kept.moved(&t.repo, branch, clock.now()) {
             crate::telemetry::warn(&format!("sluice: warning: {e:#}"));
         }
         // 124: how the host's copy differs, and ADR 0050: why the runner
