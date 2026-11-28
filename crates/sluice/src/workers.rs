@@ -368,16 +368,13 @@ impl Owned {
 
     /// Once the leader has ended: a process of its group that is no child
     /// of this process, which no wait reaches, is looked at within
-    /// `grace`, then killed.
+    /// `grace`, then killed, and looked at until it is gone, as
+    /// [`end_groups_on_edge`] looks.
     async fn settle(&self, grace: Duration) {
-        let until = tokio::time::Instant::now() + grace;
-        let mut look = tokio::time::interval(LOOK);
-        while is_there(self.group) {
-            if tokio::time::Instant::now() >= until {
-                signal_group(self.group, Signal::SIGKILL);
-                return;
-            }
-            look.tick().await;
+        gone_within(&[self.group], grace).await;
+        if is_there(self.group) {
+            signal_group(self.group, Signal::SIGKILL);
+            gone_within(&[self.group], KILLED_FOR).await;
         }
     }
 }
@@ -464,15 +461,30 @@ fn run(
     let Some(edge) = EDGE.get() else {
         return run_here(command, input, limit.map(|(limit, _)| limit));
     };
+    on_edge(edge, owned_run(edge, command, input, limit))
+}
+
+/// [`run`] on the edge, as the worker's owner task. Its output is read
+/// beside the wait on its leader. Once the leader ends, [`Owned::settle`]
+/// gives the rest of its group `grace`, then kills it, so a process that
+/// the leader left holding a pipe ends and the read ends with it. A pipe
+/// that a process outside the group holds past one more `grace` fails the
+/// call.
+async fn owned_run(
+    edge: &'static Edge,
+    command: Command,
+    input: Option<Vec<u8>>,
+    limit: Option<(Duration, Duration)>,
+) -> std::io::Result<Option<Output>> {
+    if edge.stop.is_cancelled() {
+        return Err(stopping());
+    }
     let grace = limit.map_or(weir_bounded::GRACE, |(_, grace)| grace);
-    on_edge(edge, async move {
-        if edge.stop.is_cancelled() {
-            return Err(stopping());
-        }
-        let mut held = Owned::spawn(command)?;
-        let stdin = held.child.stdin().take();
-        let mut stdout = held.child.stdout().take();
-        let mut stderr = held.child.stderr().take();
+    let mut held = Owned::spawn(command)?;
+    let stdin = held.child.stdin().take();
+    let stdout = held.child.stdout().take();
+    let stderr = held.child.stderr().take();
+    let mut reads = edge.tracker.spawn(async move {
         let written = async move {
             match (stdin, input) {
                 (Some(mut pipe), Some(input)) => {
@@ -483,44 +495,51 @@ fn run(
                 _ => Ok(()),
             }
         };
-        let (out, err) = (read_all(stdout.take()), read_all(stderr.take()));
-        let limited = async {
-            match limit {
-                Some((limit, _)) => tokio::time::sleep(limit).await,
-                None => std::future::pending().await,
-            }
-        };
-        let ended = async {
-            tokio::select! {
-                ended = async { tokio::join!(held.wait(), out, err, written) } => Ok(ended),
-                () = limited => Err(None),
-                () = edge.stop.cancelled() => Err(Some(stopping())),
-            }
-        };
-        let (status, out, err, written) = match ended.await {
-            Ok(ended) => ended,
-            Err(why) => {
-                held.end(grace).await?;
-                forget(held.group);
-                return match why {
-                    Some(stopped) => Err(stopped),
-                    None => Ok(None),
-                };
-            }
-        };
-        let status = status?;
-        held.settle(grace).await;
-        forget(held.group);
-        let output = Output {
-            status,
-            stdout: out?,
-            stderr: err?,
-        };
-        match written {
-            Err(e) if output.status.success() => Err(e),
-            _ => Ok(Some(output)),
+        tokio::join!(read_all(stdout), read_all(stderr), written)
+    });
+    let limited = async {
+        match limit {
+            Some((limit, _)) => tokio::time::sleep(limit).await,
+            None => std::future::pending().await,
         }
-    })
+    };
+    let status = tokio::select! {
+        status = held.wait() => Ok(status),
+        () = limited => Err(None),
+        () = edge.stop.cancelled() => Err(Some(stopping())),
+    };
+    let status = match status {
+        Ok(status) => status?,
+        Err(why) => {
+            held.end(grace).await?;
+            forget(held.group);
+            reads.abort();
+            return match why {
+                Some(stopped) => Err(stopped),
+                None => Ok(None),
+            };
+        }
+    };
+    held.settle(grace).await;
+    forget(held.group);
+    let (out, err, written) = tokio::select! {
+        read = &mut reads => read.map_err(std::io::Error::other)?,
+        () = tokio::time::sleep(grace) => {
+            reads.abort();
+            return Err(std::io::Error::other(
+                "a process outside the worker's group held its output open",
+            ));
+        }
+    };
+    let output = Output {
+        status,
+        stdout: out?,
+        stderr: err?,
+    };
+    match written {
+        Err(e) if output.status.success() => Err(e),
+        _ => Ok(Some(output)),
+    }
 }
 
 /// [`output`], [`output_with`] and [`status`] as methods of a command
@@ -1399,12 +1418,16 @@ mod tests {
     #[tokio::test(flavor = "current_thread", start_paused = true)]
     async fn a_worker_ends_what_its_leader_left_in_its_group() {
         edge(tokio::runtime::Handle::current());
-        let out = tokio::task::spawn_blocking(|| {
-            output(Command::new("/bin/sh").args(["-c", "sleep 600 & echo $!"]))
-        })
-        .await
-        .unwrap()
-        .unwrap();
+        let mut command = Command::new("/bin/sh");
+        command
+            .args(["-c", "sleep 600 & echo $!"])
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped());
+        let out = owned_run(EDGE.get().unwrap(), command, None, None)
+            .await
+            .unwrap()
+            .unwrap();
         assert!(out.status.success(), "{out:?}");
         let child: i32 = String::from_utf8_lossy(&out.stdout).trim().parse().unwrap();
         // Ended, it is reaped by the process it was handed to.
@@ -1418,14 +1441,11 @@ mod tests {
     #[tokio::test(flavor = "current_thread", start_paused = true)]
     async fn a_command_at_its_limit_ends_with_its_group() {
         edge(tokio::runtime::Handle::current());
-        let ran = tokio::task::spawn_blocking(|| {
-            output_within(
-                &mut a_leader_with_a_child("wait"),
-                Duration::from_secs(60),
-                weir_bounded::GRACE,
-            )
-        });
-        assert!(ran.await.unwrap().unwrap().is_none());
+        let mut command = a_leader_with_a_child("wait");
+        command.stderr(Stdio::piped());
+        let limit = Some((Duration::from_secs(60), weir_bounded::GRACE));
+        let ran = owned_run(EDGE.get().unwrap(), command, None, limit).await;
+        assert!(ran.unwrap().is_none());
         assert!(children() == 0);
     }
 }
