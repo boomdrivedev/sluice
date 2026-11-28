@@ -188,38 +188,7 @@ impl PushedRefs {
         let mut line = args.to_vec();
         line.push(speaker.as_ref().map_or(&self.remote, |s| &s.url));
         line.extend(refs);
-        // Why sluice could not make a try: git not run, or no credential.
-        let mut fault = None;
-        let mut unrenewed = None;
-        let mut refused: Vec<String> = Vec::new();
-        // The password of the credentials the remote refused last, which a
-        // renewal replaces.
-        let mut refused_password = String::new();
-        // What the remote refused where git never asked for the speaker's
-        // credentials.
-        let mut unasked = None;
-        let mut last = None;
-        // Set while the last try found the fetch lock held past its limit.
-        let mut waited = None;
-        let ran = self.policy.run(kind, |t| {
-            let given = match &speaker {
-                None => None,
-                Some(s) if t.renew() => match s.identity.renew(&s.url, &refused_password) {
-                    Ok(c) => Some(c),
-                    Err(e) => {
-                        unrenewed = Some(e);
-                        return Err(Failed::new(Judged::Answered, ()));
-                    }
-                },
-                Some(s) => match s.identity.credentials(&s.url) {
-                    Ok(c) => Some(c),
-                    Err(e) => {
-                        let e = e.context(format!("{} on {}", s.identity.name(), self.remote));
-                        fault = Some(e);
-                        return Err(Failed::new(Judged::Answered, ()));
-                    }
-                },
-            };
+        let mut attempt = |line: &[&str], given: Option<&Credentials>| -> Result<Attempt> {
             // One fetch at a time in this repository, held for the try
             // alone, never over a pause between tries, and named to its
             // git, so a sluice its git runs waits on no lock its ancestor
@@ -227,110 +196,26 @@ impl PushedRefs {
             // take: one held past it is a try the remote never judged
             // (record 0109).
             let fetching = match fetch {
-                true => match self.fetching() {
-                    Ok(Ok(held)) => Some(held),
-                    Ok(Err(held)) => {
-                        waited = Some(held);
-                        return Err(Failed::new(Judged::Never, ()));
-                    }
-                    Err(e) => {
-                        fault = Some(e);
-                        return Err(Failed::new(Judged::Answered, ()));
-                    }
+                true => match self.fetching()? {
+                    Ok(held) => Some(held),
+                    Err(held) => return Ok(Attempt::Held(held)),
                 },
                 false => None,
             };
-            waited = None;
             let held = fetching.as_ref().map(|(_, path)| path.as_path());
-            let ran = self.git_as(speaker.as_ref(), given.as_ref(), &line, held);
+            let tried = self.git_as(speaker.as_ref(), given, line, held);
             drop(fetching);
-            let (out, asked) = match ran {
-                // A try git did not end within its limit: whether the remote
-                // judged it is not known, so a read is tried again and a
-                // push is settled by reading what the remote holds (122).
-                Ok(Tried {
-                    out, stopped: true, ..
-                }) => {
-                    let verb = args.first().copied().unwrap_or("call");
-                    last = Some(told(
-                        out,
-                        &weir_bounded::stopped(
-                            &format!("git {verb}"),
-                            &self.remote,
-                            self.policy.try_for(),
-                        ),
-                    ));
-                    return Err(Failed::new(Judged::Unknown, ()));
-                }
-                Ok(Tried { out, .. }) if out.status.success() => return Ok(out),
-                Ok(Tried { out, asked, .. }) => (out, asked),
-                Err(e) => {
-                    fault = Some(e);
-                    return Err(Failed::new(Judged::Answered, ()));
-                }
-            };
-            let mut judged = judged(&out, kind, speaker.is_some());
-            match (judged, &speaker, given) {
-                (Judged::Credential, Some(_), Some(c)) if asked => {
-                    refused.push(c.about);
-                    refused_password = c.password;
-                }
-                // The remote refused what git sent of its own, or nothing
-                // sluice gave: its answer, which no credential bought
-                // afresh changes, since git sends the same again (134;
-                // record 0019 as amended 2026-11-18).
-                (Judged::Credential, Some(s), Some(_)) => {
-                    unasked = Some(self.unasked(s, &out));
-                    judged = Judged::Answered;
-                }
-                _ => {}
-            }
-            last = Some(out);
-            Err(Failed::new(judged, ()))
-        });
-        let stopped = match ran {
-            Ok(out) => {
-                return Ok(Called {
-                    out,
-                    note: None,
-                    judged: None,
-                })
-            }
-            Err(stopped) => stopped,
+            tried.map(Attempt::Ran)
         };
-        if let Some(e) = fault {
-            return Err(e);
-        }
-        if let Some(lock) = waited {
-            bail!(
-                "another fetch of this repository held {} past {}, the most a try waits for it",
-                lock.display(),
-                span(self.policy.try_for())
-            );
-        }
-        let out = last.expect("a try git failed");
-        let note = match (unrenewed, unasked) {
-            (Some(e), _) => Some(format!(
-                "{} refused {}, and none could be made afresh: {e:#}",
-                self.remote,
-                refused.join(", then ")
-            )),
-            (None, Some(unasked)) if refused.is_empty() => Some(unasked),
-            (None, Some(unasked)) => Some(format!(
-                "{} refused {}; {unasked}",
-                self.remote,
-                refused.join(", then ")
-            )),
-            (None, None) if stopped.judged == Judged::Credential && !refused.is_empty() => Some(
-                format!("{} refused {}", self.remote, refused.join(", then ")),
-            ),
-            (None, None) => None,
-        };
-        Ok(Called {
-            out,
-            note,
-            judged: Some(stopped.judged),
-        })
+        calling(
+            &self.policy,
+            kind,
+            &self.remote,
+            speaker.as_ref(),
+            &line,
+            &mut attempt,
+            &|s, out| self.unasked(s, out),
+        )
     }
 
     /// What a call as `s` that the remote refused was refused on, where git
@@ -467,16 +352,9 @@ impl PushedRefs {
     ) -> Result<bool> {
         let mut args = vec!["fetch", "--quiet", "--no-tags", "--no-write-fetch-head"];
         args.extend(flags);
-        let called = self.call(Kind::Read, &args, refspecs).map_err(|e| {
-            let Some(w) = withheld(&e) else { return e };
-            ReadRefused {
-                remote: self.remote.clone(),
-                asked: asked.into(),
-                said: w.said.clone(),
-                note: w.note.clone(),
-            }
-            .into()
-        });
+        let called = self
+            .call(Kind::Read, &args, refspecs)
+            .map_err(|e| withheld_read(&self.remote, asked, e));
         let Called { out, note, .. } = called?;
         if out.status.success() {
             return Ok(true);
@@ -667,6 +545,173 @@ impl PushedRefs {
         }
         Ok(())
     }
+}
+
+/// A read of `asked` on `remote` that failed with `e`: a [`ReadRefused`]
+/// in the forge's words, with sluice's note beside them, where the forge
+/// gave sluice's identity no credential for it (133; rule core.28), and
+/// `e` otherwise.
+fn withheld_read(remote: &str, asked: &str, e: anyhow::Error) -> anyhow::Error {
+    let Some(w) = withheld(&e) else { return e };
+    ReadRefused {
+        remote: remote.into(),
+        asked: asked.into(),
+        said: w.said.clone(),
+        note: w.note.clone(),
+    }
+    .into()
+}
+
+/// One try of a git call to the remote, as [`calling`] is told it.
+enum Attempt {
+    /// git ran: what it printed, whether its limit came first, and whether
+    /// it asked sluice's helper for the speaker's credentials.
+    Ran(Tried),
+    /// Another fetch held the repository's fetch lock, at this path, for
+    /// as long as a try may take: a try the remote never judged (record
+    /// 0109).
+    Held(PathBuf),
+}
+
+/// The tries of a git call to `remote` of `kind`, `line` its whole command
+/// line, under `policy` (134; rule core.29): each try is `attempt` of the
+/// same line, given the speaker's credentials where there is a speaker,
+/// ones made afresh after the remote refused the last that git asked
+/// sluice's helper for; `unasked` says what the remote refused where git
+/// never asked for them. Its last try's output, what each credential the
+/// remote refused was, apart from git's words (133), and how the last try
+/// stands when it failed. A fault of sluice's own, git not run or no
+/// credential given, is its error, and no try follows it.
+fn calling(
+    policy: &Policy,
+    kind: Kind,
+    remote: &str,
+    speaker: Option<&Speaker>,
+    line: &[&str],
+    attempt: &mut dyn FnMut(&[&str], Option<&Credentials>) -> Result<Attempt>,
+    unasked: &dyn Fn(&Speaker, &Output) -> String,
+) -> Result<Called> {
+    // Why sluice could not make a try: git not run, or no credential.
+    let mut fault = None;
+    let mut unrenewed = None;
+    let mut refused: Vec<String> = Vec::new();
+    // The password of the credentials the remote refused last, which a
+    // renewal replaces.
+    let mut refused_password = String::new();
+    // What the remote refused where git never asked for the speaker's
+    // credentials.
+    let mut refused_unasked = None;
+    let mut last = None;
+    // Set while the last try found the fetch lock held past its limit.
+    let mut waited = None;
+    let ran = policy.run(kind, |t| {
+        let given = match speaker {
+            None => None,
+            Some(s) if t.renew() => match s.identity.renew(&s.url, &refused_password) {
+                Ok(c) => Some(c),
+                Err(e) => {
+                    unrenewed = Some(e);
+                    return Err(Failed::new(Judged::Answered, ()));
+                }
+            },
+            Some(s) => match s.identity.credentials(&s.url) {
+                Ok(c) => Some(c),
+                Err(e) => {
+                    let e = e.context(format!("{} on {remote}", s.identity.name()));
+                    fault = Some(e);
+                    return Err(Failed::new(Judged::Answered, ()));
+                }
+            },
+        };
+        let tried = match attempt(line, given.as_ref()) {
+            Ok(Attempt::Held(held)) => {
+                waited = Some(held);
+                return Err(Failed::new(Judged::Never, ()));
+            }
+            Ok(Attempt::Ran(tried)) => tried,
+            Err(e) => {
+                fault = Some(e);
+                return Err(Failed::new(Judged::Answered, ()));
+            }
+        };
+        waited = None;
+        let (out, asked) = match tried {
+            // A try git did not end within its limit: whether the remote
+            // judged it is not known, so a read is tried again and a
+            // push is settled by reading what the remote holds (122).
+            Tried {
+                out, stopped: true, ..
+            } => {
+                let verb = line.first().copied().unwrap_or("call");
+                last = Some(told(
+                    out,
+                    &weir_bounded::stopped(&format!("git {verb}"), remote, policy.try_for()),
+                ));
+                return Err(Failed::new(Judged::Unknown, ()));
+            }
+            Tried { out, .. } if out.status.success() => return Ok(out),
+            Tried { out, asked, .. } => (out, asked),
+        };
+        let mut judged = judged(&out, kind, speaker.is_some());
+        match (judged, speaker, given) {
+            (Judged::Credential, Some(_), Some(c)) if asked => {
+                refused.push(c.about);
+                refused_password = c.password;
+            }
+            // The remote refused what git sent of its own, or nothing
+            // sluice gave: its answer, which no credential bought
+            // afresh changes, since git sends the same again (134;
+            // record 0019 as amended 2026-11-18).
+            (Judged::Credential, Some(s), Some(_)) => {
+                refused_unasked = Some(unasked(s, &out));
+                judged = Judged::Answered;
+            }
+            _ => {}
+        }
+        last = Some(out);
+        Err(Failed::new(judged, ()))
+    });
+    let stopped = match ran {
+        Ok(out) => {
+            return Ok(Called {
+                out,
+                note: None,
+                judged: None,
+            })
+        }
+        Err(stopped) => stopped,
+    };
+    if let Some(e) = fault {
+        return Err(e);
+    }
+    if let Some(lock) = waited {
+        bail!(
+            "another fetch of this repository held {} past {}, the most a try waits for it",
+            lock.display(),
+            span(policy.try_for())
+        );
+    }
+    let out = last.expect("a try git failed");
+    let note = match (unrenewed, refused_unasked) {
+        (Some(e), _) => Some(format!(
+            "{remote} refused {}, and none could be made afresh: {e:#}",
+            refused.join(", then ")
+        )),
+        (None, Some(unasked)) if refused.is_empty() => Some(unasked),
+        (None, Some(unasked)) => Some(format!(
+            "{remote} refused {}; {unasked}",
+            refused.join(", then ")
+        )),
+        (None, None) if stopped.judged == Judged::Credential && !refused.is_empty() => {
+            Some(format!("{remote} refused {}", refused.join(", then ")))
+        }
+        (None, None) => None,
+    };
+    Ok(Called {
+        out,
+        note,
+        judged: Some(stopped.judged),
+    })
 }
 
 /// A git call to the remote under the retry policy: its last try's output,
