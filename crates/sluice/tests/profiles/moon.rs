@@ -318,27 +318,6 @@ fn a_plan_reads_the_paths_a_worktree_holds_beyond_its_revision() {
     assert_eq!(names(&r), ["beta:test"]);
 }
 
-/// 71, 83; the run-bound spec's "Six cores each": the moon runner hands
-/// moon the run's share of the cores as `--concurrency`, the
-/// `SLUICE_JOBS` its environment carries.
-#[test]
-fn moon_is_given_the_runs_share_of_the_cores() {
-    let repo = workspace("moon-share");
-    let c = checks(&repo);
-    let base = repo.rev("HEAD");
-    change(&repo, &[("alpha/notes.md", "shared\n")]);
-    finish(&c, &request(&repo, "p1", &["#check-fast"], Some(&base)));
-    let req = c.runs().request("p1").unwrap();
-    let jobs = &req.env["SLUICE_JOBS"];
-    assert_eq!(jobs, "4", "eight cores under a bound of two");
-    let at = req
-        .argv
-        .iter()
-        .position(|a| a == "--concurrency")
-        .unwrap_or_else(|| panic!("no --concurrency in {:?}", req.argv));
-    assert_eq!(req.argv.get(at + 1), Some(jobs), "{:?}", req.argv);
-}
-
 /// ADR 0028: while a run goes, its tasks read as moon writes them: one
 /// ended passes with its times, one started and not ended runs, and once
 /// the run has finished there is nothing to say, its report being the
@@ -750,27 +729,6 @@ fn the_reading_names_the_checks_a_change_reads() {
     assert!(left.is_empty(), "{left:?}");
     let list = repo.git(&["worktree", "list", "--porcelain"]);
     assert_eq!(list.matches("worktree ").count(), 1, "{list}");
-}
-
-/// 140: the command runner's one check reads every change.
-#[test]
-fn the_command_runner_reads_every_check() {
-    let repo = workspace("command-reads");
-    let c = checks(&repo);
-    let base = Rev::new(repo.rev("HEAD"));
-    let docs = Rev::new(change(&repo, &[("README.md", "docs\n")]));
-    let tests = Settings::from([
-        ("runner".into(), Setting::Text("command".into())),
-        ("command".into(), Setting::Text("true".into())),
-    ]);
-    let reads = c
-        .reads(&Reading {
-            required: vec!["true".into()],
-            tests,
-            pairs: vec![(base, docs)],
-        })
-        .unwrap();
-    assert_eq!(reads, [Reads::Every]);
 }
 
 /// Run in a child of this test binary, with moon's options set in

@@ -3365,6 +3365,32 @@ mod tests {
     /// 147, C.2: the version check refuses a moon below 2.6 in words that
     /// name it and the oldest the runner reads, and a version moon cannot
     /// say quoting what it said; it reads 2.6 and later.
+    /// 71, 83; the run-bound spec's "Six cores each": moon runs its
+    /// targets in its CI mode with the run's share of the cores as
+    /// `--concurrency`; `--otel` where sluice sends telemetry, and
+    /// `--force` where the gate may not replay (28).
+    #[test]
+    fn moon_runs_its_targets_on_the_runs_share_of_the_cores() {
+        let targets = ["alpha:test".to_string(), "beta:test".to_string()];
+        assert_eq!(
+            super::exec_argv(&targets, 4, true, false),
+            [
+                "moon",
+                "exec",
+                "alpha:test",
+                "beta:test",
+                "--ci",
+                "--on-failure",
+                "continue",
+                "--concurrency",
+                "4"
+            ]
+        );
+        let argv = super::exec_argv(&targets, 2, false, true);
+        assert_eq!(argv[..2], ["moon", "--otel"]);
+        assert_eq!(argv[argv.len() - 3..], ["--concurrency", "2", "--force"]);
+    }
+
     #[test]
     fn a_moon_below_the_floor_or_unread_is_refused_quoting_it() {
         assert_eq!(
