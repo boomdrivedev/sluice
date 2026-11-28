@@ -827,8 +827,10 @@ fn left_behind(repo: &Repo, place: &Place) {
 /// 33 to 35, 25, rule core.16: a place is made under the repository's
 /// `.places/`, holding its revision, its directories' names holding no
 /// `%`, which clang and other tools read as a random character in a
-/// temporary file's path; its release leaves nothing, and a release of
-/// one released or never made is nothing.
+/// temporary file's path; its release ends its run first (34), which the
+/// runs end as `tests/runs.rs`'s `removing_a_run_in_progress_ends_it`
+/// has it, and leaves nothing, and a release of one released or never
+/// made is nothing.
 #[test]
 fn a_place_is_its_candidate_and_leaves_nothing() {
     let repo = Repo::new("checkouts-made");
@@ -841,6 +843,7 @@ fn a_place_is_its_candidate_and_leaves_nothing() {
         assert!(!name.contains('%'), "{}", dir.display());
     }
     p.release(NAME).unwrap();
+    assert_eq!(repo.runs.of(NAME), ["remove"]);
     left_behind(&repo, &place);
     p.release(NAME).unwrap();
     p.release("sluice/try/bolt/x/never").unwrap();

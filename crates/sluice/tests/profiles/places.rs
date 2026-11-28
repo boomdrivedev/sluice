@@ -1,7 +1,10 @@
-//! The place seam's profile on scratch repositories: section 5's
-//! acceptance tests in `docs/plans/phase-1-integrations.md`, for the
-//! one method, `git-worktree`. Needs git on the path, so it is in the
-//! check-tools tier.
+//! The place seam's profile on scratch repositories, git's own part of
+//! section 5's acceptance tests in `docs/plans/phase-1-integrations.md`
+//! for the one method, `git-worktree`: what a checkout holds, how git
+//! locks one and lists the worktrees, and how it lists a folder whatever
+//! spells its path. The profile's own logic, its ports, scratch, records,
+//! releases and previews, is `tests/checkouts.rs`'s, over fakes of git
+//! and the runs. Needs git on the path, so it is in the check-tools tier.
 
 #![cfg(feature = "tools")]
 
@@ -13,7 +16,7 @@ use std::path::PathBuf;
 use std::rc::Rc;
 
 use sluice::profiles::places::{GitWorktrees, Places};
-use sluice::runs::{Request, Runs};
+use sluice::runs::Runs;
 use sluice_seams::{Checkout, Place, Rev, Setting, Settings};
 use support::Repo;
 
@@ -74,10 +77,6 @@ fn runs(repo: &Repo) -> Runs {
         &repo.dir().join(".git"),
         PathBuf::from(env!("CARGO_BIN_EXE_sluice")),
     )
-}
-
-fn method(m: &str) -> Settings {
-    Settings::from([("method".into(), Setting::Text(m.into()))])
 }
 
 /// A repository with a candidate commit off main, a session's worktree on
@@ -224,48 +223,6 @@ fn a_checkout_locked_for_another_reason_is_held() {
     left_behind(&repo, &place);
 }
 
-/// 34: releasing a place ends the run in it before removing it.
-#[test]
-fn releasing_a_place_ends_its_run() {
-    let _spawns = spawns();
-    let (repo, rev) = scratch("places-run");
-    let p = places(&repo);
-    let place = p.materialize(NAME, &rev, &Settings::new()).unwrap();
-    let r = runs(&repo);
-    r.start(
-        NAME,
-        &Request {
-            argv: vec!["/bin/sh".into(), "-c".into(), "sleep 300".into()],
-            cwd: place.path.clone(),
-            env: BTreeMap::new(),
-            limit: None,
-            grace: 1,
-            meta: serde_json::Value::Null,
-            release: None,
-            watch: None,
-        },
-    )
-    .unwrap();
-    let pgid_file = r.dir(NAME).join("pgid");
-    let until = std::time::Instant::now() + std::time::Duration::from_secs(20);
-    while !pgid_file.exists() {
-        assert!(std::time::Instant::now() < until);
-        std::thread::sleep(std::time::Duration::from_millis(20));
-    }
-    let pgid: i32 = std::fs::read_to_string(&pgid_file)
-        .unwrap()
-        .trim()
-        .parse()
-        .unwrap();
-    p.release(NAME).unwrap();
-    assert_eq!(
-        nix::sys::signal::killpg(nix::unistd::Pid::from_raw(pgid), None),
-        Err(nix::errno::Errno::ESRCH)
-    );
-    assert!(!r.dir(NAME).exists());
-    left_behind(&repo, &place);
-}
-
 fn ported(names: &[&str], from: &str) -> Settings {
     let mut s = Settings::new();
     s.insert(
@@ -320,45 +277,6 @@ fn worktrees(repo: &Repo) -> Vec<String> {
 
 fn preview_name(rev: &Rev) -> String {
     format!("preview/{}", &rev.as_str()[..12])
-}
-
-/// ADR 0024: every worktree with a branch checked out, with its branch
-/// and head; a detached one, a candidate's place among them, is left out.
-#[test]
-fn checked_out_lists_the_worktrees_on_a_branch() {
-    let _spawns = spawns();
-    let (repo, cand) = scratch("checked-out");
-    // The repository's own worktree back on main, as `<repo>/main` is.
-    repo.git(&["switch", "-q", "main"]);
-    let p = places(&repo);
-    let detached = repo.dir().with_extension("view");
-    let _ = std::fs::remove_dir_all(&detached);
-    repo.git(&[
-        "worktree",
-        "add",
-        "-q",
-        "--detach",
-        detached.to_str().unwrap(),
-        "main",
-    ]);
-    p.materialize(NAME, &cand, &method("git-worktree")).unwrap();
-
-    let mut found = p.checked_out().unwrap();
-    found.sort_by(|a, b| a.branch.cmp(&b.branch));
-    let names: Vec<(&str, PathBuf)> = found
-        .iter()
-        .map(|c| (c.branch.as_str(), c.worktree.clone()))
-        .collect();
-    let canon = |p: &std::path::Path| std::fs::canonicalize(p).unwrap();
-    assert_eq!(
-        names,
-        vec![
-            ("main", canon(repo.dir())),
-            ("unit/a", canon(&repo.dir().with_extension("session"))),
-        ]
-    );
-    assert_eq!(found[0].head.0, repo.rev("main"));
-    p.release(NAME).unwrap();
 }
 
 /// 129: the worktrees on a branch, read with no process, are what
