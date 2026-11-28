@@ -886,23 +886,34 @@ impl<'a> Equipping<'a> {
     /// Run each step not yet run up to `stop`, in order, stopping at the
     /// first that fails. `Err` is sluice's own failure, never a step's.
     pub fn through(&mut self, stop: Through) -> Result<()> {
-        let first = usize::from(self.toolchain.is_some());
-        loop {
-            if self.failed().is_some() {
-                return Ok(());
-            }
-            let next = self.steps.len();
-            let step = match (&self.toolchain, next.checked_sub(first)) {
-                (Some(argv), None) => {
+        while let Some(next) = self.next(stop) {
+            let step = match next {
+                Next::Toolchain(argv) => {
                     toolchain(argv, &self.request.place.path, self.env, self.script)?
                 }
-                (_, Some(i)) => match self.runner.get(i) {
-                    Some(step) if step.through <= stop => (step.run)(&Moon, &self.context()),
-                    _ => return Ok(()),
-                },
-                (None, None) => unreachable!("with no toolchain the runner's steps are first"),
+                Next::Runner(step) => (step.run)(&Moon, &self.context(), step.name),
             };
             self.steps.push(step);
+        }
+        Ok(())
+    }
+
+    /// The step to run next on the way to `stop`: the toolchain where it
+    /// is named and has not run, else the runner's next step that belongs
+    /// to `stop`; none once a step failed.
+    fn next(&self, stop: Through) -> Option<Next<'_>> {
+        if self.failed().is_some() {
+            return None;
+        }
+        let first = usize::from(self.toolchain.is_some());
+        match (&self.toolchain, self.steps.len().checked_sub(first)) {
+            (Some(argv), None) => Some(Next::Toolchain(argv)),
+            (_, Some(i)) => self
+                .runner
+                .get(i)
+                .filter(|step| step.through <= stop)
+                .map(Next::Runner),
+            (None, None) => unreachable!("with no toolchain the runner's steps are first"),
         }
     }
 
@@ -943,6 +954,14 @@ impl<'a> Equipping<'a> {
     pub fn equipped(self) -> Equipped {
         Equipped { steps: self.steps }
     }
+}
+
+/// The step [`Equipping::through`] runs next.
+enum Next<'a> {
+    /// `[tests] toolchain`, this command.
+    Toolchain(&'a [String]),
+    /// One of the runner's steps.
+    Runner(&'a moon::Step),
 }
 
 /// What a check may need of sluice's own environment: paths, the user,
@@ -3425,5 +3444,171 @@ mod tests {
             );
         }
         let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// A run's request under `tests`, its place `p` at `/w` with the port
+    /// `web`, its scratch `/w-tmp`.
+    fn run_request(tests: Settings) -> RunRequest {
+        RunRequest {
+            place: Place {
+                name: "p".into(),
+                path: "/w".into(),
+                tmp: "/w-tmp".into(),
+                env: BTreeMap::from([("SLUICE_PORT_WEB".to_string(), "20000".to_string())]),
+            },
+            revision: sluice_seams::Rev::new(""),
+            required: Vec::new(),
+            since: None,
+            beyond: Vec::new(),
+            limit: None,
+            limits: Limits::default(),
+            tests,
+            command: None,
+            replay: false,
+            system: None,
+        }
+    }
+
+    /// `[tests]` naming `runner`, and a toolchain where `toolchain`.
+    fn equipped_by(runner: &str, toolchain: bool) -> Settings {
+        let mut tests = Settings::from([("runner".into(), Setting::Text(runner.into()))]);
+        if toolchain {
+            tests.insert(
+                "toolchain".into(),
+                Setting::List(vec!["devenv".into(), "print-dev-env".into()]),
+            );
+        }
+        tests
+    }
+
+    /// The steps `e` has run once it is walked to `stop`, each step it
+    /// comes to passing but the one named `fails`, which runs nothing.
+    fn walk(e: &mut Equipping, stop: Through, fails: &str) -> Vec<String> {
+        while let Some(next) = e.next(stop) {
+            let name = match next {
+                Next::Toolchain(_) => TOOLCHAIN,
+                Next::Runner(step) => step.name,
+            };
+            e.steps.push(match name == fails {
+                true => failed(name, "exited 1", ""),
+                false => passed(name, String::new()),
+            });
+        }
+        e.steps.iter().map(|s| s.step.clone()).collect()
+    }
+
+    /// 147; rule core.46: a working copy that pins its tools is equipped
+    /// by the toolchain, `proto install` and `moon --version` for reading,
+    /// and through `moon setup` once it runs, those it ran for reading not
+    /// run again.
+    #[test]
+    fn equipping_runs_the_toolchain_then_the_runners_steps_each_to_its_stop() {
+        let request = run_request(equipped_by("moon", true));
+        let env = BTreeMap::new();
+        let script = Path::new("/w-tmp/toolchain.sh");
+        let mut e = Equipping::new(&request, &env, 1, script).unwrap();
+        e.runner = Moon::sequence(true);
+        assert_eq!(
+            walk(&mut e, Through::Reading, ""),
+            ["toolchain", "proto install", "moon --version"]
+        );
+        assert_eq!(
+            walk(&mut e, Through::Running, ""),
+            ["toolchain", "proto install", "moon --version", "moon setup"]
+        );
+    }
+
+    /// 147; rule core.46: a working copy with no `.prototools` runs no
+    /// `proto install`, `moon --version` following the toolchain.
+    #[test]
+    fn a_working_copy_that_pins_nothing_installs_nothing() {
+        let request = run_request(equipped_by("moon", true));
+        let env = BTreeMap::new();
+        let script = Path::new("/w-tmp/toolchain.sh");
+        let mut e = Equipping::new(&request, &env, 1, script).unwrap();
+        e.runner = Moon::sequence(false);
+        assert_eq!(
+            walk(&mut e, Through::Running, ""),
+            ["toolchain", "moon --version", "moon setup"]
+        );
+    }
+
+    /// 147; rule core.46: under the command runner the toolchain is the one
+    /// step; with no toolchain there is none.
+    #[test]
+    fn the_command_runner_is_equipped_by_its_toolchain_alone() {
+        let env = BTreeMap::new();
+        let script = Path::new("/w-tmp/toolchain.sh");
+        let request = run_request(equipped_by("command", true));
+        let mut e = Equipping::new(&request, &env, 1, script).unwrap();
+        assert_eq!(walk(&mut e, Through::Running, ""), ["toolchain"]);
+        let request = run_request(equipped_by("command", false));
+        let mut e = Equipping::new(&request, &env, 1, script).unwrap();
+        assert!(walk(&mut e, Through::Running, "").is_empty());
+    }
+
+    /// 147, 114; rule core.46: no step runs after one that failed, a
+    /// toolchain's or the runner's, and a run's working copy that could
+    /// not be equipped fails its start with the step's name and words.
+    #[test]
+    fn no_step_runs_after_one_that_failed() {
+        let request = run_request(equipped_by("moon", true));
+        let env = BTreeMap::new();
+        let script = Path::new("/w-tmp/toolchain.sh");
+        let fresh = || {
+            let mut e = Equipping::new(&request, &env, 1, script).unwrap();
+            e.runner = Moon::sequence(true);
+            e
+        };
+        assert_eq!(
+            walk(&mut fresh(), Through::Running, "toolchain"),
+            ["toolchain"]
+        );
+        let mut e = fresh();
+        assert_eq!(
+            walk(&mut e, Through::Running, "proto install"),
+            ["toolchain", "proto install"]
+        );
+        let err = e.ready(Through::Running).unwrap_err();
+        assert_eq!(format!("{err:#}"), "proto install: exited 1");
+    }
+
+    /// 35, 31, 147; rule core.46: a run's command and each step that
+    /// equips its working copy start from its place, its scratch, its
+    /// share of the cores, its ports and the host's caches' variables,
+    /// with nothing of the caller's environment but the paths, the user
+    /// and the locale a check may need.
+    #[test]
+    fn a_runs_environment_is_its_place_and_nothing_of_the_callers() {
+        let request = run_request(equipped_by("command", false));
+        let caches = [HostCache {
+            dir: "/caches/sccache".into(),
+            socket: None,
+            env: [("SCCACHE_DIR".to_string(), "/caches/sccache".to_string())].into(),
+        }];
+        let caller = [
+            ("PATH", "/usr/bin"),
+            ("LC_ALL", "C"),
+            ("MOON_FORCE", "1"),
+            ("GIT_DIR", "/elsewhere/.git"),
+            ("DEVENV_ROOT", "/elsewhere"),
+            ("RUSTC_WRAPPER", "sccache"),
+        ]
+        .map(|(k, v)| (k.to_string(), v.to_string()));
+        let env = with_run_env(caller.into(), || environment(&request, 4, &caches));
+        assert_eq!(
+            env,
+            [
+                ("LC_ALL", "C"),
+                ("PATH", "/usr/bin"),
+                ("SCCACHE_DIR", "/caches/sccache"),
+                ("SLUICE_CHECKOUT", "/w"),
+                ("SLUICE_JOBS", "4"),
+                ("SLUICE_PORT_WEB", "20000"),
+                ("SLUICE_TMP", "/w-tmp"),
+            ]
+            .map(|(k, v)| (k.to_string(), v.to_string()))
+            .into()
+        );
     }
 }

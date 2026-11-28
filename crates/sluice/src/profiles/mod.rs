@@ -191,11 +191,13 @@ impl Bound {
             expire_after: instance.expire_after,
         };
         let pulls = Rc::new(github::pulls::Pulls::new(
-            branch.git_dir(),
+            Rc::new(github::request_refs::GitRefs::new(
+                branch.git_dir(),
+                identity.clone(),
+                retry.clone(),
+            )),
             &common,
             forge,
-            identity.clone(),
-            retry.clone(),
             github::kept::Kept::new(&crate::instance::state_dir()?),
             discovery,
             peer,

@@ -943,6 +943,21 @@ fn told(mut out: Output, said: &str) -> Output {
     out
 }
 
+/// 152, rule core.5, record 0124 (design D10): a leased push of a branch
+/// from `expected` to `to`, `None` for a removal, that the remote answered
+/// for the ref with a refusal, a hook's, a ruleset's or push protection's,
+/// read against the branch as fetched after it, `found`: holding `to`, it
+/// moved; still where the move expected it, the forge refused the move, in
+/// its words whole; elsewhere, it was moved meanwhile.
+fn answered_refusal(found: Option<Rev>, expected: &str, to: Option<&Rev>, out: &Output) -> Moved {
+    match found {
+        Some(f) if Some(&f) == to => Moved::Moved,
+        None if to.is_none() => Moved::Moved,
+        f if f.as_ref().map_or("", Rev::as_str) == expected => Moved::Refused(refusal(out)),
+        f => Moved::Elsewhere(f),
+    }
+}
+
 /// Why a `git push --porcelain` failed: the remote's reason for each ref
 /// it refused, which porcelain prints on stdout, then what git printed on
 /// stderr, which alone says only that some refs failed.
@@ -1113,15 +1128,7 @@ impl PushedRefs {
             // elsewhere, it was moved meanwhile.
             let answered_for_the_ref = report.lines().any(|l| l.starts_with('!'));
             if answered_for_the_ref {
-                let found = self.fetch(branch)?;
-                return Ok(match found {
-                    Some(f) if Some(&f) == to => Moved::Moved,
-                    None if to.is_none() => Moved::Moved,
-                    f if f.as_ref().map_or("", Rev::as_str) == expected => {
-                        Moved::Refused(refusal(out))
-                    }
-                    f => Moved::Elsewhere(f),
-                });
+                return Ok(answered_refusal(self.fetch(branch)?, expected, to, out));
             }
         }
         match pushed.why() {
@@ -1133,7 +1140,7 @@ impl PushedRefs {
 
 #[cfg(test)]
 mod tests {
-    use super::{lost_race, netrc_names, own_credential};
+    use super::{answered_refusal, lost_race, netrc_names, own_credential, Moved, Output, Rev};
 
     /// Record 0019 as amended 2026-11-18: a credential git sent of its own
     /// is named by where git found it, the address's user name, a header
@@ -1198,5 +1205,57 @@ mod tests {
         assert!(!lost_race(
             "fatal: unable to access 'https://github.com/o/r/': Could not resolve host"
         ));
+    }
+
+    /// git's output of a push the remote refused for its ref, its
+    /// porcelain line on stdout and git's words on stderr.
+    fn declined() -> Output {
+        use std::os::unix::process::ExitStatusExt;
+        Output {
+            status: std::process::ExitStatus::from_raw(256),
+            stdout: b"To /remote.git\n!\trefs/heads/main:refs/heads/main\t[remote rejected] (pre-receive hook declined)\nDone\n".to_vec(),
+            stderr: b"remote: push declined due to repository rule violations\nerror: failed to push some refs to '/remote.git'\n".to_vec(),
+        }
+    }
+
+    /// 152, rule core.5, record 0124 (design D10): a refusal the remote
+    /// answered for the ref is read against the branch fetched after it:
+    /// still where the move expected it, the forge refused the move, its
+    /// porcelain reason and its words both said; holding the landing, it
+    /// moved; a removal it holds no branch for, done; anywhere else, moved
+    /// meanwhile, with what it holds
+    /// (`a_refused_push_with_the_branch_moved_reads_as_elsewhere`).
+    #[test]
+    fn a_refusal_for_the_ref_is_read_against_the_branch() {
+        let (base, to, side) = (Rev::new("b0"), Rev::new("c1"), Rev::new("s2"));
+        match answered_refusal(Some(base.clone()), "b0", Some(&to), &declined()) {
+            Moved::Refused(words) => {
+                assert!(
+                    words.contains("[remote rejected] (pre-receive hook declined)"),
+                    "{words}"
+                );
+                assert!(
+                    words.contains("push declined due to repository rule violations"),
+                    "{words}"
+                );
+            }
+            other => panic!("{other:?}"),
+        }
+        assert_eq!(
+            answered_refusal(Some(to.clone()), "b0", Some(&to), &declined()),
+            Moved::Moved
+        );
+        assert_eq!(
+            answered_refusal(None, "b0", None, &declined()),
+            Moved::Moved
+        );
+        assert_eq!(
+            answered_refusal(Some(side.clone()), "b0", Some(&to), &declined()),
+            Moved::Elsewhere(Some(side))
+        );
+        assert_eq!(
+            answered_refusal(None, "b0", Some(&to), &declined()),
+            Moved::Elsewhere(None)
+        );
     }
 }

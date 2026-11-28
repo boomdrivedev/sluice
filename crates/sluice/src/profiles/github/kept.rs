@@ -332,13 +332,14 @@ impl Kept {
     }
 
     /// A submit on the host opened, updated or marked ready a pull request
-    /// of `repo` into `base`: the next pass asks at once.
-    pub fn moved(&self, repo: &Repo, base: &str) -> Result<()> {
+    /// of `repo` into `base` at `at`, by sluice's clock, which the asking
+    /// it is weighed against is kept by: the next pass asks at once.
+    pub fn moved(&self, repo: &Repo, base: &str, at: DateTime<Utc>) -> Result<()> {
         let path = self.requests_path(repo, base, "moved");
         let dir = path.parent().expect("a kept file has a directory");
         std::fs::create_dir_all(dir).with_context(|| format!("making {}", dir.display()))?;
         std::fs::File::create(&path)
-            .and_then(|f| f.set_modified(SystemTime::now()))
+            .and_then(|f| f.set_modified(at.into()))
             .with_context(|| format!("writing {}", path.display()))
     }
 
@@ -583,13 +584,16 @@ mod tests {
         let dir = scratch("moved");
         let kept = Kept::new(&dir);
         let repo = Repo::from_url("https://github.com/o/r.git").unwrap();
-        let before = Utc::now() - TimeDelta::seconds(5);
+        let before = DateTime::parse_from_rfc3339("2026-11-27T12:00:00Z")
+            .unwrap()
+            .to_utc();
         assert!(!kept.moved_since(&repo, "main", Some(before)));
         assert!(!kept.moved_since(&repo, "main", None));
-        kept.moved(&repo, "main").unwrap();
+        kept.moved(&repo, "main", before + TimeDelta::seconds(1))
+            .unwrap();
         assert!(kept.moved_since(&repo, "main", Some(before)));
         assert!(kept.moved_since(&repo, "main", None));
-        let after = Utc::now() + TimeDelta::seconds(5);
+        let after = before + TimeDelta::seconds(2);
         assert!(!kept.moved_since(&repo, "main", Some(after)));
         assert!(!kept.moved_since(&repo, "bolt/x", Some(before)));
         let _ = std::fs::remove_dir_all(&dir);

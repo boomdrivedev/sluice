@@ -14,6 +14,7 @@ pub mod kept;
 pub mod keyless;
 pub mod pulls;
 pub mod render;
+pub mod request_refs;
 mod rest;
 pub mod workflows;
 

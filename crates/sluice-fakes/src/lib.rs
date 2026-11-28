@@ -613,6 +613,11 @@ impl World {
     /// A session's work: a commit on `on` changing `changes` (`None`
     /// deletes).
     pub fn work(&self, on: &Rev, changes: &[(&str, Option<&str>)]) -> Rev {
+        self.work_saying(on, changes, &format!("work {changes:?}"))
+    }
+
+    /// [`World::work`], its commit's message `message`.
+    pub fn work_saying(&self, on: &Rev, changes: &[(&str, Option<&str>)], message: &str) -> Rev {
         let mut inner = self.0.borrow_mut();
         let mut tree = inner.commits[on].tree.clone();
         for (p, c) in changes {
@@ -621,8 +626,28 @@ impl World {
                 None => tree.remove(*p),
             };
         }
-        let msg = format!("work {changes:?}");
-        Self::put_commit(&mut inner, tree, vec![on.clone()], &msg)
+        Self::put_commit(&mut inner, tree, vec![on.clone()], message)
+    }
+
+    /// A merge of `other` into `on` keeping `on`'s files, as `git merge
+    /// -s ours` makes it, saying `message`. Returns the merge.
+    pub fn merge_ours(&self, on: &Rev, other: &Rev, message: &str) -> Rev {
+        let mut inner = self.0.borrow_mut();
+        let tree = inner.commits[on].tree.clone();
+        Self::put_commit(&mut inner, tree, vec![on.clone(), other.clone()], message)
+    }
+
+    /// Another queue lands `head` on `branch` by hand: a merge commit of
+    /// the two, `head`'s files over the branch's, saying `message`, which
+    /// the branch moves to. Returns the merge.
+    pub fn merge_onto(&self, branch: &str, head: &Rev, message: &str) -> Rev {
+        let mut inner = self.0.borrow_mut();
+        let tip = inner.refs[branch].clone();
+        let mut tree = inner.commits[&tip].tree.clone();
+        tree.extend(inner.commits[head].tree.clone());
+        let rev = Self::put_commit(&mut inner, tree, vec![tip, head.clone()], message);
+        inner.refs.insert(branch.into(), rev.clone());
+        rev
     }
 
     /// Someone moves the branch by hand with a commit of their own.
@@ -636,6 +661,16 @@ impl World {
         let rev = self.work(&tip, changes);
         self.0.borrow_mut().refs.insert(branch.into(), rev.clone());
         rev
+    }
+
+    /// The world's time, read without moving it.
+    pub fn now(&self) -> DateTime<Utc> {
+        self.0.borrow().now
+    }
+
+    /// The branches the repository holds, by name.
+    pub fn branches(&self) -> Vec<String> {
+        self.0.borrow().refs.keys().cloned().collect()
     }
 
     pub fn tip(&self, branch: &str) -> Rev {

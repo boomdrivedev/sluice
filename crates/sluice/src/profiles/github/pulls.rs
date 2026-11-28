@@ -36,7 +36,6 @@
 use std::cell::RefCell;
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
-use std::process::Stdio;
 use std::rc::Rc;
 use std::time::Duration;
 
@@ -60,9 +59,7 @@ use super::forge::{
 };
 use super::kept::{Follow, Kept, Reading, Readings};
 use super::render;
-use crate::identity::Identity;
-use crate::profiles::local_refs::LocalRefs;
-use crate::profiles::pushed_refs::PushedRefs;
+use super::request_refs::{RemoteRefs, RequestRefs};
 use crate::retry;
 use crate::{Across, AcrossRow, Ahead, Followed, GroupRefused, Opened, Queue, Short, TakenInBy};
 use sluice_core::verdict_view::{Standing as Stands, VerdictView};
@@ -278,18 +275,13 @@ struct Entry {
 }
 
 pub struct Pulls {
-    /// The repository's git directory.
-    dir: PathBuf,
-    /// The repository, as gix reads it, once opened: its default branch,
-    /// its branches and its remotes' addresses, read with no process
-    /// (129).
-    local: std::cell::OnceCell<LocalRefs>,
+    /// The repository: its default branch, its branches and its remotes'
+    /// addresses, read with no process (129), and its remotes, reached
+    /// under the retry policy every call to a remote runs under (134).
+    refs: Rc<dyn RequestRefs>,
     /// Where intake's lock files are kept.
     locks: PathBuf,
     forge: Option<Rc<dyn Forge>>,
-    identity: Option<(Rc<dyn Identity>, PathBuf)>,
-    /// The retry policy every call to a remote runs under (134).
-    retry: Rc<retry::Policy>,
     /// The pull requests the last intake read, by place.
     known: RefCell<BTreeMap<String, Known>>,
     /// Every pull request entry of the branches intake read, by id.
@@ -493,22 +485,17 @@ impl Pulls {
     /// it, with its lease (137).
     #[allow(clippy::too_many_arguments)]
     pub fn new(
-        dir: &Path,
+        refs: Rc<dyn RequestRefs>,
         common: &Path,
         forge: Option<Rc<dyn Forge>>,
-        identity: Option<(Rc<dyn Identity>, PathBuf)>,
-        retry: Rc<retry::Policy>,
         kept: Kept,
         discovery: Duration,
         peer: sluice_core::Peer,
     ) -> Pulls {
         Pulls {
-            dir: dir.to_path_buf(),
-            local: std::cell::OnceCell::new(),
+            refs,
             locks: common.join("sluice").join(".intake"),
             forge,
-            identity,
-            retry,
             known: RefCell::default(),
             entries: RefCell::default(),
             shown: RefCell::default(),
@@ -547,17 +534,8 @@ impl Pulls {
         })
     }
 
-    /// The repository, opened at its first reading.
-    fn local(&self) -> Result<&LocalRefs> {
-        if let Some(l) = self.local.get() {
-            return Ok(l);
-        }
-        let l = LocalRefs::open(&self.dir)?;
-        Ok(self.local.get_or_init(|| l))
-    }
-
-    fn pushed(&self, remote: &str) -> Result<PushedRefs> {
-        PushedRefs::open_as(&self.dir, remote, self.identity.clone(), self.retry.clone())
+    fn pushed(&self, remote: &str) -> Result<Box<dyn RemoteRefs + '_>> {
+        self.refs.remote(remote)
     }
 
     /// `branch`'s pull requests and where they are, at its revision as
@@ -580,7 +558,7 @@ impl Pulls {
         let (Some(conditions), Some(remote)) = (rules.pull_requests, rules.remote) else {
             return Ok(None);
         };
-        let url = self.local()?.remote_url(&remote)?;
+        let url = self.refs.remote_url(&remote)?;
         let repo = Repo::from_url(&url).ok_or_else(|| {
             anyhow!(
                 "{branch} takes pull requests, and its remote {remote} ({url}) is not on GitHub"
@@ -655,32 +633,6 @@ impl Pulls {
         let (file, path) = self.lock_file(branch)?;
         file.lock().context(path.display().to_string())?;
         Ok(file)
-    }
-
-    /// The commit messages of `tip..head`, oldest first.
-    fn messages(&self, tip: &Rev, head: &Rev) -> Result<Vec<String>> {
-        let out = crate::workers::command("git", "git")
-            .arg("--git-dir")
-            .arg(&self.dir)
-            .args([
-                "log",
-                "--reverse",
-                "--format=%B%x1e",
-                &format!("{tip}..{head}"),
-            ])
-            .env_remove("GIT_DIR")
-            .env_remove("GIT_WORK_TREE")
-            .stdin(Stdio::null())
-            .output()
-            .context("running git log")?;
-        if !out.status.success() {
-            bail!("git log: {}", String::from_utf8_lossy(&out.stderr).trim());
-        }
-        Ok(String::from_utf8_lossy(&out.stdout)
-            .split('\u{1e}')
-            .map(|m| m.trim().to_string())
-            .filter(|m| !m.is_empty())
-            .collect())
     }
 
     /// Read every pull request entry of `subs` for later calls this round.
@@ -981,7 +933,7 @@ impl Pulls {
             }
         }
         // 125: a group is taken whole, before any of it is considered alone.
-        let groups = self.take_groups(s, forge, &t, &pushed, branch, &ours, &latest, &log, &work);
+        let groups = self.take_groups(s, forge, &t, &*pushed, branch, &ours, &latest, &log, &work);
         let Groups {
             taken,
             bound,
@@ -1012,7 +964,7 @@ impl Pulls {
                     s,
                     forge,
                     &t,
-                    &pushed,
+                    &*pushed,
                     branch,
                     p,
                     latest.get(&place(p.number)),
@@ -1343,7 +1295,7 @@ impl Pulls {
         s: &Sluice<'_>,
         forge: &dyn Forge,
         t: &Target,
-        pushed: &PushedRefs,
+        pushed: &dyn RemoteRefs,
         branch: &str,
         p: &Pull,
         latest: Option<&Submission>,
@@ -1609,7 +1561,7 @@ impl Pulls {
         s: &Sluice<'_>,
         forge: &dyn Forge,
         t: &Target,
-        pushed: &PushedRefs,
+        pushed: &dyn RemoteRefs,
         branch: &str,
         pulls: &[&Pull],
         latest: &BTreeMap<String, Submission>,
@@ -1799,7 +1751,7 @@ impl Pulls {
         // serves none of leaves every request as it was.
         let pushed = self.pushed(&t.remote)?;
         for (p, _) in acted {
-            self.fetch_head(&pushed, p)
+            self.fetch_head(&*pushed, p)
                 .with_context(|| format!("fetching #{}'s head", p.number))?;
         }
         for ((p, left), o) in acted.iter().zip(&mut opened) {
@@ -1898,8 +1850,8 @@ impl Pulls {
     }
 
     /// The pull request's head on this host, fetched unless it is here.
-    fn fetch_head(&self, pushed: &PushedRefs, p: &Pull) -> Result<Rev> {
-        let local = self.head_ref(pushed.remote(), p.number);
+    fn fetch_head(&self, pushed: &dyn RemoteRefs, p: &Pull) -> Result<Rev> {
+        let local = self.head_ref(pushed.name(), p.number);
         if let Some(r) = pushed.read_ref(&local)? {
             if r.0 == p.head {
                 return Ok(r);
@@ -1907,7 +1859,7 @@ impl Pulls {
         }
         let got = pushed
             .fetch_ref(&format!("refs/pull/{}/head", p.number), &local)?
-            .ok_or_else(|| anyhow!("{} has no head on {}", place(p.number), pushed.remote()))?;
+            .ok_or_else(|| anyhow!("{} has no head on {}", place(p.number), pushed.name()))?;
         if got.0 != p.head {
             bail!(
                 "{} moved to {} while sluice read it at {}; the next round takes its new head",
@@ -3161,8 +3113,7 @@ impl crate::PullRequests for Pulls {
     }
 
     fn branches(&self, seams: Seams<'_>) -> Result<Vec<String>> {
-        let local = self.local()?;
-        let Some((default, _)) = crate::profiles::default_branch(local)? else {
+        let Some(default) = self.refs.default_branch()? else {
             return Ok(Vec::new());
         };
         // 129: at its revision as the host holds it, with no fetch, and
@@ -3193,7 +3144,7 @@ impl crate::PullRequests for Pulls {
         let Some(policy) = decided.map_err(|words| anyhow!(words))? else {
             return Ok(Vec::new());
         };
-        let mut names = local.branch_names()?;
+        let mut names = self.refs.branch_names()?;
         names.extend(
             policy
                 .branches
@@ -3981,7 +3932,7 @@ impl Pulls {
             // C.5: the description of the head submitted, its commits'
             // messages as many as GitHub holds; the head is in the
             // repository's objects before it is pushed.
-            let messages = self.messages(&t.tip, head)?;
+            let messages = self.refs.messages(&t.tip, head)?;
             let compare = compare_address(&t.repo, branch, &head_ref);
             let body = description(&messages, agent, group.as_ref(), &compare);
             let (pull, word) = match existing {
@@ -4109,7 +4060,7 @@ impl Pulls {
         };
         // 136: the host's next pass asks for the branch's pull requests at
         // once, the ones this act opened, updated or marked ready among them.
-        if let Err(e) = self.kept.moved(&t.repo, branch) {
+        if let Err(e) = self.kept.moved(&t.repo, branch, clock.now()) {
             crate::telemetry::warn(&format!("sluice: warning: {e:#}"));
         }
         // 124: how the host's copy differs, and ADR 0050: why the runner
@@ -4147,7 +4098,7 @@ impl Pulls {
             )
         })?;
         let pushed = self.pushed(&k.remote)?;
-        let head = self.fetch_head(&pushed, &k.pull)?;
+        let head = self.fetch_head(&*pushed, &k.pull)?;
         Ok(Session {
             head,
             from: Submitter {
@@ -4255,6 +4206,7 @@ fn lock_name(branch: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::profiles::github::request_refs::GitRefs;
 
     /// A pull request `number` into `base` at `head`, ready.
     fn open_into(number: u64, base: &str, head: &str) -> Pull {
@@ -4353,11 +4305,9 @@ mod tests {
         let repo = Repo::from_url("https://github.com/o/r.git").unwrap();
         let forge = Rc::new(FileForge::new(&dir.join("github.json"), &repo));
         let pulls = Pulls::new(
-            &dir,
+            Rc::new(GitRefs::new(&dir, None, Rc::new(retry::Policy::command()))),
             &dir,
             Some(forge.clone()),
-            None,
-            Rc::new(retry::Policy::command()),
             Kept::new(&dir.join("state")),
             crate::instance::DISCOVERY,
             sluice_core::Peer::default(),
@@ -4457,11 +4407,9 @@ mod tests {
         let repo = Repo::from_url("https://github.com/o/r.git").unwrap();
         let forge = Rc::new(FileForge::new(&dir.join("github.json"), &repo));
         let pulls = Pulls::new(
-            &dir,
+            Rc::new(GitRefs::new(&dir, None, Rc::new(retry::Policy::command()))),
             &dir,
             Some(forge.clone()),
-            None,
-            Rc::new(retry::Policy::command()),
             Kept::new(&dir.join("state")),
             crate::instance::DISCOVERY,
             sluice_core::Peer::default(),
@@ -4599,11 +4547,9 @@ mod tests {
         gix::init_bare(&dir).unwrap();
         std::fs::write(dir.join("HEAD"), "ref: refs/heads/main\n").unwrap();
         let pulls = Pulls::new(
-            &dir,
+            Rc::new(GitRefs::new(&dir, None, Rc::new(retry::Policy::command()))),
             &dir,
             None,
-            None,
-            Rc::new(retry::Policy::command()),
             Kept::new(&dir.join("state")),
             crate::instance::DISCOVERY,
             sluice_core::Peer::default(),
@@ -4733,11 +4679,9 @@ mod tests {
         })
         .unwrap();
         let pulls = Pulls::new(
-            &dir,
+            Rc::new(GitRefs::new(&dir, None, Rc::new(retry::Policy::command()))),
             &dir,
             None,
-            None,
-            Rc::new(retry::Policy::command()),
             Kept::new(&dir.join("state")),
             crate::instance::DISCOVERY,
             sluice_core::Peer::default(),
