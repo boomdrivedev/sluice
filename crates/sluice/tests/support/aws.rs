@@ -4,9 +4,8 @@
 //! holds, so no test reaches AWS (design D9 of the change
 //! `a-codebuild-fleet-runs-a-queues-checks`).
 //!
-//! A command reaches it through the AWS SDK's own chain, the process's
-//! environment pointing every service at it ([`FakeAws::point_here`]),
-//! which a test sets only in a child of its own binary it runs alone in.
+//! A command reaches it through the AWS SDK, the tests' host on the test's
+//! thread pointing every service at it ([`FakeAws::point_here`]).
 
 use std::sync::{Arc, Mutex};
 
@@ -79,23 +78,12 @@ impl FakeAws {
         self.requests().iter().map(operation).collect()
     }
 
-    /// The process's environment pointed at the fake: every service's
-    /// endpoint, credentials of no one, and no AWS file read. Only in a
-    /// child a test runs alone in.
+    /// The tests' host on this thread pointed at the fake: every service
+    /// a command reaches AWS for is answered here, with credentials of no
+    /// one and no AWS file read.
     pub fn point_here(&self) {
         let url = self.fake.url();
-        for service in ["CODEBUILD", "S3", "KMS", "STS"] {
-            std::env::set_var(format!("AWS_ENDPOINT_URL_{service}"), url);
-        }
-        std::env::set_var("AWS_ACCESS_KEY_ID", "AKIATEST");
-        std::env::set_var("AWS_SECRET_ACCESS_KEY", "test");
-        std::env::set_var("AWS_REGION", REGION);
-        std::env::set_var("AWS_CONFIG_FILE", "/dev/null");
-        std::env::set_var("AWS_SHARED_CREDENTIALS_FILE", "/dev/null");
-        std::env::set_var("AWS_EC2_METADATA_DISABLED", "true");
-        for v in ["AWS_PROFILE", "AWS_SESSION_TOKEN", "AWS_ENDPOINT_URL"] {
-            std::env::remove_var(v);
-        }
+        super::AWS_AT.with(|a| *a.borrow_mut() = Some(url.to_string()));
     }
 
     /// A build of `project` the fake holds, ended `status`, its variables

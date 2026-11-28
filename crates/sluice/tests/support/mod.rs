@@ -689,6 +689,9 @@ impl FakeHost {
 }
 
 thread_local! {
+    /// The address of the fake of AWS the tests' host on this thread
+    /// reaches AWS at, where a test points it there ([`aws::FakeAws::point_here`]).
+    pub(crate) static AWS_AT: RefCell<Option<String>> = const { RefCell::new(None) };
     /// A document the fakes' host process on this thread sends its
     /// subscribers in place of its own reading's, as a test sets it (the
     /// change `sluice-host-answers-every-read`, design D6).
@@ -1164,6 +1167,16 @@ impl Drop for FakeHolding<'_> {
 impl sluice::exec::Host for FakeHost {
     fn reserved(&self) -> usize {
         self.reserved
+    }
+
+    /// The fake of AWS a test on this thread pointed its host at, else
+    /// the host's settings, as sluice's own host reaches AWS.
+    fn aws(&self, settings: &sluice::instance::Aws) -> sluice::profiles::codebuild::sdk::Chain {
+        use sluice::profiles::codebuild::sdk::Chain;
+        match AWS_AT.with(|a| a.borrow().clone()) {
+            Some(url) => Chain::reaching(&url),
+            None => Chain::of(settings),
+        }
     }
 
     fn peer(&self) -> sluice_core::Peer {

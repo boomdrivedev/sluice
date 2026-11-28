@@ -32,6 +32,11 @@ use crate::{Pause, Pushers, CONFLICT, FAILED, LANDED, STOPPED};
 pub trait Host {
     /// The part of the bound session runs never use (91).
     fn reserved(&self) -> usize;
+    /// How a command reaches AWS for a CodeBuild pool (record 0119): as
+    /// the host's `[aws]` settings, `settings`, name it.
+    fn aws(&self, settings: &crate::instance::Aws) -> crate::profiles::codebuild::sdk::Chain {
+        crate::profiles::codebuild::sdk::Chain::of(settings)
+    }
 
     /// 135 (design D2, D14): sluice's host process, as this command asks
     /// it: through its socket, or, in the host process's own tasks and the

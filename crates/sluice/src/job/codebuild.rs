@@ -35,11 +35,11 @@ pub const RUN: &str = "run";
 /// Most a hand-over may hold, unpacked.
 const MOST: u64 = 512 * 1024 * 1024;
 
-/// The calls in `region`, made as the AWS SDK's chain finds credentials: in
-/// a build, its role.
-fn reach(region: &str) -> Rc<dyn Aws> {
+/// The calls in `region`, made as `chain` finds credentials: in a build,
+/// the AWS SDK's chain, its role.
+fn reach(chain: &Chain, region: &str) -> Rc<dyn Aws> {
     Rc::new(Sdk::new(
-        Chain::default(),
+        chain.clone(),
         region,
         Rc::new(crate::retry::Policy::command().recording_where_set()),
     ))
@@ -181,9 +181,10 @@ pub(super) fn sign(
     arn: &str,
     dir: &Path,
     clock: &dyn Clock,
+    chain: &Chain,
     out: &mut dyn Write,
 ) -> Result<i32> {
-    let aws = reach(&region_of(arn)?);
+    let aws = reach(chain, &region_of(arn)?);
     let (build, claim, branch) = run_build(aws.as_ref(), arn)?;
     let target = claimed(s, &branch, &claim)?;
     let policy = s
@@ -244,7 +245,8 @@ pub(super) fn sign(
         return Ok(0);
     }
     let statement = statement_of(&branch, &target, &report, results, clock);
-    let envelope = crate::signing::kms::sign(reach(&region_of(&key)?).as_ref(), &key, &statement)?;
+    let envelope =
+        crate::signing::kms::sign(reach(chain, &region_of(&key)?).as_ref(), &key, &statement)?;
     // What KMS signed verifies by the half the policy lists, as every
     // reader will verify it, before it is handed on.
     crate::signing::kms::verify(&envelope, &key, &crate::signing::kms::public_half(&public)?)
@@ -265,8 +267,14 @@ pub(super) fn sign(
 /// and the run written ended and closed under its claim in one write, as
 /// `--claim` writes it; refused with nothing written where the claim no
 /// longer holds the run.
-pub(super) fn record(s: &Sluice<'_>, arn: &str, from: &Path, out: &mut dyn Write) -> Result<i32> {
-    let aws = reach(&region_of(arn)?);
+pub(super) fn record(
+    s: &Sluice<'_>,
+    arn: &str,
+    from: &Path,
+    chain: &Chain,
+    out: &mut dyn Write,
+) -> Result<i32> {
+    let aws = reach(chain, &region_of(arn)?);
     let (_, claim, branch) = run_build(aws.as_ref(), arn)?;
     let signed = from.join(RECORD);
     let signed = signed.exists().then_some(signed);

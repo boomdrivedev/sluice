@@ -2194,7 +2194,7 @@ fn dispatch(
             &systems,
             &stack,
             region.as_deref(),
-            profile.as_deref(),
+            host.aws(&instance::Aws { profile }),
             out,
         ),
         Command::Step { branch, json } => {
@@ -2807,7 +2807,7 @@ fn dispatch(
                 Some(p) => instance::Aws { profile: Some(p) },
                 None => instance::Instance::read()?.aws,
             };
-            pool::check(&s, &branch, &aws, out)
+            pool::check(&s, &branch, &host.aws(&aws), out)
         }
         Command::Forge {
             command: ForgeCommand::Check { branch, json },

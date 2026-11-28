@@ -43,6 +43,10 @@ pub fn https() -> SharedHttpClient {
 pub struct Chain {
     pub aws: instance::Aws,
     pub files: Option<aws_runtime::env_config::file::EnvConfigFiles>,
+    /// For a test, the one address every service is reached at, as a fake
+    /// of AWS answers there, with credentials of no one and nothing of the
+    /// host's AWS files or environment read.
+    pub endpoint: Option<String>,
     /// For a test, the client and credentials every call is made with,
     /// reading nothing of the host's.
     #[cfg(test)]
@@ -57,6 +61,15 @@ impl Chain {
     pub fn of(aws: &instance::Aws) -> Chain {
         Chain {
             aws: aws.clone(),
+            ..Chain::default()
+        }
+    }
+
+    /// For a test: every service reached at `url`, as [`Chain::endpoint`]
+    /// says.
+    pub fn reaching(url: &str) -> Chain {
+        Chain {
+            endpoint: Some(url.into()),
             ..Chain::default()
         }
     }
@@ -83,6 +96,19 @@ impl Chain {
             .timeout_config(timeouts.clone());
         if let Some(files) = &self.files {
             loader = loader.profile_files(files.clone());
+        }
+        if let Some(url) = &self.endpoint {
+            use aws_runtime::env_config::file::{EnvConfigFileKind, EnvConfigFiles};
+            let none = EnvConfigFiles::builder()
+                .with_file(EnvConfigFileKind::Config, "/dev/null")
+                .with_file(EnvConfigFileKind::Credentials, "/dev/null")
+                .build();
+            return loader
+                .profile_files(none)
+                .endpoint_url(url)
+                .credentials_provider(aws_sdk_codebuild::config::Credentials::new(
+                    "AKIATEST", "test", None, None, "a test",
+                ));
         }
         #[cfg(test)]
         if let Some((http, credentials)) = &self.given {
