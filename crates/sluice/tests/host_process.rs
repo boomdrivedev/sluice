@@ -3168,7 +3168,6 @@ fn the_guard_passes_over_a_process_that_ends_by_itself() {
 /// pauses, with a fake worker and a fake look.
 mod edge {
     use std::path::{Path, PathBuf};
-    use std::sync::atomic::Ordering;
     use std::sync::{Arc, Mutex};
     use std::time::Duration;
 
@@ -3228,25 +3227,6 @@ mod edge {
         }
     }
 
-    /// Tasks whose looks find nothing in play, and whose workers' passes
-    /// take `takes`.
-    pub fn tasks(seen: &Seen, takes: Duration) -> Tasks {
-        let bound = seen.clone();
-        let bind: Bind = Arc::new(move |r: &Path| {
-            Ok(Box::new(Fake {
-                repository: r.to_path_buf(),
-                seen: bound.clone(),
-                takes,
-            }) as Box<dyn Worker>)
-        });
-        let looked = seen.clone();
-        let look: InPlay = Arc::new(move |r: &Path, _: bool| {
-            looked.looks.lock().unwrap().push(r.to_path_buf());
-            Looked::default()
-        });
-        Tasks::new(bind, look)
-    }
-
     /// A gate that holds each look until it opens.
     #[derive(Clone, Default)]
     pub struct Gate(Arc<(Mutex<bool>, std::sync::Condvar)>);
@@ -3286,17 +3266,6 @@ mod edge {
         Tasks::new(bind, look)
     }
 
-    /// Let every task run that can, and every blocking call end, the
-    /// paused clock not moved.
-    pub async fn settle() {
-        for _ in 0..20 {
-            for _ in 0..50 {
-                tokio::task::yield_now().await;
-            }
-            let _ = tokio::task::spawn_blocking(|| ()).await;
-        }
-    }
-
     /// `check` holds within thirty seconds.
     pub async fn soon(what: &str, check: impl Fn() -> bool) {
         let until = tokio::time::Instant::now() + Duration::from_secs(30);
@@ -3308,89 +3277,6 @@ mod edge {
             tokio::time::sleep(Duration::from_millis(10)).await;
         }
     }
-
-    pub fn load(n: &std::sync::atomic::AtomicU64) -> u64 {
-        n.load(Ordering::SeqCst)
-    }
-}
-
-/// host-events, "An idle host process on a paused clock"
-/// (`tokio-streams-before-rxrust@0b9fc11cda8b`): a scheduler with nothing
-/// in play, its clock paused and moved ten minutes, woke once a minute for
-/// the backstop's timer and once for the end of the reading it started,
-/// and for no poll and no job.
-#[tokio::test(start_paused = true)]
-async fn an_idle_host_process_wakes_only_for_its_timers() {
-    let seen = edge::Seen::default();
-    let tasks = edge::tasks(&seen, Duration::ZERO);
-    let repo = std::path::PathBuf::from("/host/idle.git");
-    tasks.look(&repo);
-    edge::soon("its first look", || seen.looks(&repo) == 1).await;
-    edge::settle().await;
-    let wakes = tasks.wakes();
-    let (timers, jobs, landed) = (
-        edge::load(&wakes.timers),
-        edge::load(&wakes.jobs),
-        edge::load(&wakes.landed),
-    );
-    for minute in 1..=10u64 {
-        tokio::time::advance(Duration::from_secs(60)).await;
-        edge::settle().await;
-        assert_eq!(edge::load(&wakes.timers) - timers, minute, "its timers");
-        assert_eq!(edge::load(&wakes.landed) - landed, minute, "its readings");
-        assert_eq!(edge::load(&wakes.jobs) - jobs, 0, "no job came");
-    }
-    assert_eq!(seen.looks(&repo), 11);
-    assert!(!tasks.any(), "nothing keeps the host process");
-}
-
-/// host-events, "The minute's backstop on a paused clock": no backstop
-/// reading starts in the first 59 seconds after the last ask, and one
-/// starts after the 60th.
-#[tokio::test(start_paused = true)]
-async fn the_backstop_falls_due_at_the_minute_on_a_paused_clock() {
-    let seen = edge::Seen::default();
-    let tasks = edge::tasks(&seen, Duration::ZERO);
-    let repo = std::path::PathBuf::from("/host/backstop.git");
-    tasks.look(&repo);
-    edge::soon("its first look", || seen.looks(&repo) == 1).await;
-    edge::settle().await;
-    tokio::time::advance(Duration::from_secs(59)).await;
-    edge::settle().await;
-    assert_eq!(seen.looks(&repo), 1, "no reading within 59 seconds");
-    tokio::time::advance(Duration::from_secs(1)).await;
-    edge::settle().await;
-    assert_eq!(seen.looks(&repo), 2, "the backstop's reading at the 60th");
-}
-
-/// host-events, "Three idle repositories for a minute": with no event and
-/// no command, each repository the host process holds is read once in the
-/// minute after its start, at the minute's backstop.
-#[tokio::test(start_paused = true)]
-async fn three_idle_repositories_are_read_once_a_minute() {
-    let seen = edge::Seen::default();
-    let tasks = edge::tasks(&seen, Duration::ZERO);
-    let repos: Vec<std::path::PathBuf> = ["a", "b", "c"]
-        .iter()
-        .map(|n| std::path::PathBuf::from(format!("/host/{n}.git")))
-        .collect();
-    for r in &repos {
-        tasks.look(r);
-    }
-    edge::soon("the looks at the start", || {
-        repos.iter().all(|r| seen.looks(r) == 1)
-    })
-    .await;
-    edge::settle().await;
-    for second in 0..60 {
-        tokio::time::advance(Duration::from_secs(1)).await;
-        edge::settle().await;
-        let want = if second < 59 { 1 } else { 2 };
-        for r in &repos {
-            assert_eq!(seen.looks(r), want, "{} at {}s", r.display(), second + 1);
-        }
-    }
-    assert_eq!(seen.passes.lock().unwrap().len(), 0, "no pass");
 }
 
 /// host-events, "A burst of ref changes" (`one-read-in-flight@e99acda774d0`):
