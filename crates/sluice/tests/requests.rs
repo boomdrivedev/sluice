@@ -30,7 +30,7 @@ use sluice::retry::{clock, Limited};
 use sluice::{run, Cli, Pause};
 use sluice_core::policy::POLICY_PATH;
 use sluice_fakes::{Fakes, World};
-use sluice_seams::{Delivery, Driver, Notification, Rev, Session, Submitter};
+use sluice_seams::{Changes, Delivery, Driver, Notification, Rev, Session, Submitter};
 use support::Scratch;
 
 /// The repository on GitHub every test's `main` is on.
@@ -3136,6 +3136,89 @@ fn a_round_lands_through_the_pause_and_says_it_once() {
     assert_eq!(out.matches(&said).count(), 1, "{out}");
     let main = g.f.world.tip("main");
     assert!(g.f.world.is_ancestor(&head, &main), "{out}");
+}
+
+impl OnGitHub {
+    /// main's record file `path` rewritten by `edit`, under the branch's
+    /// lock, as an older sluice might have left it.
+    fn rewrite(&self, path: &str, edit: impl FnOnce(Value) -> Value) {
+        let state = self.f.seams().state;
+        let _lock = state.lock("main").unwrap().unwrap();
+        let read = state.read("main").unwrap();
+        let doc: Value = serde_json::from_slice(&read.files[path]).unwrap();
+        let mut put = BTreeMap::new();
+        put.insert(path.to_string(), serde_json::to_vec(&edit(doc)).unwrap());
+        let changes = Changes {
+            put,
+            ..Changes::default()
+        };
+        state.write("main", read.version, changes).unwrap();
+    }
+
+    /// This host keeps main and took pull request `<name>` in; main's
+    /// records are then rewritten as an older sluice left them when its
+    /// hand-over to `b` withdrew that submission: its record withdrawn in
+    /// the hand-over's words, naming `b`, and its combination gone. The
+    /// request's number and head, and the submission's id.
+    fn handed_over_before(&self, name: &str) -> (u64, Rev, u64) {
+        let (n, head) = self.by_hand(name, &[("slow", Some("o\n"))], false);
+        self.f.world.hold_runs(true);
+        self.step();
+        let id = self.of(n)[0]["id"].as_u64().expect("taken in");
+        self.rewrite(&format!("submissions/{id}.json"), |mut sub| {
+            sub["state"] = "withdrawn".into();
+            sub["withdrawn"] = serde_json::json!({
+                "by": "b takes main's pull requests in",
+                "at": "2026-11-06T12:00:00Z",
+                "handed_over_to": "b",
+            });
+            sub
+        });
+        self.rewrite("branch.json", |mut doc| {
+            doc["candidates"] = serde_json::json!([]);
+            doc
+        });
+        (n, head, id)
+    }
+}
+
+/// request-intake-host, "An older hand-over" (120; record 0088 as amended;
+/// design D24): main's records hold a submission an older sluice withdrew
+/// in a hand-over to host B; the host that keeps main reads it as holding
+/// no request and takes the pull request in again at its head, with no
+/// draft made.
+#[test]
+fn an_older_hand_over_carried_onto_the_remote_is_taken_in_again() {
+    let g = OnGitHub::new("");
+    let (n, head, id) = g.handed_over_before("unit/older");
+    let said = g.round();
+    let subs = g.of(n);
+    assert_eq!(subs.len(), 2, "{said:?}{subs:?}");
+    assert_eq!(subs[0]["id"], id, "{subs:?}");
+    assert_eq!(subs[1]["head"], head.0.as_str(), "{subs:?}");
+    assert_ne!(subs[1]["state"], "withdrawn", "{subs:?}");
+    assert!(!g.pull_from("unit/older").draft, "no draft made");
+}
+
+/// request-intake-host, "A wait on an older hand-over" (120; core.48;
+/// record 0100; design D24): `sluice wait <id>` on a submission an older
+/// sluice withdrew in a hand-over follows its pull request rather than
+/// ending withdrawn.
+#[test]
+fn a_wait_on_an_older_hand_over_follows_its_pull_request() {
+    let g = OnGitHub::new("");
+    let (n, _, id) = g.handed_over_before("unit/followed");
+    // The host that keeps main takes the request in again at its head.
+    g.round();
+    let (code, out) = g.sluice(&["wait", &id.to_string(), "--timeout", "2s", "--json"]);
+    assert_ne!(code, sluice::WITHDRAWN, "{out}");
+    let doc: Value = serde_json::from_str(&out).unwrap_or_else(|e| panic!("{e}: {out}"));
+    // The request taken in again at its head carries its work.
+    let carrier = doc["carried_by"]["id"]
+        .as_u64()
+        .unwrap_or_else(|| panic!("{doc}"));
+    assert!(carrier > id, "{doc}");
+    assert_eq!(g.of(n).last().unwrap()["id"], carrier, "{doc}");
 }
 
 /// request-intake-host, "Read at its pace": a wait on host A follows its
