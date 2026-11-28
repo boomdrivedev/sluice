@@ -218,10 +218,16 @@ impl PlaceRuns for FakeRuns {
     fn release_keeping(&self, name: &str) -> Result<()> {
         self.noted(format!("release_keeping {name}"))
     }
+    /// Ending the runs with no release fails never, since it runs nothing;
+    /// a release fails as the fake says.
     fn remove_all_with(&self, place: &str, with: ReleaseWith) -> Result<()> {
         let with = match with {
             ReleaseWith::LastRun => "last-run".to_string(),
-            ReleaseWith::Fresh(None) => "none".to_string(),
+            ReleaseWith::Fresh(None) => {
+                let call = format!("remove_all_with {place} none");
+                self.calls.borrow_mut().push(call);
+                return Ok(());
+            }
             ReleaseWith::Fresh(Some(r)) => r.release.unwrap_or(r.argv).join(" "),
         };
         self.noted(format!("remove_all_with {place} {with}"))
@@ -715,6 +721,50 @@ fn a_sessions_place_is_released_under_the_policy_read_now() {
         p.release_session(&place.name, None).unwrap(),
         Released::Nothing
     );
+    assert!(session.is_dir());
+}
+
+/// Session-runs-1 clause 95, rule core.10, record 0120: a worktree sluice
+/// holds nothing for is released under the policy's release command, by a
+/// place made for the release alone and let go once it ends, passed or
+/// failed, so nothing is kept for the worktree.
+#[test]
+fn an_unheld_worktrees_release_runs_its_command_and_keeps_nothing() {
+    use sluice_seams::{Limits, ReleasePolicy, Released};
+    let repo = Repo::new("checkouts-release-unheld");
+    let p = repo.places().with_release(
+        Box::new(sluice::profiles::checks::names_release),
+        Box::new(|place, tests, limits, dir| {
+            sluice::profiles::checks::release_request(place, tests, limits, 2, &[], dir)
+        }),
+    );
+    let session = repo.session("a");
+    let name = format!(
+        "{}{}",
+        sluice::runs::SESSION,
+        std::fs::canonicalize(&session).unwrap().display()
+    );
+    let policy = ReleasePolicy {
+        branch: "main".into(),
+        tests: Settings::from([("release".into(), Setting::Text("scripts/release".into()))]),
+        limits: Limits::default(),
+    };
+
+    assert_eq!(
+        p.release_session(&name, Some(&policy)).unwrap(),
+        Released::Policy
+    );
+    assert!(called(
+        &repo,
+        &format!("remove_all_with {name} /bin/sh -c scripts/release")
+    ));
+    assert!(p.session_places().unwrap().is_empty());
+
+    *repo.runs.failing.borrow_mut() = Some("emulator still answers".into());
+    let e = p.release_session(&name, Some(&policy)).unwrap_err();
+    assert!(format!("{e:#}").contains("emulator still answers"), "{e:#}");
+    assert!(called(&repo, &format!("discard_all {name}")));
+    assert!(p.session_places().unwrap().is_empty());
     assert!(session.is_dir());
 }
 

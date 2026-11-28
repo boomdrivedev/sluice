@@ -5022,6 +5022,60 @@ fn release_falls_back_to_the_last_runs_command_and_says_so() {
     );
 }
 
+/// Record 0120: a release of a worktree sluice holds nothing for that
+/// fails exits 1 with its words and says that sluice holds nothing for
+/// it, so `sluice release` runs its release command again.
+#[test]
+fn an_unheld_release_that_fails_says_so_and_holds_nothing() {
+    let f = setup_releasing();
+    work(
+        &f,
+        "unit/a",
+        "agent-a",
+        &[("plugin/lib/plan.py", Some("p2"))],
+    );
+    f.world.release_fails(Some("emulator still answers"));
+    let (code, out) = release(&f, &["--worktree", "unit/a"]);
+    assert_eq!(code, 1, "{out}");
+    assert!(out.starts_with("could not release unit/a: "), "{out}");
+    assert!(out.contains("emulator still answers"), "{out}");
+    assert!(
+        out.ends_with(
+            "sluice holds nothing for it: `sluice release` runs its release command again\n"
+        ),
+        "{out}"
+    );
+    assert!(f.world.adopted_places().is_empty());
+}
+
+/// Record 0120, 56: a release of a worktree sluice holds nothing for,
+/// where the default branch's policy cannot be read, exits 1 naming the
+/// branch, and runs nothing.
+#[test]
+fn an_unheld_release_under_a_policy_that_cannot_be_read_runs_nothing() {
+    let f = setup_releasing();
+    work(
+        &f,
+        "unit/a",
+        "agent-a",
+        &[("plugin/lib/plan.py", Some("p2"))],
+    );
+    f.world.hand_commit(
+        BRANCH,
+        &[(
+            ".config/sluice.toml",
+            Some(&format!(
+                "[tests]\nnot_a_key = true\nrelease = \"sh release.sh\"\n\n{POLICY}"
+            )),
+        )],
+    );
+    let (code, out) = release(&f, &["--worktree", "unit/a"]);
+    assert_eq!(code, 1, "{out}");
+    assert!(out.contains(&format!("{BRANCH} cannot be read (")), "{out}");
+    assert!(out.contains("so its release command is not known"), "{out}");
+    assert!(f.world.session_releases().is_empty());
+}
+
 /// `sluice release --json`: the worktree, and that it was released; what
 /// it says beside goes to stderr.
 #[test]
