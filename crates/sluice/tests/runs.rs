@@ -11,7 +11,7 @@ use std::time::{Duration, Instant};
 use nix::errno::Errno;
 use nix::sys::signal::{kill, killpg, Signal};
 use nix::unistd::Pid;
-use sluice::runs::{Request, RunState, Runs};
+use sluice::runs::{ReleaseWith, Request, RunState, Runs};
 use support::Scratch;
 
 fn runs(dir: &Path) -> Runs {
@@ -404,6 +404,51 @@ fn a_sessions_runs_are_released_once_and_only_together() {
     );
     let ran = std::fs::read_to_string(place.path().join("ran")).unwrap();
     assert_eq!(ran, "one\ntwo\n");
+}
+
+/// Session-runs-1 clause 95: a session's place released with a release
+/// command built now ends every run of it and runs that command once, in
+/// its place, not the one its last run carried; given none, it runs no
+/// command, and its runs go all the same.
+#[test]
+fn a_sessions_runs_are_released_by_a_command_built_now() {
+    let place = Scratch::new("runs-session-fresh");
+    let runs = runs(place.path());
+    let name = "session//work/agent-fresh";
+    let mut req = request(place.path(), "true", None);
+    req.release = Some(vec![
+        "/bin/sh".into(),
+        "-c".into(),
+        "echo old >> log".into(),
+    ]);
+    let first = runs.next_run(name).unwrap();
+    runs.start(&first, &req).unwrap();
+    assert!(matches!(wait(&runs, &first), RunState::Finished(_)));
+    let mut fresh = request(place.path(), "true", None);
+    fresh.release = Some(vec![
+        "/bin/sh".into(),
+        "-c".into(),
+        "echo new >> log".into(),
+    ]);
+    runs.remove_all_with(name, ReleaseWith::Fresh(Some(fresh)))
+        .unwrap();
+    assert_eq!(
+        std::fs::read_to_string(place.path().join("log")).unwrap(),
+        "new\n"
+    );
+    assert!(!runs.dir(&first).exists());
+
+    let second = runs.next_run(name).unwrap();
+    runs.start(&second, &req).unwrap();
+    assert!(matches!(wait(&runs, &second), RunState::Finished(_)));
+    runs.remove_all_with(name, ReleaseWith::Fresh(None))
+        .unwrap();
+    assert_eq!(
+        std::fs::read_to_string(place.path().join("log")).unwrap(),
+        "new\n",
+        "a release ran"
+    );
+    assert!(!runs.dir(&second).exists());
 }
 
 /// `request` with the watch `script` run beside it.

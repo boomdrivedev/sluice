@@ -3612,4 +3612,53 @@ mod tests {
             .into()
         );
     }
+
+    /// Session-runs-1 clause 95: a session's place's release, built now
+    /// from the policy's `[tests]`, runs in the place with the environment
+    /// its runs had, its ports and short name among it, under the open
+    /// executor as the command is written; a policy that names none builds
+    /// nothing.
+    #[test]
+    fn a_release_is_built_in_its_place_with_its_environment() {
+        let dir = std::env::temp_dir().join(format!("sluice-release-built-{}", std::process::id()));
+        let place = Place {
+            name: "session//w".into(),
+            path: dir.join("w"),
+            tmp: dir.join("tmp"),
+            env: BTreeMap::from([
+                ("SLUICE_PORT_WEB".to_string(), "20001".to_string()),
+                ("SLUICE_PLACE".to_string(), "sluice-0123456789".to_string()),
+            ]),
+        };
+        let tests = Settings::from([("release".into(), Setting::Text("scripts/down".into()))]);
+        let built = release_request(&place, &tests, &Limits::default(), 2, &[], &dir.join("r"))
+            .unwrap()
+            .expect("the policy names a release");
+        assert_eq!(built.cwd, place.path);
+        assert_eq!(
+            built.release.as_deref(),
+            Some(&["/bin/sh".to_string(), "-c".into(), "scripts/down".into()][..])
+        );
+        for (k, v) in [
+            ("SLUICE_PORT_WEB", "20001"),
+            ("SLUICE_PLACE", "sluice-0123456789"),
+            ("SLUICE_JOBS", "2"),
+        ] {
+            assert_eq!(built.env.get(k).map(String::as_str), Some(v), "{k}");
+        }
+        assert_eq!(
+            built.env["SLUICE_CHECKOUT"],
+            place.path.to_string_lossy().as_ref()
+        );
+        let none = release_request(
+            &place,
+            &Settings::new(),
+            &Limits::default(),
+            2,
+            &[],
+            &dir.join("r"),
+        );
+        assert!(none.unwrap().is_none());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 }
