@@ -98,10 +98,10 @@ impl Chain {
             loader = loader.profile_files(files.clone());
         }
         if let Some(url) = &self.endpoint {
-            use aws_runtime::env_config::file::EnvConfigFiles;
+            use aws_runtime::env_config::file::{EnvConfigFileKind, EnvConfigFiles};
             let none = EnvConfigFiles::builder()
-                .include_default_config_file(false)
-                .include_default_credentials_file(false)
+                .with_file(EnvConfigFileKind::Config, "/dev/null")
+                .with_file(EnvConfigFileKind::Credentials, "/dev/null")
                 .build();
             return loader
                 .profile_files(none)
