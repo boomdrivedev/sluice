@@ -236,13 +236,14 @@ zip = { version = "=9.2.1", default-features = false, features = [
 # kern.maxfilesperproc), through a maintained crate (135; record 0126).
 rlimit = "0.11"
 
-# A worker's record, written by the child between its fork and its exec,
-# and a process's start time and parent, read from the system (the change
-# `sluice-host-owns-its-workers`).
+# A worker's record, written by the child between its fork and its exec
+# (the change `sluice-host-owns-its-workers`).
 libc = "0.2"
 
-# The tests' guard lists the processes of a test by their working folder
-# and their environment (the change `sluice-host-owns-its-workers`,
+# A process's start time, parent and arguments, read from the system
+# through a maintained crate, never by hand-written calls. The tests'
+# guard lists the processes of a test by their working folder and their
+# environment through it too (the change `sluice-host-owns-its-workers`,
 # design D6).
 sysinfo = { version = "0.37", default-features = false, features = ["system"] }
 

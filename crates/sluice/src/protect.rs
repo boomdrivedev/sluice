@@ -306,104 +306,14 @@ pub fn unread(why: &anyhow::Error) -> String {
 }
 
 /// The command that ran git: the hook is sluice's parent's child, and git
-/// the shim's parent. Read from the kernel, never by running `ps`, which
-/// a sandbox refuses to start (it is setuid on macOS).
+/// the shim's parent. Read from the kernel through sysinfo, never by
+/// running `ps`, which a sandbox refuses to start (it is setuid on macOS).
 pub fn caller() -> String {
     let shim = nix::unistd::getppid().as_raw();
-    parent_of(shim)
-        .and_then(command_of)
-        .unwrap_or_else(|| "unknown".into())
-}
-
-#[cfg(target_os = "macos")]
-fn parent_of(pid: i32) -> Option<i32> {
-    use nix::libc;
-    let mut info: libc::proc_bsdinfo = unsafe { std::mem::zeroed() };
-    let size = std::mem::size_of::<libc::proc_bsdinfo>() as i32;
-    // SAFETY: `info` is a `proc_bsdinfo` of `size` bytes, as the call asks.
-    let n = unsafe {
-        libc::proc_pidinfo(
-            pid,
-            libc::PROC_PIDTBSDINFO,
-            0,
-            (&mut info as *mut libc::proc_bsdinfo).cast(),
-            size,
-        )
-    };
-    (n == size).then_some(info.pbi_ppid as i32)
-}
-
-/// The process's arguments, from `KERN_PROCARGS2`: its argument count,
-/// the executable's path, padding, then each argument.
-#[cfg(target_os = "macos")]
-fn command_of(pid: i32) -> Option<String> {
-    use nix::libc;
-    let mut mib = [libc::CTL_KERN, libc::KERN_PROCARGS2, pid];
-    let mut size: usize = 0;
-    // SAFETY: a null buffer asks only for the size.
-    let rc = unsafe {
-        libc::sysctl(
-            mib.as_mut_ptr(),
-            mib.len() as u32,
-            std::ptr::null_mut(),
-            &mut size,
-            std::ptr::null_mut(),
-            0,
-        )
-    };
-    if rc != 0 || size < 4 {
-        return None;
-    }
-    let mut buf = vec![0u8; size];
-    // SAFETY: `buf` holds `size` bytes, as the call asks.
-    let rc = unsafe {
-        libc::sysctl(
-            mib.as_mut_ptr(),
-            mib.len() as u32,
-            buf.as_mut_ptr().cast(),
-            &mut size,
-            std::ptr::null_mut(),
-            0,
-        )
-    };
-    if rc != 0 || size < 4 {
-        return None;
-    }
-    buf.truncate(size);
-    let argc = i32::from_ne_bytes(buf[..4].try_into().ok()?) as usize;
-    let rest = &buf[4..];
-    let path_end = rest.iter().position(|b| *b == 0)?;
-    let args: Vec<String> = rest[path_end..]
-        .split(|b| *b == 0)
-        .filter(|a| !a.is_empty())
-        .take(argc)
-        .map(|a| String::from_utf8_lossy(a).into_owned())
-        .collect();
-    (!args.is_empty()).then(|| args.join(" "))
-}
-
-#[cfg(not(target_os = "macos"))]
-fn parent_of(pid: i32) -> Option<i32> {
-    let stat = std::fs::read_to_string(format!("/proc/{pid}/stat")).ok()?;
-    // The command is in parentheses and may hold spaces: the parent's id is
-    // the second field after the last `)`.
-    stat.rsplit_once(')')?
-        .1
-        .split_whitespace()
-        .nth(1)?
-        .parse()
-        .ok()
-}
-
-#[cfg(not(target_os = "macos"))]
-fn command_of(pid: i32) -> Option<String> {
-    let args = std::fs::read(format!("/proc/{pid}/cmdline")).ok()?;
-    let args: Vec<String> = args
-        .split(|b| *b == 0)
-        .filter(|a| !a.is_empty())
-        .map(|a| String::from_utf8_lossy(a).into_owned())
-        .collect();
-    (!args.is_empty()).then(|| args.join(" "))
+    crate::workers::parent(shim)
+        .and_then(crate::workers::arguments)
+        .filter(|args| !args.is_empty())
+        .map_or_else(|| "unknown".into(), |args| args.join(" "))
 }
 
 /// Whether deleting `branch`, at `cur`, leaves it at `cur`: git's

@@ -399,6 +399,9 @@ pub(crate) struct Hosting {
     pub tasks: tasks::Tasks,
     /// Connections accepted and not yet closed.
     pub connections: AtomicUsize,
+    /// Connections accepted whose one request is not answered yet, which
+    /// a start afresh answers before it replaces the image.
+    pub unanswered: Arc<Unanswered>,
     /// A connection closed: the host process looks at whether it is idle.
     pub nudge: Notify,
     /// The host process ends: every connection ends.
@@ -433,6 +436,42 @@ pub(crate) struct Hosting {
     /// protection's hook is put back in (the change
     /// `the-git-hook-asks-sluice-host`, design D4).
     pub hooks: protection::Hooks,
+}
+
+/// The connections whose one request is not answered yet: each from its
+/// accept until its answer is sent, or until it becomes a subscription or
+/// a session's command, which go on past a start afresh. A start afresh
+/// waits until none is left, so a command whose request the image took in
+/// is answered and not cut off by the new image (host-daemon, "A command
+/// during a daemon's start afresh reaches the daemon").
+pub(crate) struct Unanswered(tokio::sync::watch::Sender<usize>);
+
+impl Unanswered {
+    pub fn new() -> Self {
+        Unanswered(tokio::sync::watch::Sender::new(0))
+    }
+
+    /// One more connection, counted until the guard drops.
+    fn hold(self: &Arc<Self>) -> Asking {
+        self.0.send_modify(|n| *n += 1);
+        Asking(self.clone())
+    }
+
+    /// Once no connection waits for its answer.
+    async fn answered(&self) {
+        let mut seen = self.0.subscribe();
+        // The sender is `self`, so the wait ends only on a count of 0.
+        let _ = seen.wait_for(|n| *n == 0).await;
+    }
+}
+
+/// A connection counted in [`Unanswered`] until it drops.
+struct Asking(Arc<Unanswered>);
+
+impl Drop for Asking {
+    fn drop(&mut self) {
+        self.0 .0.send_modify(|n| *n -= 1);
+    }
 }
 
 impl Hosting {
@@ -1088,6 +1127,7 @@ fn run_holding(runtime: &tokio::runtime::Runtime, holder: Holder) -> Result<i32>
             named,
             room,
             connections: AtomicUsize::new(0),
+            unanswered: Arc::new(Unanswered::new()),
             nudge: Notify::new(),
             stop: CancellationToken::new(),
             control,
@@ -1427,8 +1467,9 @@ fn flush(telemetry: Option<&crate::telemetry::Telemetry>) {
 /// environment it started with. It keeps its pid, so its workers stay its
 /// children, and whatever keeps it running keeps the image started afresh
 /// (`sluices-runs-end-with-its-host-process@e814b716f3b1`). Every scheduler
-/// finishes its reading and lets its worker go, and its telemetry sends
-/// what it holds. Then, under the start lock, it replaces its image, the
+/// finishes its reading and lets its worker go, and each request it took
+/// in is answered, within [`tasks::FINISH_FOR`]; its telemetry sends what
+/// it holds. Then, under the start lock, it replaces its image, the
 /// start lock, its socket and the host's lock each handed to the image
 /// started afresh by its descriptor, so no other process takes the host's
 /// lock between the two images. A command that connects meanwhile waits in
@@ -1455,7 +1496,13 @@ async fn start_afresh(
     log(&format!(
         "sluice {role}: it starts afresh in its own process, keeping its pid"
     ));
-    hosting.tasks.stop_all().await;
+    // The edge accepts no connection from here. Each request it took in
+    // is answered meanwhile, from the last reading where its scheduler has
+    // stopped, so the new image cuts no command off.
+    let _ = tokio::time::timeout(tasks::FINISH_FOR, async {
+        tokio::join!(hosting.tasks.stop_all(), hosting.unanswered.answered())
+    })
+    .await;
     flush(telemetry);
     let socket = listener.as_raw_fd();
     let inherit = |fd: RawFd, flag: nix::fcntl::FdFlag| {
@@ -1966,12 +2013,14 @@ fn accept_queued(hosting: &Arc<Hosting>, listener: &UnixListener) -> usize {
     n
 }
 
-/// Answer `stream` on a task of its own, counted while it is open.
+/// Answer `stream` on a task of its own, counted while it is open, and
+/// counted unanswered from its accept, before its task runs.
 fn connect(hosting: &Arc<Hosting>, stream: UnixStream) {
     hosting.connections.fetch_add(1, Ordering::SeqCst);
+    let asking = hosting.unanswered.hold();
     let held = hosting.clone();
     hosting.connected.spawn(async move {
-        if let Err(e) = answer(&held, stream).await {
+        if let Err(e) = answer(&held, stream, asking).await {
             log(&format!("sluice host: a connection: {e:#}"));
         }
         held.connections.fetch_sub(1, Ordering::SeqCst);
@@ -2128,8 +2177,10 @@ async fn closed(lines: &mut Lines) {
     while let Some(Ok(_)) = lines.next().await {}
 }
 
-/// Answer one connection: its hello, then its one request.
-async fn answer(hosting: &Arc<Hosting>, stream: UnixStream) -> Result<()> {
+/// Answer one connection: its hello, then its one request. `asking`
+/// counts it unanswered until its answer is sent, or until it becomes a
+/// subscription or a session's command.
+async fn answer(hosting: &Arc<Hosting>, stream: UnixStream, asking: Asking) -> Result<()> {
     let (reader, mut writer) = stream.into_split();
     let mut lines = FramedRead::new(reader, LinesCodec::new_with_max_length(LINE_MAX));
     let Some(line) = next_line(&mut lines).await? else {
@@ -2168,6 +2219,7 @@ async fn answer(hosting: &Arc<Hosting>, stream: UnixStream) -> Result<()> {
     // The change `sluice-host-runs-a-sessions-checks`, design D1: a
     // session's command runs here, its output sent as it comes.
     if commands::is_command(&request) {
+        drop(asking);
         return commands::answer(hosting, request, &mut lines, &mut writer).await;
     }
     // The change `sluice-host-makes-each-change`, design D1: `sluice host`
@@ -2204,7 +2256,10 @@ async fn answer(hosting: &Arc<Hosting>, stream: UnixStream) -> Result<()> {
             let answer = reads::wait(hosting, folder, caller, wait).await;
             send(&mut writer, &answer).await
         }
-        Request::Subscribe { folders } => subscribe(hosting, folders, lines, writer).await,
+        Request::Subscribe { folders } => {
+            drop(asking);
+            subscribe(hosting, folders, lines, writer).await
+        }
         Request::Serve { repository } => {
             note(hosting, &repository);
             // D16: no reading begun before the change is current.
@@ -2470,6 +2525,33 @@ pub(crate) fn view_of(room: &Shared) -> Result<RoomView> {
 
 #[cfg(test)]
 mod tests {
+
+    /// host-daemon, "A command during a daemon's start afresh reaches the
+    /// daemon": a start afresh waits while a connection it took in has no
+    /// answer, ends its wait once the last one has its answer, and waits
+    /// for nothing where none asked.
+    #[tokio::test(flavor = "current_thread", start_paused = true)]
+    async fn a_start_afresh_waits_for_each_request_it_took_in() {
+        let unanswered = Arc::new(Unanswered::new());
+        let within = |d| tokio::time::timeout(Duration::from_secs(d), unanswered.answered());
+        within(1).await.expect("none asked");
+        let first = unanswered.hold();
+        let second = unanswered.hold();
+        assert!(within(60).await.is_err(), "two have no answer");
+        drop(first);
+        assert!(within(60).await.is_err(), "one has no answer");
+        let waiting = tokio::spawn({
+            let unanswered = unanswered.clone();
+            async move { unanswered.answered().await }
+        });
+        tokio::task::yield_now().await;
+        assert!(!waiting.is_finished(), "one has no answer");
+        drop(second);
+        tokio::time::timeout(Duration::from_secs(1), waiting)
+            .await
+            .expect("the last answer ends the wait")
+            .unwrap();
+    }
 
     /// Design D14: a host process passes only when asked as the
     /// environment it started with says, whatever the environment of the
