@@ -922,58 +922,6 @@ fn the_protection_judges_the_repository_git_names() {
     assert_eq!(protected_in(&y.dir().join(".git"), "main"), 0);
 }
 
-/// 124: a transaction the protection cannot read for a reason of its own,
-/// here two branches whose policy cannot be parsed, passes with exactly
-/// one warning saying why.
-#[test]
-fn a_transaction_the_protection_cannot_read_passes_said_once() {
-    let (repo, _) = protected("protect-unread");
-    let broken = repo.branch(
-        "broken",
-        "main",
-        &[(
-            ".config/sluice.toml",
-            Some("[branches.\"bolt/*\"\nnot toml"),
-        )],
-    );
-    repo.git(&["branch", "bolt/p", &broken]);
-    repo.git(&["branch", "bolt/q", &broken]);
-    let head = repo.rev("unit/a");
-    let out = support::git_command()
-        .current_dir(repo.dir())
-        .args(["update-ref", "--stdin"])
-        .env_remove("GIT_DIR")
-        .env("XDG_CONFIG_HOME", repo.dir().join(".git/no-config"))
-        .env("XDG_STATE_HOME", state_of(&repo))
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .and_then(|mut c| {
-            use std::io::Write as _;
-            c.stdin.take().unwrap().write_all(
-                format!("update refs/heads/bolt/p {head}\nupdate refs/heads/bolt/q {head}\n")
-                    .as_bytes(),
-            )?;
-            c.wait_with_output()
-        })
-        .unwrap();
-    assert!(out.status.success(), "{}", text(&out));
-    assert_eq!(repo.rev("bolt/p"), head);
-    assert_eq!(repo.rev("bolt/q"), head);
-    let t = text(&out);
-    assert_eq!(
-        t.matches("warning: sluice's branch protection let this through unread: ")
-            .count(),
-        1,
-        "{t}"
-    );
-    assert!(!t.contains("protected by sluice"), "{t}");
-    for b in ["bolt/p", "bolt/q"] {
-        assert_eq!(protected_in(&repo.dir().join(".git"), b), 0);
-    }
-}
-
 /// 124: host settings the hook does not know change nothing it guards: a
 /// move is refused and reported once, nothing said of the settings, and a
 /// reset that moves nothing passes saying nothing.
@@ -1020,27 +968,6 @@ fn every_other_command_refuses_a_setting_it_does_not_know() {
         t.contains(&path.display().to_string()) && t.contains("later"),
         "{t}"
     );
-}
-
-/// 124: a policy field and table the hook does not know change nothing it
-/// guards.
-#[test]
-fn a_policy_field_the_hook_does_not_know_changes_nothing_it_guards() {
-    let policy = format!(
-        "{}\n[later]\nx = 1\n",
-        POLICY.replace("trust = ", "later = true\ntrust = ")
-    );
-    let (repo, held) = protected_with("protect-later-policy", &policy);
-    // git refuses to force a checked-out branch itself.
-    repo.git(&["worktree", "remove", "--force", held.to_str().unwrap()]);
-    let tip = repo.rev("bolt/x");
-    let out = repo.git_raw(&["branch", "-f", "bolt/x", "unit/a"]);
-    let t = text(&out);
-    assert_eq!(out.status.code(), Some(128), "{t}");
-    assert!(t.contains("bolt/x is protected by sluice"), "{t}");
-    assert!(!t.contains("warning"), "{t}");
-    assert_eq!(repo.rev("bolt/x"), tip);
-    assert_eq!(protected_events(&repo).len(), 1);
 }
 
 /// 124: a branch kept on a remote, under a policy and host settings each

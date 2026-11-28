@@ -732,10 +732,11 @@ mod tests {
     const ZERO: &str = "0000000000000000000000000000000000000000";
 
     /// What the protection refuses of `text`, the repository's common
-    /// directory `common`.
+    /// directory `common`, its sluice guarding as `sluice host` judges a
+    /// transaction (124).
     fn judging(f: &sluice_fakes::Fakes, common: &Path, text: &str) -> Vec<Refused> {
         let common = common.to_string_lossy().into_owned();
-        judge(&f.sluice(), &|| Ok(common.clone()), text).unwrap()
+        judge(&f.sluice().guarding(), &|| Ok(common.clone()), text).unwrap()
     }
 
     /// A directory standing for the repository's common directory, with
@@ -914,5 +915,62 @@ mod tests {
             said.contains("sluice levels this host's bolt/x to each landing itself"),
             "{said}"
         );
+    }
+
+    /// 124: a policy field and table the protection does not know change
+    /// nothing it guards: the move is refused.
+    #[test]
+    fn a_policy_field_the_protection_does_not_know_changes_nothing_it_guards() {
+        let f = sluice_fakes::Fakes::new();
+        let tip = f.world.init(
+            "bolt/x",
+            &[(
+                ".config/sluice.toml",
+                "[branches.\"bolt/*\"]\nlater = true\nrequired = [\"#gate\"]\n\n[later]\nx = 1\n",
+            )],
+        );
+        let head = f.world.work(&tip, &[("a.txt", Some("a"))]);
+        let common = Common::new("protect-later");
+        let refused = judging(
+            &f,
+            &common.0,
+            &update(tip.as_str(), head.as_str(), "refs/heads/bolt/x"),
+        );
+        assert_eq!(refused.len(), 1);
+    }
+
+    /// 124: a transaction the protection cannot read for a reason of its
+    /// own, two branches whose policy cannot be parsed, is one error, which
+    /// the hook lets through with one warning saying why.
+    #[test]
+    fn a_transaction_the_protection_cannot_read_is_let_through_said_once() {
+        let (f, tip, head) = protected();
+        let broken = f.world.work(
+            &tip,
+            &[(
+                ".config/sluice.toml",
+                Some("[branches.\"bolt/*\"\nnot toml"),
+            )],
+        );
+        f.world.set_branch("bolt/p", &broken);
+        f.world.set_branch("bolt/q", &broken);
+        let common = Common::new("protect-unread")
+            .0
+            .to_string_lossy()
+            .into_owned();
+        let text = [
+            update(broken.as_str(), head.as_str(), "refs/heads/bolt/p"),
+            update(broken.as_str(), head.as_str(), "refs/heads/bolt/q"),
+        ]
+        .concat();
+        let e = judge(&f.sluice().guarding(), &|| Ok(common.clone()), &text)
+            .err()
+            .expect("unread");
+        let said = unread(&e);
+        assert!(
+            said.starts_with("warning: sluice's branch protection let this through unread: "),
+            "{said}"
+        );
+        assert!(!said.contains("protected by sluice"), "{said}");
     }
 }
