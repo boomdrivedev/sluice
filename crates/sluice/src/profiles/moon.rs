@@ -169,22 +169,8 @@ impl Moon {
             });
         }
         let cold = holds_cold(&tasks, &targets, &cold);
-        let jobs = cx.jobs.to_string();
-        let mut argv: Vec<&str> = vec!["moon"];
-        // ADR 0014: moon exports beside sluice; it reads no parent trace,
-        // so the run's resource attributes tie its spans to the round. It
-        // sends its spans and no metrics, since the run's environment
-        // turns them off (151 as amended 2026-11-18; rule core.66).
-        if crate::telemetry::on() {
-            argv.push("--otel");
-        }
-        argv.push("exec");
-        argv.extend(targets.iter().map(String::as_str));
-        argv.extend(["--ci", "--on-failure", "continue", "--concurrency", &jobs]);
-        // A gate that does not trust the cache gets no replay (28).
-        if !request.replay {
-            argv.push("--force");
-        }
+        let argv = exec_argv(&targets, cx.jobs, request.replay, crate::telemetry::on());
+        let argv: Vec<&str> = argv.iter().map(String::as_str).collect();
         Ok(Plan {
             argv: Some(cx.argv(&argv)),
             targets,
@@ -721,6 +707,27 @@ fn kept_out(tasks: &BTreeMap<String, Task>, required: &[String]) -> Vec<KeptOutT
             })
         })
         .collect()
+}
+
+/// moon's run of `targets` in its CI mode, carrying on past a failure, on
+/// the run's share of the cores, `jobs` (71, 83); with `--otel` where
+/// sluice sends telemetry, since moon reads no parent trace and the run's
+/// resource attributes tie its spans to the round, its metrics off by the
+/// run's environment (ADR 0014; 151 as amended 2026-11-18; rule core.66);
+/// and with `--force` where the gate may not replay (28).
+fn exec_argv(targets: &[String], jobs: usize, replay: bool, otel: bool) -> Vec<String> {
+    let mut argv = vec!["moon".to_string()];
+    if otel {
+        argv.push("--otel".into());
+    }
+    argv.push("exec".into());
+    argv.extend(targets.iter().cloned());
+    argv.extend(["--ci", "--on-failure", "continue", "--concurrency"].map(String::from));
+    argv.push(jobs.to_string());
+    if !replay {
+        argv.push("--force".into());
+    }
+    argv
 }
 
 /// 35: whether any of `targets` is a test `cold` names, by its own name
