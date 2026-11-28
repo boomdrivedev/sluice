@@ -188,38 +188,7 @@ impl PushedRefs {
         let mut line = args.to_vec();
         line.push(speaker.as_ref().map_or(&self.remote, |s| &s.url));
         line.extend(refs);
-        // Why sluice could not make a try: git not run, or no credential.
-        let mut fault = None;
-        let mut unrenewed = None;
-        let mut refused: Vec<String> = Vec::new();
-        // The password of the credentials the remote refused last, which a
-        // renewal replaces.
-        let mut refused_password = String::new();
-        // What the remote refused where git never asked for the speaker's
-        // credentials.
-        let mut unasked = None;
-        let mut last = None;
-        // Set while the last try found the fetch lock held past its limit.
-        let mut waited = None;
-        let ran = self.policy.run(kind, |t| {
-            let given = match &speaker {
-                None => None,
-                Some(s) if t.renew() => match s.identity.renew(&s.url, &refused_password) {
-                    Ok(c) => Some(c),
-                    Err(e) => {
-                        unrenewed = Some(e);
-                        return Err(Failed::new(Judged::Answered, ()));
-                    }
-                },
-                Some(s) => match s.identity.credentials(&s.url) {
-                    Ok(c) => Some(c),
-                    Err(e) => {
-                        let e = e.context(format!("{} on {}", s.identity.name(), self.remote));
-                        fault = Some(e);
-                        return Err(Failed::new(Judged::Answered, ()));
-                    }
-                },
-            };
+        let mut attempt = |line: &[&str], given: Option<&Credentials>| -> Result<Attempt> {
             // One fetch at a time in this repository, held for the try
             // alone, never over a pause between tries, and named to its
             // git, so a sluice its git runs waits on no lock its ancestor
@@ -227,110 +196,26 @@ impl PushedRefs {
             // take: one held past it is a try the remote never judged
             // (record 0109).
             let fetching = match fetch {
-                true => match self.fetching() {
-                    Ok(Ok(held)) => Some(held),
-                    Ok(Err(held)) => {
-                        waited = Some(held);
-                        return Err(Failed::new(Judged::Never, ()));
-                    }
-                    Err(e) => {
-                        fault = Some(e);
-                        return Err(Failed::new(Judged::Answered, ()));
-                    }
+                true => match self.fetching()? {
+                    Ok(held) => Some(held),
+                    Err(held) => return Ok(Attempt::Held(held)),
                 },
                 false => None,
             };
-            waited = None;
             let held = fetching.as_ref().map(|(_, path)| path.as_path());
-            let ran = self.git_as(speaker.as_ref(), given.as_ref(), &line, held);
+            let tried = self.git_as(speaker.as_ref(), given, line, held);
             drop(fetching);
-            let (out, asked) = match ran {
-                // A try git did not end within its limit: whether the remote
-                // judged it is not known, so a read is tried again and a
-                // push is settled by reading what the remote holds (122).
-                Ok(Tried {
-                    out, stopped: true, ..
-                }) => {
-                    let verb = args.first().copied().unwrap_or("call");
-                    last = Some(told(
-                        out,
-                        &weir_bounded::stopped(
-                            &format!("git {verb}"),
-                            &self.remote,
-                            self.policy.try_for(),
-                        ),
-                    ));
-                    return Err(Failed::new(Judged::Unknown, ()));
-                }
-                Ok(Tried { out, .. }) if out.status.success() => return Ok(out),
-                Ok(Tried { out, asked, .. }) => (out, asked),
-                Err(e) => {
-                    fault = Some(e);
-                    return Err(Failed::new(Judged::Answered, ()));
-                }
-            };
-            let mut judged = judged(&out, kind, speaker.is_some());
-            match (judged, &speaker, given) {
-                (Judged::Credential, Some(_), Some(c)) if asked => {
-                    refused.push(c.about);
-                    refused_password = c.password;
-                }
-                // The remote refused what git sent of its own, or nothing
-                // sluice gave: its answer, which no credential bought
-                // afresh changes, since git sends the same again (134;
-                // record 0019 as amended 2026-11-18).
-                (Judged::Credential, Some(s), Some(_)) => {
-                    unasked = Some(self.unasked(s, &out));
-                    judged = Judged::Answered;
-                }
-                _ => {}
-            }
-            last = Some(out);
-            Err(Failed::new(judged, ()))
-        });
-        let stopped = match ran {
-            Ok(out) => {
-                return Ok(Called {
-                    out,
-                    note: None,
-                    judged: None,
-                })
-            }
-            Err(stopped) => stopped,
+            tried.map(Attempt::Ran)
         };
-        if let Some(e) = fault {
-            return Err(e);
-        }
-        if let Some(lock) = waited {
-            bail!(
-                "another fetch of this repository held {} past {}, the most a try waits for it",
-                lock.display(),
-                span(self.policy.try_for())
-            );
-        }
-        let out = last.expect("a try git failed");
-        let note = match (unrenewed, unasked) {
-            (Some(e), _) => Some(format!(
-                "{} refused {}, and none could be made afresh: {e:#}",
-                self.remote,
-                refused.join(", then ")
-            )),
-            (None, Some(unasked)) if refused.is_empty() => Some(unasked),
-            (None, Some(unasked)) => Some(format!(
-                "{} refused {}; {unasked}",
-                self.remote,
-                refused.join(", then ")
-            )),
-            (None, None) if stopped.judged == Judged::Credential && !refused.is_empty() => Some(
-                format!("{} refused {}", self.remote, refused.join(", then ")),
-            ),
-            (None, None) => None,
-        };
-        Ok(Called {
-            out,
-            note,
-            judged: Some(stopped.judged),
-        })
+        calling(
+            &self.policy,
+            kind,
+            &self.remote,
+            speaker.as_ref(),
+            &line,
+            &mut attempt,
+            &|s, out| self.unasked(s, out),
+        )
     }
 
     /// What a call as `s` that the remote refused was refused on, where git
@@ -467,16 +352,9 @@ impl PushedRefs {
     ) -> Result<bool> {
         let mut args = vec!["fetch", "--quiet", "--no-tags", "--no-write-fetch-head"];
         args.extend(flags);
-        let called = self.call(Kind::Read, &args, refspecs).map_err(|e| {
-            let Some(w) = withheld(&e) else { return e };
-            ReadRefused {
-                remote: self.remote.clone(),
-                asked: asked.into(),
-                said: w.said.clone(),
-                note: w.note.clone(),
-            }
-            .into()
-        });
+        let called = self
+            .call(Kind::Read, &args, refspecs)
+            .map_err(|e| withheld_read(&self.remote, asked, e));
         let Called { out, note, .. } = called?;
         if out.status.success() {
             return Ok(true);
@@ -667,6 +545,173 @@ impl PushedRefs {
         }
         Ok(())
     }
+}
+
+/// A read of `asked` on `remote` that failed with `e`: a [`ReadRefused`]
+/// in the forge's words, with sluice's note beside them, where the forge
+/// gave sluice's identity no credential for it (133; rule core.28), and
+/// `e` otherwise.
+fn withheld_read(remote: &str, asked: &str, e: anyhow::Error) -> anyhow::Error {
+    let Some(w) = withheld(&e) else { return e };
+    ReadRefused {
+        remote: remote.into(),
+        asked: asked.into(),
+        said: w.said.clone(),
+        note: w.note.clone(),
+    }
+    .into()
+}
+
+/// One try of a git call to the remote, as [`calling`] is told it.
+enum Attempt {
+    /// git ran: what it printed, whether its limit came first, and whether
+    /// it asked sluice's helper for the speaker's credentials.
+    Ran(Tried),
+    /// Another fetch held the repository's fetch lock, at this path, for
+    /// as long as a try may take: a try the remote never judged (record
+    /// 0109).
+    Held(PathBuf),
+}
+
+/// The tries of a git call to `remote` of `kind`, `line` its whole command
+/// line, under `policy` (134; rule core.29): each try is `attempt` of the
+/// same line, given the speaker's credentials where there is a speaker,
+/// ones made afresh after the remote refused the last that git asked
+/// sluice's helper for; `unasked` says what the remote refused where git
+/// never asked for them. Its last try's output, what each credential the
+/// remote refused was, apart from git's words (133), and how the last try
+/// stands when it failed. A fault of sluice's own, git not run or no
+/// credential given, is its error, and no try follows it.
+fn calling(
+    policy: &Policy,
+    kind: Kind,
+    remote: &str,
+    speaker: Option<&Speaker>,
+    line: &[&str],
+    attempt: &mut dyn FnMut(&[&str], Option<&Credentials>) -> Result<Attempt>,
+    unasked: &dyn Fn(&Speaker, &Output) -> String,
+) -> Result<Called> {
+    // Why sluice could not make a try: git not run, or no credential.
+    let mut fault = None;
+    let mut unrenewed = None;
+    let mut refused: Vec<String> = Vec::new();
+    // The password of the credentials the remote refused last, which a
+    // renewal replaces.
+    let mut refused_password = String::new();
+    // What the remote refused where git never asked for the speaker's
+    // credentials.
+    let mut refused_unasked = None;
+    let mut last = None;
+    // Set while the last try found the fetch lock held past its limit.
+    let mut waited = None;
+    let ran = policy.run(kind, |t| {
+        let given = match speaker {
+            None => None,
+            Some(s) if t.renew() => match s.identity.renew(&s.url, &refused_password) {
+                Ok(c) => Some(c),
+                Err(e) => {
+                    unrenewed = Some(e);
+                    return Err(Failed::new(Judged::Answered, ()));
+                }
+            },
+            Some(s) => match s.identity.credentials(&s.url) {
+                Ok(c) => Some(c),
+                Err(e) => {
+                    let e = e.context(format!("{} on {remote}", s.identity.name()));
+                    fault = Some(e);
+                    return Err(Failed::new(Judged::Answered, ()));
+                }
+            },
+        };
+        let tried = match attempt(line, given.as_ref()) {
+            Ok(Attempt::Held(held)) => {
+                waited = Some(held);
+                return Err(Failed::new(Judged::Never, ()));
+            }
+            Ok(Attempt::Ran(tried)) => tried,
+            Err(e) => {
+                fault = Some(e);
+                return Err(Failed::new(Judged::Answered, ()));
+            }
+        };
+        waited = None;
+        let (out, asked) = match tried {
+            // A try git did not end within its limit: whether the remote
+            // judged it is not known, so a read is tried again and a
+            // push is settled by reading what the remote holds (122).
+            Tried {
+                out, stopped: true, ..
+            } => {
+                let verb = line.first().copied().unwrap_or("call");
+                last = Some(told(
+                    out,
+                    &weir_bounded::stopped(&format!("git {verb}"), remote, policy.try_for()),
+                ));
+                return Err(Failed::new(Judged::Unknown, ()));
+            }
+            Tried { out, .. } if out.status.success() => return Ok(out),
+            Tried { out, asked, .. } => (out, asked),
+        };
+        let mut judged = judged(&out, kind, speaker.is_some());
+        match (judged, speaker, given) {
+            (Judged::Credential, Some(_), Some(c)) if asked => {
+                refused.push(c.about);
+                refused_password = c.password;
+            }
+            // The remote refused what git sent of its own, or nothing
+            // sluice gave: its answer, which no credential bought
+            // afresh changes, since git sends the same again (134;
+            // record 0019 as amended 2026-11-18).
+            (Judged::Credential, Some(s), Some(_)) => {
+                refused_unasked = Some(unasked(s, &out));
+                judged = Judged::Answered;
+            }
+            _ => {}
+        }
+        last = Some(out);
+        Err(Failed::new(judged, ()))
+    });
+    let stopped = match ran {
+        Ok(out) => {
+            return Ok(Called {
+                out,
+                note: None,
+                judged: None,
+            })
+        }
+        Err(stopped) => stopped,
+    };
+    if let Some(e) = fault {
+        return Err(e);
+    }
+    if let Some(lock) = waited {
+        bail!(
+            "another fetch of this repository held {} past {}, the most a try waits for it",
+            lock.display(),
+            span(policy.try_for())
+        );
+    }
+    let out = last.expect("a try git failed");
+    let note = match (unrenewed, refused_unasked) {
+        (Some(e), _) => Some(format!(
+            "{remote} refused {}, and none could be made afresh: {e:#}",
+            refused.join(", then ")
+        )),
+        (None, Some(unasked)) if refused.is_empty() => Some(unasked),
+        (None, Some(unasked)) => Some(format!(
+            "{remote} refused {}; {unasked}",
+            refused.join(", then ")
+        )),
+        (None, None) if stopped.judged == Judged::Credential && !refused.is_empty() => {
+            Some(format!("{remote} refused {}", refused.join(", then ")))
+        }
+        (None, None) => None,
+    };
+    Ok(Called {
+        out,
+        note,
+        judged: Some(stopped.judged),
+    })
 }
 
 /// A git call to the remote under the retry policy: its last try's output,
@@ -1141,7 +1186,343 @@ impl PushedRefs {
 
 #[cfg(test)]
 mod tests {
-    use super::{answered_refusal, lost_race, netrc_names, own_credential, Moved, Output, Rev};
+    use std::cell::{Cell, RefCell};
+    use std::collections::VecDeque;
+    use std::os::unix::process::ExitStatusExt as _;
+    use std::time::Duration;
+
+    use super::{
+        answered_refusal, calling, lost_race, netrc_names, own_credential, withheld_read, Attempt,
+        Moved, Output, Rev, Speaker, Tried,
+    };
+    use crate::identity::{Author, Credentials, Identity, Withheld};
+    use crate::retry::{Judged, Kind, Policy};
+    use sluice_seams::ReadRefused;
+
+    /// An identity on the forge with a token of its own: `t`, then `t-1`,
+    /// `t-2` and on as it is renewed, unless its forge makes no fresh one,
+    /// saying `refuses`, or gives none at all, as `withholds` says.
+    #[derive(Default)]
+    struct Fake {
+        renewed: Cell<usize>,
+        refuses: Option<String>,
+        withholds: Option<Withheld>,
+        asked: Cell<usize>,
+    }
+
+    impl Fake {
+        fn token(&self, renewed: usize) -> String {
+            match renewed {
+                0 => "t".into(),
+                n => format!("t-{n}"),
+            }
+        }
+    }
+
+    impl Identity for Fake {
+        fn name(&self) -> String {
+            "a fake identity".into()
+        }
+
+        fn url(&self, remote_url: &str) -> Option<String> {
+            Some(remote_url.into())
+        }
+
+        fn credentials(&self, _: &str) -> anyhow::Result<Credentials> {
+            self.asked.set(self.asked.get() + 1);
+            if let Some(w) = &self.withholds {
+                return Err(w.clone().into());
+            }
+            let n = self.renewed.get();
+            Ok(Credentials {
+                username: "x-fake".into(),
+                password: self.token(n),
+                about: format!("the fake's token number {n}"),
+            })
+        }
+
+        /// Renewed in place of the token it gave last, which is the one
+        /// the remote refused.
+        fn renew(&self, url: &str, refused: &str) -> anyhow::Result<Credentials> {
+            assert_eq!(refused, self.token(self.renewed.get()));
+            if let Some(why) = &self.refuses {
+                anyhow::bail!("{why}");
+            }
+            self.renewed.set(self.renewed.get() + 1);
+            self.credentials(url)
+        }
+
+        fn author(&self, _: &str) -> anyhow::Result<Author> {
+            Ok(Author::sluice())
+        }
+    }
+
+    fn speaker(fake: &Fake) -> Speaker<'_> {
+        Speaker {
+            identity: fake,
+            url: "https://forge.invalid/o/r.git".into(),
+            helper: "!sluice credential",
+        }
+    }
+
+    /// git's try as `code`, `stdout` and `stderr`, its helper asked for
+    /// the speaker's credentials.
+    fn ran(code: i32, stdout: &str, stderr: &str) -> Attempt {
+        Attempt::Ran(Tried {
+            out: Output {
+                status: std::process::ExitStatus::from_raw(code << 8),
+                stdout: stdout.into(),
+                stderr: stderr.into(),
+            },
+            stopped: false,
+            asked: true,
+        })
+    }
+
+    fn done() -> Attempt {
+        ran(0, "", "")
+    }
+
+    /// What git prints for GitHub's 404 to a token that may not reach the
+    /// repository.
+    fn not_found() -> Attempt {
+        ran(
+            128,
+            "",
+            "remote: Repository not found.\nfatal: repository 'https://forge.invalid/o/r.git/' not found\n",
+        )
+    }
+
+    /// What git prints for a 503 to its request for the remote's refs.
+    fn unavailable() -> Attempt {
+        ran(
+            128,
+            "",
+            "fatal: unable to access 'https://forge.invalid/o/r.git/': The requested URL returned error: 503\n",
+        )
+    }
+
+    /// What the tries of a call were given: its line and the password.
+    type Given = RefCell<Vec<(Vec<String>, Option<String>)>>;
+
+    /// The tries of `line`, as `kind` under `policy`, as `speaker`, each
+    /// answered in turn by `answers`; what each try was given.
+    fn call(
+        policy: &Policy,
+        kind: Kind,
+        speaker: Option<&Speaker>,
+        answers: Vec<Attempt>,
+    ) -> (
+        anyhow::Result<super::Called>,
+        Vec<(Vec<String>, Option<String>)>,
+    ) {
+        let answers = RefCell::new(VecDeque::from(answers));
+        let given: Given = RefCell::default();
+        let line = [
+            "push",
+            "--porcelain",
+            "--force-with-lease=refs/heads/main:a",
+            "origin",
+            "b:refs/heads/main",
+        ];
+        let called = calling(
+            policy,
+            kind,
+            "origin",
+            speaker,
+            &line,
+            &mut |line, c| {
+                given.borrow_mut().push((
+                    line.iter().map(|a| a.to_string()).collect(),
+                    c.map(|c| c.password.clone()),
+                ));
+                Ok(answers
+                    .borrow_mut()
+                    .pop_front()
+                    .expect("a try past the fake's answers"))
+            },
+            &|_, _| "git sent its own".into(),
+        );
+        (called, given.into_inner())
+    }
+
+    fn recorded() -> Policy {
+        Policy::command().recording()
+    }
+
+    /// 134: a read the remote refused on the identity's credentials is run
+    /// once more on credentials made afresh, and reads what the second
+    /// run finds.
+    #[test]
+    fn a_refused_read_is_run_again_with_fresh_credentials() {
+        let fake = Fake::default();
+        let s = speaker(&fake);
+        let (called, given) = call(&recorded(), Kind::Read, Some(&s), vec![not_found(), done()]);
+        let called = called.unwrap();
+        assert!(called.out.status.success());
+        assert_eq!(called.judged, None);
+        let passwords: Vec<_> = given.iter().map(|(_, p)| p.clone()).collect();
+        assert_eq!(passwords, [Some("t".into()), Some("t-1".into())]);
+    }
+
+    /// 134, 45, rule core.5: a leased push the remote refuses on the
+    /// identity's tokens is made again on a fresh one each time, with the
+    /// same lease and ref, and lands on the third.
+    #[test]
+    fn a_push_refused_on_its_tokens_is_made_again_with_its_lease_on_fresh_ones() {
+        let fake = Fake::default();
+        let s = speaker(&fake);
+        let (called, given) = call(
+            &recorded(),
+            Kind::Push,
+            Some(&s),
+            vec![not_found(), not_found(), done()],
+        );
+        assert!(called.unwrap().out.status.success());
+        let passwords: Vec<_> = given.iter().map(|(_, p)| p.clone()).collect();
+        assert_eq!(
+            passwords,
+            [Some("t".into()), Some("t-1".into()), Some("t-2".into())]
+        );
+        assert!(
+            given.iter().all(|(line, _)| *line == given[0].0),
+            "{given:?}"
+        );
+        assert_eq!(fake.renewed.get(), 2);
+    }
+
+    /// 134: a push refused on every token until the retry policy's time is
+    /// spent stands refused, its note naming what each refused token was,
+    /// in the order tried, and carrying no token.
+    #[test]
+    fn a_push_refused_on_every_token_names_each_in_order() {
+        let fake = Fake::default();
+        let s = speaker(&fake);
+        let (called, given) = call(
+            &recorded(),
+            Kind::Push,
+            Some(&s),
+            std::iter::repeat_with(not_found).take(100).collect(),
+        );
+        let called = called.unwrap();
+        assert_eq!(called.judged, Some(Judged::Credential));
+        assert!(given.len() > 2, "more than two tries: {}", given.len());
+        let each: Vec<String> = (0..given.len())
+            .map(|n| format!("the fake's token number {n}"))
+            .collect();
+        let note = called.note.unwrap();
+        assert_eq!(note, format!("origin refused {}", each.join(", then ")));
+        assert!(!note.contains("t-1"), "{note}");
+    }
+
+    /// 134 (forge-identity, refused twice): a push refused on its token and
+    /// on a fresh one, the policy's time spent before another try, is two
+    /// tries whose note names both tokens.
+    #[test]
+    fn a_push_refused_twice_with_the_time_spent_names_both() {
+        let fake = Fake::default();
+        let s = speaker(&fake);
+        // Room for one pause of a second or two, and no second pause.
+        let policy = Policy::new(Duration::from_secs(2)).recording();
+        let (called, given) = call(
+            &policy,
+            Kind::Push,
+            Some(&s),
+            vec![not_found(), not_found(), not_found()],
+        );
+        assert_eq!(given.len(), 2, "two pushes");
+        assert_eq!(
+            called.unwrap().note.unwrap(),
+            "origin refused the fake's token number 0, then the fake's token number 1"
+        );
+    }
+
+    /// 134: a push refused on its token, when its forge makes no fresh
+    /// one, is made once, its note naming the refused token and why none
+    /// could be made afresh.
+    #[test]
+    fn a_push_with_no_fresh_token_is_made_once() {
+        let fake = Fake {
+            refuses: Some("the forge made no token".into()),
+            ..Fake::default()
+        };
+        let s = speaker(&fake);
+        let (called, given) = call(&recorded(), Kind::Push, Some(&s), vec![not_found(), done()]);
+        assert_eq!(given.len(), 1, "one push");
+        assert_eq!(
+            called.unwrap().note.unwrap(),
+            "origin refused the fake's token number 0, and none could be made afresh: \
+             the forge made no token"
+        );
+        assert_eq!(fake.renewed.get(), 0);
+    }
+
+    /// 134 (forge-identity): a push whose request for the remote's refs is
+    /// answered 503, before anything of it was sent, is tried again on the
+    /// same token, and lands.
+    #[test]
+    fn a_push_answered_503_before_it_was_sent_is_tried_again() {
+        let fake = Fake::default();
+        let s = speaker(&fake);
+        let (called, given) = call(
+            &recorded(),
+            Kind::Push,
+            Some(&s),
+            vec![unavailable(), done()],
+        );
+        assert!(called.unwrap().out.status.success());
+        let passwords: Vec<_> = given.iter().map(|(_, p)| p.clone()).collect();
+        assert_eq!(passwords, [Some("t".into()), Some("t".into())]);
+        assert_eq!(fake.renewed.get(), 0);
+    }
+
+    /// 134: on the host's own credentials, which sluice cannot make
+    /// afresh, a push the remote refuses is the remote's answer, made
+    /// once.
+    #[test]
+    fn a_push_refused_on_the_hosts_credentials_is_made_once() {
+        let (called, given) = call(&recorded(), Kind::Push, None, vec![not_found(), done()]);
+        let called = called.unwrap();
+        assert_eq!(
+            given,
+            [(given[0].0.clone(), None)],
+            "one push, given nothing"
+        );
+        assert_eq!(called.judged, Some(Judged::Answered));
+        assert_eq!(called.note, None);
+    }
+
+    /// 133, rule core.28: a read the forge gives sluice's identity no
+    /// credential for runs no git and asks the forge once (rule core.29);
+    /// it is a read of the remote refused, in the forge's words with
+    /// sluice's note beside them.
+    #[test]
+    fn a_credential_the_forge_withholds_is_a_refused_read() {
+        let withheld = Withheld {
+            said: "GET /repos/o/r/installation: 404 Not Found".into(),
+            note: Some("point the remote that names o/r at its new address".into()),
+        };
+        let fake = Fake {
+            withholds: Some(withheld.clone()),
+            ..Fake::default()
+        };
+        let s = speaker(&fake);
+        let (called, given) = call(&recorded(), Kind::Read, Some(&s), vec![done()]);
+        assert!(given.is_empty(), "no git ran");
+        assert_eq!(fake.asked.get(), 1, "asked once");
+        let read = withheld_read("origin", "refs/heads/main", called.err().unwrap());
+        assert_eq!(
+            sluice_seams::read_refused(&read),
+            Some(&ReadRefused {
+                remote: "origin".into(),
+                asked: "refs/heads/main".into(),
+                said: withheld.said,
+                note: withheld.note,
+            })
+        );
+        let other = withheld_read("origin", "refs/heads/main", anyhow::anyhow!("no git"));
+        assert!(sluice_seams::read_refused(&other).is_none());
+    }
 
     /// Record 0019 as amended 2026-11-18: a credential git sent of its own
     /// is named by where git found it, the address's user name, a header

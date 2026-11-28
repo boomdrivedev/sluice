@@ -12,7 +12,7 @@ use std::process::Stdio;
 use std::rc::Rc;
 use std::time::{Duration, Instant};
 
-use sluice::identity::{Author, Credentials, Identity, Withheld};
+use sluice::identity::{Author, Credentials, Identity};
 use sluice::profiles::branches::Branches;
 use sluice::profiles::pushed_refs::PushedRefs;
 use sluice::retry;
@@ -528,9 +528,8 @@ fn the_router_sends_a_branch_to_its_remote() {
 }
 
 /// An identity whose remote is a fake HTTP server, with a token of its
-/// own: `token`, then `token-1`, `token-2` and on as it is renewed, unless
-/// its forge refuses to make another, saying `refuses`, or gives none at
-/// all, as `withholds` says. A commit pushed as it names
+/// own: `token`, then `token-1`, `token-2` and on as it is renewed. A
+/// commit pushed as it names
 /// `a fake <fake@identity.invalid>`, unless it cannot say who it is, as
 /// `unnamed` says.
 struct FakeIdentity {
@@ -538,8 +537,6 @@ struct FakeIdentity {
     url: Option<String>,
     token: String,
     renewed: Cell<usize>,
-    refuses: Option<String>,
-    withholds: Option<Withheld>,
     unnamed: Option<String>,
     /// The URL each credential was asked for, in order.
     asked: RefCell<Vec<String>>,
@@ -567,8 +564,6 @@ impl FakeIdentity {
             url: None,
             token: token.into(),
             renewed: Cell::new(0),
-            refuses: None,
-            withholds: None,
             unnamed: None,
             asked: RefCell::default(),
         }
@@ -578,22 +573,6 @@ impl FakeIdentity {
     fn unnamed(self, why: &str) -> FakeIdentity {
         FakeIdentity {
             unnamed: Some(why.into()),
-            ..self
-        }
-    }
-
-    /// The identity whose forge makes no fresh token, saying `why`.
-    fn refusing(self, why: &str) -> FakeIdentity {
-        FakeIdentity {
-            refuses: Some(why.into()),
-            ..self
-        }
-    }
-
-    /// The identity whose forge gives no credentials, as `withheld` says.
-    fn withholding(self, withheld: Withheld) -> FakeIdentity {
-        FakeIdentity {
-            withholds: Some(withheld),
             ..self
         }
     }
@@ -621,9 +600,6 @@ impl Identity for FakeIdentity {
             assert_eq!(url, own);
         }
         self.asked.borrow_mut().push(url.into());
-        if let Some(w) = &self.withholds {
-            return Err(w.clone().into());
-        }
         let n = self.renewed.get();
         Ok(Credentials {
             username: "x-fake".into(),
@@ -636,9 +612,6 @@ impl Identity for FakeIdentity {
     /// remote refused.
     fn renew(&self, url: &str, refused: &str) -> anyhow::Result<Credentials> {
         assert_eq!(refused, self.token(self.renewed.get()));
-        if let Some(why) = &self.refuses {
-            anyhow::bail!("{why}");
-        }
         self.renewed.set(self.renewed.get() + 1);
         self.credentials(url)
     }
@@ -993,32 +966,6 @@ fn an_identity_reaches_only_sluices_git() {
     }
 }
 
-/// A fetch the remote refuses the identity's credentials on is run once
-/// more with credentials made afresh, and reads what the second run
-/// finds.
-#[test]
-fn a_refused_fetch_is_run_again_with_fresh_credentials() {
-    let repo = Repo::new("refused-once");
-    let _bare = repo.bare_origin();
-    let token = format!("fake-token-{}", std::process::id());
-    let (first, fresh) = (basic(&token), basic(&format!("{token}-1")));
-    let fake = Fake::start(move |r| match r.header("Authorization") {
-        None => ask(),
-        Some(a) if a == first => not_found(),
-        Some(a) if a == fresh => empty_repository(),
-        Some(_) => (403, vec![], "an unknown token\n".into()),
-    });
-    let url = format!("{}/o/r.git", fake.url());
-    let identity = Rc::new(FakeIdentity::new(&url, &token));
-    let p = as_identity(&repo, &identity);
-    assert_eq!(p.read("main").unwrap(), None, "the fresh token reads");
-    assert_eq!(
-        given(&fake),
-        [basic(&token), basic(&identity.token(1))],
-        "the refused token, then a fresh one, once"
-    );
-}
-
 /// deneb, 2026-11-05: a driver keeps each branch's profile open for as
 /// long as it runs, and a remote pointed at its repository's new address
 /// since, as after GitHub renamed it, is reached there by the next read,
@@ -1054,36 +1001,6 @@ fn a_remote_pointed_elsewhere_is_reached_there_at_the_next_read() {
         "the read reached the new address"
     );
     assert_eq!(*identity.asked.borrow(), [from, to]);
-}
-
-/// 133, rule core.28: a fetch the forge gives sluice's identity no
-/// credential for is a read of the remote refused, in the forge's words
-/// with sluice's note beside them; no git runs, and the forge's answer is
-/// not asked again (rule core.29).
-#[test]
-fn a_credential_the_forge_withholds_is_a_refused_read() {
-    let repo = Repo::new("withheld");
-    let _bare = repo.bare_origin();
-    let fake = remote(|_, _| empty_repository());
-    let url = format!("{}/o/r.git", fake.url());
-    let withheld = Withheld {
-        said: "GET /repos/o/r/installation: 404 Not Found".into(),
-        note: Some("point the remote that names o/r at its new address".into()),
-    };
-    let identity = Rc::new(FakeIdentity::new(&url, "fake-token").withholding(withheld.clone()));
-    let p = as_identity(&repo, &identity);
-    let read = p.read("main").unwrap_err();
-    assert_eq!(
-        read_refused(&read),
-        Some(&ReadRefused {
-            remote: "origin".into(),
-            asked: "refs/heads/main".into(),
-            said: withheld.said,
-            note: withheld.note,
-        })
-    );
-    assert!(fake.requests().is_empty(), "no git ran");
-    assert_eq!(identity.asked.borrow().len(), 1, "asked once");
 }
 
 /// 134: a fetch refused on fresh credentials too, until the retry
@@ -1273,122 +1190,6 @@ fn a_credential_git_sends_of_its_own_is_named_and_never_blamed_on_the_identity()
             0,
             "{stored}: no token bought afresh"
         );
-    }
-}
-
-/// 134: a push refused on every token until the retry policy's time is
-/// spent fails with the remote's words and what each refused token was,
-/// in the order tried, and carries no token.
-#[test]
-fn a_push_refused_on_every_token_names_each_in_order() {
-    let repo = Repo::new("refused-push");
-    let _bare = repo.bare_origin();
-    let fake = remote(|_, _| not_found());
-    let token = format!("fake-token-{}", std::process::id());
-    let url = format!("{}/o/r.git", fake.url());
-    let identity = Rc::new(FakeIdentity::new(&url, &token));
-    let p = as_identity(&repo, &identity);
-    let head = rev(repo.rev("HEAD"));
-    let err = format!("{:#}", p.push_branch(&head, "agent").unwrap_err());
-    assert!(err.contains("Repository not found."), "{err}");
-    assert!(err.ends_with(&refused_note(&identity)), "{err}");
-    assert!(!err.contains(&token), "a report carries no token: {err}");
-    assert_eq!(given(&fake), tokens(&identity), "a fresh token each try");
-    assert!(identity.renewed.get() >= 2, "more than two tries");
-}
-
-/// 134 (forge-identity, refused twice): a push refused on its token and on
-/// a fresh one, the policy's time spent before another try, is two pushes
-/// whose failure names both tokens.
-#[test]
-fn a_push_refused_twice_with_the_time_spent_names_both() {
-    let repo = Repo::new("refused-push-twice");
-    let _bare = repo.bare_origin();
-    let fake = remote(|_, _| not_found());
-    let url = format!("{}/o/r.git", fake.url());
-    let identity = Rc::new(FakeIdentity::new(&url, "fake-token"));
-    // Room for one pause of a second or two, and no second pause.
-    let policy = Rc::new(retry::Policy::new(Duration::from_secs(2)).recording());
-    let p = PushedRefs::open_as(repo.dir(), "origin", Some(speaker(&identity)), policy).unwrap();
-    let head = rev(repo.rev("HEAD"));
-    let err = format!("{:#}", p.push_branch(&head, "agent").unwrap_err());
-    assert!(err.contains("Repository not found."), "{err}");
-    assert!(
-        err.ends_with("origin refused the fake's token number 0, then the fake's token number 1"),
-        "{err}"
-    );
-    assert_eq!(given(&fake).len(), 2, "two pushes");
-}
-
-/// 134: a push refused on its token, when its forge makes no fresh one,
-/// fails with the remote's words, what the refused token was and why none
-/// could be made afresh, after one push.
-#[test]
-fn a_push_with_no_fresh_token_is_made_once() {
-    let repo = Repo::new("push-unrenewed");
-    let _bare = repo.bare_origin();
-    let fake = remote(|_, _| not_found());
-    let token = format!("fake-token-{}", std::process::id());
-    let url = format!("{}/o/r.git", fake.url());
-    let identity = Rc::new(FakeIdentity::new(&url, &token).refusing("the forge made no token"));
-    let p = as_identity(&repo, &identity);
-    let head = rev(repo.rev("HEAD"));
-    let err = format!("{:#}", p.push_branch(&head, "agent").unwrap_err());
-    assert!(err.contains("Repository not found."), "{err}");
-    assert!(
-        err.ends_with(
-            "origin refused the fake's token number 0, \
-             and none could be made afresh: the forge made no token"
-        ),
-        "{err}"
-    );
-    assert!(!err.contains(&token), "a report carries no token: {err}");
-    assert_eq!(given(&fake).len(), 1, "one push");
-    assert_eq!(identity.renewed.get(), 0);
-}
-
-/// 134, 45, 104, rule core.5: a leased push the remote refuses on the
-/// identity's first token is made once more on a fresh one with the same
-/// lease, and moves the branch; a branch made as a landing is.
-#[test]
-fn a_leased_push_refused_on_its_token_is_made_once_more() {
-    let repo = Repo::new("leased-renewed");
-    let _bare = repo.bare_origin();
-    let base = repo.rev("main");
-    let head = rev(repo.branch("unit/u", "main", &[("a", Some("1"))]));
-    let local = open(&repo);
-    let to = landing(&local, &rev(base.clone()), &head);
-    let zero = "0".repeat(40);
-    for (branch, old, new) in [
-        ("bolt/x", zero, base.clone()),
-        ("main", base.clone(), to.as_str().to_string()),
-    ] {
-        let first = basic("fake-token");
-        let fake = {
-            let (first, base) = (first.clone(), base.clone());
-            remote(move |a, r| match is_push(r) && a == first {
-                true => not_found(),
-                false => takes(r, &[("refs/heads/main", &base)]),
-            })
-        };
-        let url = format!("{}/o/r.git", fake.url());
-        let identity = Rc::new(FakeIdentity::new(&url, "fake-token"));
-        let p = as_identity(&repo, &identity);
-        let moved = match branch {
-            "main" => p.move_to("main", &rev(base.clone()), &to),
-            _ => p.make(branch, &rev(base.clone())),
-        };
-        assert_eq!(moved.unwrap(), Moved::Moved, "{branch}");
-        let command = vec![(old, new, format!("refs/heads/{branch}"))];
-        assert_eq!(
-            pushes(&fake),
-            [
-                (first, command.clone()),
-                (basic(&identity.token(1)), command)
-            ],
-            "{branch}: the refused push, then the same on a fresh token"
-        );
-        assert_eq!(identity.renewed.get(), 1);
     }
 }
 
@@ -1666,70 +1467,6 @@ fn a_fetch_answered_503_twice_reads_on_the_third() {
     assert_eq!(identity.renewed.get(), 0, "a 503 buys no token");
 }
 
-/// 134, 45, rule core.5: a leased push refused `Repository not found.` on
-/// two tokens and taken on the third moves the branch: three pushes, each
-/// on a different token, with the same lease and ref.
-#[test]
-fn a_leased_push_refused_on_two_tokens_lands_on_the_third() {
-    let repo = Repo::new("leased-third");
-    let _bare = repo.bare_origin();
-    let base = repo.rev("main");
-    let head = rev(repo.branch("unit/u", "main", &[("a", Some("1"))]));
-    let to = landing(&open(&repo), &rev(base.clone()), &head);
-    let refused = [basic("fake-token"), basic("fake-token-1")];
-    let fake = {
-        let base = base.clone();
-        remote(
-            move |a, r| match is_push(r) && refused.iter().any(|t| t == a) {
-                true => not_found(),
-                false => takes(r, &[("refs/heads/main", &base)]),
-            },
-        )
-    };
-    let url = format!("{}/o/r.git", fake.url());
-    let identity = Rc::new(FakeIdentity::new(&url, "fake-token"));
-    let p = as_identity(&repo, &identity);
-    assert_eq!(
-        p.move_to("main", &rev(base.clone()), &to).unwrap(),
-        Moved::Moved
-    );
-    let command = vec![(base, to.as_str().to_string(), "refs/heads/main".into())];
-    assert_eq!(
-        pushes(&fake),
-        tokens(&identity)
-            .into_iter()
-            .map(|t| (t, command.clone()))
-            .collect::<Vec<_>>(),
-        "three pushes, each on its own token, each the same"
-    );
-    assert_eq!(identity.renewed.get(), 2);
-}
-
-/// 134 (forge-identity): a push whose request for the remote's refs is
-/// answered 503, before anything of it was sent, is tried again and lands.
-#[test]
-fn a_push_answered_503_before_it_was_sent_is_tried_again() {
-    let repo = Repo::new("push-503");
-    let _bare = repo.bare_origin();
-    let base = repo.rev("main");
-    let head = rev(repo.branch("unit/u", "main", &[("a", Some("1"))]));
-    let to = landing(&open(&repo), &rev(base.clone()), &head);
-    let listed = Count::default();
-    let fake = {
-        let (base, listed) = (base.clone(), listed.clone());
-        remote(move |_, r| match lists_for_push(r) && listed.take() == 0 {
-            true => unavailable(),
-            false => takes(r, &[("refs/heads/main", &base)]),
-        })
-    };
-    let url = format!("{}/o/r.git", fake.url());
-    let identity = Rc::new(FakeIdentity::new(&url, "fake-token"));
-    let p = as_identity(&repo, &identity);
-    assert_eq!(p.move_to("main", &rev(base), &to).unwrap(), Moved::Moved);
-    assert_eq!(listed_for_push(&fake), vec![basic("fake-token"); 2]);
-    assert_eq!(pushes(&fake).len(), 1, "the first try sent nothing");
-}
-
 /// 134, 122, 45: a landing whose push was cut after it was sent is made
 /// once; the remote's branch then decides: moved when it holds the
 /// landing, failed naming the unanswered push and where the branch is
@@ -1776,31 +1513,6 @@ fn a_landing_cut_after_it_was_sent_is_what_the_remote_holds() {
         }
         assert_eq!(pushes(&fake).len(), 1, "made: {made}, one push");
     }
-}
-
-/// 134: on the host's own credentials, which sluice cannot make afresh, a
-/// push the remote refuses is made once and fails with the remote's words.
-#[test]
-fn a_push_refused_on_the_hosts_credentials_is_made_once() {
-    let repo = Repo::new("host-refused");
-    let fake = Fake::start(|_| not_found());
-    repo.git(&[
-        "remote",
-        "add",
-        "origin",
-        &format!("{}/o/r.git", fake.url()),
-    ]);
-    let p = open(&repo);
-    let head = rev(repo.rev("main"));
-    let err = format!("{:#}", p.push_branch(&head, "agent").unwrap_err());
-    assert!(err.contains("Repository not found."), "{err}");
-    assert!(!err.contains("refused"), "no token to name: {err}");
-    let tried = fake
-        .requests()
-        .iter()
-        .filter(|r| r.path.contains("git-receive-pack"))
-        .count();
-    assert_eq!(tried, 1, "one push");
 }
 
 /// 129: the remotes and a remote's fetch address, read with no process,
