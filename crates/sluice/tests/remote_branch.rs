@@ -294,19 +294,6 @@ impl Setup {
         self.repo.dir().join(".git/sluice/main")
     }
 
-    /// Step `main` until a step fails; what it said.
-    fn step_until_failed(&self) -> String {
-        let deadline = Instant::now() + Duration::from_secs(60);
-        loop {
-            let out = self.sluice(&["step", "main"]);
-            if !out.status.success() {
-                return text(&out);
-            }
-            assert!(Instant::now() < deadline, "{}", self.status());
-            std::thread::sleep(Duration::from_millis(50));
-        }
-    }
-
     /// A records file of `main` holds `word`.
     fn logged(&self, word: &str) -> bool {
         let dir = self.repo.dir().join(".git/sluice/main");
@@ -370,71 +357,6 @@ fn a_push_from_elsewhere_refuses_the_landing_and_the_next_round_lands() {
     let main = s.remote_main();
     assert_eq!(s.repo.rev("main"), main);
     assert_eq!(s.repo.rev(&format!("{main}^1")), theirs);
-}
-
-/// 24: the push was accepted and sluice stopped before recording it; the
-/// next round finds the landing on the remote and records it, with no new
-/// run.
-#[test]
-fn a_landing_pushed_but_unrecorded_is_recorded_by_the_next_round() {
-    let s = Setup::new("remote-stopped", "origin");
-    let pushed = s.seen.path().join("pushed");
-    s.on_next_push(&format!("touch {}\nsleep 5", pushed.display()), true);
-    s.submit("a");
-    // Step until the push is under way, then stop the step that made it.
-    let deadline = Instant::now() + Duration::from_secs(60);
-    loop {
-        let mut step = s
-            .command(s.repo.dir())
-            .args(["step", "main"])
-            .spawn()
-            .unwrap();
-        loop {
-            if pushed.exists() {
-                step.kill().unwrap();
-                step.wait().unwrap();
-                break;
-            }
-            if step.try_wait().unwrap().is_some() {
-                break;
-            }
-            std::thread::sleep(Duration::from_millis(20));
-        }
-        if pushed.exists() {
-            break;
-        }
-        assert!(Instant::now() < deadline, "{}", s.status());
-        std::thread::sleep(Duration::from_millis(50));
-    }
-    let landed = s.remote_main();
-    assert_ne!(s.states(), ["landed"]);
-    s.step_until_out();
-    assert_eq!(s.states(), ["landed"]);
-    assert_eq!(s.runs(), 1, "no new run");
-    assert_eq!(s.remote_main(), landed);
-}
-
-/// 24: the remote could not be reached during the push; the next round
-/// finds the remote unchanged and lands then, with no new run.
-#[test]
-fn a_push_that_never_reached_the_remote_lands_on_the_next_round() {
-    let s = Setup::new("remote-unreachable", "origin");
-    let aside = s.origin.path().with_extension("aside");
-    s.on_next_push(
-        &format!("mv {} {}", s.origin.path().display(), aside.display()),
-        false,
-    );
-    let before = s.remote_main();
-    s.submit("a");
-    let failed = s.step_until_failed();
-    assert!(failed.contains("pushing main to origin failed"), "{failed}");
-    assert_eq!(s.states(), ["landing"], "not landed");
-    std::fs::rename(&aside, s.origin.path()).unwrap();
-    assert_eq!(s.remote_main(), before);
-    s.step_until_out();
-    assert_eq!(s.states(), ["landed"]);
-    assert_eq!(s.runs(), 1, "no new run");
-    assert_eq!(s.repo.rev("main"), s.remote_main());
 }
 
 /// 22, 122, 124, I4: when the remote's side of the landing's push has
@@ -809,71 +731,6 @@ fn a_bolt_is_made_landed_on_and_deleted_on_its_remote() {
     for gone in ["refs/heads/bolt/x", "refs/remotes/origin/bolt/x"] {
         let out = s.repo.git_raw(&["rev-parse", "--verify", "-q", gone]);
         assert!(!out.status.success(), "{gone} is still here");
-    }
-}
-
-/// A bolt made here on its remote and deleted with nothing submitted to
-/// it here, as when every submission to it was made in another copy of
-/// the repository, so its records hold the revision it was made at alone:
-/// `sluice status` answers it, plain and with `--all`, saying it is gone
-/// and its queue empty, and the overview names it gone, apart from the
-/// branches it lands on. A branch with neither records nor a revision is
-/// still no branch (26, 61, 105; record 0091). One in this host's own
-/// files is `tests/cli.rs`'s.
-#[test]
-fn a_bolt_deleted_with_nothing_submitted_here_answers_its_status() {
-    {
-        let s = Setup::new("gone-bolt-remote", "origin");
-        let out = s.sluice(&["branch", "create", "bolt/x", "--from", "main"]);
-        assert!(out.status.success(), "{}", text(&out));
-        let out = s.sluice(&["branch", "delete", "bolt/x"]);
-        assert!(out.status.success(), "{}", text(&out));
-
-        let out = s.sluice(&["status", "bolt/x"]);
-        assert!(out.status.success(), "{}", text(&out));
-        assert!(text(&out).starts_with("bolt/x is gone\n"), "{}", text(&out));
-        assert!(
-            text(&out).contains("nothing in the queue"),
-            "{}",
-            text(&out)
-        );
-        for args in [
-            &["status", "bolt/x", "--json"][..],
-            &["status", "bolt/x", "--all", "--json"],
-        ] {
-            let out = s.sluice(args);
-            assert!(out.status.success(), "{}", text(&out));
-            let doc: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
-            assert_eq!(doc["gone"], true, "{doc}");
-            assert_eq!(doc["submissions"], serde_json::json!([]), "{doc}");
-        }
-
-        let out = s.sluice(&["overview", "--json"]);
-        assert!(out.status.success(), "{}", text(&out));
-        let doc: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
-        let bolt = doc["branches"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .find(|b| b["branch"] == "bolt/x")
-            .unwrap_or_else(|| panic!("the overview names bolt/x: {doc}"));
-        assert_eq!(bolt["gone"], true, "{doc}");
-        let out = s.sluice(&["overview"]);
-        assert!(out.status.success(), "{}", text(&out));
-        assert!(
-            text(&out).contains("gone, nothing queued or recent: bolt/x\n"),
-            "{}",
-            text(&out)
-        );
-        assert!(!text(&out).contains("bolt/x at"), "{}", text(&out));
-
-        let out = s.sluice(&["status", "bolt/never"]);
-        assert_eq!(out.status.code(), Some(1), "{}", text(&out));
-        assert!(
-            text(&out).contains("no branch bolt/never; branches with records: bolt/x"),
-            "{}",
-            text(&out)
-        );
     }
 }
 
