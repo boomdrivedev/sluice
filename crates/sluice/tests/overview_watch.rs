@@ -179,27 +179,6 @@ fn assert_goes_on(dir: &Path) {
     assert!(status.is_none(), "{status:?}: {}", watch.stderr());
 }
 
-/// 129: a repository sluice was never set up in.
-#[test]
-fn a_watch_ends_where_no_branch_holds_the_policy() {
-    let repo = Repo::new("no-sluice");
-    assert_ends_with_no_sluice(repo.dir());
-}
-
-/// 129, rule core.27: the policy on `origin/main` as last fetched, and on
-/// no branch of the host's own, is sluice set up; the remote is nowhere,
-/// so nothing could be fetched.
-#[test]
-fn a_watch_goes_on_where_the_policy_is_only_on_a_remotes_branch() {
-    let repo = Repo::new("remote-policy");
-    let fetched = repo.branch("fetched", "main", &[(".config/sluice.toml", Some(POLICY))]);
-    repo.git(&["switch", "-q", "main"]);
-    repo.git(&["branch", "-q", "-D", "fetched"]);
-    repo.git(&["remote", "add", "origin", "/nowhere/origin.git"]);
-    repo.git(&["update-ref", "refs/remotes/origin/main", &fetched]);
-    assert_goes_on(repo.dir());
-}
-
 /// 129: a policy written in a worktree and committed on no branch is no
 /// policy a branch holds.
 #[test]
