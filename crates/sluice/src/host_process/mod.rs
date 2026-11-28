@@ -498,8 +498,13 @@ struct Successor {
 impl Successor {
     /// This process as it starts.
     fn now() -> Successor {
+        Successor::in_env(std::env::vars_os().collect())
+    }
+
+    /// This process, started in the environment `env`.
+    fn in_env(env: Vec<(OsString, OsString)>) -> Successor {
         Successor {
-            env: std::env::vars_os().collect(),
+            env,
             program: std::env::current_exe()
                 .and_then(std::fs::canonicalize)
                 .map_err(|e| format!("the executable the host process started as: {e}")),
@@ -607,9 +612,29 @@ fn runtime() -> Result<tokio::runtime::Runtime> {
 /// or, where another holds its lock, end at once and move nothing (135;
 /// design D1). `choices` are the telemetry its own command line and
 /// sluice's variables choose (151; rule core.53). Its exit.
-pub fn run(choices: crate::telemetry::Choices, mut carried: Carried) -> Result<i32> {
-    let successor = Successor::now();
-    let paths = Paths::host()?;
+pub fn run(choices: crate::telemetry::Choices, carried: Carried) -> Result<i32> {
+    run_in(std::env::vars_os().collect(), choices, carried)
+}
+
+/// [`run`] in the environment `env`, the one this host process starts
+/// with: its state folder, its settings file and its telemetry are those
+/// `env` names, and the environment its workers and a successor start
+/// from is `env`'s (design D3), so a host process a test serves on a
+/// thread of its own is held apart from the test's own environment.
+pub fn run_in(
+    env: Vec<(OsString, OsString)>,
+    choices: crate::telemetry::Choices,
+    mut carried: Carried,
+) -> Result<i32> {
+    let successor = Successor::in_env(env);
+    let var = |k: &str| {
+        successor
+            .env
+            .iter()
+            .find(|(n, _)| n == k)
+            .map(|(_, v)| v.clone())
+    };
+    let paths = Paths::from_env(var)?;
     // An image started afresh in place holds the start lock that its last
     // image handed it, until its socket answers.
     let start = carried.start.take();
@@ -973,7 +998,7 @@ fn run_holding(runtime: &tokio::runtime::Runtime, holder: Holder) -> Result<i32>
     }
     // Record 0107 (design D19): the host's settings, held with the sign of
     // their file, which it looks at when the file's folder changes.
-    let host_settings = HostSettings::read()?;
+    let host_settings = HostSettings::read_in(&successor.env)?;
     let instance = host_settings.held().clone();
     // 151 (record 0106; rule core.53): its rounds' telemetry, as the host's
     // settings and its own choices say, started before any thread of its
@@ -982,7 +1007,10 @@ fn run_holding(runtime: &tokio::runtime::Runtime, holder: Holder) -> Result<i32>
         choices,
         instance.telemetry.as_ref(),
         &crate::profiles::checks::hostname(),
-        std::env::vars(),
+        successor
+            .env
+            .iter()
+            .filter_map(|(k, v)| Some((k.to_str()?.to_string(), v.to_str()?.to_string()))),
     );
     let telemetry = match chosen.send {
         true => match crate::telemetry::Telemetry::start(&chosen) {

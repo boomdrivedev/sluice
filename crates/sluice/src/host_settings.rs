@@ -36,7 +36,7 @@ use std::time::SystemTime;
 
 use anyhow::Result;
 
-use crate::instance::{config_path, home, host_cores, settings_text, Instance};
+use crate::instance::{config_path, config_path_in, home, host_cores, settings_text, Instance};
 
 /// The settings a process holds, and the sign of the file it read them
 /// from (135; record 0107).
@@ -117,6 +117,15 @@ impl HostSettings {
     pub fn read() -> Result<HostSettings> {
         let (given, all) = host_cores();
         HostSettings::at(config_path().as_deref(), given, all)
+    }
+
+    /// As [`HostSettings::read`], the file named in the environment `env`,
+    /// the one sluice's host process started with, which a host process a
+    /// test serves holds apart from the test's own.
+    pub fn read_in(env: &[(std::ffi::OsString, std::ffi::OsString)]) -> Result<HostSettings> {
+        let (given, all) = host_cores();
+        let var = |k: &str| env.iter().find(|(n, _)| n == k).map(|(_, v)| v.clone());
+        HostSettings::at(config_path_in(var).as_deref(), given, all)
     }
 
     /// As [`HostSettings::read`], from the settings at `path`, on a host of
@@ -391,5 +400,22 @@ mod tests {
         let why = refused(settings.look());
         assert!(why.contains("max"), "{why}");
         assert_eq!(settings.held().bound, 4);
+    }
+
+    /// Design D3: the settings a host process reads are the file its own
+    /// start environment names, `XDG_CONFIG_HOME`'s, never this process's.
+    #[test]
+    fn the_settings_are_read_from_the_environment_given() {
+        let dir = Scratch::new("read-in");
+        let path = dir.0.join("sluice/config.toml");
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(&path, "[runs]\nmax = 3\n").unwrap();
+        let env = vec![(
+            std::ffi::OsString::from("XDG_CONFIG_HOME"),
+            dir.0.clone().into_os_string(),
+        )];
+        let settings = HostSettings::read_in(&env).unwrap();
+        assert_eq!(settings.path(), Some(path.as_path()));
+        assert_eq!(settings.held().bound, 3);
     }
 }
