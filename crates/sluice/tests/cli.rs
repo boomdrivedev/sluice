@@ -10218,29 +10218,6 @@ fn job_release_with_nothing_kept_releases_nothing() {
     assert!(f.world.release_attempts().is_empty());
 }
 
-/// Whether this is the child `test` runs alone in, where it may set the
-/// process's environment, as pointing the AWS SDK at a fake; outside it,
-/// that child is run, and must pass.
-fn alone(test: &str) -> bool {
-    if std::env::var("SLUICE_TEST_ALONE").as_deref() == Ok(test) {
-        return true;
-    }
-    let out = support::isolated(&mut std::process::Command::new(
-        std::env::current_exe().unwrap(),
-    ))
-    .args(["--exact", test, "--nocapture"])
-    .env("SLUICE_TEST_ALONE", test)
-    .output()
-    .unwrap();
-    let said = String::from_utf8_lossy(&out.stdout);
-    let err = String::from_utf8_lossy(&out.stderr);
-    assert!(
-        out.status.success() && said.contains(&format!("test {test} ... ok")),
-        "{test}, alone:\n{said}{err}"
-    );
-    false
-}
-
 /// Record 0119 (design D1): `main` on `origin`, its runs for `linux-x64`,
 /// which this world's hosts are not, taken by the CodeBuild pool
 /// `codebuild`, whose `kms` signer lists `public`.
@@ -10293,9 +10270,6 @@ fn run_build(aws: &support::aws::FakeAws, claim: &str, ran: &std::path::Path) ->
 #[test]
 fn job_sign_keeps_a_hand_over_only_as_codebuild_recorded_it() {
     use sluice_core::records::{CheckOutcome, RunState};
-    if !alone("job_sign_keeps_a_hand_over_only_as_codebuild_recorded_it") {
-        return;
-    }
     let aws = support::aws::FakeAws::start();
     let key = aws.with_key("alias/sluice-sign");
     aws.point_here();
@@ -10426,9 +10400,6 @@ fn job_sign_keeps_a_hand_over_only_as_codebuild_recorded_it() {
 #[test]
 fn job_record_build_ends_the_run_with_what_the_key_signed() {
     use sluice_core::records::{CheckOutcome, RunState};
-    if !alone("job_record_build_ends_the_run_with_what_the_key_signed") {
-        return;
-    }
     let aws = support::aws::FakeAws::start();
     let key = aws.with_key("alias/sluice-sign");
     aws.point_here();
@@ -11391,9 +11362,6 @@ fn init_codebuild_keeps_the_repositorys_own_commands() {
 /// changes; a key of another spec refused, with nothing written
 #[test]
 fn init_codebuild_from_a_stack_appends_the_pool() {
-    if !alone("init_codebuild_from_a_stack_appends_the_pool") {
-        return;
-    }
     let aws = support::aws::FakeAws::start();
     let key = aws.with_key("alias/sluice-sign");
     aws.point_here();
@@ -11518,16 +11486,12 @@ fn fleet_policy(public: &str, rules: &str) -> String {
 }
 
 /// A fake AWS holding the stack `sluice` for `acme/widgets`, its fleet
-/// growing to ten, the environment pointed at it, and no host settings
-/// naming a profile.
+/// growing to ten, the tests' host pointed at it.
 fn fleet_deployed() -> (support::aws::FakeAws, p256::ecdsa::SigningKey) {
     let aws = support::aws::FakeAws::start();
     let key = aws.with_key("alias/sluice-sign");
     aws.deploy("sluice", "acme/widgets", 10);
     aws.point_here();
-    let settings = support::Scratch::new("pool-check-settings");
-    std::env::set_var("XDG_CONFIG_HOME", settings.path());
-    std::mem::forget(settings);
     (aws, key)
 }
 
@@ -11538,9 +11502,6 @@ fn fleet_deployed() -> (support::aws::FakeAws, p256::ecdsa::SigningKey) {
 /// 10`, and exits 0 where every other line passes
 #[test]
 fn pool_check_says_a_fleet_tests_side_by_side() {
-    if !alone("pool_check_says_a_fleet_tests_side_by_side") {
-        return;
-    }
     let (aws, key) = fleet_deployed();
     let f = Fakes::new();
     let policy = fleet_policy(&support::aws::public(&key), "batch = true\nparallel = 3\n");
@@ -11588,9 +11549,6 @@ fn pool_check_says_a_fleet_tests_side_by_side() {
 /// queue and exits 1
 #[test]
 fn pool_check_names_a_branch_whose_queue_no_host_can_run() {
-    if !alone("pool_check_names_a_branch_whose_queue_no_host_can_run") {
-        return;
-    }
     let (_aws, key) = fleet_deployed();
     let f = Fakes::new();
     let policy = fleet_policy(
@@ -11621,9 +11579,6 @@ fn pool_check_names_a_branch_whose_queue_no_host_can_run() {
 /// exits 1
 #[test]
 fn pool_check_names_a_key_the_policy_does_not_list() {
-    if !alone("pool_check_names_a_key_the_policy_does_not_list") {
-        return;
-    }
     let (_aws, _key) = fleet_deployed();
     let another = p256::ecdsa::SigningKey::random(&mut rand_core::OsRng);
     let f = Fakes::new();
@@ -11667,9 +11622,6 @@ fn run_buildspec_with(aws: &support::aws::FakeAws, lines: &str) {
 /// between its `# sluice:` lines passes, said so
 #[test]
 fn pool_check_reads_a_buildspec_with_the_repositorys_own_commands() {
-    if !alone("pool_check_reads_a_buildspec_with_the_repositorys_own_commands") {
-        return;
-    }
     let (aws, key) = fleet_deployed();
     run_buildspec_with(&aws, "      - ./push \"$SLUICE_CHECKOUT\"\n");
     let f = Fakes::new();
@@ -11696,9 +11648,6 @@ fn pool_check_reads_a_buildspec_with_the_repositorys_own_commands() {
 /// at the buildspec's top level fails, naming the run project and the line
 #[test]
 fn pool_check_names_own_commands_that_leave_the_buildspec() {
-    if !alone("pool_check_names_own_commands_that_leave_the_buildspec") {
-        return;
-    }
     let (aws, key) = fleet_deployed();
     run_buildspec_with(&aws, "      - ./push\nartifacts:\n");
     let line = aws.held.lock().unwrap().projects[0]["source"]["buildspec"]
