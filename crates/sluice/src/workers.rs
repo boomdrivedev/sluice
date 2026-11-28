@@ -618,8 +618,13 @@ enum Inner {
         end: CancellationToken,
         kept: bool,
     },
-    /// Started in a process with no edge, as std starts it.
-    Here(Option<std::process::Child>),
+    /// Started in a process with no edge, as std starts it, and ended by
+    /// weir-bounded with its `grace`. `child` is `None` once it is kept.
+    Here {
+        child: Option<std::process::Child>,
+        grace: Duration,
+        ended: bool,
+    },
 }
 
 /// Start `command` as a worker. Ended, its group is asked to end and given
@@ -631,7 +636,11 @@ pub fn start(command: &mut Command, grace: Duration) -> std::io::Result<Worker> 
         let child = command.spawn()?;
         return Ok(Worker {
             pid: child.id(),
-            inner: Inner::Here(Some(child)),
+            inner: Inner::Here {
+                child: Some(child),
+                grace,
+                ended: false,
+            },
         });
     };
     let ended = Arc::new(Mutex::new(None));
@@ -692,7 +701,7 @@ impl Worker {
                 Some(Ok(status)) => Ok(Some(*status)),
                 Some(Err(e)) => Err(std::io::Error::new(e.kind(), e.to_string())),
             },
-            Inner::Here(child) => match child.as_mut() {
+            Inner::Here { child, .. } => match child.as_mut() {
                 Some(child) => child.try_wait(),
                 None => Ok(None),
             },
@@ -704,11 +713,22 @@ impl Worker {
     pub fn kill(&mut self) {
         match &mut self.inner {
             Inner::Edge { end, .. } => end.cancel(),
-            Inner::Here(child) => {
-                if let Some(child) = child.as_mut() {
-                    let _ = child.kill();
-                }
+            Inner::Here {
+                child: Some(child),
+                grace,
+                ended,
+            } if !*ended => {
+                // weir-bounded ends the group of a process with no
+                // runtime, and the leader is waited on, so it is no
+                // zombie (`nothing-detached@f807c7f5fcea`).
+                let group = self.pid as i32;
+                weir_bounded::end_group(group, *grace, &mut || {
+                    matches!(child.try_wait(), Ok(Some(_)))
+                });
+                let _ = child.wait();
+                *ended = true;
             }
+            Inner::Here { .. } => {}
         }
     }
 
@@ -720,18 +740,19 @@ impl Worker {
     pub fn keep(mut self) {
         match &mut self.inner {
             Inner::Edge { kept, .. } => *kept = true,
-            Inner::Here(child) => drop(child.take()),
+            Inner::Here { child, .. } => drop(child.take()),
         }
     }
 }
 
 impl Drop for Worker {
     fn drop(&mut self) {
-        if let Inner::Edge {
-            end, kept: false, ..
-        } = &self.inner
-        {
-            end.cancel();
+        match &self.inner {
+            Inner::Edge {
+                end, kept: false, ..
+            } => end.cancel(),
+            Inner::Here { child: Some(_), .. } => self.kill(),
+            _ => {}
         }
     }
 }
