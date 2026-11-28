@@ -5,6 +5,7 @@
 //! runs over the fakes in tests and over the real profiles that
 //! [`profiles`] binds.
 
+pub mod asks;
 pub mod branch;
 pub mod caller;
 pub mod equip;

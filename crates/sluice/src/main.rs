@@ -1,6 +1,6 @@
 use std::ffi::OsString;
 use std::io::Write;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::rc::Rc;
 use std::time::Instant;
 
@@ -219,7 +219,7 @@ fn main() {
             })
             .unwrap_or_else(|e| {
                 eprintln!("sluice: {e:#}");
-                tell_json(*json, &e);
+                sluice::asks::tell_json(*json, &e);
                 3
             });
         std::process::exit(code);
@@ -248,7 +248,7 @@ fn main() {
         Ok(read) => read,
         Err(e) => {
             eprintln!("sluice: {e:#}");
-            tell_json(json, &e);
+            sluice::asks::tell_json(json, &e);
             std::process::exit(3);
         }
     };
@@ -333,7 +333,7 @@ fn main() {
         Ok(opened) => opened,
         Err(e) => {
             eprintln!("sluice: {e:#}");
-            tell_json(json, &e);
+            sluice::asks::tell_json(json, &e);
             finish(telemetry);
             std::process::exit(3);
         }
@@ -349,7 +349,7 @@ fn main() {
         false => Ok(()),
     }) {
         eprintln!("sluice: {e:#}");
-        tell_json(json, &e);
+        sluice::asks::tell_json(json, &e);
         finish(telemetry);
         std::process::exit(3);
     }
@@ -375,200 +375,12 @@ fn main() {
         Ok(code) => code,
         Err(e) => {
             sluice::telemetry::error(&format!("sluice: {e:#}"));
-            tell_json(json, &e);
+            sluice::asks::tell_json(json, &e);
             3
         }
     };
     finish(telemetry);
     std::process::exit(code);
-}
-
-/// `path` from `folder`, with no `.` in it: the path a read sends.
-fn from_folder(folder: &Path, path: &str) -> PathBuf {
-    folder
-        .join(path)
-        .components()
-        .filter(|c| !matches!(c, std::path::Component::CurDir))
-        .collect()
-}
-
-/// The request a read command sends to sluice's host process; `None` for a
-/// command that is no read, or a read that the command refuses as it is.
-fn read_request(cli: &Cli, folder: &Path) -> Option<sluice::host_process::protocol::Request> {
-    use sluice::host_process::protocol::Request;
-    let folder_of = |path: &str| from_folder(folder, path);
-    Some(match &cli.command {
-        None => Request::Home {
-            folder: folder.to_path_buf(),
-            caller: sluice::caller::here(),
-            worktree: folder_of(&cli.worktree),
-            json: cli.json,
-        },
-        Some(Command::Status {
-            target,
-            all,
-            json,
-            branch,
-        }) => Request::Status {
-            folder: folder.to_path_buf(),
-            caller: sluice::caller::here(),
-            target: target.clone(),
-            all: *all,
-            json: *json,
-            branch: branch.clone(),
-        },
-        Some(Command::Overview {
-            json, watch: false, ..
-        }) => Request::Overview {
-            folder: folder.to_path_buf(),
-            caller: sluice::caller::here(),
-            json: *json,
-        },
-        Some(Command::Submit {
-            branch,
-            after,
-            check: true,
-            head,
-            worktree,
-            json,
-            ..
-        }) if worktree.len() <= 1 => Request::Forecast {
-            folder: folder.to_path_buf(),
-            caller: sluice::caller::here(),
-            branch: branch.clone(),
-            worktree: folder_of(worktree.first().map_or(".", String::as_str)),
-            head: head.clone(),
-            after: after.clone(),
-            json: *json,
-        },
-        Some(Command::Inbox {
-            worktree,
-            json,
-            confirm,
-            new,
-        }) => Request::Inbox {
-            folder: folder.to_path_buf(),
-            caller: sluice::caller::here(),
-            worktree: folder_of(worktree),
-            json: *json,
-            confirm: *confirm,
-            new: *new,
-        },
-        Some(Command::Previews { json }) => Request::Previews {
-            folder: folder.to_path_buf(),
-            caller: sluice::caller::here(),
-            json: *json,
-        },
-        _ => return None,
-    })
-}
-
-/// The request a change command sends to sluice's host process, naming its
-/// caller's session and trace context; `None` for a command that is no
-/// change (the change `sluice-host-makes-each-change`, design D1).
-fn change_request(cli: &Cli, folder: &Path) -> Option<sluice::host_process::protocol::Request> {
-    use sluice::host_process::protocol::{Request, SubmitAsk};
-    let folder = folder.to_path_buf();
-    let caller = sluice::caller::traced();
-    Some(match &cli.command {
-        Some(Command::Submit {
-            branch,
-            after,
-            priority,
-            no_wait,
-            subject,
-            check: false,
-            head,
-            status,
-            worktree,
-            json,
-            confirm,
-            confirm_landing,
-        }) => Request::Submit {
-            folder,
-            caller,
-            submit: SubmitAsk {
-                branch: branch.clone(),
-                after: after.clone(),
-                priority: *priority,
-                no_wait: *no_wait,
-                subject: subject.clone(),
-                head: head.clone(),
-                status: *status,
-                worktree: worktree.clone(),
-                json: *json,
-                confirm: *confirm,
-                confirm_landing: *confirm_landing,
-            },
-        },
-        Some(Command::Amend {
-            id,
-            after,
-            priority,
-            by,
-            json,
-            branch,
-        }) => Request::Amend {
-            folder,
-            caller,
-            id: *id,
-            after: after.clone(),
-            priority: *priority,
-            by: by.clone(),
-            json: *json,
-            branch: branch.clone(),
-        },
-        Some(Command::Withdraw {
-            id,
-            by,
-            json,
-            branch,
-        }) => Request::Withdraw {
-            folder,
-            caller,
-            id: *id,
-            by: by.clone(),
-            json: *json,
-            branch: branch.clone(),
-        },
-        Some(Command::Confirm {
-            keys,
-            who,
-            worktree,
-            json,
-        }) => Request::Confirm {
-            worktree: from_folder(&folder, worktree),
-            folder,
-            caller,
-            keys: keys.clone(),
-            who: who.clone(),
-            json: *json,
-        },
-        Some(Command::Release {
-            name: Some(name),
-            accept_failure,
-            json,
-            ..
-        }) => Request::Release {
-            folder,
-            caller,
-            name: name.clone(),
-            accept_failure: *accept_failure,
-            json: *json,
-        },
-        Some(Command::Branch { command }) => Request::Branch {
-            folder,
-            caller,
-            branch: command.clone(),
-        },
-        Some(Command::Protect { remove, json }) => Request::Protect {
-            folder,
-            caller,
-            remove: *remove,
-            json: *json,
-        },
-        _ => return None,
-    })
 }
 
 /// A change, made by sluice's host process, started where none answers:
@@ -583,7 +395,7 @@ fn change(cli: &Cli) -> Option<i32> {
         Err(e) => {
             let e = anyhow::Error::from(e);
             eprintln!("sluice: {e:#}");
-            tell_json(cli.json(), &e);
+            sluice::asks::tell_json(cli.json(), &e);
             return Some(3);
         }
     };
@@ -593,19 +405,19 @@ fn change(cli: &Cli) -> Option<i32> {
     };
     let request = match step {
         Some(_) => None,
-        None => Some(change_request(cli, &folder)?),
+        None => Some(sluice::asks::change_request(cli, &folder)?),
     };
     // 124: a command still reads the host's settings in full, and refuses
     // a field it does not know, naming the file and the field.
     if let Err(e) = Instance::read() {
         eprintln!("sluice: {e:#}");
-        tell_json(cli.json(), &e);
+        sluice::asks::tell_json(cli.json(), &e);
         return Some(3);
     }
     let did_not = |e: anyhow::Error| {
         let e = e.context("sluice's host process did not answer");
         eprintln!("sluice: {e:#}");
-        tell_json(cli.json(), &e);
+        sluice::asks::tell_json(cli.json(), &e);
         Some(3)
     };
     let client = match sluice::host_process::client::Client::host() {
@@ -692,7 +504,7 @@ fn change(cli: &Cli) -> Option<i32> {
         Ok(code) => Some(code),
         Err(e) => {
             sluice::telemetry::error(&format!("sluice: {e:#}"));
-            tell_json(cli.json(), &e);
+            sluice::asks::tell_json(cli.json(), &e);
             Some(3)
         }
     }
@@ -709,105 +521,25 @@ fn read(cli: &Cli) -> Option<i32> {
         Err(e) => {
             let e = anyhow::Error::from(e);
             eprintln!("sluice: {e:#}");
-            tell_json(cli.json(), &e);
+            sluice::asks::tell_json(cli.json(), &e);
             return Some(3);
         }
     };
-    let request = read_request(cli, &folder)?;
+    let request = sluice::asks::read_request(cli, &folder)?;
     // 124: a command still reads the host's settings in full, and refuses
     // a field it does not know, naming the file and the field.
     if let Err(e) = Instance::read() {
         eprintln!("sluice: {e:#}");
-        tell_json(cli.json(), &e);
+        sluice::asks::tell_json(cli.json(), &e);
         return Some(3);
     }
-    let asked = sluice::host_process::client::Client::host().and_then(|c| c.output(&request));
-    match asked {
-        Ok(output) => {
-            let mut out = std::io::stdout();
-            let _ = out.write_all(output.stdout.as_bytes());
-            let _ = out.flush();
-            for line in &output.stderr {
-                eprintln!("{line}");
-            }
-            Some(output.code)
-        }
-        Err(e) => {
-            let e = e.context("sluice's host process did not answer");
-            eprintln!("sluice: {e:#}");
-            tell_json(cli.json(), &e);
-            Some(3)
-        }
-    }
-}
-
-/// The request a session's command sends to sluice's host process; `None`
-/// for any other command (the change `sluice-host-runs-a-sessions-checks`,
-/// design D1, D2).
-fn session_request(cli: &Cli, folder: &Path) -> Option<sluice::host_process::protocol::Request> {
-    use sluice::host_process::protocol::Request;
-    let caller = sluice::caller::traced();
-    let run_env = sluice::profiles::checks::run_env_here();
-    let otel = cli.choices();
-    let folder_of = |path: &str| from_folder(folder, path);
-    Some(match &cli.command {
-        Some(Command::Exec {
-            branch,
-            command,
-            worktree,
-            json,
-            release,
-        }) => Request::Exec {
-            folder: folder.to_path_buf(),
-            caller,
-            run_env,
-            otel: otel.clone(),
-            branch: branch.clone(),
-            command: command.clone(),
-            worktree: folder_of(worktree),
-            json: *json,
-            release: *release,
-        },
-        Some(Command::Preview {
-            branch,
-            revision,
-            wait,
-            json,
-        }) => Request::Preview {
-            folder: folder.to_path_buf(),
-            caller,
-            run_env,
-            otel: otel.clone(),
-            branch: branch.clone(),
-            revision: revision.clone(),
-            wait: *wait,
-            json: *json,
-        },
-        Some(Command::Equip { branch, at, json }) => Request::Equip {
-            folder: folder.to_path_buf(),
-            caller,
-            run_env,
-            otel: otel.clone(),
-            branch: branch.clone(),
-            at: at.clone(),
-            json: *json,
-        },
-        Some(Command::Release {
-            name: None,
-            worktree,
-            accept_failure,
-            json,
-        }) => Request::ReleaseWorktree {
-            folder: folder.to_path_buf(),
-            caller,
-            run_env,
-            otel: otel.clone(),
-            worktree: folder_of(worktree),
-            accept_failure: *accept_failure,
-            json: *json,
-        },
-        _ => return None,
-    })
+    let mut out = std::io::stdout();
+    Some(sluice::asks::read(
+        sluice::host_process::client::Client::host(),
+        &request,
+        cli.json(),
+        &mut out,
+    ))
 }
 
 /// A session's command, run by sluice's host process, started where none
@@ -821,16 +553,16 @@ fn session(cli: &Cli) -> Option<i32> {
         Err(e) => {
             let e = anyhow::Error::from(e);
             eprintln!("sluice: {e:#}");
-            tell_json(cli.json(), &e);
+            sluice::asks::tell_json(cli.json(), &e);
             return Some(3);
         }
     };
-    let request = session_request(cli, &folder)?;
+    let request = sluice::asks::session_request(cli, &folder)?;
     // 124: a command still reads the host's settings in full, and refuses
     // a field it does not know, naming the file and the field.
     if let Err(e) = Instance::read() {
         eprintln!("sluice: {e:#}");
-        tell_json(cli.json(), &e);
+        sluice::asks::tell_json(cli.json(), &e);
         return Some(3);
     }
     // Record 0120 as amended 2026-11-17 (rule core.10): a worktree's
@@ -843,7 +575,7 @@ fn session(cli: &Cli) -> Option<i32> {
     );
     if let Err(e) = sluice::stop_on_interrupt() {
         eprintln!("sluice: {e:#}");
-        tell_json(cli.json(), &e);
+        sluice::asks::tell_json(cli.json(), &e);
         return Some(3);
     }
     let ran = match release {
@@ -862,7 +594,7 @@ fn session(cli: &Cli) -> Option<i32> {
         Ok(code) => code,
         Err(e) => {
             eprintln!("sluice: {e:#}");
-            tell_json(cli.json(), &e);
+            sluice::asks::tell_json(cli.json(), &e);
             3
         }
     })
@@ -903,7 +635,7 @@ fn watch(cli: &Cli) -> Option<i32> {
         Ok(code) => code,
         Err(e) => {
             sluice::telemetry::error(&format!("sluice: {e:#}"));
-            tell_json(true, &e);
+            sluice::asks::tell_json(true, &e);
             3
         }
     })
@@ -929,7 +661,7 @@ fn wait(cli: &Cli) -> Option<i32> {
     // 124: a command still reads the host's settings in full.
     if let Err(e) = Instance::read() {
         eprintln!("sluice: {e:#}");
-        tell_json(*json, &e);
+        sluice::asks::tell_json(*json, &e);
         return Some(3);
     }
     let every = sluice::tick(cli.command.as_ref());
@@ -949,7 +681,11 @@ fn wait(cli: &Cli) -> Option<i32> {
                 target: target.clone(),
                 branch: branch.clone(),
                 pull_request: *pull_request,
-                worktree: Some(from_folder(&folder, worktree).display().to_string()),
+                worktree: Some(
+                    sluice::asks::from_folder(&folder, worktree)
+                        .display()
+                        .to_string(),
+                ),
                 json: *json,
                 confirm: *confirm,
                 confirm_landing: *confirm_landing,
@@ -963,7 +699,7 @@ fn wait(cli: &Cli) -> Option<i32> {
         Ok(code) => Some(code),
         Err(e) => {
             sluice::telemetry::error(&format!("sluice: {e:#}"));
-            tell_json(*json, &e);
+            sluice::asks::tell_json(*json, &e);
             Some(3)
         }
     }
@@ -1195,12 +931,3 @@ fn retry(cli: &Cli) -> Policy {
 /// Set to `record` in tests, the pauses between a run's or a wait's rounds
 /// are skipped, and the clock the command reads moved on by each.
 const ROUND_SLEEP_VAR: &str = "SLUICE_ROUND_SLEEP";
-
-/// sluice failing itself (exit 3), told on stdout as well when the reader
-/// asked for JSON and waits for it there.
-fn tell_json(json: bool, e: &anyhow::Error) {
-    if json {
-        let d = sluice::told::document(sluice::told::Kind::Internal, &format!("{e:#}"), &[]);
-        println!("{d}");
-    }
-}
