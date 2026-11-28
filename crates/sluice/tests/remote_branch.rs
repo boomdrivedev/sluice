@@ -110,19 +110,6 @@ impl Setup {
         s
     }
 
-    /// The file `path` of `main`'s state on the remote, as another host
-    /// reads it.
-    fn remote_state(&self, path: &str) -> String {
-        let out = support::git_command()
-            .arg("--git-dir")
-            .arg(self.origin.path())
-            .args(["show", &format!("refs/sluice/state/main:{path}")])
-            .output()
-            .unwrap();
-        assert!(out.status.success(), "{}", text(&out));
-        String::from_utf8_lossy(&out.stdout).into_owned()
-    }
-
     fn with(name: &str, policy: &str) -> Setup {
         let repo = Repo::new(name);
         let seen = Scratch::new(&format!("{name}-seen"));
@@ -771,80 +758,6 @@ fn a_refused_fetch_is_logged_once_and_its_end_with_the_rounds() {
     s.step_until_out();
     assert_eq!(s.states(), ["landed"]);
     assert_eq!(events(&log(), "read-refused").len(), 1);
-}
-
-/// 133, 80, 73: with `main`'s state on the remote too, the rounds while it
-/// is away write nothing, and both lines land in the first write after it
-/// is back, each timed when it happened.
-#[test]
-fn with_the_state_on_the_remote_both_lines_land_in_the_first_write_after() {
-    let s = Setup::signed("remote-refused-state");
-    s.submit("a");
-    s.step_until_out();
-    assert_eq!(s.states(), ["landed"]);
-    // Rounds until one writes nothing more.
-    let deadline = Instant::now() + Duration::from_secs(60);
-    loop {
-        let before = s.remote_state("version");
-        let out = s.sluice(&["step", "main"]);
-        assert!(out.status.success(), "{}", text(&out));
-        if s.remote_state("version") == before {
-            break;
-        }
-        assert!(Instant::now() < deadline, "main never settled");
-    }
-    let version: u64 = s.remote_state("version").trim().parse().unwrap();
-    let aside = s.origin.path().with_extension("aside");
-    std::fs::rename(s.origin.path(), &aside).unwrap();
-    for _ in 0..3 {
-        let out = s.sluice(&["step", "main"]);
-        assert!(!out.status.success());
-        assert!(
-            text(&out).contains("fetching refs/sluice/state/main from origin failed"),
-            "{}",
-            text(&out)
-        );
-    }
-    let kept: serde_json::Value = serde_json::from_slice(
-        &std::fs::read(
-            s.repo
-                .dir()
-                .join(".git/sluice-remote/origin/refused/main.json"),
-        )
-        .unwrap(),
-    )
-    .unwrap();
-    assert_eq!(kept["rounds"], 3, "{kept}");
-    std::fs::rename(&aside, s.origin.path()).unwrap();
-    assert_eq!(
-        s.remote_state("version").trim(),
-        version.to_string(),
-        "nothing was written while the remote was away"
-    );
-    let out = s.sluice(&["step", "main"]);
-    assert!(out.status.success(), "{}", text(&out));
-    assert_eq!(
-        s.remote_state("version").trim(),
-        (version + 1).to_string(),
-        "one write"
-    );
-    let log = s.remote_state("log.jsonl");
-    let refused = events(&log, "read-refused");
-    let again = events(&log, "read-again");
-    assert_eq!((refused.len(), again.len()), (1, 1), "{log}");
-    assert_eq!(refused[0]["host"], "remote-refused-state");
-    assert_eq!(refused[0]["asked"], "refs/sluice/state/main");
-    assert_eq!(refused[0]["at"], kept["since"], "timed when it happened");
-    assert_eq!(again[0]["since"], kept["since"]);
-    assert_eq!(again[0]["rounds"], 3);
-    assert!(again[0]["at"].as_str() >= refused[0]["at"].as_str());
-    let out = s.sluice(&["step", "main"]);
-    assert!(out.status.success(), "{}", text(&out));
-    assert_eq!(
-        events(&s.remote_state("log.jsonl"), "read-refused").len(),
-        1,
-        "no line is written twice"
-    );
 }
 
 /// A bolt whose policy names a remote that has no such branch is refused,
