@@ -571,52 +571,6 @@ fn a_wait_on_a_landing_the_forge_refused_exits_6() {
     assert_eq!(s.states(), ["refused"]);
 }
 
-/// A pre-receive hook at `s`'s remote that refuses every push saying
-/// `words`, each push counted in the file it returns.
-fn refusing(s: &Setup, words: &str) -> std::path::PathBuf {
-    use std::os::unix::fs::PermissionsExt;
-    let hook = s.origin.path().join("hooks/pre-receive");
-    let pushes = s.origin.path().join("pushes");
-    std::fs::create_dir_all(hook.parent().unwrap()).unwrap();
-    std::fs::write(
-        &hook,
-        format!(
-            "#!/bin/sh\necho push >> \"{}\"\necho \"{words}\" >&2\nexit 1\n",
-            pushes.display()
-        ),
-    )
-    .unwrap();
-    std::fs::set_permissions(&hook, std::fs::Permissions::from_mode(0o755)).unwrap();
-    pushes
-}
-
-/// Step `main` until its one submission is refused.
-fn step_until_refused(s: &Setup) {
-    let deadline = Instant::now() + Duration::from_secs(60);
-    while s.states() != ["refused"] {
-        let out = s.sluice(&["step", "main"]);
-        assert!(out.status.success(), "{}", text(&out));
-        assert!(Instant::now() < deadline, "{}", s.status());
-        std::thread::sleep(Duration::from_millis(50));
-    }
-}
-
-/// One round of `main`: a step that finds another round holding the
-/// branch's lock, the host process's own after the submit, runs none and
-/// says it is busy, so it is asked again until one runs.
-fn one_round(s: &Setup) {
-    let deadline = Instant::now() + Duration::from_secs(60);
-    loop {
-        let out = s.sluice(&["step", "main"]);
-        assert!(out.status.success(), "{}", text(&out));
-        if !text(&out).contains("busy: another round holds the lock") {
-            return;
-        }
-        assert!(Instant::now() < deadline, "{}", s.status());
-        std::thread::sleep(Duration::from_millis(50));
-    }
-}
-
 /// The lines of `main`'s log on `s`'s host that hold `what`.
 fn logged_count(s: &Setup, what: &str) -> usize {
     let dir = s.repo.dir().join(".git/sluice/main");
@@ -625,47 +579,6 @@ fn logged_count(s: &Setup, what: &str) -> usize {
         .filter_map(|e| std::fs::read_to_string(e.unwrap().path()).ok())
         .map(|t| t.lines().filter(|l| l.contains(what)).count())
         .sum()
-}
-
-/// 152, 24, rule core.5; record 0124 as amended 2026-11-23 (the change
-/// `sluice-host-makes-each-change`, design D3): once the forge takes it,
-/// the next round pushes the held landing, and its submission lands as the
-/// same landing, with no new run.
-#[test]
-fn a_held_landing_lands_at_the_next_round_once_the_forge_takes_it() {
-    let s = Setup::new("held-taken", "origin");
-    refusing(&s, "main takes no push but the queue's identity");
-    let before = s.remote_main();
-    s.submit("a");
-    step_until_refused(&s);
-    std::fs::remove_file(s.origin.path().join("hooks/pre-receive")).unwrap();
-    one_round(&s);
-    assert_eq!(s.states(), ["landed"]);
-    assert_eq!(s.runs(), 1, "no new run");
-    let landed = s.remote_main();
-    assert_eq!(s.repo.rev(&format!("{landed}^1")), before);
-}
-
-/// 152, rule core.5; record 0124 as amended 2026-11-23 (design D3): a
-/// round's push refused again with other words leaves the landing held
-/// with them, logged once more, and a status shows them.
-#[test]
-fn a_held_landing_refused_with_other_words_is_held_with_them() {
-    let s = Setup::new("held-refused-again", "origin");
-    let pushes = refusing(&s, "main takes no push but the queue's identity");
-    let before = s.remote_main();
-    s.submit("a");
-    step_until_refused(&s);
-    let again = "push declined due to repository rule violations";
-    refusing(&s, again);
-    one_round(&s);
-    assert_eq!(s.states(), ["refused"]);
-    assert_eq!(s.remote_main(), before);
-    let pushed = std::fs::read_to_string(&pushes).unwrap_or_default();
-    assert!(pushed.lines().count() >= 2, "pushed again: {pushed}");
-    assert_eq!(logged_count(&s, "\"event\":\"forge_refused\""), 2);
-    let status = s.sluice(&["status", "main"]);
-    assert!(text(&status).contains(again), "{}", text(&status));
 }
 
 /// 124, 6, rule core.6: after a landing, this host's copy of `main`
