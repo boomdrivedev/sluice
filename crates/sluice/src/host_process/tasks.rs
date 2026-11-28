@@ -2233,6 +2233,72 @@ mod tests {
         }
     }
 
+    /// [`settle`] twenty times: what a minute of an idle scheduler starts
+    /// on a paused clock, run to its end.
+    async fn settled() {
+        for _ in 0..20 {
+            settle().await;
+        }
+    }
+
+    /// host-events, "An idle host process on a paused clock"
+    /// (`tokio-streams-before-rxrust@0b9fc11cda8b`): a scheduler with
+    /// nothing in play, its clock paused and moved ten minutes, woke once a
+    /// minute for the backstop's timer and once for the end of the reading
+    /// it started, and for no poll and no job.
+    #[tokio::test(start_paused = true)]
+    async fn an_idle_host_process_wakes_only_for_its_timers() {
+        let fakes = Fakes::default();
+        let tasks = fakes.tasks();
+        let repo = PathBuf::from("/host/idle.git");
+        tasks.look(&repo);
+        soon("its first look", || fakes.seen.looks(&repo).len() == 1).await;
+        settled().await;
+        let wakes = tasks.wakes();
+        let load = |n: &AtomicU64| n.load(Ordering::SeqCst);
+        let (timers, jobs, landed) = (load(&wakes.timers), load(&wakes.jobs), load(&wakes.landed));
+        for minute in 1..=10u64 {
+            tokio::time::advance(Duration::from_secs(60)).await;
+            settled().await;
+            assert_eq!(load(&wakes.timers) - timers, minute, "its timers");
+            assert_eq!(load(&wakes.landed) - landed, minute, "its readings");
+            assert_eq!(load(&wakes.jobs) - jobs, 0, "no job came");
+        }
+        assert_eq!(fakes.seen.looks(&repo).len(), 11);
+        assert!(!tasks.any(), "nothing keeps the host process");
+    }
+
+    /// host-events, "Three idle repositories for a minute": with no event
+    /// and no command, each repository the host process holds is read once
+    /// in the minute after its start, at the minute's backstop.
+    #[tokio::test(start_paused = true)]
+    async fn three_idle_repositories_are_read_once_a_minute() {
+        let fakes = Fakes::default();
+        let tasks = fakes.tasks();
+        let repos: Vec<PathBuf> = ["a", "b", "c"]
+            .iter()
+            .map(|n| PathBuf::from(format!("/host/{n}.git")))
+            .collect();
+        for r in &repos {
+            tasks.look(r);
+        }
+        soon("the looks at the start", || {
+            repos.iter().all(|r| fakes.seen.looks(r).len() == 1)
+        })
+        .await;
+        settled().await;
+        for second in 0..60 {
+            tokio::time::advance(Duration::from_secs(1)).await;
+            settled().await;
+            let want = if second < 59 { 1 } else { 2 };
+            for r in &repos {
+                let looks = fakes.seen.looks(r).len();
+                assert_eq!(looks, want, "{} at {}s", r.display(), second + 1);
+            }
+        }
+        assert!(locked(&fakes.seen.passes).is_empty(), "no pass");
+    }
+
     /// 26, 135 (design D5): a worker that panics ends its own thread alone,
     /// and is bound again at its next tick; another repository's worker
     /// passes meanwhile.
