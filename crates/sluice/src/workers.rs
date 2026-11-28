@@ -894,13 +894,31 @@ pub fn sweep(owner: &Owner) -> Swept {
         ..Swept::default()
     };
     // Each process of `sluice host` records itself before its exec, so a
-    // child of the earlier image that still runs has a record.
-    let me = std::process::id() as i32;
+    // child of the earlier image that still runs has a record. Whether a
+    // record names a child of this process is asked of nix's `waitpid`
+    // without blocking, never of the process's details, which a child
+    // that is exiting no longer gives: one that runs is waited on again,
+    // and one that ended since the reap above is reaped now.
     if let Some(edge) = EDGE.get() {
+        use nix::sys::wait::{waitpid, WaitPidFlag, WaitStatus};
         for r in records(&owner.dir) {
-            if r.of(owner) && r.live() && parent(r.pid) == Some(me) {
-                adopt(edge, &owner.dir, r.pid);
-                swept.kept.push(r.pid);
+            if !r.of(owner) || swept.reaped.contains(&r.pid) {
+                continue;
+            }
+            let asked = loop {
+                match waitpid(Pid::from_raw(r.pid), Some(WaitPidFlag::WNOHANG)) {
+                    Err(nix::errno::Errno::EINTR) => {}
+                    asked => break asked,
+                }
+            };
+            match asked {
+                Ok(WaitStatus::StillAlive) => {
+                    adopt(edge, &owner.dir, r.pid);
+                    swept.kept.push(r.pid);
+                }
+                Ok(_) => swept.reaped.push(r.pid),
+                // No child of this process.
+                Err(_) => {}
             }
         }
     }
@@ -1258,6 +1276,31 @@ mod tests {
         command
     }
 
+    /// Block until the child `pid` has ended, and leave it unwaited on, a
+    /// zombie, as the earlier image of `sluice host` leaves a child that
+    /// ended: the system's `waitid` with `WNOWAIT`, which nix gives on
+    /// Linux alone.
+    fn until_ended_unwaited(pid: i32) {
+        // SAFETY: siginfo_t is plain data, and zeroed is a valid value.
+        let mut info: libc::siginfo_t = unsafe { std::mem::zeroed() };
+        loop {
+            // SAFETY: waitid writes only `info`, which it is given.
+            let asked = unsafe {
+                libc::waitid(
+                    libc::P_PID,
+                    pid as libc::id_t,
+                    &mut info,
+                    libc::WEXITED | libc::WNOWAIT,
+                )
+            };
+            if asked == 0 {
+                return;
+            }
+            let e = std::io::Error::last_os_error();
+            assert_eq!(e.raw_os_error(), Some(libc::EINTR), "waitid {pid}: {e}");
+        }
+    }
+
     /// `nothing-detached@f807c7f5fcea`: as `sluice host` starts, each
     /// child that its earlier image left and that has ended, recorded as a
     /// worker or not, is reaped, so none of them stays a zombie of the
@@ -1265,14 +1308,12 @@ mod tests {
     /// image before its hand-over in place, a zombie for 16 hours). The
     /// sweep reaps each one and removes its record before it returns, so
     /// no one sees a reaped child whose record stands, however loaded the
-    /// host. Nothing is timed: the children have ended once `SIGCHLD` says
+    /// host. Nothing is timed: the children have ended once `waitid` says
     /// so, and what the sweep left is read as it returns, while every core
     /// is kept busy, as under the load that left a record standing (a reap
     /// on another thread, its record removed after, loses that race).
-    #[tokio::test(flavor = "current_thread")]
-    async fn a_sweep_reaps_each_child_its_earlier_image_left() {
-        let signal = tokio::signal::unix::SignalKind::child();
-        let mut ends = tokio::signal::unix::signal(signal).unwrap();
+    #[test]
+    fn a_sweep_reaps_each_child_its_earlier_image_left() {
         let cores = std::thread::available_parallelism().map_or(2, |n| n.get());
         for round in 0..8 {
             let dir = scratch(&format!("sweep-reaps-{round}"));
@@ -1285,10 +1326,8 @@ mod tests {
                 .spawn()
                 .unwrap()
                 .id() as i32;
-            // A child is a zombie before its parent is sent `SIGCHLD`.
-            while [recorded, unrecorded].iter().any(|p| started(*p).is_some()) {
-                ends.recv().await;
-            }
+            until_ended_unwaited(recorded);
+            until_ended_unwaited(unrecorded);
             let busy = std::sync::Arc::new(AtomicBool::new(true));
             let load: Vec<_> = (0..cores * 2)
                 .map(|_| {
