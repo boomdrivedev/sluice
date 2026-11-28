@@ -32,6 +32,7 @@
 //! moon is only asked a question in is equipped up to the version check;
 //! one moon runs a task in, through the setup.
 
+use crate::workers::Run as _;
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 use std::process::{Output, Stdio};
@@ -506,32 +507,10 @@ impl Moon {
             .env_clear()
             .envs(cx.env)
             .envs(env.iter().copied());
-        let Some(input) = input else {
-            return command.stdin(Stdio::null()).output();
-        };
-        let mut child = command
-            .stdin(Stdio::piped())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .spawn()?;
-        let mut stdin = child.stdin.take().expect("stdin is piped");
-        // Written beside the read of its output, so a long list never
-        // waits on a pipe moon has not read.
-        std::thread::scope(|s| {
-            let writer = s.spawn(move || {
-                use std::io::Write as _;
-                stdin.write_all(input)
-            });
-            let out = child.wait_with_output();
-            let written = writer.join().expect("the writer of moon's stdin");
-            let out = out?;
-            // A moon that failed says why in what it printed; one that
-            // answered without reading the whole list answered for less.
-            match written {
-                Err(e) if out.status.success() => Err(e),
-                _ => Ok(out),
-            }
-        })
+        match input {
+            None => command.worker_output(),
+            Some(input) => command.worker_output_with(input.to_vec()),
+        }
     }
 
     /// The moon the toolchain puts first, refused below `FLOOR`. Its
@@ -906,23 +885,14 @@ impl Tree {
 /// A file of `revision`'s tree, read by `git cat-file --batch
 /// --follow-symlinks` in the place, as [`file_at`] says.
 fn file_by_git(git: &std::ffi::OsStr, place: &Path, revision: &str, path: &str) -> Option<Vec<u8>> {
-    use std::io::Write;
-    let mut child = crate::workers::command(git, "git")
+    let out = crate::workers::command(git, "git")
         .current_dir(place)
         .args(["cat-file", "--batch", "--follow-symlinks", "-Z"])
         .env_remove("GIT_DIR")
         .env_remove("GIT_WORK_TREE")
         .env_remove("GIT_INDEX_FILE")
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::null())
-        .spawn()
+        .worker_output_with(format!("{revision}:{path}\0").into_bytes())
         .ok()?;
-    let mut ask = child.stdin.take()?;
-    let asked = ask.write_all(format!("{revision}:{path}\0").as_bytes());
-    drop(ask);
-    let out = child.wait_with_output().ok()?;
-    asked.ok()?;
     if !out.status.success() {
         return None;
     }
@@ -954,7 +924,7 @@ fn changed_files(place: &Path, base: &str, head: &str) -> Result<Vec<String>> {
         .env_remove("GIT_WORK_TREE")
         .env_remove("GIT_INDEX_FILE")
         .stdin(Stdio::null())
-        .output()
+        .worker_output()
         .context("running git diff")?;
     if !out.status.success() {
         bail!(

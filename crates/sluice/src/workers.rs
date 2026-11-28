@@ -24,23 +24,42 @@
 //! two seconds of the record's write. So a pid that the system gave to
 //! another process is never ended.
 //!
+//! In `sluice host`, each worker starts on its tokio edge through
+//! process-wrap, with `ProcessGroup` and `KillOnDrop`, and a task of the
+//! edge owns it and waits on it ([`edge`], [`output`], [`start`];
+//! `each-worker-starts-through-process-wrap@025fae162990`). Its core waits
+//! on that task from the blocking pool, and builds no runtime and starts
+//! no thread. A drop of a worker that runs kills its whole group, which
+//! tokio's kill on drop does not, through process-wrap's group kill; and
+//! once its leader has ended, what is left of its group, which no wait of
+//! this process reaches, is looked at within its grace, then killed. A
+//! process with no runtime, a command, a run's supervisor or the git hook,
+//! starts its processes as std's `Command` does, and weir-bounded bounds
+//! them.
+//!
 //! When `sluice host` stops, it ends each worker's group ([`stop`]). When it
-//! starts, it ends each group that a killed host process left, and it waits
-//! again on each child that an earlier image of its own process started, a
-//! worker or not, and one that has ended already among them ([`sweep`]).
-//! A process that is not `sluice host` has no owner, and [`take`] does
-//! nothing in it.
+//! starts, before its first worker, it reaps each child of its earlier
+//! image that has ended, by nix's `waitpid` on any child, waits again on
+//! each recorded child of that image that runs, and ends each group that a
+//! killed host process left ([`sweep`]). A process that is not `sluice
+//! host` has no owner, and [`take`] does nothing in it.
 
 use std::collections::BTreeSet;
 use std::os::unix::ffi::OsStrExt;
 use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
-use std::process::Command;
+use std::process::{Command, ExitStatus, Output, Stdio};
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Mutex, OnceLock};
-use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+use std::sync::{Arc, Mutex, OnceLock};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
+use nix::sys::signal::{killpg, Signal};
+use nix::unistd::Pid;
+use process_wrap::tokio::{ChildWrapper, CommandWrap, KillOnDrop, ProcessGroup};
 use serde::{Deserialize, Serialize};
+use tokio::io::AsyncWriteExt as _;
+use tokio_util::sync::CancellationToken;
+use tokio_util::task::TaskTracker;
 
 /// The folder of the records, in `host/`.
 pub const DIR: &str = "workers";
@@ -259,43 +278,536 @@ fn record_self(dir: &[u8], body: &[u8]) -> std::io::Result<()> {
     Ok(())
 }
 
-/// Wait on `child`, a worker of this process, on a thread of its own: when
-/// it ends, its record goes, and the hook of [`own`] is called.
-pub fn wait(mut child: std::process::Child) {
-    let pid = child.id() as i32;
-    CHILDREN.lock().expect("the children").insert(pid);
-    std::thread::spawn(move || {
-        let _ = child.wait();
-        ended(pid);
+/// The edge of `sluice host`, on which each of its workers starts and is
+/// waited on (`each-worker-starts-through-process-wrap@025fae162990`,
+/// `a-residents-core-stays-synchronous-behind-a-tokio-edge@914dd32ed8dd`).
+struct Edge {
+    /// The runtime of the host process, which its `main` built.
+    handle: tokio::runtime::Handle,
+    /// The owner task of each worker.
+    tracker: TaskTracker,
+    /// Cancelled as the host process stops: each owner task then ends its
+    /// worker's group.
+    stop: CancellationToken,
+}
+
+static EDGE: OnceLock<Edge> = OnceLock::new();
+
+/// Start each worker of this process on the runtime of `handle`, through
+/// process-wrap, owned by a task that the edge tracks. `sluice host` calls
+/// it once, inside its runtime, before [`sweep`]. A process that never
+/// calls it, a command, a run's supervisor or the git hook, has no
+/// runtime, and starts its processes as std's `Command` does.
+pub fn edge(handle: tokio::runtime::Handle) {
+    let _ = EDGE.set(Edge {
+        handle,
+        tracker: TaskTracker::new(),
+        stop: CancellationToken::new(),
     });
 }
 
-/// Wait on `pid`, a child that an earlier image of this process started,
-/// on a thread of its own, as [`wait`] does: when it ends, its record in
-/// `dir` goes.
-fn adopt(dir: &Path, pid: i32) {
+/// How often a group whose leader has ended is looked at within its grace.
+const LOOK: Duration = Duration::from_millis(50);
+
+/// A worker as its owner task holds it: the leader of a process group of
+/// its own, started through process-wrap's `ProcessGroup` with its
+/// `KillOnDrop`. tokio's kill on drop reaches the leader alone, so a drop
+/// before the leader was waited on kills the whole group first, through
+/// process-wrap's group kill: git, nix and a check start children of
+/// their own.
+struct Owned {
+    child: Box<dyn ChildWrapper>,
+    group: i32,
+    waited: bool,
+}
+
+impl Drop for Owned {
+    fn drop(&mut self) {
+        if !self.waited {
+            // The leader is not reaped, so the group is still its own.
+            let _ = self.child.start_kill();
+        }
+    }
+}
+
+impl Owned {
+    /// Start `command`, which [`command`] or [`take`] made, in a process
+    /// group of its own.
+    fn spawn(command: Command) -> std::io::Result<Owned> {
+        let mut wrapped = CommandWrap::from(tokio::process::Command::from(command));
+        wrapped.wrap(ProcessGroup::leader()).wrap(KillOnDrop);
+        let child = wrapped.spawn()?;
+        let group = child
+            .id()
+            .ok_or_else(|| std::io::Error::other("a worker ended before its pid was read"))?
+            as i32;
+        Ok(Owned {
+            child,
+            group,
+            waited: false,
+        })
+    }
+
+    /// Wait on the leader.
+    async fn wait(&mut self) -> std::io::Result<ExitStatus> {
+        let status = self.child.wait().await?;
+        self.waited = true;
+        Ok(status)
+    }
+
+    /// End the worker: its group is asked to end, given `grace`, then
+    /// killed, and the leader is waited on.
+    async fn end(&mut self, grace: Duration) -> std::io::Result<ExitStatus> {
+        let _ = self.child.signal(libc::SIGTERM);
+        if let Ok(status) = tokio::time::timeout(grace, self.wait()).await {
+            return status;
+        }
+        let _ = self.child.start_kill();
+        self.wait().await
+    }
+
+    /// Once the leader has ended: a process of its group that is no child
+    /// of this process, which no wait reaches, is looked at within
+    /// `grace`, then killed, and looked at until it is gone, as
+    /// [`end_groups_on_edge`] looks.
+    async fn settle(&self, grace: Duration) {
+        gone_within(&[self.group], grace).await;
+        if is_there(self.group) {
+            signal_group(self.group, Signal::SIGKILL);
+            gone_within(&[self.group], KILLED_FOR).await;
+        }
+    }
+}
+
+/// Run `future` as an owner task on the edge, and wait for its answer. A
+/// caller of the core waits so on the blocking pool, and builds no runtime
+/// and starts no thread.
+fn on_edge<T: Send + 'static>(
+    edge: &'static Edge,
+    future: impl std::future::Future<Output = std::io::Result<T>> + Send + 'static,
+) -> std::io::Result<T> {
+    let (answer, answered) = std::sync::mpsc::sync_channel(1);
+    edge.tracker.spawn_on(
+        async move {
+            let _ = answer.send(future.await);
+        },
+        &edge.handle,
+    );
+    answered
+        .recv()
+        .map_err(|_| std::io::Error::other("a worker's owner ended before it answered"))?
+}
+
+/// A refusal to start, once the host process stops.
+fn stopping() -> std::io::Error {
+    std::io::Error::from_raw_os_error(libc::ECANCELED)
+}
+
+/// `command` run to its end, its standard output and error kept, its
+/// standard input none, as std's `Command::output` gives it. In `sluice
+/// host` it runs as a worker of the edge: its group is ended once its
+/// leader has, given its grace, and at once where the host stops.
+pub fn output(command: &mut Command) -> std::io::Result<Output> {
+    command
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    run(command, None, None).map(|o| o.expect("no limit"))
+}
+
+/// `command` run as [`output`] runs it, to `limit`: `None` where the limit
+/// came first and its group was ended, `grace` given first. In a process
+/// with no edge, weir-bounded runs it, to its own grace.
+pub fn output_within(
+    command: &mut Command,
+    limit: Duration,
+    grace: Duration,
+) -> std::io::Result<Option<Output>> {
+    command
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    run(command, None, Some((limit, grace)))
+}
+
+/// `command` run as [`output`] runs it, with `input` its standard input:
+/// on the edge written beside the read of its output, so a long input
+/// never waits on a pipe it has not read; in a process with no edge,
+/// written whole to an unnamed file that it reads. A write that failed is the answer only
+/// where the command ended well: one that failed says why in what it
+/// printed.
+pub fn output_with(command: &mut Command, input: Vec<u8>) -> std::io::Result<Output> {
+    command
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    run(command, Some(input), None).map(|o| o.expect("no limit"))
+}
+
+/// `command` run to its end, its standard streams as it set them, and its
+/// exit.
+pub fn status(command: &mut Command) -> std::io::Result<ExitStatus> {
+    run(command, None, None).map(|o| o.expect("no limit").status)
+}
+
+/// `command` run to its end, or to `limit`, where `None` answers that the
+/// limit came first.
+fn run(
+    command: &mut Command,
+    input: Option<Vec<u8>>,
+    limit: Option<(Duration, Duration)>,
+) -> std::io::Result<Option<Output>> {
+    let command = std::mem::replace(command, Command::new("/"));
+    let Some(edge) = EDGE.get() else {
+        return run_here(command, input, limit.map(|(limit, _)| limit));
+    };
+    on_edge(edge, owned_run(edge, command, input, limit))
+}
+
+/// [`run`] on the edge, as the worker's owner task. Its output is read
+/// beside the wait on its leader. Once the leader ends, [`Owned::settle`]
+/// gives the rest of its group `grace`, then kills it, so a process that
+/// the leader left holding a pipe ends and the read ends with it. A pipe
+/// that a process outside the group holds past one more `grace` fails the
+/// call.
+async fn owned_run(
+    edge: &'static Edge,
+    command: Command,
+    input: Option<Vec<u8>>,
+    limit: Option<(Duration, Duration)>,
+) -> std::io::Result<Option<Output>> {
+    if edge.stop.is_cancelled() {
+        return Err(stopping());
+    }
+    let grace = limit.map_or(weir_bounded::GRACE, |(_, grace)| grace);
+    let mut held = Owned::spawn(command)?;
+    let stdin = held.child.stdin().take();
+    let stdout = held.child.stdout().take();
+    let stderr = held.child.stderr().take();
+    let mut reads = edge.tracker.spawn(async move {
+        let written = async move {
+            match (stdin, input) {
+                (Some(mut pipe), Some(input)) => {
+                    let wrote = pipe.write_all(&input).await;
+                    drop(pipe);
+                    wrote
+                }
+                _ => Ok(()),
+            }
+        };
+        tokio::join!(read_all(stdout), read_all(stderr), written)
+    });
+    let limited = async {
+        match limit {
+            Some((limit, _)) => tokio::time::sleep(limit).await,
+            None => std::future::pending().await,
+        }
+    };
+    let status = tokio::select! {
+        status = held.wait() => Ok(status),
+        () = limited => Err(None),
+        () = edge.stop.cancelled() => Err(Some(stopping())),
+    };
+    let status = match status {
+        Ok(status) => status?,
+        Err(why) => {
+            held.end(grace).await?;
+            forget(held.group);
+            reads.abort();
+            return match why {
+                Some(stopped) => Err(stopped),
+                None => Ok(None),
+            };
+        }
+    };
+    held.settle(grace).await;
+    forget(held.group);
+    let (out, err, written) = tokio::select! {
+        read = &mut reads => read.map_err(std::io::Error::other)?,
+        () = tokio::time::sleep(grace) => {
+            reads.abort();
+            return Err(std::io::Error::other(
+                "a process outside the worker's group held its output open",
+            ));
+        }
+    };
+    let output = Output {
+        status,
+        stdout: out?,
+        stderr: err?,
+    };
+    match written {
+        Err(e) if output.status.success() => Err(e),
+        _ => Ok(Some(output)),
+    }
+}
+
+/// [`output`], [`output_with`] and [`status`] as methods of a command
+/// that [`command`] made, so a call site reads as std's does.
+pub trait Run {
+    /// [`output`] of this command.
+    fn worker_output(&mut self) -> std::io::Result<Output>;
+    /// [`output_with`] of this command.
+    fn worker_output_with(&mut self, input: Vec<u8>) -> std::io::Result<Output>;
+    /// [`status`] of this command.
+    fn worker_status(&mut self) -> std::io::Result<ExitStatus>;
+}
+
+impl Run for Command {
+    fn worker_output(&mut self) -> std::io::Result<Output> {
+        output(self)
+    }
+
+    fn worker_output_with(&mut self, input: Vec<u8>) -> std::io::Result<Output> {
+        output_with(self, input)
+    }
+
+    fn worker_status(&mut self) -> std::io::Result<ExitStatus> {
+        status(self)
+    }
+}
+
+/// All that `pipe` gives until it ends.
+async fn read_all(pipe: Option<impl tokio::io::AsyncRead + Unpin>) -> std::io::Result<Vec<u8>> {
+    let mut bytes = Vec::new();
+    if let Some(mut pipe) = pipe {
+        tokio::io::AsyncReadExt::read_to_end(&mut pipe, &mut bytes).await?;
+    }
+    Ok(bytes)
+}
+
+/// `command` run in this process, which has no edge, as std runs it.
+fn run_here(
+    mut command: Command,
+    input: Option<Vec<u8>>,
+    limit: Option<Duration>,
+) -> std::io::Result<Option<Output>> {
+    if let Some(limit) = limit {
+        let ended = weir_bounded::output(&mut command, limit)?;
+        return Ok((!ended.stopped).then_some(Output {
+            status: ended.status,
+            stdout: ended.stdout,
+            stderr: ended.stderr,
+        }));
+    }
+    let Some(input) = input else {
+        return command.output().map(Some);
+    };
+    // The input is written whole to an unnamed file first, which the
+    // command reads as its standard input: no thread writes it.
+    use std::io::{Seek as _, Write as _};
+    let mut given = tempfile::tempfile()?;
+    given.write_all(&input)?;
+    given.seek(std::io::SeekFrom::Start(0))?;
+    command.stdin(Stdio::from(given)).output().map(Some)
+}
+
+/// A worker that outlives the call that starts it: a run's supervisor.
+/// Dropped while it runs, its group ends, unless [`Worker::keep`] gave it
+/// to its owner.
+pub struct Worker {
+    pid: u32,
+    inner: Inner,
+}
+
+enum Inner {
+    /// Owned by a task of the edge, which sets `ended` once it waited on
+    /// the worker.
+    Edge {
+        ended: Arc<Mutex<Option<std::io::Result<ExitStatus>>>>,
+        end: CancellationToken,
+        kept: bool,
+    },
+    /// Started in a process with no edge, as std starts it, and ended by
+    /// weir-bounded with its `grace`. `child` is `None` once it is kept.
+    Here {
+        child: Option<std::process::Child>,
+        grace: Duration,
+        ended: bool,
+    },
+}
+
+/// Start `command` as a worker. Ended, its group is asked to end and given
+/// `grace`. In `sluice host` it counts among the host's children until it
+/// ends, when the hook of [`own`] is called.
+pub fn start(command: &mut Command, grace: Duration) -> std::io::Result<Worker> {
+    let mut command = std::mem::replace(command, Command::new("/"));
+    let Some(edge) = EDGE.get() else {
+        let child = command.spawn()?;
+        return Ok(Worker {
+            pid: child.id(),
+            inner: Inner::Here {
+                child: Some(child),
+                grace,
+                ended: false,
+            },
+        });
+    };
+    let ended = Arc::new(Mutex::new(None));
+    let end = edge.stop.child_token();
+    let (started, began) = std::sync::mpsc::sync_channel(1);
+    let owned = (ended.clone(), end.clone());
+    edge.tracker.spawn_on(
+        async move {
+            let (ended, end) = owned;
+            if end.is_cancelled() {
+                let _ = started.send(Err(stopping()));
+                return;
+            }
+            let mut held = match Owned::spawn(command) {
+                Ok(h) => h,
+                Err(e) => {
+                    let _ = started.send(Err(e));
+                    return;
+                }
+            };
+            let pid = held.group;
+            CHILDREN.lock().expect("the children").insert(pid);
+            let _ = started.send(Ok(pid as u32));
+            let status = tokio::select! {
+                status = held.wait() => status,
+                () = end.cancelled() => held.end(grace).await,
+            };
+            held.settle(grace).await;
+            ended_child(pid);
+            *ended.lock().expect("the worker's end") = Some(status);
+        },
+        &edge.handle,
+    );
+    let pid = began
+        .recv()
+        .map_err(|_| std::io::Error::other("a worker's owner ended before it started"))??;
+    Ok(Worker {
+        pid,
+        inner: Inner::Edge {
+            ended,
+            end,
+            kept: false,
+        },
+    })
+}
+
+impl Worker {
+    /// Its leader's pid, which is also its process group.
+    pub fn id(&self) -> u32 {
+        self.pid
+    }
+
+    /// How it ended, where it has.
+    pub fn try_wait(&mut self) -> std::io::Result<Option<ExitStatus>> {
+        match &mut self.inner {
+            Inner::Edge { ended, .. } => match &*ended.lock().expect("the worker's end") {
+                None => Ok(None),
+                Some(Ok(status)) => Ok(Some(*status)),
+                Some(Err(e)) => Err(std::io::Error::new(e.kind(), e.to_string())),
+            },
+            Inner::Here { child, .. } => match child.as_mut() {
+                Some(child) => child.try_wait(),
+                None => Ok(None),
+            },
+        }
+    }
+
+    /// End it now: its group is asked to end, given its grace, then
+    /// killed, and its owner waits on it.
+    pub fn kill(&mut self) {
+        match &mut self.inner {
+            Inner::Edge { end, .. } => end.cancel(),
+            Inner::Here {
+                child: Some(child),
+                grace,
+                ended,
+            } if !*ended => {
+                // weir-bounded ends the group of a process with no
+                // runtime, and the leader is waited on, so it is no
+                // zombie (`nothing-detached@f807c7f5fcea`).
+                let group = self.pid as i32;
+                weir_bounded::end_group(group, *grace, &mut || {
+                    matches!(child.try_wait(), Ok(Some(_)))
+                });
+                let _ = child.wait();
+                *ended = true;
+            }
+            Inner::Here { .. } => {}
+        }
+    }
+
+    /// Give it to its owner: it then ends when it exits, or when its owner
+    /// stops. A process with no edge is `sluice job run`, a pool's job,
+    /// which waits for the run to end and then exits: it starts no thread
+    /// to wait on the worker, which is handed to the system's first process
+    /// as the job exits.
+    pub fn keep(mut self) {
+        match &mut self.inner {
+            Inner::Edge { kept, .. } => *kept = true,
+            Inner::Here { child, .. } => drop(child.take()),
+        }
+    }
+}
+
+impl Drop for Worker {
+    fn drop(&mut self) {
+        match &self.inner {
+            Inner::Edge {
+                end, kept: false, ..
+            } => end.cancel(),
+            Inner::Here { child: Some(_), .. } => self.kill(),
+            _ => {}
+        }
+    }
+}
+
+/// Wait again, on the edge, on `pid`, a child that an earlier image of
+/// this process started and that runs: at each `SIGCHLD`, nix's `waitpid`
+/// asks it without blocking. When it ends, its record in `dir` goes.
+fn adopt(edge: &'static Edge, dir: &Path, pid: i32) {
     CHILDREN.lock().expect("the children").insert(pid);
     let dir = dir.to_path_buf();
-    std::thread::spawn(move || {
-        let raw = pid;
-        let pid = nix::unistd::Pid::from_raw(pid);
-        while let Err(nix::errno::Errno::EINTR) = nix::sys::wait::waitpid(pid, None) {}
-        forget_in(&dir, raw);
-        ended(raw);
-    });
+    edge.tracker.spawn_on(
+        async move {
+            use nix::sys::wait::{waitpid, WaitPidFlag, WaitStatus};
+            let raw = nix::unistd::Pid::from_raw(pid);
+            let signal = tokio::signal::unix::SignalKind::child();
+            let mut children = tokio::signal::unix::signal(signal).ok();
+            while let Ok(WaitStatus::StillAlive) | Err(nix::errno::Errno::EINTR) =
+                waitpid(raw, Some(WaitPidFlag::WNOHANG))
+            {
+                match children.as_mut() {
+                    Some(c) => {
+                        c.recv().await;
+                    }
+                    None => tokio::time::sleep(LOOK).await,
+                }
+            }
+            forget_in(&dir, pid);
+            ended_child(pid);
+        },
+        &edge.handle,
+    );
 }
 
-/// The children of this process, each with whether it has ended unwaited
-/// on, a zombie.
-fn own_children() -> Vec<(i32, bool)> {
-    platform::children(std::process::id() as i32)
-        .into_iter()
-        .map(|pid| (pid, started(pid).is_none()))
-        .collect()
+/// Reap each child of this process that has ended, by nix's `waitpid` on
+/// any child without blocking. Only before the first worker of this image
+/// starts, so it takes no child that a handle of this image waits on.
+fn reap_ended() -> Vec<i32> {
+    use nix::sys::wait::{waitpid, WaitPidFlag, WaitStatus};
+    let mut reaped = Vec::new();
+    loop {
+        match waitpid(None, Some(WaitPidFlag::WNOHANG)) {
+            Ok(WaitStatus::StillAlive) | Err(nix::errno::Errno::ECHILD) => return reaped,
+            Err(nix::errno::Errno::EINTR) => {}
+            Err(_) => return reaped,
+            Ok(status) => {
+                if let Some(pid) = status.pid() {
+                    reaped.push(pid.as_raw());
+                }
+            }
+        }
+    }
 }
 
 /// The child `pid` ended.
-fn ended(pid: i32) {
+fn ended_child(pid: i32) {
     if let Some(owner) = owner() {
         forget_in(&owner.dir, pid);
     }
@@ -374,24 +886,48 @@ pub struct Swept {
 /// (`nothing-detached@f807c7f5fcea`); each record whose worker no longer
 /// runs goes; and each group of another owner is ended.
 pub fn sweep(owner: &Owner) -> Swept {
-    let mut swept = Swept::default();
-    // No worker of this image has started yet, so each child is the
-    // earlier image's, and no handle of this image waits on it.
-    for (pid, zombie) in own_children() {
-        if CHILDREN.lock().expect("the children").contains(&pid) {
-            continue;
-        }
-        adopt(&owner.dir, pid);
-        if zombie {
-            swept.reaped.push(pid);
-        } else {
-            swept.kept.push(pid);
+    // No worker of this image has started yet, so each child that has
+    // ended is the earlier image's, and no handle of this image waits on
+    // it.
+    let mut swept = Swept {
+        reaped: reap_ended(),
+        ..Swept::default()
+    };
+    // Each process of `sluice host` records itself before its exec, so a
+    // child of the earlier image that still runs has a record. Whether a
+    // record names a child of this process is asked of nix's `waitpid`
+    // without blocking, never of the process's details, which a child
+    // that is exiting no longer gives: one that runs is waited on again,
+    // and one that ended since the reap above is reaped now.
+    if let Some(edge) = EDGE.get() {
+        use nix::sys::wait::{waitpid, WaitPidFlag, WaitStatus};
+        for r in records(&owner.dir) {
+            if !r.of(owner) || swept.reaped.contains(&r.pid) {
+                continue;
+            }
+            let asked = loop {
+                match waitpid(Pid::from_raw(r.pid), Some(WaitPidFlag::WNOHANG)) {
+                    Err(nix::errno::Errno::EINTR) => {}
+                    asked => break asked,
+                }
+            };
+            match asked {
+                Ok(WaitStatus::StillAlive) => {
+                    adopt(edge, &owner.dir, r.pid);
+                    swept.kept.push(r.pid);
+                }
+                Ok(_) => swept.reaped.push(r.pid),
+                // No child of this process.
+                Err(_) => {}
+            }
         }
     }
-    let waited = |pid: i32| swept.kept.contains(&pid) || swept.reaped.contains(&pid);
+    for pid in &swept.reaped {
+        forget_in(&owner.dir, *pid);
+    }
     let mut ending = Vec::new();
     for r in records(&owner.dir) {
-        if waited(r.pid) {
+        if swept.kept.contains(&r.pid) {
             // Its waiter removes its record when it ends.
         } else if !r.live() {
             forget_in(&owner.dir, r.pid);
@@ -422,49 +958,48 @@ pub fn stop(owner: &Owner) -> Vec<Record> {
     // after this point. A worker that it forked before this point writes
     // its record at once, and the second look below finds it.
     STOPPING.store(true, Ordering::SeqCst);
-    let mut mine: Vec<Record> = records(&owner.dir)
-        .into_iter()
-        .filter(|r| r.live() && r.of(owner))
-        .collect();
-    let waited: Vec<i32> = CHILDREN
-        .lock()
-        .expect("the children")
-        .iter()
-        .copied()
-        .collect();
-    for pid in &waited {
-        signal_group(*pid, libc::SIGTERM);
-    }
-    let until = Instant::now() + STOP_GRACE;
-    while children() > 0 && Instant::now() < until {
-        std::thread::sleep(Duration::from_millis(20));
-    }
-    let left: Vec<Record> = records(&owner.dir)
-        .into_iter()
-        .filter(|r| r.live() && r.of(owner))
-        .collect();
-    end_groups(
-        &left.iter().map(|r| r.pid).collect::<Vec<_>>(),
-        weir_bounded::GRACE,
-    );
-    std::thread::sleep(SETTLE);
-    let late: Vec<Record> = records(&owner.dir)
-        .into_iter()
-        .filter(|r| r.live() && r.of(owner))
-        .collect();
-    end_groups(
-        &late.iter().map(|r| r.pid).collect::<Vec<_>>(),
-        weir_bounded::GRACE,
-    );
+    let live = || -> Vec<Record> {
+        records(&owner.dir)
+            .into_iter()
+            .filter(|r| r.live() && r.of(owner))
+            .collect()
+    };
+    let groups = |rs: &[Record]| rs.iter().map(|r| r.pid).collect::<Vec<_>>();
+    let mut mine = live();
+    let late = match EDGE.get() {
+        Some(edge) => edge.handle.block_on(async {
+            // Each owner task ends its worker's group, its grace given
+            // first, and waits on it. A child of an earlier image is asked
+            // to end, and its waiter reaps it.
+            edge.stop.cancel();
+            let adopted: Vec<i32> = CHILDREN
+                .lock()
+                .expect("the children")
+                .iter()
+                .copied()
+                .collect();
+            for pid in adopted {
+                signal_group(pid, Signal::SIGTERM);
+            }
+            edge.tracker.close();
+            let _ = tokio::time::timeout(STOP_GRACE + KILLED_FOR, edge.tracker.wait()).await;
+            // A run's checks, its supervisor's children, which a record of
+            // this owner names.
+            end_groups_on_edge(&groups(&live()), weir_bounded::GRACE).await;
+            tokio::time::sleep(SETTLE).await;
+            let late = live();
+            end_groups_on_edge(&groups(&late), weir_bounded::GRACE).await;
+            late
+        }),
+        None => {
+            end_groups(&groups(&mine), weir_bounded::GRACE);
+            Vec::new()
+        }
+    };
     for r in late {
         if !mine.iter().any(|m| m.pid == r.pid) {
             mine.push(r);
         }
-    }
-    // A child its waiter did not reap yet is reaped here.
-    let until = Instant::now() + Duration::from_secs(1);
-    while children() > 0 && Instant::now() < until {
-        std::thread::sleep(Duration::from_millis(20));
     }
     for r in records(&owner.dir) {
         if r.of(owner) || !r.live() {
@@ -474,42 +1009,63 @@ pub fn stop(owner: &Owner) -> Vec<Record> {
     mine
 }
 
-/// End each of `groups`: each is asked to end, given `grace`, then killed.
+/// End each of `groups`, no child of this process: each is asked to end,
+/// given `grace`, then killed. In `sluice host`, on its edge with tokio's
+/// clock; elsewhere by weir-bounded's `end_group`.
 fn end_groups(groups: &[i32], grace: Duration) {
-    let there = |g: &i32| is_there(*g);
-    let live: Vec<i32> = groups.iter().copied().filter(there).collect();
+    match EDGE.get() {
+        Some(edge) => edge.handle.block_on(end_groups_on_edge(groups, grace)),
+        None => {
+            for group in groups {
+                weir_bounded::end_group(*group, grace, &mut || false);
+            }
+        }
+    }
+}
+
+/// How long a killed group is looked at, at most.
+const KILLED_FOR: Duration = Duration::from_secs(5);
+
+/// [`end_groups`] on the edge: each group is asked to end, looked at on
+/// tokio's interval within `grace`, then killed, and looked at again for
+/// [`KILLED_FOR`] at most.
+async fn end_groups_on_edge(groups: &[i32], grace: Duration) {
+    let live: Vec<i32> = groups.iter().copied().filter(|g| is_there(*g)).collect();
     if live.is_empty() {
         return;
     }
-    for g in &live {
-        signal_group(*g, libc::SIGTERM);
+    for group in &live {
+        signal_group(*group, Signal::SIGTERM);
     }
-    let until = Instant::now() + grace;
-    while live.iter().any(there) && Instant::now() < until {
-        std::thread::sleep(Duration::from_millis(50));
+    gone_within(&live, grace).await;
+    for group in live.iter().filter(|g| is_there(**g)) {
+        signal_group(*group, Signal::SIGKILL);
     }
-    for g in live.iter().filter(|g| there(g)) {
-        signal_group(*g, libc::SIGKILL);
-    }
-    let until = Instant::now() + Duration::from_secs(5);
-    while live.iter().any(there) && Instant::now() < until {
-        std::thread::sleep(Duration::from_millis(20));
-    }
+    gone_within(&live, KILLED_FOR).await;
 }
 
-/// Whether any process of `group` is left.
+/// Look at `groups` on tokio's interval until none is left, or `within`
+/// has passed.
+async fn gone_within(groups: &[i32], within: Duration) {
+    let looked = async {
+        let mut look = tokio::time::interval(LOOK);
+        while groups.iter().any(|g| is_there(*g)) {
+            look.tick().await;
+        }
+    };
+    let _ = tokio::time::timeout(within, looked).await;
+}
+
+/// Whether any process of `group` is left: nix's `killpg` with no signal
+/// finds one, or may not signal it.
 fn is_there(group: i32) -> bool {
-    // SAFETY: killpg reads its two integer arguments; signal 0 sends
-    // nothing.
-    let asked = unsafe { libc::killpg(group, 0) };
-    asked == 0 || std::io::Error::last_os_error().raw_os_error() != Some(libc::ESRCH)
+    killpg(Pid::from_raw(group), None) != Err(nix::errno::Errno::ESRCH)
 }
 
-fn signal_group(group: i32, signal: libc::c_int) {
-    // SAFETY: killpg reads its two integer arguments.
-    unsafe {
-        libc::killpg(group, signal);
-    }
+/// Send `signal` to every process of `group`, whatever it answers: a group
+/// gone meanwhile is what was asked for.
+fn signal_group(group: i32, signal: Signal) {
+    let _ = killpg(Pid::from_raw(group), signal);
 }
 
 /// The start time of the process `pid`, in seconds since the epoch, where
@@ -552,25 +1108,6 @@ mod platform {
     pub fn parent(pid: i32) -> Option<i32> {
         info(pid).map(|i| i.pbi_ppid as i32)
     }
-
-    /// The children of `pid`, a zombie among them.
-    pub fn children(pid: i32) -> Vec<i32> {
-        let mut pids: Vec<libc::pid_t> = vec![0; 256];
-        loop {
-            let size = (pids.len() * std::mem::size_of::<libc::pid_t>()) as libc::c_int;
-            // SAFETY: the buffer is `size` bytes of this process's memory.
-            let n = unsafe { libc::proc_listchildpids(pid, pids.as_mut_ptr().cast(), size) };
-            let Ok(n) = usize::try_from(n) else {
-                return Vec::new();
-            };
-            // A full buffer may have left some out: a larger one is asked.
-            if n < pids.len() {
-                pids.truncate(n);
-                return pids.into_iter().filter(|p| *p > 0).collect();
-            }
-            pids.resize(pids.len() * 2, 0);
-        }
-    }
 }
 
 #[cfg(target_os = "linux")]
@@ -604,18 +1141,6 @@ mod platform {
 
     pub fn parent(pid: i32) -> Option<i32> {
         stat(pid)?.get(1)?.parse().ok()
-    }
-
-    /// The children of `pid`, a zombie among them.
-    pub fn children(pid: i32) -> Vec<i32> {
-        let Ok(entries) = std::fs::read_dir("/proc") else {
-            return Vec::new();
-        };
-        entries
-            .flatten()
-            .filter_map(|e| e.file_name().to_str()?.parse::<i32>().ok())
-            .filter(|p| parent(*p) == Some(pid))
-            .collect()
     }
 }
 
@@ -702,7 +1227,11 @@ mod tests {
         assert_eq!(r[0].held.as_ref().unwrap().owner, 7);
         let group = nix::unistd::getpgid(Some(nix::unistd::Pid::from_raw(pid))).unwrap();
         assert_eq!(group.as_raw(), pid);
-        end_groups(&[pid], Duration::from_secs(1));
+        let mut status = None;
+        weir_bounded::end_group(pid, Duration::from_secs(1), &mut || {
+            status = status.or(child.try_wait().ok().flatten());
+            status.is_some()
+        });
         let _ = child.wait();
         assert!(!is_there(pid));
         std::fs::remove_dir_all(&dir).unwrap();
@@ -715,18 +1244,12 @@ mod tests {
             == Err(nix::errno::Errno::ESRCH)
     }
 
-    /// `nothing-detached@f807c7f5fcea`: as `sluice host` starts, each
-    /// child that its earlier image left is waited on, one that has ended
-    /// already, recorded as a worker or not, among them, so none of them
-    /// stays a zombie of the host process (deneb, 2026-11-27: pid 64735, a
-    /// child of the daemon's image before its hand-over in place, a zombie
-    /// for 16 hours).
-    #[test]
-    fn a_sweep_reaps_each_child_its_earlier_image_left() {
-        let dir = scratch("sweep-reaps");
+    /// The owner that a test's sweep runs as, this process, and the body
+    /// of a record that names it.
+    fn this_owner(dir: &Path) -> (Owner, Vec<u8>) {
         let me = std::process::id();
         let owner = Owner {
-            dir: dir.clone(),
+            dir: dir.to_path_buf(),
             pid: me,
             start: started(me as i32).unwrap(),
         };
@@ -736,36 +1259,136 @@ mod tests {
             what: "git".into(),
         })
         .unwrap();
+        (owner, held)
+    }
+
+    /// A `/bin/sh -c <script>` that records itself in `dir` before its
+    /// exec, as a worker of `held`'s owner does.
+    fn recorded(dir: &Path, held: Vec<u8>, script: &str) -> Command {
         let mut prefix = dir.as_os_str().as_bytes().to_vec();
         prefix.push(b'/');
-        let mut recorded = Command::new("/bin/sh");
-        recorded.args(["-c", "exit 0"]).process_group(0);
+        let mut command = Command::new("/bin/sh");
+        command.args(["-c", script]).process_group(0);
         // SAFETY: as in `take`.
         unsafe {
-            recorded.pre_exec(move || record_self(&prefix, &held));
+            command.pre_exec(move || record_self(&prefix, &held));
         }
-        // Their handles go as the earlier image's did at its exec: no one
-        // waits on them.
-        let recorded = recorded.spawn().unwrap().id() as i32;
-        let unrecorded = Command::new("/bin/sh")
-            .args(["-c", "exit 0"])
+        command
+    }
+
+    /// Block until the child `pid` has ended, and leave it unwaited on, a
+    /// zombie, as the earlier image of `sluice host` leaves a child that
+    /// ended: the system's `waitid` with `WNOWAIT`, which nix gives on
+    /// Linux alone.
+    fn until_ended_unwaited(pid: i32) {
+        // SAFETY: siginfo_t is plain data, and zeroed is a valid value.
+        let mut info: libc::siginfo_t = unsafe { std::mem::zeroed() };
+        loop {
+            // SAFETY: waitid writes only `info`, which it is given.
+            let asked = unsafe {
+                libc::waitid(
+                    libc::P_PID,
+                    pid as libc::id_t,
+                    &mut info,
+                    libc::WEXITED | libc::WNOWAIT,
+                )
+            };
+            if asked == 0 {
+                return;
+            }
+            let e = std::io::Error::last_os_error();
+            assert_eq!(e.raw_os_error(), Some(libc::EINTR), "waitid {pid}: {e}");
+        }
+    }
+
+    /// `nothing-detached@f807c7f5fcea`: as `sluice host` starts, each
+    /// child that its earlier image left and that has ended, recorded as a
+    /// worker or not, is reaped, so none of them stays a zombie of the
+    /// host process (deneb, 2026-11-27: pid 64735, a child of the daemon's
+    /// image before its hand-over in place, a zombie for 16 hours). The
+    /// sweep reaps each one and removes its record before it returns, so
+    /// no one sees a reaped child whose record stands, however loaded the
+    /// host. Nothing is timed: the children have ended once `waitid` says
+    /// so, and what the sweep left is read as it returns, while every core
+    /// is kept busy, as under the load that left a record standing (a reap
+    /// on another thread, its record removed after, loses that race).
+    #[test]
+    fn a_sweep_reaps_each_child_its_earlier_image_left() {
+        let cores = std::thread::available_parallelism().map_or(2, |n| n.get());
+        for round in 0..8 {
+            let dir = scratch(&format!("sweep-reaps-{round}"));
+            let (owner, held) = this_owner(&dir);
+            // Their handles go as the earlier image's did at its exec: no
+            // one waits on them.
+            let recorded = recorded(&dir, held, "exit 0").spawn().unwrap().id() as i32;
+            let unrecorded = Command::new("/bin/sh")
+                .args(["-c", "exit 0"])
+                .spawn()
+                .unwrap()
+                .id() as i32;
+            until_ended_unwaited(recorded);
+            until_ended_unwaited(unrecorded);
+            let busy = std::sync::Arc::new(AtomicBool::new(true));
+            let load: Vec<_> = (0..cores * 2)
+                .map(|_| {
+                    let busy = busy.clone();
+                    std::thread::spawn(move || {
+                        while busy.load(Ordering::Relaxed) {
+                            std::hint::spin_loop();
+                        }
+                    })
+                })
+                .collect();
+            let swept = sweep(&owner);
+            let left = (gone(recorded), gone(unrecorded), records(&dir));
+            busy.store(false, Ordering::Relaxed);
+            for l in load {
+                l.join().unwrap();
+            }
+            assert!(
+                left.0,
+                "round {round}: the recorded worker {recorded} is a zombie"
+            );
+            assert!(left.1, "round {round}: the child {unrecorded} is a zombie");
+            assert!(left.2.is_empty(), "round {round}: {:?}", left.2);
+            assert!(swept.reaped.contains(&recorded), "{swept:?}");
+            assert!(swept.reaped.contains(&unrecorded), "{swept:?}");
+            assert!(swept.ended.is_empty(), "{swept:?}");
+            std::fs::remove_dir_all(&dir).unwrap();
+        }
+    }
+
+    /// A recorded child that the earlier image left and that runs is
+    /// waited on again on the edge. When it ends, its record goes before
+    /// the host process is told that a worker ended. Nothing is timed: the
+    /// child ends once its input closes, and the test waits for the hook.
+    #[tokio::test(flavor = "current_thread")]
+    async fn a_running_child_of_the_earlier_image_loses_its_record_as_it_ends() {
+        let dir = scratch("sweep-keeps");
+        let (owner, held) = this_owner(&dir);
+        let (told, mut ended) = tokio::sync::mpsc::unbounded_channel();
+        let _ = ENDED.set(Box::new(move || {
+            let _ = told.send(());
+        }));
+        edge(tokio::runtime::Handle::current());
+        let mut child = recorded(&dir, held, "read line")
+            .stdin(Stdio::piped())
             .spawn()
-            .unwrap()
-            .id() as i32;
-        let until = Instant::now() + Duration::from_secs(10);
-        while [recorded, unrecorded].iter().any(|p| started(*p).is_some()) {
-            assert!(Instant::now() < until, "the children never ended");
-            std::thread::sleep(Duration::from_millis(20));
-        }
-        let swept = sweep(&owner);
-        let until = Instant::now() + Duration::from_secs(5);
-        while !(gone(recorded) && gone(unrecorded)) && Instant::now() < until {
-            std::thread::sleep(Duration::from_millis(20));
-        }
-        assert!(gone(recorded), "the recorded worker {recorded} is a zombie");
-        assert!(gone(unrecorded), "the child {unrecorded} is a zombie");
-        assert!(swept.ended.is_empty(), "{swept:?}");
+            .unwrap();
+        let input = child.stdin.take().unwrap();
+        let pid = child.id() as i32;
+        // Its handle goes as the earlier image's did at its exec.
+        drop(child);
+        let swept = tokio::task::spawn_blocking(move || sweep(&owner))
+            .await
+            .unwrap();
+        assert_eq!(swept.kept, vec![pid], "{swept:?}");
+        assert_eq!(children(), 1);
+        drop(input);
+        ended.recv().await.unwrap();
         assert!(records(&dir).is_empty(), "{:?}", records(&dir));
+        assert!(gone(pid), "{pid} is a zombie");
+        assert_eq!(children(), 0);
         std::fs::remove_dir_all(&dir).unwrap();
     }
 
@@ -795,5 +1418,94 @@ mod tests {
         assert_eq!(refused.raw_os_error(), Some(libc::ECANCELED), "{refused}");
         assert!(records(&dir).is_empty());
         std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// The pid that `sh` prints first on `out`: a child it started in the
+    /// worker's group.
+    async fn first_pid(out: &mut Option<tokio::process::ChildStdout>) -> i32 {
+        use tokio::io::AsyncBufReadExt as _;
+        let pipe = out.take().expect("stdout is piped");
+        let mut line = String::new();
+        tokio::io::BufReader::new(pipe)
+            .read_line(&mut line)
+            .await
+            .unwrap();
+        line.trim().parse().unwrap()
+    }
+
+    /// A command whose leader starts a child of its own in its group,
+    /// prints the child's pid and waits for it.
+    fn a_leader_with_a_child(also: &str) -> Command {
+        let mut command = Command::new("/bin/sh");
+        command
+            .args(["-c", &format!("sleep 600 & echo $!; {also}")])
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped());
+        command
+    }
+
+    /// Waits, with tokio's clock, until no process of `group` is left.
+    async fn until_gone(group: i32) {
+        while is_there(group) {
+            tokio::time::sleep(LOOK).await;
+        }
+    }
+
+    /// `each-worker-starts-through-process-wrap@025fae162990`: a worker
+    /// dropped while it runs ends with its whole group, a child that its
+    /// leader started among it, which tokio's kill on drop alone leaves
+    /// running, and its leader is reaped. No time is asserted: the test
+    /// waits until the group is gone.
+    #[tokio::test(flavor = "current_thread", start_paused = true)]
+    async fn a_dropped_worker_ends_its_whole_group() {
+        let mut held = Owned::spawn(a_leader_with_a_child("wait")).unwrap();
+        let child = first_pid(held.child.stdout()).await;
+        let group = held.group;
+        assert_eq!(
+            nix::unistd::getpgid(Some(nix::unistd::Pid::from_raw(child)))
+                .unwrap()
+                .as_raw(),
+            group
+        );
+        drop(held);
+        until_gone(group).await;
+        assert!(gone(child), "{child} outlived its worker");
+    }
+
+    /// A child that outlives its leader in the worker's group, which no
+    /// wait of this process reaches, is ended once the worker's grace
+    /// has passed.
+    #[tokio::test(flavor = "current_thread", start_paused = true)]
+    async fn a_worker_ends_what_its_leader_left_in_its_group() {
+        edge(tokio::runtime::Handle::current());
+        let mut command = Command::new("/bin/sh");
+        command
+            .args(["-c", "sleep 600 & echo $!"])
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped());
+        let out = owned_run(EDGE.get().unwrap(), command, None, None)
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(out.status.success(), "{out:?}");
+        let child: i32 = String::from_utf8_lossy(&out.stdout).trim().parse().unwrap();
+        // Ended, it is reaped by the process it was handed to.
+        while !gone(child) {
+            tokio::time::sleep(LOOK).await;
+        }
+    }
+
+    /// A command at its limit is ended with its whole group, a child that
+    /// its leader started among it, and answers that its limit came first.
+    #[tokio::test(flavor = "current_thread", start_paused = true)]
+    async fn a_command_at_its_limit_ends_with_its_group() {
+        edge(tokio::runtime::Handle::current());
+        let mut command = a_leader_with_a_child("wait");
+        command.stderr(Stdio::piped());
+        let limit = Some((Duration::from_secs(60), weir_bounded::GRACE));
+        let ran = owned_run(EDGE.get().unwrap(), command, None, limit).await;
+        assert!(ran.unwrap().is_none());
+        assert!(children() == 0);
     }
 }

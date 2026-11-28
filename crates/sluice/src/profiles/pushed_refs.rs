@@ -34,6 +34,7 @@
 //! forms one commit wherever it is formed (record 0019 as amended
 //! 2026-11-18; rules core.1, core.2, core.6, core.43).
 
+use crate::workers::Run as _;
 use std::fs::TryLockError;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output, Stdio};
@@ -352,7 +353,7 @@ impl PushedRefs {
         }
         // git's own reading of the address, with nothing sent to the remote.
         let reached = command(self.local.git_dir(), &["ls-remote", "--get-url", &s.url])
-            .output()
+            .worker_output()
             .ok()
             .filter(|o| o.status.success())
             .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
@@ -365,7 +366,7 @@ impl PushedRefs {
                 self.local.git_dir(),
                 &["config", "--get-urlmatch", "http.extraheader", &reached],
             )
-            .output()
+            .worker_output()
             .is_ok_and(|o| o.status.success() && !o.stdout.trim_ascii().is_empty());
         format!(
             "{} refused {}, which git sent in place of {who}'s credentials, never asking sluice for them",

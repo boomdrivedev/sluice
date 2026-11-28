@@ -16,6 +16,7 @@
 //! waiting and then follows (C.5 worktrunk; record 0065): `sluice wait`
 //! itself removes nothing.
 
+use crate::workers::Run as _;
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
@@ -52,7 +53,7 @@ impl Worktrunk {
             .env_remove("GIT_INDEX_FILE")
             .env_remove("GIT_COMMON_DIR")
             .stdin(Stdio::null())
-            .output()
+            .worker_output()
             .context("running git")
     }
 

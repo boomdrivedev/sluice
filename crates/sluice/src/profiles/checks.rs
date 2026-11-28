@@ -56,6 +56,7 @@
 //! Engine API's `GET /_ping`, running nothing and reading nothing of the
 //! repository's (rules core.37, core.38).
 
+use crate::workers::Run as _;
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
@@ -126,7 +127,7 @@ impl Context<'_> {
             .env_clear()
             .envs(self.env)
             .stdin(std::process::Stdio::null())
-            .output()
+            .worker_output()
             .with_context(|| format!("running {}", argv.join(" ")))?;
         if !out.status.success() {
             bail!(
@@ -701,9 +702,9 @@ fn regex_quote(s: &str) -> String {
 /// The user's own temporary directory on macOS, resolved, which some
 /// tools use whatever `TMPDIR` says.
 fn user_tmp() -> Option<PathBuf> {
-    let out = std::process::Command::new("/usr/bin/getconf")
+    let out = crate::workers::command("/usr/bin/getconf", "getconf")
         .arg("DARWIN_USER_TEMP_DIR")
-        .output()
+        .worker_output()
         .ok()?;
     let dir = String::from_utf8(out.stdout).ok()?;
     std::fs::canonicalize(dir.trim()).ok()
@@ -769,7 +770,7 @@ fn toolchain(
         .env_clear()
         .envs(env)
         .stdin(std::process::Stdio::null())
-        .output()
+        .worker_output()
     {
         Ok(out) => out,
         Err(e) => return Ok(failed(TOOLCHAIN, &format!("could not be run: {e}"), "")),
@@ -1849,7 +1850,7 @@ impl ReadingTree {
     }
 
     fn git(&self, args: &[&str]) -> Result<std::process::Output> {
-        std::process::Command::new("git")
+        crate::workers::command("git", "git")
             .arg("-C")
             .arg(&self.common)
             .args(args)
@@ -1858,7 +1859,7 @@ impl ReadingTree {
             .env_remove("GIT_INDEX_FILE")
             .env_remove("GIT_COMMON_DIR")
             .stdin(std::process::Stdio::null())
-            .output()
+            .worker_output()
             .context("running git")
     }
 }

@@ -115,6 +115,7 @@
 //! path at its first run with none of its runs going, its former scratch
 //! moved there (record 0063 as amended 2026-11-05).
 
+use crate::workers::Run as _;
 use std::collections::{BTreeMap, BTreeSet};
 use std::ffi::OsString;
 use std::fs::File;
@@ -1429,7 +1430,7 @@ impl Places {
             .env_remove("GIT_INDEX_FILE")
             .env_remove("GIT_COMMON_DIR")
             .stdin(Stdio::null())
-            .output()
+            .worker_output()
             .context("running git")
     }
 
@@ -1532,20 +1533,10 @@ impl Places {
 
     /// git's hash of `text`: names stay the same across sluice's builds.
     fn hash(&self, text: &str) -> Result<String> {
-        use std::io::Write as _;
-        let mut child = crate::workers::command("git", "git")
+        let out = crate::workers::command("git", "git")
             .args(["hash-object", "--stdin"])
-            .stdin(Stdio::piped())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .spawn()
+            .worker_output_with(text.as_bytes().to_vec())
             .context("running git hash-object")?;
-        child
-            .stdin
-            .take()
-            .expect("piped stdin")
-            .write_all(text.as_bytes())?;
-        let out = child.wait_with_output()?;
         if !out.status.success() {
             bail!(
                 "git hash-object: {}",

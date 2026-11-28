@@ -320,8 +320,7 @@ impl Runs {
             .stdin(Stdio::null())
             .stdout(Stdio::null())
             .stderr(Stdio::null());
-        let owner = crate::workers::owner();
-        match owner {
+        match crate::workers::owner() {
             Some(owner) => {
                 cmd.env(crate::workers::VAR, crate::workers::var(owner));
                 crate::workers::take(&mut cmd, "run");
@@ -330,29 +329,21 @@ impl Runs {
                 cmd.process_group(0);
             }
         }
-        let mut child = cmd
-            .spawn()
+        let mut supervisor = crate::workers::start(&mut cmd, crate::workers::STOP_GRACE)
             .with_context(|| format!("starting {} supervise", self.program.display()))?;
-        let began = self.began(name, &dir, &mut child);
+        let began = self.began(name, &dir, &mut supervisor);
         // Every supervisor is waited on, one that never started or whose
         // start could not be read among them, so none is left a zombie
-        // (`nothing-detached@f807c7f5fcea`). A worker is waited on by its
-        // owner, which a hand-over in place keeps. Any other supervisor is
-        // reaped by this thread.
-        match owner {
-            Some(_) => crate::workers::wait(child),
-            None => {
-                std::thread::spawn(move || {
-                    let _ = child.wait();
-                });
-            }
-        }
+        // (`nothing-detached@f807c7f5fcea`). In `sluice host` its owner
+        // task waits on it, which a hand-over in place keeps; elsewhere a
+        // thread does.
+        supervisor.keep();
         began
     }
 
-    /// Wait until the supervisor `child` of the run in `dir` holds it, or
-    /// has ended it. One that does not start within its time is killed.
-    fn began(&self, name: &str, dir: &Path, child: &mut std::process::Child) -> Result<()> {
+    /// Wait until the supervisor of the run in `dir` holds it, or has
+    /// ended it. One that does not start within its time is ended.
+    fn began(&self, name: &str, dir: &Path, supervisor: &mut crate::workers::Worker) -> Result<()> {
         // The run is under way once its supervisor holds the lock, so no
         // later read takes a supervisor still starting for a lost one. One
         // that fails exits and is caught at once; the deadline is for one
@@ -362,7 +353,7 @@ impl Runs {
             if self.supervised(dir)? || read_ended(dir)?.is_some() {
                 return Ok(());
             }
-            if let Some(status) = child.try_wait()? {
+            if let Some(status) = supervisor.try_wait()? {
                 // A run whose command could not start ends between the
                 // read above and this one: its supervisor wrote the end
                 // and exited, which is the run's end, not a lost start.
@@ -372,7 +363,7 @@ impl Runs {
                 bail!("the supervisor of {name} exited at once: {status}");
             }
             if Instant::now() >= until {
-                let _ = child.kill();
+                supervisor.kill();
                 bail!("the supervisor of {name} did not start");
             }
             std::thread::sleep(Duration::from_millis(10));
@@ -619,42 +610,33 @@ impl Runs {
             None => &request.cwd,
         };
         let log = dir.join("release.log");
-        let out = File::create(&log)?;
         let mut command = Command::new(program);
         command
             .args(args)
             .current_dir(cwd)
             .env_clear()
             .envs(&request.env)
-            .stdin(Stdio::null())
-            .stdout(out.try_clone()?)
-            .stderr(out)
             .process_group(0);
         crate::workers::take(&mut command, "release");
-        let mut child = command
-            .spawn()
-            .with_context(|| format!("starting the release command {program}"))?;
-        let pgid = child.id() as i32;
-        let deadline = Instant::now() + Duration::from_secs(request.limit.unwrap_or(600));
-        let mut status = None;
-        while status.is_none() && Instant::now() < deadline {
-            status = child.try_wait()?;
-            if status.is_none() {
-                std::thread::sleep(Duration::from_millis(50));
-            }
-        }
-        let mut reap = || {
-            if status.is_none() {
-                status = child.try_wait().ok().flatten();
-            }
-            status.is_some()
+        let limit = Duration::from_secs(request.limit.unwrap_or(600));
+        let ran =
+            crate::workers::output_within(&mut command, limit, Duration::from_secs(request.grace))
+                .with_context(|| format!("starting the release command {program}"))?;
+        let (said, status) = match &ran {
+            Some(out) => (
+                [&out.stdout[..], &out.stderr[..]].concat(),
+                Some(out.status),
+            ),
+            None => (Vec::new(), None),
         };
-        end_group(pgid, Duration::from_secs(request.grace), &mut reap);
-        let status = match status {
-            Some(s) => s,
-            None => child.wait()?,
+        std::fs::write(&log, &said).with_context(|| format!("writing {}", log.display()))?;
+        let Some(status) = status else {
+            bail!(
+                "the release command of {} did not end within {} s",
+                request.cwd.display(),
+                limit.as_secs()
+            );
         };
-        crate::workers::forget(pgid);
         if !status.success() {
             let tail = log_end(&log);
             bail!(

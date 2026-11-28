@@ -11,6 +11,7 @@
 //! [`LocalRefs::commit_as`], the one its remote is pushed as (record 0019
 //! as amended 2026-11-18; rules core.6, core.17, core.43, core.58).
 
+use crate::workers::Run as _;
 use std::cell::RefCell;
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -576,7 +577,7 @@ impl LocalRefs {
             .env("GIT_COMMITTER_NAME", &sluice.name)
             .env("GIT_COMMITTER_EMAIL", &sluice.email)
             .stdin(Stdio::null())
-            .output()
+            .worker_output()
             .with_context(|| format!("running git {}", args.join(" ")))
     }
 }
