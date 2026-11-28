@@ -959,261 +959,6 @@ fn forge_check_with_a_command_names_each_failure() {
     );
 }
 
-/// A repository whose `main` lives on GitHub as configured, and on a bare
-/// repository on this host as git reaches it; the host's config and the
-/// fake API are the test's own.
-#[cfg(feature = "tools")]
-struct OnGitHub {
-    repo: support::Repo,
-    _bare: support::Scratch,
-    config: support::Scratch,
-    fake: Fake,
-}
-
-#[cfg(feature = "tools")]
-impl OnGitHub {
-    fn new(name: &str, forge: Forge) -> OnGitHub {
-        OnGitHub::with_policy(
-            name,
-            "[tests]\nrunner = \"command\"\ncommand = \"true\"\n\n[branches.main]\nremote = \"origin\"\n",
-            forge.start(),
-        )
-    }
-
-    /// A repository whose `main` holds `policy`, on GitHub as `fake`
-    /// answers.
-    fn with_policy(name: &str, policy: &str, fake: Fake) -> OnGitHub {
-        let repo = support::Repo::new(name);
-        repo.write(".config/sluice.toml", policy);
-        repo.git(&["add", "-A"]);
-        repo.git(&["commit", "-q", "-m", "sluice's policy"]);
-        let bare = repo.bare_origin();
-        repo.git(&["remote", "set-url", "origin", "https://github.com/o/r.git"]);
-        repo.git(&[
-            "config",
-            &format!("url.{}.insteadOf", bare.path().display()),
-            "https://github.com/o/r.git",
-        ]);
-        OnGitHub {
-            repo,
-            _bare: bare,
-            config: support::Scratch::new(&format!("{name}-config")),
-            fake,
-        }
-    }
-
-    /// The host's `[forge]` names the app, its key with mode `0600`.
-    fn give_forge(&self) {
-        use std::os::unix::fs::PermissionsExt;
-        let dir = self.config.path().join("sluice");
-        std::fs::create_dir_all(&dir).unwrap();
-        let key = dir.join("app.pem");
-        std::fs::write(&key, KEY).unwrap();
-        std::fs::set_permissions(&key, std::fs::Permissions::from_mode(0o600)).unwrap();
-        std::fs::write(
-            dir.join("config.toml"),
-            format!(
-                "[forge]\napp_id = {APP}\nkey = {:?}\n",
-                key.display().to_string()
-            ),
-        )
-        .unwrap();
-    }
-
-    /// The host's `[forge]` names the app and, in place of its key, a
-    /// credential command of the test's own: a script in the config
-    /// directory that gives `token-1` (record 0108).
-    fn give_forge_command(&self) {
-        self.give_forge_command_running(
-            "cat > /dev/null\n[ \"$1\" = get ] && echo password=token-1\nexit 0\n",
-        );
-    }
-
-    /// The host's `[forge]` names the app and, in place of its key, a
-    /// credential command of the test's own: a script in the config
-    /// directory, mode `0755`, that runs `body` (record 0108).
-    fn give_forge_command_running(&self, body: &str) {
-        use std::io::Write;
-        use std::os::unix::fs::OpenOptionsExt;
-        let dir = self.config.path().join("sluice");
-        std::fs::create_dir_all(&dir).unwrap();
-        let script = dir.join("token-helper");
-        let mut f = std::fs::OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .mode(0o755)
-            .open(&script)
-            .unwrap();
-        f.write_all(format!("#!/bin/sh\n{body}").as_bytes())
-            .unwrap();
-        f.sync_all().unwrap();
-        drop(f);
-        std::fs::write(
-            dir.join("config.toml"),
-            format!(
-                "[forge]\napp_id = {APP}\ncredential = [{:?}]\n",
-                script.display().to_string()
-            ),
-        )
-        .unwrap();
-    }
-
-    /// `sluice <args>`: its exit and what it said. The operator's token is
-    /// the fake's, so nothing asks gh for the user's.
-    fn sluice(&self, args: &[&str]) -> (i32, String) {
-        let out = support::isolated(&mut std::process::Command::new(env!(
-            "CARGO_BIN_EXE_sluice"
-        )))
-        .current_dir(self.repo.dir())
-        .args(args)
-        .env("XDG_CONFIG_HOME", self.config.path())
-        .env("XDG_STATE_HOME", self.config.path())
-        .env("SLUICE_FORGE_API", self.fake.url())
-        .env("GH_TOKEN", "operator")
-        .env_remove("GITHUB_TOKEN")
-        .env_remove("GIT_DIR")
-        .stdin(std::process::Stdio::null())
-        .output()
-        .unwrap();
-        let text = String::from_utf8_lossy(&out.stdout).to_string()
-            + &String::from_utf8_lossy(&out.stderr);
-        (out.status.code().unwrap_or(-1), text)
-    }
-}
-
-/// `sluice status` on a branch whose `remote` is GitHub's: with no
-/// `[forge]`, it says sluice has no identity of its own; with one, it
-/// names the app. Neither fetches: a status reads the branch as the host
-/// holds it since the host process last asked the remote, and asks GitHub
-/// for no token of its own (129; design D16).
-#[cfg(feature = "tools")]
-#[test]
-fn status_says_who_pushes_the_branch() {
-    let s = OnGitHub::new("forge-status", Forge::new(&Clock::new()));
-    let (code, without) = s.sluice(&["status", "main"]);
-    assert_eq!(code, 0, "{without}");
-    assert!(
-        without.contains(
-            "pushed to origin with this host's own git credentials: \
-             sluice has no identity of its own there"
-        ),
-        "{without}"
-    );
-    assert_eq!(minted(&s.fake), 0);
-
-    s.give_forge();
-    let (code, with) = s.sluice(&["status", "main"]);
-    assert_eq!(code, 0, "{with}");
-    assert!(
-        with.contains(&format!("pushed to origin as GitHub app {APP}")),
-        "{with}"
-    );
-    assert_eq!(minted(&s.fake), 0, "a status fetches nothing of its own");
-}
-
-/// `sluice forge check main` exits 1 without `[forge]` or with a second
-/// bypass, naming it, and 0 when all is set.
-#[cfg(feature = "tools")]
-#[test]
-fn forge_check_exits_by_what_it_finds() {
-    let clock = Clock::new();
-    let s = OnGitHub::new("forge-check", Forge::new(&clock));
-    let (code, said) = s.sluice(&["forge", "check", "main"]);
-    assert_eq!(code, 1, "{said}");
-    assert!(said.contains("no [forge] table"), "{said}");
-    let (code, said) = s.sluice(&["forge", "check", "main", "--json"]);
-    assert_eq!(code, 1, "{said}");
-    let doc: serde_json::Value = serde_json::from_str(&said).unwrap();
-    assert_eq!(
-        (&doc["branch"], &doc["ok"]),
-        (&json!("main"), &json!(false))
-    );
-    assert_eq!(doc["checks"][0]["ok"], false);
-    assert!(
-        doc["checks"][0]["message"]
-            .as_str()
-            .unwrap()
-            .contains("no [forge] table"),
-        "{said}"
-    );
-
-    s.give_forge();
-    let (code, said) = s.sluice(&["forge", "check"]);
-    assert_eq!(code, 0, "{said}");
-    assert!(
-        said.contains(&format!("lets only app {APP} through")),
-        "{said}"
-    );
-    let (code, said) = s.sluice(&["forge", "check", "--json"]);
-    assert_eq!(code, 0, "{said}");
-    let doc: serde_json::Value = serde_json::from_str(&said).unwrap();
-    assert_eq!(doc["ok"], true);
-    let checks = doc["checks"].as_array().unwrap();
-    assert!(checks.iter().all(|c| c["ok"] == true), "{said}");
-    assert!(
-        checks.iter().any(|c| c["message"]
-            .as_str()
-            .unwrap()
-            .contains(&format!("lets only app {APP} through"))),
-        "{said}"
-    );
-
-    let mut extra = Forge::new(&clock);
-    extra.rulesets[0].1 = json!([
-        { "actor_id": APP, "actor_type": "Integration", "bypass_mode": "always" },
-        { "actor_id": 1, "actor_type": "OrganizationAdmin", "bypass_mode": "always" },
-    ]);
-    let s = OnGitHub::new("forge-check-extra", extra);
-    s.give_forge();
-    let (code, said) = s.sluice(&["forge", "check", "main"]);
-    assert_eq!(code, 1, "{said}");
-    assert!(
-        said.contains("lets more than the app through: OrganizationAdmin 1"),
-        "{said}"
-    );
-}
-
-/// The forge-identity spec's "A command, all set", from the command line:
-/// `sluice forge check` on a host whose `[forge]` names a credential
-/// command runs it, says it gives a token and the ruleset lets only the
-/// app through, and says nothing of a key (record 0108).
-#[cfg(feature = "tools")]
-#[test]
-fn forge_check_runs_the_hosts_command() {
-    let s = OnGitHub::new("forge-check-command-host", Forge::new(&Clock::new()));
-    s.give_forge_command();
-    let (code, said) = s.sluice(&["forge", "check", "main"]);
-    assert_eq!(code, 0, "{said}");
-    assert!(said.contains("gives a token for o/r"), "{said}");
-    assert!(
-        said.contains(&format!("lets only app {APP} through")),
-        "{said}"
-    );
-    assert!(!said.contains("[forge] key"), "{said}");
-}
-
-/// The forge-identity spec's "forge check tells the command's words
-/// without its token": `sluice forge check` on a host whose credential
-/// command refuses, naming a token on its standard error, says the
-/// command's words with the token redacted, and nothing it says, as text
-/// or as JSON, holds the token (record 0108 as amended 2026-11-10).
-#[cfg(feature = "tools")]
-#[test]
-fn forge_check_tells_a_commands_words_without_its_token() {
-    let s = OnGitHub::new("forge-check-command-words", Forge::new(&Clock::new()));
-    s.give_forge_command_running(
-        "cat > /dev/null\n\
-         echo 'the cached ghs_0123456789abcdefghijABCDEFGHIJ012345 was refused' >&2\nexit 1\n",
-    );
-    let (code, said) = s.sluice(&["forge", "check", "main"]);
-    assert_eq!(code, 1, "{said}");
-    assert!(said.contains("the cached [redacted] was refused"), "{said}");
-    assert!(!said.contains("0123456789abcdefghij"), "{said}");
-    let (code, said) = s.sluice(&["forge", "check", "main", "--json"]);
-    assert_eq!(code, 1, "{said}");
-    assert!(!said.contains("0123456789abcdefghij"), "{said}");
-}
-
 /// The app's pull request calls against the fake API, answered from the
 /// file-backed fake: what a person does there reads back through the app
 /// as GitHub would show it, and what the app posts lands there.
@@ -2965,92 +2710,347 @@ fn forge_check_names_an_environment_any_branch_may_use() {
     assert!(check(custom_environment(), &["main"]).is_empty());
 }
 
-/// satisfies: record 0119 (design D14, as amended 2026-11-18); the
-/// forge-identity spec's "The workflow and the policy disagree" and "A
-/// policy forge check cannot read whole", from the command line: `sluice
-/// forge check` reads the pool from the policy read whole at the branch's
-/// revision, or at main's for a branch not yet made, and names each of its
-/// lines, exiting 1 while main holds no workflow and 0 once it holds the
-/// one init writes (boomdrivedev/sluice-actions-trial on 0.97.1,
-/// 2026-11-18: seven lines, all ok, and none of the pool's, since routing's
-/// reading of the policy passes its pools over).
+/// What needs git, run in the check-tools tier alone: its tests are
+/// `tools::`, which that tier selects of this binary.
 #[cfg(feature = "tools")]
-#[test]
-fn forge_check_reads_the_pool_the_policy_names() {
-    let clock = Clock::new();
-    let (pool, _) = actions_pool();
-    let wants = sluice::profiles::github::workflows::sluice(sluice::VERSION, &pool.runners);
-    let pools = [
-        "ok      the signer forge verifies .github/workflows/sluice.yml at refs/heads/main",
-        "ok      the app may run o/r's workflows",
-        "ok      only main may use o/r's sluice environment",
-    ];
+mod tools {
+    use super::*;
 
-    let s = OnGitHub::with_policy(
-        "forge-check-pool",
-        POOL_POLICY,
-        pool_forge(&clock, None, custom_environment(), &["main"]),
-    );
-    s.give_forge();
-    let (code, said) = s.sluice(&["forge", "check", "main"]);
-    assert_eq!(code, 1, "{said}");
-    assert!(
-        said.contains(
-            "failed  main holds no .github/workflows/sluice.yml: sluice init actions writes it, \
-             to land on main"
-        ),
-        "{said}"
-    );
-    for line in pools {
-        assert!(said.contains(line), "{line}\n{said}");
-    }
-    // A branch not yet made: its pools are main's, which it is made from.
-    let (code, said) = s.sluice(&["forge", "check", "feature/x"]);
-    assert_eq!(code, 1, "{said}");
-    assert!(
-        said.contains("feature/x is not made yet; main's policy puts it on its remote"),
-        "{said}"
-    );
-    assert!(
-        said.contains("failed  main holds no .github/workflows/sluice.yml"),
-        "{said}"
-    );
-
-    let s = OnGitHub::with_policy(
-        "forge-check-pool-set",
-        POOL_POLICY,
-        pool_forge(&clock, Some(&wants), custom_environment(), &["main"]),
-    );
-    s.give_forge();
-    let (code, said) = s.sluice(&["forge", "check", "main"]);
-    assert_eq!(code, 0, "{said}");
-    assert!(
-        said.contains(
-            "ok      .github/workflows/sluice.yml on main is as sluice init actions writes it"
-        ),
-        "{said}"
-    );
-    for line in pools {
-        assert!(said.contains(line), "{line}\n{said}");
+    /// A repository whose `main` lives on GitHub as configured, and on a bare
+    /// repository on this host as git reaches it; the host's config and the
+    /// fake API are the test's own.
+    struct OnGitHub {
+        repo: support::Repo,
+        _bare: support::Scratch,
+        config: support::Scratch,
+        fake: Fake,
     }
 
-    // A policy routing reads, refused whole: named, and its pools unread.
-    let s = OnGitHub::with_policy(
-        "forge-check-pool-refused",
-        &format!("{POOL_POLICY}\n[landing]\nsubject = \"{{nope}}\"\n"),
-        pool_forge(&clock, Some(&wants), custom_environment(), &["main"]),
-    );
-    s.give_forge();
-    let (code, said) = s.sluice(&["forge", "check", "main"]);
-    assert_eq!(code, 1, "{said}");
-    assert!(
-        said.contains("failed  main's policy at ")
-            && said.contains("is refused, so its pools are not read: ")
-            && said.contains("[landing] subject names {nope}"),
-        "{said}"
-    );
-    assert!(
-        !said.contains("verifies .github/workflows/sluice.yml"),
-        "{said}"
-    );
+    impl OnGitHub {
+        fn new(name: &str, forge: Forge) -> OnGitHub {
+            OnGitHub::with_policy(
+                name,
+                "[tests]\nrunner = \"command\"\ncommand = \"true\"\n\n[branches.main]\nremote = \"origin\"\n",
+                forge.start(),
+            )
+        }
+
+        /// A repository whose `main` holds `policy`, on GitHub as `fake`
+        /// answers.
+        fn with_policy(name: &str, policy: &str, fake: Fake) -> OnGitHub {
+            let repo = support::Repo::new(name);
+            repo.write(".config/sluice.toml", policy);
+            repo.git(&["add", "-A"]);
+            repo.git(&["commit", "-q", "-m", "sluice's policy"]);
+            let bare = repo.bare_origin();
+            repo.git(&["remote", "set-url", "origin", "https://github.com/o/r.git"]);
+            repo.git(&[
+                "config",
+                &format!("url.{}.insteadOf", bare.path().display()),
+                "https://github.com/o/r.git",
+            ]);
+            OnGitHub {
+                repo,
+                _bare: bare,
+                config: support::Scratch::new(&format!("{name}-config")),
+                fake,
+            }
+        }
+
+        /// The host's `[forge]` names the app, its key with mode `0600`.
+        fn give_forge(&self) {
+            use std::os::unix::fs::PermissionsExt;
+            let dir = self.config.path().join("sluice");
+            std::fs::create_dir_all(&dir).unwrap();
+            let key = dir.join("app.pem");
+            std::fs::write(&key, KEY).unwrap();
+            std::fs::set_permissions(&key, std::fs::Permissions::from_mode(0o600)).unwrap();
+            std::fs::write(
+                dir.join("config.toml"),
+                format!(
+                    "[forge]\napp_id = {APP}\nkey = {:?}\n",
+                    key.display().to_string()
+                ),
+            )
+            .unwrap();
+        }
+
+        /// The host's `[forge]` names the app and, in place of its key, a
+        /// credential command of the test's own: a script in the config
+        /// directory that gives `token-1` (record 0108).
+        fn give_forge_command(&self) {
+            self.give_forge_command_running(
+                "cat > /dev/null\n[ \"$1\" = get ] && echo password=token-1\nexit 0\n",
+            );
+        }
+
+        /// The host's `[forge]` names the app and, in place of its key, a
+        /// credential command of the test's own: a script in the config
+        /// directory, mode `0755`, that runs `body` (record 0108).
+        fn give_forge_command_running(&self, body: &str) {
+            use std::io::Write;
+            use std::os::unix::fs::OpenOptionsExt;
+            let dir = self.config.path().join("sluice");
+            std::fs::create_dir_all(&dir).unwrap();
+            let script = dir.join("token-helper");
+            let mut f = std::fs::OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .mode(0o755)
+                .open(&script)
+                .unwrap();
+            f.write_all(format!("#!/bin/sh\n{body}").as_bytes())
+                .unwrap();
+            f.sync_all().unwrap();
+            drop(f);
+            std::fs::write(
+                dir.join("config.toml"),
+                format!(
+                    "[forge]\napp_id = {APP}\ncredential = [{:?}]\n",
+                    script.display().to_string()
+                ),
+            )
+            .unwrap();
+        }
+
+        /// `sluice <args>`: its exit and what it said. The operator's token is
+        /// the fake's, so nothing asks gh for the user's.
+        fn sluice(&self, args: &[&str]) -> (i32, String) {
+            let out = support::isolated(&mut std::process::Command::new(env!(
+                "CARGO_BIN_EXE_sluice"
+            )))
+            .current_dir(self.repo.dir())
+            .args(args)
+            .env("XDG_CONFIG_HOME", self.config.path())
+            .env("XDG_STATE_HOME", self.config.path())
+            .env("SLUICE_FORGE_API", self.fake.url())
+            .env("GH_TOKEN", "operator")
+            .env_remove("GITHUB_TOKEN")
+            .env_remove("GIT_DIR")
+            .stdin(std::process::Stdio::null())
+            .output()
+            .unwrap();
+            let text = String::from_utf8_lossy(&out.stdout).to_string()
+                + &String::from_utf8_lossy(&out.stderr);
+            (out.status.code().unwrap_or(-1), text)
+        }
+    }
+
+    /// `sluice status` on a branch whose `remote` is GitHub's: with no
+    /// `[forge]`, it says sluice has no identity of its own; with one, it
+    /// names the app. Neither fetches: a status reads the branch as the host
+    /// holds it since the host process last asked the remote, and asks GitHub
+    /// for no token of its own (129; design D16).
+    #[test]
+    fn status_says_who_pushes_the_branch() {
+        let s = OnGitHub::new("forge-status", Forge::new(&Clock::new()));
+        let (code, without) = s.sluice(&["status", "main"]);
+        assert_eq!(code, 0, "{without}");
+        assert!(
+            without.contains(
+                "pushed to origin with this host's own git credentials: \
+                 sluice has no identity of its own there"
+            ),
+            "{without}"
+        );
+        assert_eq!(minted(&s.fake), 0);
+
+        s.give_forge();
+        let (code, with) = s.sluice(&["status", "main"]);
+        assert_eq!(code, 0, "{with}");
+        assert!(
+            with.contains(&format!("pushed to origin as GitHub app {APP}")),
+            "{with}"
+        );
+        assert_eq!(minted(&s.fake), 0, "a status fetches nothing of its own");
+    }
+
+    /// `sluice forge check main` exits 1 without `[forge]` or with a second
+    /// bypass, naming it, and 0 when all is set.
+    #[test]
+    fn forge_check_exits_by_what_it_finds() {
+        let clock = Clock::new();
+        let s = OnGitHub::new("forge-check", Forge::new(&clock));
+        let (code, said) = s.sluice(&["forge", "check", "main"]);
+        assert_eq!(code, 1, "{said}");
+        assert!(said.contains("no [forge] table"), "{said}");
+        let (code, said) = s.sluice(&["forge", "check", "main", "--json"]);
+        assert_eq!(code, 1, "{said}");
+        let doc: serde_json::Value = serde_json::from_str(&said).unwrap();
+        assert_eq!(
+            (&doc["branch"], &doc["ok"]),
+            (&json!("main"), &json!(false))
+        );
+        assert_eq!(doc["checks"][0]["ok"], false);
+        assert!(
+            doc["checks"][0]["message"]
+                .as_str()
+                .unwrap()
+                .contains("no [forge] table"),
+            "{said}"
+        );
+
+        s.give_forge();
+        let (code, said) = s.sluice(&["forge", "check"]);
+        assert_eq!(code, 0, "{said}");
+        assert!(
+            said.contains(&format!("lets only app {APP} through")),
+            "{said}"
+        );
+        let (code, said) = s.sluice(&["forge", "check", "--json"]);
+        assert_eq!(code, 0, "{said}");
+        let doc: serde_json::Value = serde_json::from_str(&said).unwrap();
+        assert_eq!(doc["ok"], true);
+        let checks = doc["checks"].as_array().unwrap();
+        assert!(checks.iter().all(|c| c["ok"] == true), "{said}");
+        assert!(
+            checks.iter().any(|c| c["message"]
+                .as_str()
+                .unwrap()
+                .contains(&format!("lets only app {APP} through"))),
+            "{said}"
+        );
+
+        let mut extra = Forge::new(&clock);
+        extra.rulesets[0].1 = json!([
+            { "actor_id": APP, "actor_type": "Integration", "bypass_mode": "always" },
+            { "actor_id": 1, "actor_type": "OrganizationAdmin", "bypass_mode": "always" },
+        ]);
+        let s = OnGitHub::new("forge-check-extra", extra);
+        s.give_forge();
+        let (code, said) = s.sluice(&["forge", "check", "main"]);
+        assert_eq!(code, 1, "{said}");
+        assert!(
+            said.contains("lets more than the app through: OrganizationAdmin 1"),
+            "{said}"
+        );
+    }
+
+    /// The forge-identity spec's "A command, all set", from the command line:
+    /// `sluice forge check` on a host whose `[forge]` names a credential
+    /// command runs it, says it gives a token and the ruleset lets only the
+    /// app through, and says nothing of a key (record 0108).
+    #[test]
+    fn forge_check_runs_the_hosts_command() {
+        let s = OnGitHub::new("forge-check-command-host", Forge::new(&Clock::new()));
+        s.give_forge_command();
+        let (code, said) = s.sluice(&["forge", "check", "main"]);
+        assert_eq!(code, 0, "{said}");
+        assert!(said.contains("gives a token for o/r"), "{said}");
+        assert!(
+            said.contains(&format!("lets only app {APP} through")),
+            "{said}"
+        );
+        assert!(!said.contains("[forge] key"), "{said}");
+    }
+
+    /// The forge-identity spec's "forge check tells the command's words
+    /// without its token": `sluice forge check` on a host whose credential
+    /// command refuses, naming a token on its standard error, says the
+    /// command's words with the token redacted, and nothing it says, as text
+    /// or as JSON, holds the token (record 0108 as amended 2026-11-10).
+    #[test]
+    fn forge_check_tells_a_commands_words_without_its_token() {
+        let s = OnGitHub::new("forge-check-command-words", Forge::new(&Clock::new()));
+        s.give_forge_command_running(
+            "cat > /dev/null\n\
+             echo 'the cached ghs_0123456789abcdefghijABCDEFGHIJ012345 was refused' >&2\nexit 1\n",
+        );
+        let (code, said) = s.sluice(&["forge", "check", "main"]);
+        assert_eq!(code, 1, "{said}");
+        assert!(said.contains("the cached [redacted] was refused"), "{said}");
+        assert!(!said.contains("0123456789abcdefghij"), "{said}");
+        let (code, said) = s.sluice(&["forge", "check", "main", "--json"]);
+        assert_eq!(code, 1, "{said}");
+        assert!(!said.contains("0123456789abcdefghij"), "{said}");
+    }
+
+    /// satisfies: record 0119 (design D14, as amended 2026-11-18); the
+    /// forge-identity spec's "The workflow and the policy disagree" and "A
+    /// policy forge check cannot read whole", from the command line: `sluice
+    /// forge check` reads the pool from the policy read whole at the branch's
+    /// revision, or at main's for a branch not yet made, and names each of its
+    /// lines, exiting 1 while main holds no workflow and 0 once it holds the
+    /// one init writes (boomdrivedev/sluice-actions-trial on 0.97.1,
+    /// 2026-11-18: seven lines, all ok, and none of the pool's, since routing's
+    /// reading of the policy passes its pools over).
+    #[test]
+    fn forge_check_reads_the_pool_the_policy_names() {
+        let clock = Clock::new();
+        let (pool, _) = actions_pool();
+        let wants = sluice::profiles::github::workflows::sluice(sluice::VERSION, &pool.runners);
+        let pools = [
+            "ok      the signer forge verifies .github/workflows/sluice.yml at refs/heads/main",
+            "ok      the app may run o/r's workflows",
+            "ok      only main may use o/r's sluice environment",
+        ];
+
+        let s = OnGitHub::with_policy(
+            "forge-check-pool",
+            POOL_POLICY,
+            pool_forge(&clock, None, custom_environment(), &["main"]),
+        );
+        s.give_forge();
+        let (code, said) = s.sluice(&["forge", "check", "main"]);
+        assert_eq!(code, 1, "{said}");
+        assert!(
+            said.contains(
+                "failed  main holds no .github/workflows/sluice.yml: sluice init actions writes it, \
+                 to land on main"
+            ),
+            "{said}"
+        );
+        for line in pools {
+            assert!(said.contains(line), "{line}\n{said}");
+        }
+        // A branch not yet made: its pools are main's, which it is made from.
+        let (code, said) = s.sluice(&["forge", "check", "feature/x"]);
+        assert_eq!(code, 1, "{said}");
+        assert!(
+            said.contains("feature/x is not made yet; main's policy puts it on its remote"),
+            "{said}"
+        );
+        assert!(
+            said.contains("failed  main holds no .github/workflows/sluice.yml"),
+            "{said}"
+        );
+
+        let s = OnGitHub::with_policy(
+            "forge-check-pool-set",
+            POOL_POLICY,
+            pool_forge(&clock, Some(&wants), custom_environment(), &["main"]),
+        );
+        s.give_forge();
+        let (code, said) = s.sluice(&["forge", "check", "main"]);
+        assert_eq!(code, 0, "{said}");
+        assert!(
+            said.contains(
+                "ok      .github/workflows/sluice.yml on main is as sluice init actions writes it"
+            ),
+            "{said}"
+        );
+        for line in pools {
+            assert!(said.contains(line), "{line}\n{said}");
+        }
+
+        // A policy routing reads, refused whole: named, and its pools unread.
+        let s = OnGitHub::with_policy(
+            "forge-check-pool-refused",
+            &format!("{POOL_POLICY}\n[landing]\nsubject = \"{{nope}}\"\n"),
+            pool_forge(&clock, Some(&wants), custom_environment(), &["main"]),
+        );
+        s.give_forge();
+        let (code, said) = s.sluice(&["forge", "check", "main"]);
+        assert_eq!(code, 1, "{said}");
+        assert!(
+            said.contains("failed  main's policy at ")
+                && said.contains("is refused, so its pools are not read: ")
+                && said.contains("[landing] subject names {nope}"),
+            "{said}"
+        );
+        assert!(
+            !said.contains("verifies .github/workflows/sluice.yml"),
+            "{said}"
+        );
+    }
 }
