@@ -474,7 +474,7 @@ struct Running {
 
 impl HostProcess for Running {
     fn asked_only(&self) -> bool {
-        super::asked_only()
+        self.hosting.named.asked_only
     }
 
     fn note(&self, _: &Here<'_, '_>) -> Result<()> {
@@ -488,7 +488,7 @@ impl HostProcess for Running {
         super::note(&self.hosting, &self.repository);
         self.hosting.tasks.told(&self.repository);
         let task = self.hosting.tasks.handle(&self.repository);
-        if !super::asked_only() {
+        if !self.hosting.named.asked_only {
             task.wake();
         }
         Ok(())

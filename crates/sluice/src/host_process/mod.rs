@@ -369,9 +369,18 @@ fn refused_hand_over(folder: &Folder, own: &str, by: &str) -> Option<String> {
     })
 }
 
-/// Whether passes are taken only when asked (design D14).
+/// Whether passes are taken only when asked (design D14), as this
+/// process's environment says: a command's own setting.
 pub fn asked_only() -> bool {
     std::env::var(ROUND_SLEEP_VAR).as_deref() == Ok("record")
+}
+
+/// Whether passes are taken only when asked (design D14), as the
+/// environment `env` says: a host process's, from the environment it
+/// started with.
+pub fn asked_only_in(env: &[(OsString, OsString)]) -> bool {
+    env.iter()
+        .any(|(k, v)| k == ROUND_SLEEP_VAR && v.as_os_str() == "record")
 }
 
 /// A line in the host process's log, which is its stderr.
@@ -962,11 +971,12 @@ fn run_holding(runtime: &tokio::runtime::Runtime, holder: Holder) -> Result<i32>
     } = holder;
     let mut lock = Some(lock);
     take_log(&folder)?;
+    let asked_only = asked_only_in(&successor.env);
     let named = Named {
         version: crate::VERSION.to_string(),
         pid: std::process::id(),
         since: chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true),
-        asked_only: asked_only(),
+        asked_only,
         daemon,
         program: successor.program.as_ref().ok().cloned(),
     };
@@ -1045,7 +1055,7 @@ fn run_holding(runtime: &tokio::runtime::Runtime, holder: Holder) -> Result<i32>
         let tasks = tasks::Tasks::new(
             tasks::repository_bind(
                 room.clone(),
-                asked_only(),
+                asked_only,
                 named.clone(),
                 settings.clone(),
                 tokens.clone(),
@@ -1060,7 +1070,7 @@ fn run_holding(runtime: &tokio::runtime::Runtime, holder: Holder) -> Result<i32>
                 )
             }),
         );
-        let tasks = match asked_only() {
+        let tasks = match asked_only {
             true => tasks.passes_when_asked(),
             false => tasks,
         };
@@ -1108,7 +1118,7 @@ fn run_holding(runtime: &tokio::runtime::Runtime, holder: Holder) -> Result<i32>
                 (_, false) => String::new(),
             },
             hosting.named.pid,
-            if asked_only() {
+            if asked_only {
                 "; it passes only when asked"
             } else {
                 ""
@@ -2202,7 +2212,7 @@ async fn answer(hosting: &Arc<Hosting>, stream: UnixStream) -> Result<()> {
             // Where passes are taken only when asked, the repository is
             // held for the next ask; otherwise it is passed at once.
             let task = hosting.tasks.handle(&repository);
-            if !asked_only() {
+            if !hosting.named.asked_only {
                 task.wake();
             }
             send(&mut writer, &Answer::Ok).await
@@ -2342,7 +2352,7 @@ impl subscription::Serves for Subscribed {
         // Where passes are taken only when asked, the follower's first
         // document is of a reading afresh, which its coming asks for: the
         // repository is read before its first document is sent (D14).
-        if asked_only() && kind != FollowKind::Run {
+        if hosting.named.asked_only && kind != FollowKind::Run {
             let tasks = hosting.tasks.clone();
             let read = repository.clone();
             hosting.connected.spawn(async move {
@@ -2460,6 +2470,18 @@ pub(crate) fn view_of(room: &Shared) -> Result<RoomView> {
 
 #[cfg(test)]
 mod tests {
+
+    /// Design D14: a host process passes only when asked as the
+    /// environment it started with says, whatever the environment of the
+    /// process it runs in.
+    #[test]
+    fn passes_are_asked_only_as_the_start_environment_says() {
+        use std::ffi::OsString;
+        let env = |v: &str| vec![(OsString::from(ROUND_SLEEP_VAR), OsString::from(v))];
+        assert!(asked_only_in(&env("record")));
+        assert!(!asked_only_in(&env("0")));
+        assert!(!asked_only_in(&[]));
+    }
 
     /// resident-reads, "An older one-shot read" and "An older watch",
     /// resident-workers, "An older hold", and resident-changes, "An older
