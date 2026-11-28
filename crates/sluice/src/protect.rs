@@ -558,7 +558,7 @@ pub fn ask(lines: String) -> i32 {
 /// cause (148). One whose lock does not come within [`RECORD_WAIT`] is said
 /// and recorded nowhere.
 pub fn judged(s: &Sluice<'_>, host: &dyn Host, text: &str, by: &str) -> i32 {
-    let refused = match judge(s, host, text) {
+    let refused = match judge(s, &|| host.repository(), text) {
         Ok(refused) => refused,
         Err(e) => {
             crate::telemetry::say(&unread(&e));
@@ -606,8 +606,14 @@ pub fn judged(s: &Sluice<'_>, host: &dyn Host, text: &str, by: &str) -> i32 {
 }
 
 /// The writes of a transaction the hook refuses, each judged by the
-/// branch's own value on this host; none fetches.
-fn judge(s: &Sluice<'_>, host: &dyn Host, text: &str) -> Result<Vec<Refused>> {
+/// branch's own value on this host; none fetches. `repository` names the
+/// repository's common git directory, read only for a deletion, where
+/// git's own packing is told apart.
+fn judge(
+    s: &Sluice<'_>,
+    repository: &dyn Fn() -> Result<String>,
+    text: &str,
+) -> Result<Vec<Refused>> {
     let seams = s.seams();
     let mut refused = Vec::new();
     for line in text.lines() {
@@ -635,7 +641,7 @@ fn judge(s: &Sluice<'_>, host: &dyn Host, text: &str) -> Result<Vec<Refused>> {
         let needing = if deleting {
             // git's own packing, which a fetch's maintenance runs, is let
             // through before the records are read (S64; record 0110).
-            if pruned(Path::new(&host.repository()?), branch, &cur)? {
+            if pruned(Path::new(&repository()?), branch, &cur)? {
                 continue;
             }
             let needing = s.needing(branch)?;
@@ -699,5 +705,214 @@ mod tests {
             );
         }
         let _ = std::fs::remove_dir_all(&base);
+    }
+
+    /// `bolt/x` under a policy that protects it, and a session's head off
+    /// it: the fakes, its revision and the head.
+    fn protected() -> (sluice_fakes::Fakes, Rev, Rev) {
+        let f = sluice_fakes::Fakes::new();
+        let tip = f.world.init(
+            "bolt/x",
+            &[(
+                ".config/sluice.toml",
+                "[branches.\"bolt/*\"]\nrequired = [\"#gate\"]\n",
+            )],
+        );
+        f.world.task("app:test", "");
+        let head = f.world.work(&tip, &[("a.txt", Some("a"))]);
+        f.world.session("unit/a", "agent-a", &head);
+        (f, tip, head)
+    }
+
+    /// git's transaction line moving `name` from `from` to `to`.
+    fn update(from: &str, to: &str, name: &str) -> String {
+        format!("{from} {to} {name}\n")
+    }
+
+    const ZERO: &str = "0000000000000000000000000000000000000000";
+
+    /// What the protection refuses of `text`, the repository's common
+    /// directory `common`.
+    fn judging(f: &sluice_fakes::Fakes, common: &Path, text: &str) -> Vec<Refused> {
+        let common = common.to_string_lossy().into_owned();
+        judge(&f.sluice(), &|| Ok(common.clone()), text).unwrap()
+    }
+
+    /// A directory standing for the repository's common directory, with
+    /// no `packed-refs`, removed once dropped.
+    struct Common(PathBuf);
+
+    impl Common {
+        fn new(name: &str) -> Common {
+            let dir = std::env::temp_dir().join(format!("sluice-{name}-{}", std::process::id()));
+            let _ = std::fs::remove_dir_all(&dir);
+            std::fs::create_dir_all(&dir).unwrap();
+            Common(dir)
+        }
+    }
+
+    impl Drop for Common {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
+    /// 1, S1, rule core.4: a move of a protected branch is refused, told
+    /// before git's own error that the branch is protected, the command,
+    /// both revisions and what the worktree may hold; a branch in this
+    /// host's own refs is told no line of a copy.
+    #[test]
+    fn a_move_of_a_protected_branch_is_refused_saying_the_command() {
+        let (f, tip, head) = protected();
+        let common = Common::new("protect-move");
+        let refused = judging(
+            &f,
+            &common.0,
+            &update(tip.as_str(), head.as_str(), "refs/heads/bolt/x"),
+        );
+        assert_eq!(refused.len(), 1);
+        let r = &refused[0];
+        assert_eq!(
+            (r.branch.as_str(), &r.from, r.to.as_ref()),
+            ("bolt/x", &tip, Some(&head))
+        );
+        assert!(!r.copy && r.needing.is_empty());
+        let by = format!("git update-ref refs/heads/bolt/x {head}");
+        let said = refusal(r, &by);
+        assert!(
+            said.starts_with(
+                "error: bolt/x is protected by sluice; submit the change to sluice instead\n"
+            ),
+            "{said}"
+        );
+        assert!(
+            said.contains(&format!(
+                "`{by}` would move it from {} to {}",
+                tip.short(),
+                head.short()
+            )),
+            "{said}"
+        );
+        assert!(
+            said.ends_with(
+                "the worktree may hold the attempted change: git merge --abort or git reset --hard"
+            ),
+            "{said}"
+        );
+        assert!(!said.contains("levels this host's"), "{said}");
+    }
+
+    /// What moves no protected branch passes: a write that leaves it where
+    /// it is, a branch's making, a branch the policy does not name, and a
+    /// ref that is no branch.
+    #[test]
+    fn what_moves_no_protected_branch_passes() {
+        let (f, tip, head) = protected();
+        f.world.set_branch("unit/a", &head);
+        let common = Common::new("protect-pass");
+        let text = [
+            update(tip.as_str(), tip.as_str(), "refs/heads/bolt/x"),
+            update(ZERO, head.as_str(), "refs/heads/bolt/new"),
+            update(head.as_str(), tip.as_str(), "refs/heads/unit/a"),
+            update(ZERO, head.as_str(), "refs/tags/v1"),
+        ]
+        .concat();
+        assert!(judging(&f, &common.0, &text).is_empty());
+    }
+
+    /// 56: a branch whose own revision's policy does not name it is not
+    /// protected, whatever another branch's policy says.
+    #[test]
+    fn the_branchs_own_revision_decides() {
+        let (f, tip, _) = protected();
+        let bare = f.world.work(&tip, &[(".config/sluice.toml", None)]);
+        f.world.set_branch("bolt/z", &bare);
+        let common = Common::new("protect-own");
+        let text = update(bare.as_str(), tip.as_str(), "refs/heads/bolt/z");
+        assert!(judging(&f, &common.0, &text).is_empty());
+    }
+
+    /// A deletion is refused while a submission still needs the branch,
+    /// naming it, and passes once none does; git's own packing, which
+    /// writes the branch into `packed-refs` at its value and prunes its
+    /// loose file, passes all the same, and one beside a lock on
+    /// `packed-refs`, as every other deletion takes, does not (S64; record
+    /// 0110).
+    #[test]
+    fn a_branch_still_needed_is_not_deleted_but_git_may_pack_it() {
+        use sluice_core::{Requester, SubmitHead, SubmitRequest};
+        let (f, tip, _) = protected();
+        let s = f.sluice();
+        let id = s
+            .submit(&SubmitRequest {
+                head: SubmitHead::Worktree("unit/a".into()),
+                branch: "bolt/x".into(),
+                after: Vec::new(),
+                priority: 0,
+                subject: None,
+                trace: None,
+            })
+            .unwrap()
+            .expect("accepted")
+            .id;
+        let common = Common::new("protect-delete");
+        let delete = update(tip.as_str(), ZERO, "refs/heads/bolt/x");
+        let refused = judging(&f, &common.0, &delete);
+        assert_eq!(refused.len(), 1);
+        assert_eq!(
+            (refused[0].to.as_ref(), &refused[0].needing[..]),
+            (None, &[id][..])
+        );
+        let said = refusal(&refused[0], "git branch -D bolt/x");
+        assert!(
+            said.contains(&format!(
+                "`git branch -D bolt/x` would delete it at {}; it still holds #{id}: \
+                 withdraw or land them first",
+                tip.short()
+            )),
+            "{said}"
+        );
+
+        std::fs::write(
+            common.0.join("packed-refs"),
+            format!("# pack-refs with: peeled fully-peeled sorted\n{tip} refs/heads/bolt/x\n"),
+        )
+        .unwrap();
+        assert!(judging(&f, &common.0, &delete).is_empty(), "git's packing");
+        std::fs::write(common.0.join("packed-refs.lock"), "").unwrap();
+        assert_eq!(judging(&f, &common.0, &delete).len(), 1);
+        std::fs::remove_file(common.0.join("packed-refs.lock")).unwrap();
+        std::fs::remove_file(common.0.join("packed-refs")).unwrap();
+
+        s.withdraw(id, &Requester::Operator).unwrap().unwrap();
+        assert!(judging(&f, &common.0, &delete).is_empty());
+    }
+
+    /// 124: on a branch kept on a remote, a write is judged by this host's
+    /// own copy: one that leaves the copy where it stands passes, one that
+    /// moves it is refused, told that sluice levels the copy itself.
+    #[test]
+    fn a_copy_is_judged_by_its_own_value() {
+        let (f, tip, head) = protected();
+        f.world.on_remote("bolt/x");
+        let moved = f.world.work(&tip, &[("b.txt", Some("b"))]);
+        f.world.set_branch("bolt/x", &moved);
+        f.world.set_copy("bolt/x", Some(&tip));
+        let common = Common::new("protect-copy");
+        let stays = update(tip.as_str(), tip.as_str(), "refs/heads/bolt/x");
+        assert!(judging(&f, &common.0, &stays).is_empty());
+        let refused = judging(
+            &f,
+            &common.0,
+            &update(tip.as_str(), head.as_str(), "refs/heads/bolt/x"),
+        );
+        assert_eq!(refused.len(), 1);
+        assert!(refused[0].copy);
+        assert_eq!(refused[0].from, tip);
+        let said = refusal(&refused[0], "git reset --hard");
+        assert!(
+            said.contains("sluice levels this host's bolt/x to each landing itself"),
+            "{said}"
+        );
     }
 }
