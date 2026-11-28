@@ -27,8 +27,21 @@ fn checks(repo: &Repo) -> Checks {
 
 /// The check profile of `repo` on a host that declares `caches`.
 fn caching(repo: &Repo, caches: Vec<HostCache>) -> Checks {
+    caching_at(&repo.dir().join(".git"), caches)
+}
+
+/// The check profile of a test that runs nothing, over `common`, a
+/// scratch directory standing for the repository's common directory:
+/// nothing of git is read, so none is made.
+fn profile(common: &Scratch) -> Checks {
+    caching_at(common.path(), Vec::new())
+}
+
+/// The check profile of the repository whose common directory is
+/// `common`, on a host that declares `caches`.
+fn caching_at(common: &Path, caches: Vec<HostCache>) -> Checks {
     Checks::new(
-        &repo.dir().join(".git"),
+        common,
         PathBuf::from(env!("CARGO_BIN_EXE_sluice")),
         Instance {
             bound: 2,
@@ -45,7 +58,7 @@ fn caching(repo: &Repo, caches: Vec<HostCache>) -> Checks {
             managed: false,
         },
     )
-    .with_running(repo.dir().join(".git/host-running"))
+    .with_running(common.join("host-running"))
 }
 
 fn command(cmd: &str) -> Settings {
@@ -56,16 +69,22 @@ fn command(cmd: &str) -> Settings {
 }
 
 fn request(repo: &Repo, name: &str, tests: Settings) -> RunRequest {
-    let tmp = repo.dir().join(".git/sluice/.tmp").join(name);
+    placed(repo.dir(), &repo.rev("HEAD"), name, tests)
+}
+
+/// A run of `name` in the folder `dir` at `revision`, under `tests`: a
+/// run refused before anything of it runs needs no repository there.
+fn placed(dir: &Path, revision: &str, name: &str, tests: Settings) -> RunRequest {
+    let tmp = dir.join(".git/sluice/.tmp").join(name);
     std::fs::create_dir_all(&tmp).unwrap();
     RunRequest {
         place: Place {
             name: name.into(),
-            path: repo.dir().to_path_buf(),
+            path: dir.to_path_buf(),
             tmp,
             env: Default::default(),
         },
-        revision: sluice_seams::Rev::new(repo.rev("HEAD")),
+        revision: sluice_seams::Rev::new(revision),
         required: vec![],
         since: None,
         beyond: Vec::new(),
@@ -219,15 +238,18 @@ fn a_cold_command_gets_no_cache() {
 /// inside it refuses the run before anything of it runs, naming the cache.
 #[test]
 fn a_cache_holding_the_checkout_is_refused() {
-    let repo = Repo::new("checks-cache-checkout");
-    let parent = repo.dir().parent().unwrap().to_path_buf();
+    let repo = Scratch::new("checks-cache-checkout");
+    let common = repo.path().join(".git");
+    std::fs::create_dir_all(&common).unwrap();
+    let at = "0123456789abcdef0123456789abcdef01234567";
+    let parent = repo.path().parent().unwrap().to_path_buf();
     for (name, dir, how) in [
         ("p1", parent, "holds"),
-        ("p2", repo.dir().to_path_buf(), "is"),
-        ("p3", repo.dir().join(".cache/sccache"), "lies inside"),
+        ("p2", repo.path().to_path_buf(), "is"),
+        ("p3", repo.path().join(".cache/sccache"), "lies inside"),
     ] {
-        let c = caching(
-            &repo,
+        let c = caching_at(
+            &common,
             vec![HostCache {
                 dir: dir.clone(),
                 socket: None,
@@ -236,7 +258,7 @@ fn a_cache_holding_the_checkout_is_refused() {
         );
         let err = format!(
             "{:#}",
-            support::start(&c, &request(&repo, name, command("touch ran"))).unwrap_err()
+            support::start(&c, &placed(repo.path(), at, name, command("touch ran"))).unwrap_err()
         );
         assert!(
             err.contains(&format!("dir {} {how} this run's checkout", dir.display())),
@@ -245,7 +267,7 @@ fn a_cache_holding_the_checkout_is_refused() {
         assert!(err.contains("outside every checkout"), "{err}");
         assert!(!c.runs().dir(name).join("request.json").exists());
     }
-    assert!(!repo.dir().join("ran").exists());
+    assert!(!repo.path().join("ran").exists());
 }
 
 /// `[tests] toolchain` runs before the run and what it prints is sourced
@@ -343,8 +365,8 @@ fn the_open_executor_refuses_what_it_cannot_hold() {
 /// 71: the bound is the instance's.
 #[test]
 fn the_bound_is_the_instances() {
-    let repo = Repo::new("checks-bound");
-    assert_eq!(checks(&repo).bound().unwrap(), 2);
+    let repo = Scratch::new("checks-bound");
+    assert_eq!(profile(&repo).bound().unwrap(), 2);
 }
 
 /// 71, S60 (rule core.49; record 0087): the bound is the host's, shared
@@ -419,11 +441,14 @@ fn a_second_repositorys_start_waits_for_the_hosts_bound() {
 /// A policy that names no runner, or one sluice lacks, refuses the run.
 #[test]
 fn an_unknown_runner_is_refused() {
-    let repo = Repo::new("checks-runner");
-    let c = checks(&repo);
-    assert!(support::start(&c, &request(&repo, "p1", Settings::new())).is_err());
+    let dir = Scratch::new("checks-runner");
+    let common = dir.path().join(".git");
+    std::fs::create_dir_all(&common).unwrap();
+    let c = caching_at(&common, Vec::new());
+    let at = "0123456789abcdef0123456789abcdef01234567";
+    assert!(support::start(&c, &placed(dir.path(), at, "p1", Settings::new())).is_err());
     let tests = Settings::from([("runner".into(), Setting::Text("make".into()))]);
-    assert!(support::start(&c, &request(&repo, "p2", tests)).is_err());
+    assert!(support::start(&c, &placed(dir.path(), at, "p2", tests)).is_err());
 }
 
 /// 83, 84: on macOS the sandbox holds a run to writing its place and
@@ -793,10 +818,10 @@ fn docker() -> Limits {
 /// a path with no socket beside it is passed over.
 #[test]
 fn an_engine_that_answers_meets_a_run_that_asks_for_one() {
-    let repo = Repo::new("checks-engine");
+    let repo = Scratch::new("checks-engine");
     let dir = Scratch::short();
     let socket = support::engine(dir.path(), "HTTP/1.0 200 OK");
-    let c = checks(&repo).with_engine_sockets(vec![dir.path().join("none.sock"), socket]);
+    let c = profile(&repo).with_engine_sockets(vec![dir.path().join("none.sock"), socket]);
     assert_eq!(c.unmet(&docker()).unwrap(), None);
 }
 
@@ -805,11 +830,11 @@ fn an_engine_that_answers_meets_a_run_that_asks_for_one() {
 /// an engine unmet, saying where the look found none and what it found.
 #[test]
 fn a_host_whose_engine_does_not_answer_does_not_meet_it() {
-    let repo = Repo::new("checks-no-engine");
+    let repo = Scratch::new("checks-no-engine");
 
     let dir = Scratch::short();
     let socket = support::engine(dir.path(), "HTTP/1.0 500 Internal Server Error");
-    let c = checks(&repo).with_engine_sockets(vec![socket.clone()]);
+    let c = profile(&repo).with_engine_sockets(vec![socket.clone()]);
     let why = c.unmet(&docker()).unwrap().expect("unmet");
     assert!(why.contains(&socket.display().to_string()), "{why}");
     assert!(why.contains("500"), "{why}");
@@ -818,7 +843,7 @@ fn a_host_whose_engine_does_not_answer_does_not_meet_it() {
     let (socket, why) = support::at_a_closed_socket(
         dir.path(),
         |socket| {
-            let c = checks(&repo).with_engine_sockets(vec![socket.to_path_buf()]);
+            let c = profile(&repo).with_engine_sockets(vec![socket.to_path_buf()]);
             c.unmet(&docker()).unwrap().expect("unmet")
         },
         |_, why| why.contains("refused"),
@@ -829,7 +854,7 @@ fn a_host_whose_engine_does_not_answer_does_not_meet_it() {
 
     let dir = Scratch::short();
     let socket = dir.path().join("e.sock");
-    let c = checks(&repo).with_engine_sockets(vec![socket.clone()]);
+    let c = profile(&repo).with_engine_sockets(vec![socket.clone()]);
     let why = c.unmet(&docker()).unwrap().expect("unmet");
     assert_eq!(
         why,
@@ -843,9 +868,9 @@ fn a_host_whose_engine_does_not_answer_does_not_meet_it() {
 /// 84: a run that asks for no engine is met, with no socket looked at.
 #[test]
 fn a_run_that_asks_for_no_engine_is_met_with_none() {
-    let repo = Repo::new("checks-engine-unasked");
+    let repo = Scratch::new("checks-engine-unasked");
     let dir = Scratch::short();
-    let c = checks(&repo).with_engine_sockets(vec![dir.path().join("e.sock")]);
+    let c = profile(&repo).with_engine_sockets(vec![dir.path().join("e.sock")]);
     assert_eq!(c.unmet(&Limits::default()).unwrap(), None);
 }
 
@@ -947,9 +972,9 @@ fn local(port: u16, tls: Option<EngineTls>) -> Endpoint {
 /// and what it did.
 #[test]
 fn an_engine_at_a_tcp_address_is_looked_for_there() {
-    let repo = Repo::new("checks-engine-tcp");
+    let repo = Scratch::new("checks-engine-tcp");
     let port = support::tcp_engine("HTTP/1.0 200 OK");
-    let c = checks(&repo).with_engine_endpoints(vec![local(port, None)]);
+    let c = profile(&repo).with_engine_endpoints(vec![local(port, None)]);
     assert_eq!(c.unmet(&docker()).unwrap(), None);
 
     let refusal = |closed: u16| {
@@ -957,7 +982,7 @@ fn an_engine_at_a_tcp_address_is_looked_for_there() {
     };
     let (closed, why) = support::at_a_closed_port(
         |closed| {
-            let c = checks(&repo).with_engine_endpoints(vec![local(closed, None)]);
+            let c = profile(&repo).with_engine_endpoints(vec![local(closed, None)]);
             c.unmet(&docker()).unwrap()
         },
         |closed, why| why.as_deref() == Some(refusal(closed).as_str()),
@@ -965,7 +990,7 @@ fn an_engine_at_a_tcp_address_is_looked_for_there() {
     assert_eq!(why.as_deref(), Some(refusal(closed).as_str()));
 
     let failing = support::tcp_engine("HTTP/1.0 500 Internal Server Error");
-    let c = checks(&repo).with_engine_endpoints(vec![local(failing, None)]);
+    let c = profile(&repo).with_engine_endpoints(vec![local(failing, None)]);
     assert_eq!(
         c.unmet(&docker()).unwrap().as_deref(),
         Some(
@@ -980,7 +1005,7 @@ fn an_engine_at_a_tcp_address_is_looked_for_there() {
 /// `ca.pem`; without them, or verified against another CA, it is not.
 #[test]
 fn an_engine_over_tls_is_found_with_the_clients_certificate() {
-    let repo = Repo::new("checks-engine-tls");
+    let repo = Scratch::new("checks-engine-tls");
     let certs = Scratch::new("checks-engine-tls-certs");
     let port = support::tls_engine(certs.path());
     let tls = |verify, certs: &std::path::Path| {
@@ -989,13 +1014,13 @@ fn an_engine_over_tls_is_found_with_the_clients_certificate() {
             certs: certs.to_path_buf(),
         })
     };
-    let c = checks(&repo).with_engine_endpoints(vec![local(port, tls(true, certs.path()))]);
+    let c = profile(&repo).with_engine_endpoints(vec![local(port, tls(true, certs.path()))]);
     assert_eq!(c.unmet(&docker()).unwrap(), None);
 
     // No client certificate: the engine refuses the connection's TLS.
     let bare = Scratch::new("checks-engine-tls-bare");
     std::fs::copy(certs.path().join("ca.pem"), bare.path().join("ca.pem")).unwrap();
-    let c = checks(&repo).with_engine_endpoints(vec![local(port, tls(true, bare.path()))]);
+    let c = profile(&repo).with_engine_endpoints(vec![local(port, tls(true, bare.path()))]);
     let why = c.unmet(&docker()).unwrap().expect("unmet");
     assert!(
         why.starts_with(&format!(
@@ -1010,7 +1035,7 @@ fn an_engine_over_tls_is_found_with_the_clients_certificate() {
     for f in ["cert.pem", "key.pem"] {
         std::fs::copy(certs.path().join(f), other.path().join(f)).unwrap();
     }
-    let c = checks(&repo).with_engine_endpoints(vec![local(port, tls(true, other.path()))]);
+    let c = profile(&repo).with_engine_endpoints(vec![local(port, tls(true, other.path()))]);
     let why = c.unmet(&docker()).unwrap().expect("unmet");
     assert!(why.contains("invalid peer certificate"), "{why}");
 }
@@ -1063,12 +1088,12 @@ fn docker_host_names_a_unix_socket_or_a_tcp_address() {
 /// looked for.
 #[test]
 fn a_limit_the_executor_cannot_hold_leaves_a_run_unmet_before_any_socket() {
-    let repo = Repo::new("checks-limits-unmet");
+    let repo = Scratch::new("checks-limits-unmet");
     let dir = Scratch::short();
     let socket = dir.path().join("e.sock");
     let listener = std::os::unix::net::UnixListener::bind(&socket).unwrap();
     listener.set_nonblocking(true).unwrap();
-    let c = checks(&repo).with_engine_sockets(vec![socket]);
+    let c = profile(&repo).with_engine_sockets(vec![socket]);
     let gig = Some(1 << 30);
     let open = Limits {
         memory: gig,
