@@ -713,30 +713,6 @@ fn a_flaky_failure_names_no_operators_step() {
     }
 }
 
-/// run-outcome, "set-aside is no command" (design D4): sluice says that
-/// `set-aside` is no command it knows, exits as for any such command, and
-/// writes nothing.
-#[test]
-fn set_aside_is_no_command() {
-    let d = support::OnDisk::new("cli-no-set-aside", ON_DISK);
-    let before = d.git.count();
-    let out = d.sluice(&[
-        "set-aside",
-        "cli:tools",
-        "--at",
-        "2026-10-17T13:05:32Z",
-        "--reason",
-        "x",
-    ]);
-    assert_eq!(out.status.code(), Some(sluice::USAGE), "{out:?}");
-    assert!(
-        String::from_utf8_lossy(&out.stderr).contains("unrecognized subcommand 'set-aside'"),
-        "{out:?}"
-    );
-    assert_eq!(d.git.count(), before, "nothing run");
-    assert!(!d.repo.dir().join(".git/sluice/set-aside.jsonl").exists());
-}
-
 #[test]
 fn a_conflict_exits_two_and_check_says_so_first() {
     let f = setup();
@@ -3871,27 +3847,26 @@ fn sluice_run_follows_the_host_process() {
 /// 137; design D13 of `sluice-runs-as-a-daemon`).
 #[test]
 fn sluice_run_says_nothing_needs_it() {
-    if let Some(err) = stderr_of("sluice_run_says_nothing_needs_it") {
-        let said: Vec<&str> = err.lines().filter(|l| l.starts_with("sluice: ")).collect();
-        assert_eq!(
-            said,
-            [
-                "sluice: sluice starts its own host process; nothing needs `sluice run`, and \
-                 `sluice daemon` keeps it running on a machine that chooses to"
-            ],
-            "{err}"
+    let err = stderr_said(|| {
+        let f = one_queued();
+        let (code, out) = sluice(&f, &["run", "--rounds", "2"]);
+        assert_eq!(code, 0, "{out}");
+        let help = <Cli as clap::CommandFactory>::command()
+            .render_long_help()
+            .to_string();
+        assert!(
+            !help.lines().any(|l| l.trim_start().starts_with("run ")),
+            "{help}"
         );
-        return;
-    }
-    let f = one_queued();
-    let (code, out) = sluice(&f, &["run", "--rounds", "2"]);
-    assert_eq!(code, 0, "{out}");
-    let help = <Cli as clap::CommandFactory>::command()
-        .render_long_help()
-        .to_string();
-    assert!(
-        !help.lines().any(|l| l.trim_start().starts_with("run ")),
-        "{help}"
+    });
+    let said: Vec<&str> = err.lines().filter(|l| l.starts_with("sluice: ")).collect();
+    assert_eq!(
+        said,
+        [
+            "sluice: sluice starts its own host process; nothing needs `sluice run`, and \
+             `sluice daemon` keeps it running on a machine that chooses to"
+        ],
+        "{err}"
     );
 }
 
@@ -5739,29 +5714,27 @@ impl Pause for Unpaused {
 /// after lands the submission, and the wait reports it, exit 0.
 #[test]
 fn a_round_the_forge_could_not_answer_is_said_once_and_the_wait_goes_on() {
-    const TEST: &str = "a_round_the_forge_could_not_answer_is_said_once_and_the_wait_goes_on";
-    if let Some(err) = stderr_of(TEST) {
-        let said: Vec<&str> = err
-            .lines()
-            .filter(|l| l.starts_with(&format!("sluice: {BRANCH}: ")))
-            .collect();
-        assert_eq!(said.len(), 1, "{err}");
-        assert!(said[0].ends_with(": 503 Service Unavailable"), "{err}");
-        assert!(!err.contains("could not read #"), "{err}");
-        return;
-    }
-    let f = setup();
-    work(&f, "unit/a", "agent-a", &[("plugin/a", Some("a"))]);
-    sluice(&f, &["submit", BRANCH, "--worktree", "unit/a", "--no-wait"]);
-    f.world.unanswer_starts(1);
-    let stop = Then(Cell::new(0), |n| n < 40);
-    let (code, out) = sluice_with(&f, &stop, &["wait", "1"]);
-    assert_eq!(code, LANDED, "{out}");
-    let tip = f.world.tip(BRANCH);
-    assert!(
-        out.ends_with(&format!("passed · landed as {}\n", &tip.0[..7])),
-        "{out}"
-    );
+    let err = stderr_said(|| {
+        let f = setup();
+        work(&f, "unit/a", "agent-a", &[("plugin/a", Some("a"))]);
+        sluice(&f, &["submit", BRANCH, "--worktree", "unit/a", "--no-wait"]);
+        f.world.unanswer_starts(1);
+        let stop = Then(Cell::new(0), |n| n < 40);
+        let (code, out) = sluice_with(&f, &stop, &["wait", "1"]);
+        assert_eq!(code, LANDED, "{out}");
+        let tip = f.world.tip(BRANCH);
+        assert!(
+            out.ends_with(&format!("passed · landed as {}\n", &tip.0[..7])),
+            "{out}"
+        );
+    });
+    let said: Vec<&str> = err
+        .lines()
+        .filter(|l| l.starts_with(&format!("sluice: {BRANCH}: ")))
+        .collect();
+    assert_eq!(said.len(), 1, "{err}");
+    assert!(said[0].ends_with(": 503 Service Unavailable"), "{err}");
+    assert!(!err.contains("could not read #"), "{err}");
 }
 
 /// 134: Ctrl-C while a wait's call to a remote is between tries ends the
@@ -6963,6 +6936,14 @@ fn a_waiting_submission_says_its_branchs_hold_once() {
     assert_eq!(json(&out)["state"], "queued");
 }
 
+/// What `body` says on stderr on this thread, kept as `sluice host`
+/// keeps what a read it answers says (design D1 of the change
+/// `sluice-host-answers-every-read`).
+fn stderr_said(body: impl FnOnce()) -> String {
+    let ((), lines) = sluice::telemetry::capturing(body);
+    lines.iter().map(|l| format!("{l}\n")).collect()
+}
+
 /// What `test` says on stderr, which the harness keeps from the test
 /// itself: it runs alone in a child of this binary, which must pass.
 /// `None` in that child, which runs the test's body.
@@ -6999,31 +6980,30 @@ fn after_the_landing(err: &str) -> Vec<&str> {
 /// outcome as for any landing, exit 0. The next round releases the place.
 #[test]
 fn a_release_failing_after_the_landing_leaves_it_landed() {
-    if let Some(err) = stderr_of("a_release_failing_after_the_landing_leaves_it_landed") {
-        assert!(after_the_landing(&err).is_empty(), "{err}");
-        return;
-    }
-    let f = setup();
-    work(&f, "unit/a", "agent-a", &[("plugin/a", Some("a"))]);
-    f.world.fail_next_release();
-    let (code, out) = sluice(&f, &["submit", BRANCH, "--worktree", "unit/a"]);
-    assert_eq!(code, LANDED, "{out}");
-    let tip = f.world.tip(BRANCH);
-    assert_eq!(
-        outcome(&out).last().copied(),
-        Some(format!("passed · landed as {}", &tip.0[..7]).as_str()),
-        "{out}"
-    );
-    let place = format!("sluice/try/{BRANCH}/1");
-    assert!(
-        out.contains(&format!(
-            "could not release {place} (try 1 of 4): the release command of {place} failed\n"
-        )),
-        "{out}"
-    );
-    assert_eq!(f.world.live_places().len(), 1);
-    sluice(&f, &["step", BRANCH]);
-    assert!(f.world.live_places().is_empty());
+    let err = stderr_said(|| {
+        let f = setup();
+        work(&f, "unit/a", "agent-a", &[("plugin/a", Some("a"))]);
+        f.world.fail_next_release();
+        let (code, out) = sluice(&f, &["submit", BRANCH, "--worktree", "unit/a"]);
+        assert_eq!(code, LANDED, "{out}");
+        let tip = f.world.tip(BRANCH);
+        assert_eq!(
+            outcome(&out).last().copied(),
+            Some(format!("passed · landed as {}", &tip.0[..7]).as_str()),
+            "{out}"
+        );
+        let place = format!("sluice/try/{BRANCH}/1");
+        assert!(
+            out.contains(&format!(
+                "could not release {place} (try 1 of 4): the release command of {place} failed\n"
+            )),
+            "{out}"
+        );
+        assert_eq!(f.world.live_places().len(), 1);
+        sluice(&f, &["step", BRANCH]);
+        assert!(f.world.live_places().is_empty());
+    });
+    assert!(after_the_landing(&err).is_empty(), "{err}");
 }
 
 /// 122 (rule core.48; design D9): pushing the outcome fails after the
@@ -7032,21 +7012,20 @@ fn a_release_failing_after_the_landing_leaves_it_landed() {
 /// process's.
 #[test]
 fn a_push_failing_after_the_landing_leaves_it_landed() {
-    if let Some(err) = stderr_of("a_push_failing_after_the_landing_leaves_it_landed") {
-        assert!(after_the_landing(&err).is_empty(), "{err}");
-        return;
-    }
-    let f = setup();
-    work(&f, "unit/a", "agent-a", &[("plugin/a", Some("a"))]);
-    sluice(&f, &["submit", BRANCH, "--worktree", "unit/a", "--no-wait"]);
-    f.world.crash_after_next_notify();
-    let (code, out) = sluice(&f, &["wait", "1"]);
-    assert_eq!(code, LANDED, "{out}");
-    let tip = f.world.tip(BRANCH);
-    assert!(
-        out.ends_with(&format!("passed · landed as {}\n", &tip.0[..7])),
-        "{out}"
-    );
+    let err = stderr_said(|| {
+        let f = setup();
+        work(&f, "unit/a", "agent-a", &[("plugin/a", Some("a"))]);
+        sluice(&f, &["submit", BRANCH, "--worktree", "unit/a", "--no-wait"]);
+        f.world.crash_after_next_notify();
+        let (code, out) = sluice(&f, &["wait", "1"]);
+        assert_eq!(code, LANDED, "{out}");
+        let tip = f.world.tip(BRANCH);
+        assert!(
+            out.ends_with(&format!("passed · landed as {}\n", &tip.0[..7])),
+            "{out}"
+        );
+    });
+    assert!(after_the_landing(&err).is_empty(), "{err}");
 }
 
 /// 122, 123: under `--json`, a landing whose release then fails is one
@@ -7054,24 +7033,23 @@ fn a_push_failing_after_the_landing_leaves_it_landed() {
 /// stderr, and nothing failed the round.
 #[test]
 fn a_landing_whose_release_fails_is_one_document_under_json() {
-    if let Some(err) = stderr_of("a_landing_whose_release_fails_is_one_document_under_json") {
-        assert!(after_the_landing(&err).is_empty(), "{err}");
-        let place = format!("sluice/try/{BRANCH}/1");
-        assert!(
-            err.contains(&format!("could not release {place} (try 1 of 4): ")),
-            "{err}"
-        );
-        return;
-    }
-    let f = setup();
-    work(&f, "unit/a", "agent-a", &[("plugin/a", Some("a"))]);
-    sluice(&f, &["submit", BRANCH, "--worktree", "unit/a", "--no-wait"]);
-    f.world.fail_next_release();
-    let (code, out) = sluice(&f, &["wait", "1", "--json"]);
-    assert_eq!(code, LANDED, "{out}");
-    let v = json(&out);
-    assert_eq!(v["state"], "landed");
-    assert_eq!(v["landed_as"], f.world.tip(BRANCH).0);
+    let err = stderr_said(|| {
+        let f = setup();
+        work(&f, "unit/a", "agent-a", &[("plugin/a", Some("a"))]);
+        sluice(&f, &["submit", BRANCH, "--worktree", "unit/a", "--no-wait"]);
+        f.world.fail_next_release();
+        let (code, out) = sluice(&f, &["wait", "1", "--json"]);
+        assert_eq!(code, LANDED, "{out}");
+        let v = json(&out);
+        assert_eq!(v["state"], "landed");
+        assert_eq!(v["landed_as"], f.world.tip(BRANCH).0);
+    });
+    assert!(after_the_landing(&err).is_empty(), "{err}");
+    let place = format!("sluice/try/{BRANCH}/1");
+    assert!(
+        err.contains(&format!("could not release {place} (try 1 of 4): ")),
+        "{err}"
+    );
 }
 
 /// 122, 24 (design D9): the host process's round a waiting submit follows
@@ -7080,45 +7058,44 @@ fn a_landing_whose_release_fails_is_one_document_under_json() {
 /// so.
 #[test]
 fn a_landing_the_round_did_not_record_is_reported_landed() {
-    if let Some(err) = stderr_of("a_landing_the_round_did_not_record_is_reported_landed") {
-        assert!(after_the_landing(&err).is_empty(), "{err}");
-        return;
-    }
-    let f = setup();
-    work(&f, "unit/a", "agent-a", &[("plugin/a", Some("a"))]);
-    // Between the submit's rounds, another process records the landing
-    // and stops before the move; the submit's next round makes the move,
-    // and its write confirming it fails.
-    let between = |n: usize| {
-        if n == 1 {
-            f.world.crash(sluice_fakes::Crash::BeforeMove);
-            assert!(f.sluice().step(BRANCH).is_err());
-            f.world.crash_next_write();
-        }
-    };
-    let pause = Between {
-        n: Cell::new(0),
-        rounds: 5,
-        between: &between,
-    };
-    let (code, out) = sluice_with(&f, &pause, &["submit", BRANCH, "--worktree", "unit/a"]);
-    assert_eq!(code, LANDED, "{out}");
-    let tip = f.world.tip(BRANCH);
-    assert!(
-        out.ends_with(&format!("passed · landed as {}\n", &tip.0[..7])),
-        "{out}"
-    );
-    let (_, out) = sluice(&f, &["status", "1", "--json"]);
-    assert_eq!(json(&out)["state"], "landing");
-    sluice(&f, &["step", BRANCH]);
-    let (_, out) = sluice(&f, &["status", "1", "--json"]);
-    assert_eq!(
-        (
-            json(&out)["state"].as_str(),
-            json(&out)["landed_as"].as_str()
-        ),
-        (Some("landed"), Some(tip.0.as_str()))
-    );
+    let err = stderr_said(|| {
+        let f = setup();
+        work(&f, "unit/a", "agent-a", &[("plugin/a", Some("a"))]);
+        // Between the submit's rounds, another process records the landing
+        // and stops before the move; the submit's next round makes the move,
+        // and its write confirming it fails.
+        let between = |n: usize| {
+            if n == 1 {
+                f.world.crash(sluice_fakes::Crash::BeforeMove);
+                assert!(f.sluice().step(BRANCH).is_err());
+                f.world.crash_next_write();
+            }
+        };
+        let pause = Between {
+            n: Cell::new(0),
+            rounds: 5,
+            between: &between,
+        };
+        let (code, out) = sluice_with(&f, &pause, &["submit", BRANCH, "--worktree", "unit/a"]);
+        assert_eq!(code, LANDED, "{out}");
+        let tip = f.world.tip(BRANCH);
+        assert!(
+            out.ends_with(&format!("passed · landed as {}\n", &tip.0[..7])),
+            "{out}"
+        );
+        let (_, out) = sluice(&f, &["status", "1", "--json"]);
+        assert_eq!(json(&out)["state"], "landing");
+        sluice(&f, &["step", BRANCH]);
+        let (_, out) = sluice(&f, &["status", "1", "--json"]);
+        assert_eq!(
+            (
+                json(&out)["state"].as_str(),
+                json(&out)["landed_as"].as_str()
+            ),
+            (Some("landed"), Some(tip.0.as_str()))
+        );
+    });
+    assert!(after_the_landing(&err).is_empty(), "{err}");
 }
 
 /// 122 (design D9): a round of the host process's that fails before the
@@ -7127,34 +7104,32 @@ fn a_landing_the_round_did_not_record_is_reported_landed() {
 /// round after, finishing the landing, lands it.
 #[test]
 fn a_round_failing_before_the_landing_is_said_and_the_wait_goes_on() {
-    const TEST: &str = "a_round_failing_before_the_landing_is_said_and_the_wait_goes_on";
-    if let Some(err) = stderr_of(TEST) {
-        let said = err
-            .lines()
-            .filter(|l| {
-                l.starts_with(&format!("sluice: {BRANCH}: ")) && l.contains("crashed before moving")
-            })
-            .count();
-        assert_eq!(said, 1, "{err}");
-        return;
-    }
-    let f = setup();
-    work(&f, "unit/a", "agent-a", &[("plugin/a", Some("a"))]);
-    let between = |n: usize| {
-        if n == 1 {
-            f.world.crash(sluice_fakes::Crash::BeforeMove);
-        }
-    };
-    let pause = Between {
-        n: Cell::new(0),
-        rounds: 5,
-        between: &between,
-    };
-    let (code, out) = sluice_with(&f, &pause, &["submit", BRANCH, "--worktree", "unit/a"]);
-    assert_eq!(code, LANDED, "{out}");
-    assert_eq!(out.matches("landed as").count(), 1, "{out}");
-    let (_, out) = sluice(&f, &["status", "1", "--json"]);
-    assert_eq!(json(&out)["state"], "landed");
+    let err = stderr_said(|| {
+        let f = setup();
+        work(&f, "unit/a", "agent-a", &[("plugin/a", Some("a"))]);
+        let between = |n: usize| {
+            if n == 1 {
+                f.world.crash(sluice_fakes::Crash::BeforeMove);
+            }
+        };
+        let pause = Between {
+            n: Cell::new(0),
+            rounds: 5,
+            between: &between,
+        };
+        let (code, out) = sluice_with(&f, &pause, &["submit", BRANCH, "--worktree", "unit/a"]);
+        assert_eq!(code, LANDED, "{out}");
+        assert_eq!(out.matches("landed as").count(), 1, "{out}");
+        let (_, out) = sluice(&f, &["status", "1", "--json"]);
+        assert_eq!(json(&out)["state"], "landed");
+    });
+    let said = err
+        .lines()
+        .filter(|l| {
+            l.starts_with(&format!("sluice: {BRANCH}: ")) && l.contains("crashed before moving")
+        })
+        .count();
+    assert_eq!(said, 1, "{err}");
 }
 
 // ---------------------------------------------------------------------------
@@ -11171,25 +11146,22 @@ fn init_actions_takes_the_run_jobs_packages_write_alone() {
 }
 
 /// A working copy holding `policy`, its origin `acme/widgets` on GitHub,
-/// for `sluice init codebuild`.
+/// for `sluice init codebuild`: its repository written as the files gix
+/// reads a remote's address from, with no git started.
 fn codebuild_copy(policy: &str) -> support::Scratch {
     let dir = copy_with(policy);
-    for args in [
-        vec!["init", "-q"],
-        vec![
-            "remote",
-            "add",
-            "origin",
-            "https://github.com/acme/widgets.git",
-        ],
-    ] {
-        let out = support::git_command()
-            .current_dir(dir.path())
-            .args(&args)
-            .output()
-            .unwrap();
-        assert!(out.status.success(), "{out:?}");
+    let git = dir.path().join(".git");
+    for sub in ["objects", "refs/heads", "refs/tags"] {
+        std::fs::create_dir_all(git.join(sub)).unwrap();
     }
+    std::fs::write(git.join("HEAD"), "ref: refs/heads/main\n").unwrap();
+    std::fs::write(
+        git.join("config"),
+        "[core]\n\trepositoryformatversion = 0\n\tbare = false\n\
+         [remote \"origin\"]\n\turl = https://github.com/acme/widgets.git\n\
+         \tfetch = +refs/heads/*:refs/remotes/origin/*\n",
+    )
+    .unwrap();
     dir
 }
 
@@ -12108,23 +12080,6 @@ fn a_change_command_binds_no_repository() {
     }
 }
 
-/// refused-landing, "sluice push is no command" (the change
-/// `sluice-host-makes-each-change`, design D3): sluice says that `push`
-/// is no command it knows, exits as for any such command, and pushes
-/// nothing.
-#[test]
-fn push_is_no_command() {
-    let d = support::OnDisk::new("cli-no-push", ON_DISK);
-    let before = d.git.count();
-    let out = d.sluice(&["push", "main"]);
-    assert_eq!(out.status.code(), Some(sluice::USAGE), "{out:?}");
-    assert!(
-        String::from_utf8_lossy(&out.stderr).contains("unrecognized subcommand 'push'"),
-        "{out:?}"
-    );
-    assert_eq!(d.git.count(), before, "nothing run");
-}
-
 /// `main` and `bolt/*` gated, in this host's own files or, `remote`
 /// true, on origin, `main` at its first revision.
 fn bolts(remote: bool) -> Fakes {
@@ -12317,4 +12272,34 @@ fn a_branch_by_name_is_submitted_at_its_remotes_revision() {
     assert_eq!(f.world.tip("bolt/x"), remote, "nothing moved on origin");
     assert_eq!(f.world.copy_of("bolt/x"), Some(made), "nor written here");
     assert_eq!(f.world.tip("main"), main);
+}
+
+/// refused-landing, "sluice push is no command" (the change
+/// `sluice-host-makes-each-change`, design D3), and run-outcome,
+/// "set-aside is no command" (design D4): neither is a command sluice
+/// knows, so the command line is refused before anything runs or is
+/// written, and exits as any line sluice cannot read does
+/// (`tests/usage.rs`).
+#[test]
+fn push_and_set_aside_are_no_commands() {
+    for args in [
+        &["sluice", "push", "main"][..],
+        &[
+            "sluice",
+            "set-aside",
+            "cli:tools",
+            "--at",
+            "2026-10-17T13:05:32Z",
+            "--reason",
+            "x",
+        ],
+    ] {
+        let e = Cli::try_parse_from(args).unwrap_err();
+        assert_eq!(e.kind(), clap::error::ErrorKind::InvalidSubcommand, "{e}");
+        assert!(
+            e.to_string()
+                .contains(&format!("unrecognized subcommand '{}'", args[1])),
+            "{e}"
+        );
+    }
 }
