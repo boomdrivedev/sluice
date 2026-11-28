@@ -12173,30 +12173,42 @@ fn a_bolt_is_made_landed_on_and_deleted() {
 /// every submission to it was made in another copy of the repository, so
 /// its records hold the revision it was made at alone: `sluice status`
 /// answers it, plain and with `--all`, saying it is gone and its queue
-/// empty, and the overview names it gone, in this host's own files (26,
-/// 61, 105; record 0091); one on a remote is `tests/remote_branch.rs`'s.
+/// empty, and the overview names it gone, apart from the branches it
+/// lands on, in this host's own files and on its remote alike; a branch
+/// with neither records nor a revision is still no branch (26, 61, 105;
+/// record 0091).
 #[test]
 fn a_bolt_deleted_with_nothing_submitted_here_answers_its_status() {
-    {
-        let f = bolts(false);
+    for remote in [false, true] {
+        let f = bolts(remote);
         let (code, out) = sluice(&f, &["branch", "create", "bolt/x", "--from", "main"]);
-        assert_eq!(code, 0, "{out}");
+        assert_eq!(code, 0, "remote {remote}: {out}");
         let (code, out) = sluice(&f, &["branch", "delete", "bolt/x"]);
-        assert_eq!(code, 0, "{out}");
+        assert_eq!(code, 0, "remote {remote}: {out}");
 
         let (code, out) = sluice(&f, &["status", "bolt/x"]);
-        assert_eq!(code, 0, "{out}");
-        assert!(out.starts_with("bolt/x is gone\n"), "{out}");
-        assert!(out.contains("nothing in the queue"), "{out}");
+        assert_eq!(code, 0, "remote {remote}: {out}");
+        assert!(
+            out.starts_with("bolt/x is gone\n"),
+            "remote {remote}: {out}"
+        );
+        assert!(
+            out.contains("nothing in the queue"),
+            "remote {remote}: {out}"
+        );
         for args in [
             &["status", "bolt/x", "--json"][..],
             &["status", "bolt/x", "--all", "--json"],
         ] {
             let (code, out) = sluice(&f, args);
-            assert_eq!(code, 0, "{out}");
+            assert_eq!(code, 0, "remote {remote}: {out}");
             let doc = json(&out);
-            assert_eq!(doc["gone"], true, "{doc}");
-            assert_eq!(doc["submissions"], serde_json::json!([]), "{doc}");
+            assert_eq!(doc["gone"], true, "remote {remote}: {doc}");
+            assert_eq!(
+                doc["submissions"],
+                serde_json::json!([]),
+                "remote {remote}: {doc}"
+            );
         }
         let (_, out) = sluice(&f, &["overview", "--json"]);
         let doc = json(&out);
@@ -12205,9 +12217,22 @@ fn a_bolt_deleted_with_nothing_submitted_here_answers_its_status() {
             .unwrap()
             .iter()
             .find(|b| b["branch"] == "bolt/x")
-            .unwrap_or_else(|| panic!("the overview names bolt/x: {doc}"))
+            .unwrap_or_else(|| panic!("remote {remote}: the overview names bolt/x: {doc}"))
             .clone();
-        assert_eq!(bolt["gone"], true, "{doc}");
+        assert_eq!(bolt["gone"], true, "remote {remote}: {doc}");
+        let (_, out) = sluice(&f, &["overview"]);
+        assert!(
+            out.contains("gone, nothing queued or recent: bolt/x\n"),
+            "remote {remote}: {out}"
+        );
+        assert!(!out.contains("bolt/x at"), "remote {remote}: {out}");
+
+        let (code, out) = sluice(&f, &["status", "bolt/never"]);
+        assert_eq!(code, 1, "remote {remote}: {out}");
+        assert!(
+            out.contains("no branch bolt/never; branches with records: bolt/x"),
+            "remote {remote}: {out}"
+        );
     }
 }
 
