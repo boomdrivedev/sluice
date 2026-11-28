@@ -478,8 +478,8 @@ pub fn codebuild(dir: &Path, systems: &[String], force: bool, out: &mut dyn Writ
 
 /// `sluice init codebuild --stack <stack>` in the working copy at `dir`
 /// (design D10): the stack's key read by its alias with `GetPublicKey`,
-/// through the operator's own AWS chain, `profile` where named, in
-/// `region`, else the chain's; a key of another spec or usage refused;
+/// through `chain`, the operator's own AWS chain, in `region`, else the
+/// chain's; a key of another spec or usage refused;
 /// and `[signers.codebuild]`, naming the ARN KMS answers and the public
 /// half, and `[pools.codebuild]`, naming the region, the stack's sign
 /// project and its run project for each system, appended as text where the
@@ -489,11 +489,11 @@ pub fn codebuild_stack(
     systems: &[String],
     stack: &str,
     region: Option<&str>,
-    profile: Option<&str>,
+    chain: crate::profiles::codebuild::sdk::Chain,
     out: &mut dyn Write,
 ) -> Result<i32> {
     use crate::profiles::codebuild::aws::Aws as _;
-    use crate::profiles::codebuild::sdk::{Chain, Sdk};
+    use crate::profiles::codebuild::sdk::Sdk;
     let (path, text, policy) = read_policy(dir, "codebuild --stack")?;
     let named = |table: &str| {
         policy
@@ -517,9 +517,6 @@ pub fn codebuild_stack(
     }
     let mut left = Vec::new();
     let systems = codebuild_systems(&policy, systems, &mut left)?;
-    let chain = Chain::of(&crate::instance::Aws {
-        profile: profile.map(String::from),
-    });
     let region = match region {
         Some(r) => r.to_string(),
         None => chain.region().ok_or_else(|| {

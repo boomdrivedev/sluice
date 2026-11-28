@@ -173,7 +173,8 @@ pub fn run(
             )
             .as_peer(host.peer());
             if let Some(build) = &build {
-                return codebuild::sign(&s, build, &dir, clock, out);
+                let chain = host.aws(&crate::instance::Aws::default());
+                return codebuild::sign(&s, build, &dir, clock, &chain, out);
             }
             let (Some(branch), Some(from)) = (branch, from) else {
                 bail!("sluice job sign: give --branch and --from, or --build");
@@ -201,7 +202,8 @@ pub fn run(
             let s = Sluice::new(seams, clock).as_peer(host.peer());
             if let Some(build) = &build {
                 let from = from.ok_or_else(|| anyhow::anyhow!("--build needs --from"))?;
-                return codebuild::record(&s, build, &from, out);
+                let chain = host.aws(&crate::instance::Aws::default());
+                return codebuild::record(&s, build, &from, &chain, out);
             }
             let Some(branch) = branch else {
                 bail!("sluice job record: give --branch, or --build");

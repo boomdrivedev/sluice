@@ -65,15 +65,9 @@ fn differs(had: &str, wants: &str) -> String {
 }
 
 /// `sluice pool check <branch>`: each pool of the policy at `branch`'s
-/// revision read back, the CodeBuild ones from AWS as `aws` names the
-/// profile, else the host's chain; 0 where each holds, 1 naming each that
-/// does not.
-pub fn check(
-    s: &Sluice<'_>,
-    branch: &str,
-    aws: &crate::instance::Aws,
-    out: &mut dyn Write,
-) -> Result<i32> {
+/// revision read back, the CodeBuild ones from AWS as `chain` reaches it;
+/// 0 where each holds, 1 naming each that does not.
+pub fn check(s: &Sluice<'_>, branch: &str, chain: &Chain, out: &mut dyn Write) -> Result<i32> {
     let tip = s
         .seams()
         .branch
@@ -121,7 +115,7 @@ pub fn check(
     }
     for pool in &policy.pools {
         match pool.kind.0.as_str() {
-            "codebuild" => lines.extend(fleet(&policy, &rules, pool, aws)?),
+            "codebuild" => lines.extend(fleet(&policy, &rules, pool, chain)?),
             kind => lines.push(Line::Note(format!(
                 "[pools.{}] is a {kind} pool: `sluice forge check {branch}` reads it",
                 pool.name
@@ -148,12 +142,12 @@ fn fleet(
     policy: &Policy,
     rules: &Rules,
     pool: &sluice_core::policy::Pool,
-    aws: &crate::instance::Aws,
+    chain: &Chain,
 ) -> Result<Vec<Line>> {
     let at = format!("[pools.{}]", pool.name);
     let (region, sign) = codebuild::table(&pool.kind)?;
     let calls: Rc<dyn Aws> = Rc::new(Sdk::new(
-        Chain::of(aws),
+        chain.clone(),
         &region,
         Rc::new(crate::retry::Policy::command().recording_where_set()),
     ));
