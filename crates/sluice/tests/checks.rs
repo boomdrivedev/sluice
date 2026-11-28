@@ -1242,38 +1242,10 @@ fn an_exit_the_policy_names_records_no_fail() {
     assert!(r.not_run.is_empty());
 }
 
-/// 84 (record 0066 as amended 2026-10-30): sluice runs no readiness
-/// command before a run; a policy that names `ready` has its tests run.
-#[test]
-fn a_failing_ready_before_the_run_runs_the_tests() {
-    let repo = Repo::new("checks-ready-before");
-    let c = checks(&repo);
-    let tests = with(command("true"), "ready", Setting::Text("false".into()));
-    let r = finish(&c, &request(&repo, "p1", tests));
-    assert_eq!(r.tasks.len(), 1, "{:?}", r.tasks);
-    assert_eq!(r.tasks[0].outcome, Outcome::Pass);
-    assert!(r.not_run.is_empty() && r.missing.is_empty(), "{r:?}");
-}
-
-/// 84, could-not-run-1 114: nor after a run in which a check did not
-/// pass, so its fail is recorded under its key.
-#[test]
-fn a_failing_ready_once_a_check_failed_leaves_the_fail() {
-    let repo = Repo::new("checks-ready-after");
-    let c = checks(&repo);
-    std::fs::write(repo.dir().join("ready"), "").unwrap();
-    let tests = with(
-        command("rm ready; exit 1"),
-        "ready",
-        Setting::Text("test -e ready".into()),
-    );
-    let r = finish(&c, &request(&repo, "p1", tests));
-    assert_eq!(fails(&r), ["rm ready; exit 1"]);
-    assert!(r.not_run.is_empty(), "{:?}", r.not_run);
-}
-
-/// 84, 114: nothing of a `ready` command is run, before the run or after
-/// a fail.
+/// 84 (record 0066 as amended 2026-10-30), could-not-run-1 114: nothing
+/// of a `ready` command is run, before the run or after a fail: a policy
+/// that names one has its tests run, and a check's fail is recorded under
+/// its key.
 #[test]
 fn a_ready_command_is_never_run() {
     let repo = Repo::new("checks-ready-never");
