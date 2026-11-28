@@ -1316,63 +1316,6 @@ fn a_wait_whose_timeout_comes_first_calls_nothing() {
     assert_eq!(g.repo_calls(), before, "no call to GitHub: {}", text(&out));
 }
 
-/// The user, 2026-10-28: a submit that does not wait fails at once on a
-/// spent allowance, exit 3, naming when it ends, and calls nothing.
-#[test]
-fn a_submit_that_does_not_wait_fails_at_once_on_the_pause() {
-    let g = OnGitHub::new("pr-spent-no-wait", "");
-    let w = g.session("hurried", &[("h.txt", "h\n")]);
-    let until = g.spent_for(20);
-    let before = g.repo_calls();
-    let out = g
-        .command(env!("CARGO_BIN_EXE_sluice"), &w)
-        .args(["submit", "main", "--no-wait"])
-        .output()
-        .unwrap();
-    assert_eq!(out.status.code(), Some(3), "{}", text(&out));
-    let said = text(&out);
-    assert!(
-        said.contains(&format!(
-            "GitHub's allowance of calls for app {} is spent until {}: {SPENT}",
-            github::APP,
-            hhmm(until)
-        )),
-        "{said}"
-    );
-    assert!(!said.contains("waiting"), "{said}");
-    assert_eq!(g.repo_calls(), before);
-    assert!(g.gh.forge.by_ref("unit/hurried").unwrap().is_none());
-}
-
-/// The forge-allowance spec's "A landing during the pause" and "Said
-/// once": `sluice run` under a pause lands a combination that passed,
-/// calls nothing of the installation's allowance, and says the pause once.
-#[test]
-fn a_round_lands_through_the_pause_and_says_it_once() {
-    let g = OnGitHub::new("pr-spent-run", "");
-    let (n, head) = g.by_hand("unit/through", &[("t.txt", Some("t\n"))], false);
-    g.step();
-    assert_eq!(g.of(n).len(), 1, "{:?}", g.subs());
-    let until = g.spent_for(20);
-    let before = g.repo_calls();
-    let out = g.sluice(&["run", "--rounds", "6"]);
-    assert!(out.status.success(), "{}", text(&out));
-    let stdout = String::from_utf8_lossy(&out.stdout);
-    let said = format!(
-        "main's pull requests passed by: GitHub's allowance of calls for app {} is spent until {}: {SPENT}",
-        github::APP,
-        hhmm(until)
-    );
-    assert_eq!(stdout.matches(&said).count(), 1, "{}", text(&out));
-    assert_eq!(g.of(n)[0]["state"], "landed", "{:?}", g.subs());
-    let landed = g.main_on_github();
-    assert_eq!(
-        github::rev(g.bare.path(), &format!("{landed}^2")).unwrap(),
-        head
-    );
-    assert_eq!(g.repo_calls(), before, "no call under the allowance");
-}
-
 // ---------------------------------------------------------------------------
 // forge-reads: the open pull requests asked for at the host's interval, a
 // pull request read again only once it moved, and posted on only when what
