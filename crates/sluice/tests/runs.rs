@@ -451,6 +451,44 @@ fn a_sessions_runs_are_released_by_a_command_built_now() {
     assert!(!runs.dir(&second).exists());
 }
 
+/// Record 0121: a run ended keeping its directory has its release command
+/// run once, as a preview's release asks, or none, as a preview's free
+/// asks; a removal after the first runs that release no second time, and
+/// a discard after the second runs none.
+#[test]
+fn a_run_ended_keeping_its_directory_releases_once_or_not_at_all() {
+    let place = Scratch::new("runs-keeping");
+    let runs = runs(place.path());
+    let mut req = request(place.path(), "sleep 300", None);
+    req.release = Some(vec![
+        "/bin/sh".into(),
+        "-c".into(),
+        "echo released >> log".into(),
+    ]);
+    let log = || std::fs::read_to_string(place.path().join("log")).unwrap_or_default();
+
+    runs.start("p1", &req).unwrap();
+    wait_for(&runs.dir("p1").join("pgid"));
+    let pgid = number(&runs.dir("p1").join("pgid"));
+    runs.release_keeping("p1").unwrap();
+    assert!(group_gone(pgid), "the run was not ended");
+    assert_eq!(log(), "released\n");
+    assert!(runs.dir("p1").exists(), "its directory went");
+    runs.remove("p1").unwrap();
+    assert_eq!(log(), "released\n", "its release ran again");
+    assert!(!runs.dir("p1").exists());
+
+    runs.start("p2", &req).unwrap();
+    wait_for(&runs.dir("p2").join("pgid"));
+    let pgid = number(&runs.dir("p2").join("pgid"));
+    runs.end_keeping("p2").unwrap();
+    assert!(group_gone(pgid), "the run was not ended");
+    assert!(runs.dir("p2").exists(), "its directory went");
+    runs.discard("p2").unwrap();
+    assert_eq!(log(), "released\n", "a release ran");
+    assert!(!runs.dir("p2").exists());
+}
+
 /// `request` with the watch `script` run beside it.
 fn watched(place: &Path, script: &str, watch: &str) -> Request {
     Request {

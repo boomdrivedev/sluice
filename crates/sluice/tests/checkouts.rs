@@ -60,6 +60,14 @@ impl FakeWorktrees {
         );
     }
 
+    /// git's entry for the checkout at `path` dropped, its folder left,
+    /// as git's removal that stopped part way leaves it (deneb,
+    /// 2026-11-10: `Directory not empty`, then `is not a working tree`).
+    fn forget(&self, path: &Path) {
+        assert!(path.is_dir());
+        self.list.borrow_mut().remove(&FakeWorktrees::key(path));
+    }
+
     /// The checkout at `path` locked with `reason`, as `git worktree lock`
     /// or an add stopped part way leaves it.
     fn lock(&self, path: &Path, reason: &str) {
@@ -234,7 +242,7 @@ struct Repo {
 impl Repo {
     fn new(name: &str) -> Repo {
         let dir = Scratch::new(name);
-        let common = dir.path().join("repo/.git");
+        let common = dir.path().join(name).join(".git");
         std::fs::create_dir_all(&common).unwrap();
         let runs = Rc::new(FakeRuns {
             dir: dir.path().join("runs"),
@@ -943,4 +951,616 @@ fn an_empty_scratch_root_reads_no_record() {
     assert!(p.remove_unnamed_scratch().unwrap().is_empty());
     std::fs::create_dir_all(root.join(".tmp/0123456789")).unwrap();
     assert!(p.remove_unnamed_scratch().is_err(), "a record read");
+}
+
+fn preview_name(rev: &Rev) -> String {
+    format!("preview/{}", &rev.as_str()[..12])
+}
+
+fn addresses(pairs: &[(&str, &str)]) -> BTreeMap<String, String> {
+    pairs
+        .iter()
+        .map(|(k, v)| (k.to_string(), v.to_string()))
+        .collect()
+}
+
+/// A preview of `rev` in `p`, holding a `web` port.
+fn ported_preview(p: &Places, rev: &Rev) -> (String, Place) {
+    let name = preview_name(rev);
+    let (place, _) = p
+        .preview(
+            &name,
+            rev,
+            "main",
+            &ported(&["web"], &ports(1).to_string()),
+            &BTreeMap::new(),
+            "now",
+        )
+        .unwrap();
+    (name, place)
+}
+
+/// Previews-1 clauses 98 to 101: a preview is made at its revision with
+/// its ports and a name for each, kept apart in `.previews/` where no
+/// session's or candidate's reader looks, given back as it is when asked
+/// again, and released with its checkout, its scratch directory and its
+/// ports; a second release is nothing.
+#[test]
+fn a_preview_is_made_kept_apart_and_released() {
+    let repo = Repo::new("checkouts-preview");
+    let p = repo.places();
+    let from = ports(6);
+    let settings = ported(&["web", "api"], &from.to_string());
+    let name = preview_name(&rev());
+    let urls = addresses(&[
+        ("web", "https://{name.web}.localhost"),
+        ("api", "http://localhost:{port.api}/docs"),
+    ]);
+
+    let (place, preview) = p
+        .preview(
+            &name,
+            &rev(),
+            "bolt/x",
+            &settings,
+            &urls,
+            "2026-10-14T09:00:00Z",
+        )
+        .unwrap();
+    holds(&repo, &place, &rev());
+    let flat = format!("{}.json", name.replace('/', "%2F"));
+    let record = repo.common.join("sluice/.previews").join(&flat);
+    assert!(record.exists(), "{}", record.display());
+    assert!(place.path.starts_with(repo.common.join("sluice/.previews")));
+    assert_eq!(preview.revision, rev());
+    assert_eq!(preview.branch, "bolt/x");
+    let web = &preview.names["SLUICE_NAME_WEB"];
+    // `<port>-<rev>--<branch>--<repository>`, the repository named by
+    // the directory holding `.git`.
+    assert!(
+        web.starts_with(&format!("web-{}--bolt-x--", rev().short())),
+        "{web}"
+    );
+    assert!(web.ends_with("checkouts-preview"), "{web}");
+    assert_eq!(place.env["SLUICE_NAME_WEB"], *web);
+    assert_eq!(place.env["SLUICE_BRANCH"], "bolt/x");
+    assert_eq!(place.env["SLUICE_REVISION"], rev().as_str());
+    assert_eq!(preview.addresses["web"], format!("https://{web}.localhost"));
+    assert_eq!(
+        preview.addresses["api"],
+        format!("http://localhost:{}/docs", place.env["SLUICE_PORT_API"])
+    );
+    assert!(p.session_places().unwrap().is_empty());
+    assert!(!repo.common.join("sluice/.places").join(&flat).exists());
+
+    // Asked again: the same preview, whatever the settings now say.
+    let (again, listed) = p
+        .preview(
+            &name,
+            &rev(),
+            "main",
+            &ported(&["web"], &from.to_string()),
+            &BTreeMap::new(),
+            "later",
+        )
+        .unwrap();
+    assert_eq!(again.path, place.path);
+    assert_eq!(listed.names, preview.names);
+    assert_eq!(listed.ports, preview.ports);
+    assert_eq!(p.previews().unwrap(), vec![listed]);
+
+    // A candidate's place and a session's worktree beside it share nothing.
+    let cand = p.materialize(NAME, &rev(), &settings).unwrap();
+    let session = repo.session("a");
+    let adopted = p
+        .adopt(session.to_str().unwrap(), "bolt/x", &settings, "now")
+        .unwrap();
+    for other in [&cand, &adopted] {
+        for k in ["SLUICE_PORT_WEB", "SLUICE_PORT_API"] {
+            assert!(
+                !place.env.values().any(|v| *v == other.env[k]),
+                "{k} shared"
+            );
+        }
+    }
+    p.release(NAME).unwrap();
+    p.release(&adopted.name).unwrap();
+
+    assert!(p.release_preview(&name, None, 3).unwrap());
+    left_behind(&repo, &place);
+    assert!(!record.exists());
+    assert!(p.previews().unwrap().is_empty());
+    assert!(!p.release_preview(&name, None, 3).unwrap());
+    assert!(repo.held().is_empty(), "a port is still held");
+}
+
+/// 99: an address that names a port the policy does not list is refused
+/// before anything is made.
+#[test]
+fn a_preview_naming_an_unlisted_port_is_refused() {
+    let repo = Repo::new("checkouts-preview-refused");
+    let p = repo.places();
+    let name = preview_name(&rev());
+    let e = p
+        .preview(
+            &name,
+            &rev(),
+            "main",
+            &ported(&["web"], "41750"),
+            &addresses(&[("api", "https://{name.api}.localhost")]),
+            "now",
+        )
+        .unwrap_err();
+    assert!(
+        format!("{e:#}").contains("[preview] addresses api names {name.api}"),
+        "{e:#}"
+    );
+    assert!(p.previews().unwrap().is_empty());
+    assert!(!repo.common.join("sluice/.previews").exists());
+    assert!(repo.held().is_empty());
+    assert!(listed(&repo).is_empty());
+}
+
+/// 101: a preview released because its command failed has its run's
+/// release command run, and keeps its record, holding nothing, with what
+/// the command printed, until it is released again.
+#[test]
+fn a_failed_preview_is_kept_holding_nothing() {
+    let repo = Repo::new("checkouts-preview-failed");
+    let p = repo.places();
+    let (name, place) = ported_preview(&p, &rev());
+    p.preview_run(&name, &sluice_seams::RunHandle(name.clone()))
+        .unwrap();
+
+    assert!(p.release_preview(&name, Some("broken\n"), 3).unwrap());
+    assert_eq!(repo.runs.of(&name), ["release_keeping", "remove"]);
+    left_behind(&repo, &place);
+    let kept = p.previews().unwrap();
+    assert_eq!(kept.len(), 1);
+    assert_eq!(kept[0].failed.as_deref(), Some("broken\n"));
+    assert!(kept[0].ports.is_empty() && kept[0].run.is_none() && !kept[0].gone);
+    assert!(repo.held().is_empty());
+    assert!(p.release_preview(&name, None, 3).unwrap());
+    assert!(p.previews().unwrap().is_empty());
+}
+
+/// 99: a preview whose short revision would give a name another preview
+/// holds is named by the longer revision.
+#[test]
+fn a_name_another_preview_holds_takes_the_longer_revision() {
+    let repo = Repo::new("checkouts-preview-clash");
+    let p = repo.places();
+    let settings = ported(&["web"], &ports(1).to_string());
+    let name = preview_name(&rev());
+    let (_, first) = p
+        .preview(&name, &rev(), "main", &settings, &BTreeMap::new(), "now")
+        .unwrap();
+    let short = first.names["SLUICE_NAME_WEB"].clone();
+    // Another revision's preview that took the same name.
+    let dir = repo.common.join("sluice/.previews");
+    let record = |n: &str| dir.join(format!("{}.json", n.replace('/', "%2F")));
+    let mut other: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(record(&name)).unwrap()).unwrap();
+    let rival = "f".repeat(40);
+    other["revision"] = rival.clone().into();
+    other["block"] = serde_json::Value::Null;
+    std::fs::write(
+        record(&format!("preview/{}", &rival[..12])),
+        other.to_string(),
+    )
+    .unwrap();
+    p.release_preview(&name, None, 3).unwrap();
+
+    let (_, again) = p
+        .preview(&name, &rev(), "main", &settings, &BTreeMap::new(), "now")
+        .unwrap();
+    let long = &again.names["SLUICE_NAME_WEB"];
+    assert_ne!(*long, short);
+    assert!(
+        long.starts_with(&format!("web-{}--", &rev().as_str()[..12])),
+        "{long}"
+    );
+    p.release_preview(&name, None, 3).unwrap();
+    p.release_preview(&format!("preview/{}", &rival[..12]), None, 3)
+        .unwrap();
+}
+
+/// 123: a preview whose release command fails keeps its record with what
+/// failed, held once tried more than the retries it was given; freed, its
+/// checkout and record go with nothing run.
+#[test]
+fn a_failed_preview_release_is_held_once_its_retries_are_spent() {
+    let repo = Repo::new("checkouts-preview-release-failed");
+    let p = repo.places();
+    let (name, place) = ported_preview(&p, &rev());
+    *repo.runs.failing.borrow_mut() = Some("usage: scripts/preview up".into());
+
+    p.release_preview(&name, None, 1).unwrap_err();
+    let kept = p.previews().unwrap()[0].release_failed.clone().unwrap();
+    assert!(
+        kept.failed.contains("usage: scripts/preview up"),
+        "{kept:?}"
+    );
+    assert_eq!((kept.tries, kept.stopped), (1, false));
+    assert!(place.path.exists());
+    p.release_preview(&name, None, 1).unwrap_err();
+    let kept = p.previews().unwrap()[0].release_failed.clone().unwrap();
+    assert_eq!((kept.tries, kept.stopped), (2, true));
+
+    *repo.runs.failing.borrow_mut() = None;
+    let tried = repo.runs.of(&name).len();
+    p.free(&name).unwrap();
+    assert_eq!(
+        repo.runs.of(&name)[tried..],
+        ["end_keeping", "discard"],
+        "a release ran"
+    );
+    left_behind(&repo, &place);
+    assert!(p.previews().unwrap().is_empty());
+}
+
+/// What a preview's containers' end saw at each call: the place it was
+/// handed, whether the checkout was there, how many ports were held, and
+/// what had been asked of its runs.
+type Seen = Rc<RefCell<Vec<(Place, bool, usize, Vec<String>)>>>;
+
+/// The place profile of `repo`, ending a preview's containers by noting
+/// what each end was handed (record 0121, design D1, D3), refusing while
+/// `refusing` counts down; which containers an end removes is the check
+/// profile's, `tests/checks.rs`'s.
+fn ending(repo: &Repo) -> (Places, Seen, Rc<std::cell::Cell<usize>>) {
+    let seen: Seen = Rc::default();
+    let refusing = Rc::new(std::cell::Cell::new(0));
+    let (noted, refused, held, runs) = (
+        seen.clone(),
+        refusing.clone(),
+        repo.ports.path().join("held"),
+        repo.runs.clone(),
+    );
+    let p = repo.places().with_containers(Box::new(move |place| {
+        let count = std::fs::read_dir(&held).map_or(0, |d| d.count());
+        noted.borrow_mut().push((
+            place.clone(),
+            place.path.exists(),
+            count,
+            runs.of(&place.name),
+        ));
+        if refused.get() > 0 {
+            refused.set(refused.get() - 1);
+            bail!("could not remove the containers: publishes: the engine refused");
+        }
+        Ok(())
+    }));
+    (p, seen, refusing)
+}
+
+/// 34, previews-1 clause 101, record 0121 (design D1, D3): a preview
+/// released at its caller's asking has its release command run, then its
+/// containers ended while its checkout and its ports are still held, the
+/// place handed as its command was given it; then its checkout and ports
+/// go.
+#[test]
+fn a_released_preview_ends_its_containers_before_its_ports_go() {
+    let repo = Repo::new("checkouts-preview-containers");
+    let (p, seen, _) = ending(&repo);
+    let (name, place) = ported_preview(&p, &rev());
+
+    assert!(p.release_preview(&name, None, 3).unwrap());
+    assert_eq!(repo.runs.of(&name), ["release_keeping", "remove"]);
+    let seen = seen.borrow();
+    assert_eq!(seen.len(), 1);
+    let (handed, checkout, held, ran) = &seen[0];
+    assert_eq!(handed, &place, "the place its command was given");
+    assert_eq!(ran, &["release_keeping"], "its release command ran first");
+    assert!(checkout, "its checkout went before its containers ended");
+    assert_eq!(*held, 1, "its port went before its containers ended");
+    left_behind(&repo, &place);
+    assert!(repo.held().is_empty());
+}
+
+/// 123, previews-1 clause 101, record 0121 (design D3): a preview whose
+/// checkout was removed has its stored release run once in its scratch
+/// directory, which fails there; its containers are ended all the same,
+/// after that release and while its port is held; then it is freed.
+#[test]
+fn a_gone_previews_containers_end_after_its_stored_release() {
+    let repo = Repo::new("checkouts-preview-gone-containers");
+    let (p, seen, _) = ending(&repo);
+    let (name, place) = ported_preview(&p, &rev());
+    *repo.runs.failing.borrow_mut() = Some("sh: infra/release.sh: No such file".into());
+
+    std::fs::remove_dir_all(&place.path).unwrap();
+    let gone = p.release_gone(&name).unwrap();
+    assert!(gone.ran);
+    let failed = gone.failed.expect("its release failed in the scratch");
+    assert!(failed.contains("infra/release.sh"), "{failed}");
+    assert_eq!(
+        repo.runs.of(&name),
+        ["release_gone", "end_keeping", "discard"]
+    );
+    let seen = seen.borrow();
+    assert_eq!(seen.len(), 1);
+    assert_eq!(seen[0].0, place);
+    assert_eq!(seen[0].2, 1, "its port went before its containers ended");
+    assert_eq!(
+        seen[0].3,
+        ["release_gone", "end_keeping"],
+        "after its release"
+    );
+    left_behind(&repo, &place);
+    assert!(p.previews().unwrap().is_empty());
+    assert!(repo.held().is_empty());
+}
+
+/// 123, previews-1 clause 101, record 0121 (design D3): a preview freed
+/// at its release's failure's acceptance runs nothing in its name, its
+/// release command included, and has its containers ended while its
+/// checkout and port are still held; then it is freed.
+#[test]
+fn an_accepted_previews_containers_end_with_nothing_run() {
+    let repo = Repo::new("checkouts-preview-accepted");
+    let (p, seen, _) = ending(&repo);
+    let (name, place) = ported_preview(&p, &rev());
+
+    p.free(&name).unwrap();
+    assert_eq!(repo.runs.of(&name), ["end_keeping", "discard"]);
+    let seen = seen.borrow();
+    assert_eq!(seen.len(), 1);
+    assert_eq!(
+        (&seen[0].0, seen[0].1, seen[0].2, &seen[0].3[..]),
+        (&place, true, 1, &["end_keeping".to_string()][..])
+    );
+    left_behind(&repo, &place);
+    assert!(p.previews().unwrap().is_empty());
+    assert!(repo.held().is_empty());
+}
+
+/// 123, record 0121 (design D5): a container the engine will not remove
+/// keeps its preview whole. A release fails, keeping the failure with one
+/// try, the checkout and the port; with the checkout then removed, a gone
+/// release fails and lets nothing go; once the engine removes it, the next
+/// gone release frees the preview, its release command having run once
+/// in all.
+#[test]
+fn a_container_left_keeps_the_preview_and_its_ports() {
+    let repo = Repo::new("checkouts-preview-container-left");
+    let (p, _, refusing) = ending(&repo);
+    let (name, place) = ported_preview(&p, &rev());
+    let refused = "publishes: the engine refused";
+
+    refusing.set(1);
+    let e = format!("{:#}", p.release_preview(&name, None, 3).unwrap_err());
+    assert!(e.contains("could not remove the containers"), "{e}");
+    assert!(e.contains(refused), "{e}");
+    let kept = p.previews().unwrap()[0].release_failed.clone().unwrap();
+    assert!(kept.failed.contains(refused), "{kept:?}");
+    assert_eq!((kept.tries, kept.stopped), (1, false));
+    assert!(place.path.exists(), "its checkout stays");
+    assert_eq!(repo.held().len(), 1, "its port stays held");
+
+    std::fs::remove_dir_all(&place.path).unwrap();
+    refusing.set(1);
+    let e = format!("{:#}", p.release_gone(&name).unwrap_err());
+    assert!(e.contains(refused), "{e}");
+    let listed = p.previews().unwrap();
+    assert_eq!(listed.len(), 1, "the preview stays listed");
+    assert!(listed[0].gone);
+    assert_eq!(repo.held().len(), 1, "its port stays held");
+    assert!(place.tmp.exists(), "its scratch stays");
+
+    let gone = p.release_gone(&name).unwrap();
+    assert_eq!((gone.ran, gone.failed), (false, None));
+    let of = repo.runs.of(&name);
+    assert_eq!(
+        of.iter().filter(|c| *c == "release_keeping").count()
+            + of.iter().filter(|c| *c == "release_gone").count(),
+        2,
+        "{of:?}"
+    );
+    left_behind(&repo, &place);
+    assert!(p.previews().unwrap().is_empty());
+    assert!(repo.held().is_empty());
+}
+
+/// 123: a combination's checkout deleted by hand is gone, and freed with
+/// nothing run in its name: its run removed, git no longer listing it,
+/// its scratch directory and record gone and its port free.
+#[test]
+fn a_deleted_checkout_is_gone_and_freed_with_nothing_run() {
+    let repo = Repo::new("checkouts-gone");
+    let p = repo.places();
+    let settings = ported(&["web"], &ports(1).to_string());
+    let place = p.materialize(NAME, &rev(), &settings).unwrap();
+    assert!(!p.gone(NAME).unwrap());
+    assert!(!p.gone("sluice/try/bolt/x/99").unwrap(), "no record");
+
+    std::fs::remove_dir_all(&place.path).unwrap();
+    assert!(p.gone(NAME).unwrap());
+    p.free(NAME).unwrap();
+    assert_eq!(repo.runs.of(NAME), ["discard"], "a release ran");
+    left_behind(&repo, &place);
+    assert!(p.made().unwrap().is_empty());
+    assert!(!p.gone(NAME).unwrap());
+
+    let next = p
+        .materialize("sluice/try/bolt/x/2", &rev(), &settings)
+        .unwrap();
+    assert_eq!(
+        port(&next, "SLUICE_PORT_WEB"),
+        port(&place, "SLUICE_PORT_WEB")
+    );
+    p.release("sluice/try/bolt/x/2").unwrap();
+}
+
+/// 123: a combination's checkout deleted by hand has the release its run
+/// stored run once, from its scratch directory; then it is freed: git no
+/// longer lists it, its scratch directory and record are gone and its
+/// port is free. A second release of it runs nothing.
+#[test]
+fn a_deleted_checkouts_stored_release_runs_once_from_its_scratch_directory() {
+    let repo = Repo::new("checkouts-release-gone");
+    let p = repo.places();
+    let settings = ported(&["web"], &ports(1).to_string());
+    let place = p.materialize(NAME, &rev(), &settings).unwrap();
+    repo.runs.stored.borrow_mut().insert(NAME.into());
+
+    std::fs::remove_dir_all(&place.path).unwrap();
+    assert!(p.gone(NAME).unwrap());
+    let gone = p.release_gone(NAME).unwrap();
+    assert_eq!((gone.ran, gone.failed), (true, None));
+    assert!(called(
+        &repo,
+        &format!("release_gone {NAME} {}", place.tmp.display())
+    ));
+    assert_eq!(repo.runs.of(NAME), ["release_gone", "discard"]);
+    left_behind(&repo, &place);
+    assert!(p.made().unwrap().is_empty());
+
+    let again = p.release_gone(NAME).unwrap();
+    assert_eq!((again.ran, again.failed), (false, None));
+    assert_eq!(
+        repo.runs
+            .of(NAME)
+            .iter()
+            .filter(|c| *c == "release_gone")
+            .count(),
+        1
+    );
+
+    let next = p
+        .materialize("sluice/try/bolt/x/2", &rev(), &settings)
+        .unwrap();
+    assert_eq!(
+        port(&next, "SLUICE_PORT_WEB"),
+        port(&place, "SLUICE_PORT_WEB")
+    );
+    p.release("sluice/try/bolt/x/2").unwrap();
+}
+
+/// 123: a gone checkout whose stored release fails is freed all the same,
+/// the release's failure returned with what it said; one whose gone
+/// release was noted started, as a free that stopped part way leaves it,
+/// runs nothing; and one whose runs stored no release runs nothing.
+#[test]
+fn a_gone_checkout_is_freed_whatever_its_stored_release_did() {
+    let repo = Repo::new("checkouts-release-gone-fails");
+    let p = repo.places();
+    let settings = ported(&["web"], &ports(1).to_string());
+    let place = p.materialize(NAME, &rev(), &settings).unwrap();
+    *repo.runs.failing.borrow_mut() = Some("exit status: 2: usage: scripts/preview up".into());
+    std::fs::remove_dir_all(&place.path).unwrap();
+    let gone = p.release_gone(NAME).unwrap();
+    assert!(gone.ran);
+    let failed = gone.failed.expect("its failure is returned");
+    assert!(failed.contains("usage: scripts/preview up"), "{failed}");
+    *repo.runs.failing.borrow_mut() = None;
+    left_behind(&repo, &place);
+    assert!(p.made().unwrap().is_empty());
+    assert!(!p.gone(NAME).unwrap());
+    let next_name = "sluice/try/bolt/x/2";
+    let next = p.materialize(next_name, &rev(), &settings).unwrap();
+    assert_eq!(
+        port(&next, "SLUICE_PORT_WEB"),
+        port(&place, "SLUICE_PORT_WEB"),
+        "its port is free"
+    );
+
+    // Its gone release noted started before: nothing runs again.
+    repo.runs.stored.borrow_mut().insert(next_name.into());
+    std::fs::remove_dir_all(&next.path).unwrap();
+    let file = "sluice%2Ftry%2Fbolt%2Fx%2F2.json";
+    let mut made = repo.record(file);
+    made["gone_release"] = "2026-10-23T09:00:00Z".into();
+    std::fs::write(
+        repo.common.join("sluice/.places").join(file),
+        serde_json::to_vec(&made).unwrap(),
+    )
+    .unwrap();
+    let gone = p.release_gone(next_name).unwrap();
+    assert_eq!((gone.ran, gone.failed), (false, None));
+    assert_eq!(repo.runs.of(next_name), ["discard"], "it ran again");
+    left_behind(&repo, &next);
+
+    // No run stored a release.
+    let third = p
+        .materialize("sluice/try/bolt/x/3", &rev(), &settings)
+        .unwrap();
+    std::fs::remove_dir_all(&third.path).unwrap();
+    let gone = p.release_gone("sluice/try/bolt/x/3").unwrap();
+    assert_eq!((gone.ran, gone.failed), (false, None));
+    left_behind(&repo, &third);
+    assert!(p.made().unwrap().is_empty());
+}
+
+/// Makes `dir` its owner's to write again when dropped, so a test that
+/// fails with it read-only leaves nothing its scratch cannot remove.
+struct Unlock(PathBuf);
+
+impl Drop for Unlock {
+    fn drop(&mut self) {
+        let _ =
+            std::fs::set_permissions(&self.0, std::os::unix::fs::PermissionsExt::from_mode(0o755));
+    }
+}
+
+/// A directory of `place` a check left read-only, holding a file.
+fn read_only(place: &Place) -> Unlock {
+    let dir = place.path.join("locked");
+    std::fs::create_dir(&dir).unwrap();
+    std::fs::write(dir.join("file"), "x").unwrap();
+    std::fs::set_permissions(&dir, std::os::unix::fs::PermissionsExt::from_mode(0o555)).unwrap();
+    Unlock(dir)
+}
+
+/// 123, record 0115: a combination's checkout whose folder git no longer
+/// lists, holding a directory a check left read-only, is released once
+/// from what sluice holds and freed: the release its run stored runs
+/// once, or nothing where it ran already, as on deneb, and sluice removes
+/// what is left of the folder, its scratch, its record and its ports
+/// going with it. The operator's acceptance frees one the same way, with
+/// nothing run.
+#[test]
+fn a_checkout_git_no_longer_lists_is_freed() {
+    let repo = Repo::new("checkouts-unlisted-freed");
+    let p = repo.places();
+    let settings = ported(&["web"], &ports(1).to_string());
+    let freed = |name: &str, place: &Place| {
+        left_behind(&repo, place);
+        assert!(p.made().unwrap().is_empty());
+        assert!(!p.gone(name).unwrap());
+    };
+
+    // Released once: its stored release runs, and what is left goes.
+    let first = p.materialize(NAME, &rev(), &settings).unwrap();
+    repo.runs.stored.borrow_mut().insert(NAME.into());
+    let _unlock = read_only(&first);
+    repo.worktrees.forget(&first.path);
+    assert!(p.gone(NAME).unwrap());
+    let gone = p.release_gone(NAME).unwrap();
+    assert_eq!((gone.ran, gone.failed), (true, None));
+    freed(NAME, &first);
+
+    // The incident: its release ran as its run was removed, before git
+    // stopped part way; nothing runs again.
+    let second_name = "sluice/try/bolt/x/2";
+    let second = p.materialize(second_name, &rev(), &settings).unwrap();
+    assert_eq!(
+        port(&second, "SLUICE_PORT_WEB"),
+        port(&first, "SLUICE_PORT_WEB"),
+        "its port is free"
+    );
+    let _unlock = read_only(&second);
+    repo.worktrees.forget(&second.path);
+    let gone = p.release_gone(second_name).unwrap();
+    assert_eq!((gone.ran, gone.failed), (false, None));
+    freed(second_name, &second);
+
+    // The operator's acceptance: nothing runs, and what is left goes.
+    let third_name = "sluice/try/bolt/x/3";
+    let third = p.materialize(third_name, &rev(), &settings).unwrap();
+    let _unlock = read_only(&third);
+    repo.worktrees.forget(&third.path);
+    p.free(third_name).unwrap();
+    assert_eq!(repo.runs.of(third_name), ["discard"], "a release ran");
+    freed(third_name, &third);
 }
