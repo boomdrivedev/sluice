@@ -151,7 +151,7 @@ pub(crate) async fn answer(hosting: &Arc<Hosting>, request: Request) -> Answer {
     super::note(hosting, &repository);
     hosting.tasks.told(&repository);
     let task = hosting.tasks.handle(&repository);
-    if !super::asked_only() {
+    if !hosting.named.asked_only {
         task.wake();
     }
     made

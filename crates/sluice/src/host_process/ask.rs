@@ -347,7 +347,7 @@ pub struct Inside {
 
 impl HostProcess for Inside {
     fn asked_only(&self) -> bool {
-        super::asked_only()
+        self.named.asked_only
     }
 
     fn note(&self, _: &Here<'_, '_>) -> Result<()> {

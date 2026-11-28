@@ -475,7 +475,7 @@ pub(crate) async fn wait(
         });
     // Design D14: where passes are taken only when asked, the step is at
     // the wait's own time, as its passes are.
-    let at = super::asked_only().then_some(ask.at);
+    let at = hosting.named.asked_only.then_some(ask.at);
     let stepped = tokio::task::spawn_blocking(move || {
         let (ran, stderr) = crate::telemetry::capturing(|| {
             let within = Some(folder.clone());
@@ -616,7 +616,7 @@ struct Answering {
 
 impl HostProcess for Answering {
     fn asked_only(&self) -> bool {
-        super::asked_only()
+        self.named.asked_only
     }
 
     fn note(&self, _: &Here<'_, '_>) -> Result<()> {
