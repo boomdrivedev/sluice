@@ -115,13 +115,12 @@
 //! path at its first run with none of its runs going, its former scratch
 //! moved there (record 0063 as amended 2026-11-05).
 
-use crate::workers::Run as _;
 use std::collections::{BTreeMap, BTreeSet};
 use std::ffi::OsString;
 use std::fs::File;
 use std::net::{Ipv4Addr, SocketAddr, TcpListener, TcpStream};
 use std::path::{Path, PathBuf};
-use std::process::{Output, Stdio};
+use std::rc::Rc;
 use std::time::Duration;
 
 use anyhow::{anyhow, bail, Context as _, Result};
@@ -132,6 +131,9 @@ use sluice_seams::{
 };
 
 use crate::runs::{dir_name, flat_name, ReleaseWith, Request, Runs, SESSION};
+
+mod worktrees;
+pub use worktrees::{GitWorktrees, Worktrees};
 
 /// Builds a session's place's release command from the policy's `[tests]`
 /// and limits, under the executor its runs had, writing what the
@@ -148,6 +150,60 @@ pub type ReleaseNamed = Box<dyn Fn(&Settings) -> Result<bool>>;
 /// Ends what the engine holds for a place: the check seam's, handed to
 /// this profile by the binding (rule core.2; record 0121).
 pub type ContainerEnd = Box<dyn Fn(&Place) -> Result<()>>;
+
+/// The runs of a repository's places as this profile ends and releases
+/// them: [`Runs`], whose supervisors and release commands are processes
+/// of their own (34, 95, 123; rule core.10).
+pub trait PlaceRuns {
+    /// [`Runs::any_going`].
+    fn any_going(&self, place: &str) -> Result<bool>;
+    /// [`Runs::discard`].
+    fn discard(&self, name: &str) -> Result<()>;
+    /// [`Runs::discard_all`].
+    fn discard_all(&self, place: &str) -> Result<()>;
+    /// [`Runs::end_keeping`].
+    fn end_keeping(&self, name: &str) -> Result<()>;
+    /// [`Runs::release_dir`].
+    fn release_dir(&self, place: &str) -> PathBuf;
+    /// [`Runs::release_gone`].
+    fn release_gone(&self, name: &str, cwd: &Path) -> Result<bool>;
+    /// [`Runs::remove`].
+    fn remove(&self, name: &str) -> Result<()>;
+    /// [`Runs::release_keeping`].
+    fn release_keeping(&self, name: &str) -> Result<()>;
+    /// [`Runs::remove_all_with`].
+    fn remove_all_with(&self, place: &str, with: ReleaseWith) -> Result<()>;
+}
+
+impl PlaceRuns for Runs {
+    fn any_going(&self, place: &str) -> Result<bool> {
+        Runs::any_going(self, place)
+    }
+    fn discard(&self, name: &str) -> Result<()> {
+        Runs::discard(self, name)
+    }
+    fn discard_all(&self, place: &str) -> Result<()> {
+        Runs::discard_all(self, place)
+    }
+    fn end_keeping(&self, name: &str) -> Result<()> {
+        Runs::end_keeping(self, name)
+    }
+    fn release_dir(&self, place: &str) -> PathBuf {
+        Runs::release_dir(self, place)
+    }
+    fn release_gone(&self, name: &str, cwd: &Path) -> Result<bool> {
+        Runs::release_gone(self, name, cwd)
+    }
+    fn remove(&self, name: &str) -> Result<()> {
+        Runs::remove(self, name)
+    }
+    fn release_keeping(&self, name: &str) -> Result<()> {
+        Runs::release_keeping(self, name)
+    }
+    fn remove_all_with(&self, place: &str, with: ReleaseWith) -> Result<()> {
+        Runs::remove_all_with(self, place, with)
+    }
+}
 
 /// Whose a place is.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -687,7 +743,7 @@ fn free_ports(dir: &Path, ports: &BTreeMap<String, String>, record: &Path) -> Re
 
 pub struct Places {
     common: PathBuf,
-    runs: Runs,
+    runs: Rc<dyn PlaceRuns>,
     /// Where the host's ports are held; the default when `None`.
     ports: Option<PathBuf>,
     /// The directory standing for the user's, [`user_scratch`] when
@@ -699,36 +755,26 @@ pub struct Places {
     /// How a preview's containers are ended (record 0121); none ended when
     /// `None`.
     containers: Option<ContainerEnd>,
-    /// The repository at its common directory, as gix reads it, once
-    /// opened: its worktrees, read with no process (129).
-    repo: std::cell::OnceCell<gix::Repository>,
+    /// The repository's worktrees, as git keeps them.
+    worktrees: Rc<dyn Worktrees>,
     /// The repository's key, [`repository_key`], once made.
     key: std::cell::OnceCell<String>,
 }
 
 impl Places {
-    pub fn new(common: &Path, runs: Runs) -> Self {
+    /// The places of the repository whose common directory is `common`,
+    /// made and removed as `worktrees` keeps them, their runs `runs`.
+    pub fn new(common: &Path, worktrees: Rc<dyn Worktrees>, runs: Rc<dyn PlaceRuns>) -> Self {
         Places {
             common: common.to_path_buf(),
+            worktrees,
             runs,
             ports: None,
             scratch_root: None,
             release: None,
             containers: None,
-            repo: std::cell::OnceCell::new(),
             key: std::cell::OnceCell::new(),
         }
-    }
-
-    /// The repository at its common directory, opened at its first
-    /// reading.
-    fn repo(&self) -> Result<&gix::Repository> {
-        if let Some(r) = self.repo.get() {
-            return Ok(r);
-        }
-        let r = gix::open(&self.common)
-            .map_err(|e| anyhow!("opening the repository at {}: {e}", self.common.display()))?;
-        Ok(self.repo.get_or_init(|| r))
     }
 
     /// Read whether a policy names a session's place's release command
@@ -1017,7 +1063,7 @@ impl Places {
         let Ok((path, _)) = Places::session_name(folder) else {
             return Ok(Released::Nothing);
         };
-        if !self.listed(&path)? {
+        if !self.worktrees.listed(&path)? {
             return Ok(Released::Nothing);
         }
         let made = {
@@ -1100,34 +1146,11 @@ impl Places {
         )
     }
 
-    /// Records 0120 and 0115: whether git lists the folder `path` as one
-    /// of the repository's worktrees, detached or not: its main worktree
-    /// where it has one, or the folder an entry under `<common>/worktrees/`
-    /// names. Read from the repository's files as `git worktree list` reads
-    /// them, with no process started and no object read (129; rule
-    /// core.31), each folder matched by what it is on disk ([`Folder`]),
-    /// never by how its path is spelled. An entry whose `gitdir` file
-    /// cannot be read, or whose folder cannot be, names nothing; worktrees
-    /// that cannot be listed and a `path` that cannot be read are an error,
-    /// never read as unlisted.
-    fn listed(&self, path: &Path) -> Result<bool> {
-        let want = Folder::of(path).with_context(|| format!("reading {}", path.display()))?;
-        let repo = self.repo()?;
-        let is = |dir: &Path| Folder::of(dir).is_ok_and(|f| f == want);
-        if !repo.is_bare() && repo.workdir().is_some_and(is) {
-            return Ok(true);
-        }
-        let linked = repo
-            .worktrees()
-            .map_err(|e| anyhow!("listing the worktrees: {e}"))?;
-        Ok(linked.into_iter().any(|w| w.base().is_ok_and(|b| is(&b))))
-    }
-
     /// 123, record 0115: whether the folder `path` of a place sluice made,
     /// a candidate's or a preview's, is gone: no directory, or one git no
     /// longer lists as a worktree, whatever is left in it.
     fn folder_gone(&self, path: &Path) -> Result<bool> {
-        Ok(!path.is_dir() || !self.listed(path)?)
+        Ok(!path.is_dir() || !self.worktrees.listed(path)?)
     }
 
     /// Hold ports in `dir` rather than the host's own.
@@ -1431,22 +1454,6 @@ impl Places {
         Ok(())
     }
 
-    /// `git` in the common dir, with nothing of a caller's repository or
-    /// hooks: a hook's `GIT_DIR` would point it elsewhere.
-    fn git(&self, args: &[&str]) -> Result<Output> {
-        crate::workers::command("git", "git")
-            .arg("-C")
-            .arg(&self.common)
-            .args(args)
-            .env_remove("GIT_DIR")
-            .env_remove("GIT_WORK_TREE")
-            .env_remove("GIT_INDEX_FILE")
-            .env_remove("GIT_COMMON_DIR")
-            .stdin(Stdio::null())
-            .worker_output()
-            .context("running git")
-    }
-
     /// Record 0122 (design D3): the place `name`, where its record names a
     /// checkout this host made that git lists, unlocked, holding exactly
     /// `rev`: the proof a step that stopped before its run started made it.
@@ -1459,7 +1466,7 @@ impl Places {
         let Some(path) = made.path.clone().filter(|p| p.is_dir()) else {
             return Ok(None);
         };
-        let Some(listed) = self.worktree_entry(&path)? else {
+        let Some(listed) = self.worktrees.entry(&path)? else {
             return Ok(None);
         };
         if listed.locked.is_some() || listed.head.as_ref() != Some(rev) {
@@ -1467,18 +1474,7 @@ impl Places {
         }
         // Holding nothing beyond its revision, as git made it: nothing ran
         // in it.
-        let path_text = path
-            .to_str()
-            .ok_or_else(|| anyhow!("{} is not UTF-8", path.display()))?;
-        let status = self.git(&[
-            "-C",
-            path_text,
-            "status",
-            "--porcelain",
-            "--untracked-files=all",
-            "--ignored",
-        ])?;
-        if !status.status.success() || !status.stdout.is_empty() {
+        if !self.worktrees.clean(&path)? {
             return Ok(None);
         }
         let tmp = self.scratch(name, &made);
@@ -1499,48 +1495,9 @@ impl Places {
         }))
     }
 
-    /// Record 0122 (design D3, D4): what `git worktree list --porcelain`
-    /// says of the folder `path`, matched by what it is on disk
-    /// ([`Folder`]) or, where it is gone, by its spelling: the revision it
-    /// holds and whether, and why, git keeps it locked. `None` where git
-    /// lists no such folder.
-    fn worktree_entry(&self, path: &Path) -> Result<Option<Listed>> {
-        let out = self.git(&["worktree", "list", "--porcelain", "-z"])?;
-        if !out.status.success() {
-            bail!(
-                "git worktree list: {}",
-                String::from_utf8_lossy(&out.stderr).trim()
-            );
-        }
-        let want = Folder::of(path).ok();
-        Ok(parse_worktree_entries(&out.stdout)
-            .into_iter()
-            .find(|(at, _)| match &want {
-                Some(w) => Folder::of(at).is_ok_and(|f| f == *w),
-                None => at == path,
-            })
-            .map(|(_, listed)| listed))
-    }
-
     fn make_worktree(&self, name: &str, rev: &Rev) -> Result<PathBuf> {
         let path = self.worktree_path(name);
-        let out = self.git(&[
-            "-c",
-            "core.hooksPath=/dev/null",
-            "worktree",
-            "add",
-            "--detach",
-            path.to_str()
-                .ok_or_else(|| anyhow!("{} is not UTF-8", path.display()))?,
-            rev.as_str(),
-        ])?;
-        if !out.status.success() {
-            bail!(
-                "git worktree add {}: {}",
-                path.display(),
-                String::from_utf8_lossy(&out.stderr).trim()
-            );
-        }
+        self.worktrees.add(&path, rev)?;
         Ok(path)
     }
 
@@ -1568,7 +1525,7 @@ impl Places {
     /// goes by sluice's own removal ([`remove_leftover`]); nothing where it
     /// is not there either.
     fn remove_worktree(&self, path: &Path) -> Result<()> {
-        if !self.listed(path)? {
+        if !self.worktrees.listed(path)? {
             return remove_leftover(path).with_context(|| {
                 format!(
                     "removing what is left of {}, which git no longer lists as a worktree",
@@ -1576,29 +1533,17 @@ impl Places {
                 )
             });
         }
-        let path_text = path
-            .to_str()
-            .ok_or_else(|| anyhow!("{} is not UTF-8", path.display()))?;
         // 123, rule core.16, record 0122 (design D4): `git worktree add`
         // locks the checkout `initializing` until it is done, and an add
         // stopped part way leaves the lock, which every removal refuses.
         // A checkout sluice made, locked so, is unlocked, removed and
         // pruned; one locked for any other reason is a hold sluice keeps,
         // and its release fails naming the lock and git's words.
-        let locked = self.worktree_entry(path)?.and_then(|l| l.locked);
+        let locked = self.worktrees.entry(path)?.and_then(|l| l.locked);
         if locked.as_deref() == Some(INITIALIZING) {
-            let out = self.git(&["worktree", "unlock", path_text])?;
-            if !out.status.success() {
-                bail!(
-                    "git worktree unlock {}: {}",
-                    path.display(),
-                    String::from_utf8_lossy(&out.stderr).trim()
-                );
-            }
+            self.worktrees.unlock(path)?;
         }
-        let out = self.git(&["worktree", "remove", "--force", path_text])?;
-        if !out.status.success() {
-            let said = String::from_utf8_lossy(&out.stderr).trim().to_string();
+        if let Err(said) = self.worktrees.remove(path)? {
             match locked.filter(|l| l != INITIALIZING) {
                 Some(why) => bail!(
                     "{} is locked ({}), a hold sluice keeps: git worktree remove: {said}",
@@ -1612,66 +1557,9 @@ impl Places {
             }
         }
         if locked.is_some() {
-            let out = self.git(&["worktree", "prune"])?;
-            if !out.status.success() {
-                bail!(
-                    "git worktree prune: {}",
-                    String::from_utf8_lossy(&out.stderr).trim()
-                );
-            }
+            self.worktrees.prune()?;
         }
         Ok(())
-    }
-}
-
-/// A folder as it is on disk, whatever spells its path: the device and
-/// inode of the folder, or, where it no longer exists, of its nearest
-/// ancestor that does, with the rest of its path below that ancestor. So
-/// `/var/…` and `/private/var/…`, or a path spelled through a link, are
-/// one folder, and a folder deleted is still the one its entry names
-/// (record 0115).
-#[derive(Debug, PartialEq, Eq)]
-struct Folder {
-    dev: u64,
-    ino: u64,
-    rest: PathBuf,
-}
-
-impl Folder {
-    fn of(path: &Path) -> std::io::Result<Folder> {
-        use std::os::unix::fs::MetadataExt as _;
-        let mut at = path;
-        let mut rest: Vec<&std::ffi::OsStr> = Vec::new();
-        loop {
-            // The folder itself is not followed, as git never follows it; an
-            // ancestor is, since the rest of the path is reached through it.
-            let meta = if rest.is_empty() {
-                std::fs::symlink_metadata(at)
-            } else {
-                std::fs::metadata(at)
-            };
-            match meta {
-                Ok(m) => {
-                    return Ok(Folder {
-                        dev: m.dev(),
-                        ino: m.ino(),
-                        rest: rest.iter().rev().collect(),
-                    })
-                }
-                Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-                    let (Some(parent), Some(name)) = (at.parent(), at.file_name()) else {
-                        return Err(e);
-                    };
-                    rest.push(name);
-                    at = if parent.as_os_str().is_empty() {
-                        Path::new(".")
-                    } else {
-                        parent
-                    };
-                }
-                Err(e) => return Err(e),
-            }
-        }
     }
 }
 
@@ -1714,41 +1602,6 @@ fn remove_leftover(path: &Path) -> Result<()> {
         Err(e) if !gone(&e) => Err(e).with_context(|| format!("removing {}", path.display())),
         _ => Ok(()),
     }
-}
-
-/// The worktree at `worktree` whose HEAD is the ref `head`, with the
-/// branch it names and that branch's revision, as `git worktree list`
-/// reads them: `None` when HEAD is detached or names no branch, and the
-/// null revision for a branch not yet made.
-fn on_branch(repo: &gix::Repository, head: &str, worktree: PathBuf) -> Result<Option<CheckedOut>> {
-    let found = repo
-        .try_find_reference(head)
-        .map_err(|e| anyhow!("reading {head}: {e}"))?;
-    let Some(found) = found else {
-        return Ok(None);
-    };
-    let gix::refs::TargetRef::Symbolic(name) = found.target() else {
-        return Ok(None);
-    };
-    let full = name.as_bstr().to_string();
-    let Some(branch) = full.strip_prefix("refs/heads/") else {
-        return Ok(None);
-    };
-    let at = match repo
-        .try_find_reference(name)
-        .map_err(|e| anyhow!("reading {full}: {e}"))?
-    {
-        Some(mut r) => r
-            .peel_to_id()
-            .map_err(|e| anyhow!("peeling {full}: {e}"))?
-            .to_string(),
-        None => gix::ObjectId::null(repo.object_hash()).to_string(),
-    };
-    Ok(Some(CheckedOut {
-        worktree,
-        branch: branch.to_string(),
-        head: Rev(at),
-    }))
 }
 
 /// Record 0122 (design D3, D4): what `git worktree list --porcelain -z`
@@ -2149,42 +2002,8 @@ impl Checkout for Places {
         self.write_record(name, &made)
     }
 
-    /// Every worktree with a branch checked out, read as `git worktree
-    /// list` lists them with no process started (129): the main worktree
-    /// where the repository is not bare, then each linked one whose
-    /// directory is there or which is locked; one whose HEAD names no
-    /// branch is left out, as [`parse_worktree_list`] leaves it.
     fn checked_out(&self) -> Result<Vec<CheckedOut>> {
-        let repo = self.repo()?;
-        let mut found = Vec::new();
-        if !repo.is_bare() {
-            if let Some(dir) = repo.workdir() {
-                found.extend(on_branch(repo, "main-worktree/HEAD", dir.to_path_buf())?);
-            }
-        }
-        let linked = repo
-            .worktrees()
-            .map_err(|e| anyhow!("listing the worktrees: {e}"))?;
-        for w in linked {
-            // Its directory gone, as `git worktree prune` would remove it.
-            if w.is_prunable() {
-                continue;
-            }
-            let (Ok(base), Ok(id)) = (w.base(), w.id()) else {
-                continue;
-            };
-            found.extend(on_branch(repo, &format!("worktrees/{id}/HEAD"), base)?);
-        }
-        Ok(found
-            .into_iter()
-            .map(|mut c| {
-                // As a session's place names its worktree (`session_name`).
-                if let Ok(p) = std::fs::canonicalize(&c.worktree) {
-                    c.worktree = p;
-                }
-                c
-            })
-            .collect())
+        self.worktrees.checked_out()
     }
 
     fn adopt(&self, worktree: &str, branch: &str, checkout: &Settings, at: &str) -> Result<Place> {
@@ -2384,12 +2203,13 @@ impl Checkout for Places {
 mod tests {
     use super::{
         fill, free_ports, hold_ports, label, own_dir, port_free, repository, repository_key,
-        scratch_name, slug, user_scratch, Kind, Made, Places, Ports,
+        scratch_name, slug, user_scratch, GitWorktrees, Kind, Made, Places, Ports,
     };
     use crate::runs::{dir_name, Runs};
     use sluice_seams::{Checkout, LastResult, Rev, RunOutcome, SessionRunKind};
     use std::collections::BTreeMap;
     use std::path::Path;
+    use std::rc::Rc;
 
     fn last() -> LastResult {
         LastResult {
@@ -2498,8 +2318,12 @@ mod tests {
         let _ = std::fs::remove_dir_all(&root);
         std::fs::create_dir_all(&root).unwrap();
         std::fs::write(root.join("not-a-dir"), "").unwrap();
-        let places = Places::new(&root, Runs::new(&root, "sluice".into()))
-            .with_ports(root.join("not-a-dir/blocks"));
+        let places = Places::new(
+            &root,
+            Rc::new(GitWorktrees::new(&root)),
+            Rc::new(Runs::new(&root, "sluice".into())),
+        )
+        .with_ports(root.join("not-a-dir/blocks"));
         let name = "try/main/90";
         let made = Made::new(Kind::Made, "worktree");
         places.write_record(name, &made).unwrap();
@@ -2522,7 +2346,12 @@ mod tests {
         let _ = std::fs::remove_dir_all(&root);
         std::fs::create_dir_all(&root).unwrap();
         let open = || {
-            Places::new(&root, Runs::new(&root, "sluice".into())).with_ports(root.join("blocks"))
+            Places::new(
+                &root,
+                Rc::new(GitWorktrees::new(&root)),
+                Rc::new(Runs::new(&root, "sluice".into())),
+            )
+            .with_ports(root.join("blocks"))
         };
         let places = open();
         let name = format!("session/{}", root.join("wt").display());
@@ -2631,8 +2460,12 @@ mod tests {
         assert_ne!(key, repository_key(Path::new("/Users/me/code/other/.git")));
 
         let root = Path::new("/s");
-        let places =
-            Places::new(common, Runs::new(common, "sluice".into())).with_scratch_root(root.into());
+        let places = Places::new(
+            common,
+            Rc::new(GitWorktrees::new(common)),
+            Rc::new(Runs::new(common, "sluice".into())),
+        )
+        .with_scratch_root(root.into());
         for name in [
             "sluice/try/main/39",
             &format!("session//{}", "w".repeat(300)),
@@ -2716,8 +2549,12 @@ mod tests {
         let root = std::env::temp_dir().join(format!("sluice-sweep-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&root);
         std::fs::create_dir_all(&root).unwrap();
-        let places = Places::new(&root, Runs::new(&root, "sluice".into()))
-            .with_scratch_root(root.join("user"));
+        let places = Places::new(
+            &root,
+            Rc::new(GitWorktrees::new(&root)),
+            Rc::new(Runs::new(&root, "sluice".into())),
+        )
+        .with_scratch_root(root.join("user"));
         let users = places.repository_dir().unwrap().join("abcdef0123");
         places.make_scratch(&users).unwrap();
         let former = root.join("sluice/.tmp/0123456789");

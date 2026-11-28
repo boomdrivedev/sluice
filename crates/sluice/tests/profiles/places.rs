@@ -10,8 +10,9 @@ mod support;
 
 use std::collections::BTreeMap;
 use std::path::PathBuf;
+use std::rc::Rc;
 
-use sluice::profiles::places::Places;
+use sluice::profiles::places::{GitWorktrees, Places};
 use sluice::runs::{Request, Runs};
 use sluice_seams::{Checkout, Place, Rev, Setting, Settings};
 use support::Repo;
@@ -60,7 +61,12 @@ fn user_dir(repo: &Repo) -> PathBuf {
 
 fn places(repo: &Repo) -> Places {
     let common = repo.dir().join(".git");
-    Places::new(&common, runs(repo)).with_scratch_root(user_dir(repo))
+    Places::new(
+        &common,
+        Rc::new(GitWorktrees::new(&common)),
+        Rc::new(runs(repo)),
+    )
+    .with_scratch_root(user_dir(repo))
 }
 
 fn runs(repo: &Repo) -> Runs {
@@ -1936,9 +1942,14 @@ fn a_checkout_git_no_longer_lists_is_gone() {
     std::os::unix::fs::symlink(repo.dir(), &link).unwrap();
     // A place made through the link: its record spells its path so, while
     // git lists the folder by the path it resolves to.
-    let through = Places::new(&link.join(".git"), runs(&repo))
-        .with_scratch_root(user_dir(&repo))
-        .with_ports(blocks.path().to_path_buf());
+    let common = link.join(".git");
+    let through = Places::new(
+        &common,
+        Rc::new(GitWorktrees::new(&common)),
+        Rc::new(runs(&repo)),
+    )
+    .with_scratch_root(user_dir(&repo))
+    .with_ports(blocks.path().to_path_buf());
     let place = through.materialize(NAME, &rev, &Settings::new()).unwrap();
     assert!(place.path.starts_with(&link), "{}", place.path.display());
     assert!(
