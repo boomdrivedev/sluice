@@ -2898,6 +2898,30 @@ mod tests {
         }
     }
 
+    /// 140: the command runner's one check reads every change, asked of
+    /// nothing.
+    #[test]
+    fn the_command_runner_reads_every_check() {
+        use sluice_seams::{Reading, Reads, Rev, Tests as _};
+        let checks = Checks::new(
+            Path::new("/nonexistent/repo.git"),
+            PathBuf::from("sluice"),
+            Instance::from_file(None, 4).unwrap(),
+        );
+        let tests = Settings::from([
+            ("runner".into(), Setting::Text("command".into())),
+            ("command".into(), Setting::Text("true".into())),
+        ]);
+        let reads = checks
+            .reads(&Reading {
+                required: vec!["true".into()],
+                tests,
+                pairs: vec![(Rev::new("a"), Rev::new("b"))],
+            })
+            .unwrap();
+        assert_eq!(reads, [Reads::Every]);
+    }
+
     /// 88, rule core.2 (design D5 of the change
     /// `a-codebuild-fleet-runs-a-queues-checks`): a pool's launch, job and
     /// wake go to the launcher bound for its kind, a job with the pool's

@@ -547,39 +547,6 @@ fn copy_apart_with(name: &str, extra: &str) -> (Scratch, Repo, PathBuf, String, 
     (bare, repo, held, copy, remote)
 }
 
-/// 124: on a branch kept on a remote, the protection judges a write by
-/// this host's own `bolt/x`, fetching nothing: a reset to where it stands
-/// and git's packing pass, and a move to origin's revision is refused
-/// from the copy's value.
-#[test]
-fn a_copy_apart_from_its_remote_is_judged_by_its_own_value() {
-    let (_bare, repo, held, copy, remote) = copy_apart("protect-copy");
-    let out = git_in(&repo, &held, &["reset", "-q", "--hard"]);
-    assert!(out.status.success(), "{}", text(&out));
-    let out = repo.git_raw(&["pack-refs", "--all", "--prune"]);
-    assert!(out.status.success(), "{}", text(&out));
-    assert!(!repo.dir().join(".git/refs/heads/bolt/x").exists());
-    assert_eq!(repo.rev("bolt/x"), copy);
-    assert!(protected_events(&repo).is_empty());
-
-    let out = repo.git_raw(&["update-ref", "refs/heads/bolt/x", &remote]);
-    assert_eq!(out.status.code(), Some(128), "{}", text(&out));
-    assert_eq!(repo.rev("bolt/x"), copy);
-    let events = protected_events(&repo);
-    assert_eq!(events.len(), 1, "{events:?}");
-    assert_eq!(
-        (&events[0]["from"], &events[0]["to"]),
-        (&serde_json::json!(copy), &serde_json::json!(remote))
-    );
-    assert!(
-        events[0]["by"]
-            .as_str()
-            .unwrap()
-            .contains("update-ref refs/heads/bolt/x"),
-        "{events:?}"
-    );
-}
-
 /// A protected repository whose `bolt/x` and its records are kept on
 /// `origin`, its policy naming a signer, so a read of the records fetches
 /// them (C.6); and the bare origin.

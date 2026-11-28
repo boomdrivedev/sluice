@@ -169,22 +169,8 @@ impl Moon {
             });
         }
         let cold = holds_cold(&tasks, &targets, &cold);
-        let jobs = cx.jobs.to_string();
-        let mut argv: Vec<&str> = vec!["moon"];
-        // ADR 0014: moon exports beside sluice; it reads no parent trace,
-        // so the run's resource attributes tie its spans to the round. It
-        // sends its spans and no metrics, since the run's environment
-        // turns them off (151 as amended 2026-11-18; rule core.66).
-        if crate::telemetry::on() {
-            argv.push("--otel");
-        }
-        argv.push("exec");
-        argv.extend(targets.iter().map(String::as_str));
-        argv.extend(["--ci", "--on-failure", "continue", "--concurrency", &jobs]);
-        // A gate that does not trust the cache gets no replay (28).
-        if !request.replay {
-            argv.push("--force");
-        }
+        let argv = exec_argv(&targets, cx.jobs, request.replay, crate::telemetry::on());
+        let argv: Vec<&str> = argv.iter().map(String::as_str).collect();
         Ok(Plan {
             argv: Some(cx.argv(&argv)),
             targets,
@@ -721,6 +707,27 @@ fn kept_out(tasks: &BTreeMap<String, Task>, required: &[String]) -> Vec<KeptOutT
             })
         })
         .collect()
+}
+
+/// moon's run of `targets` in its CI mode, carrying on past a failure, on
+/// the run's share of the cores, `jobs` (71, 83); with `--otel` where
+/// sluice sends telemetry, since moon reads no parent trace and the run's
+/// resource attributes tie its spans to the round, its metrics off by the
+/// run's environment (ADR 0014; 151 as amended 2026-11-18; rule core.66);
+/// and with `--force` where the gate may not replay (28).
+fn exec_argv(targets: &[String], jobs: usize, replay: bool, otel: bool) -> Vec<String> {
+    let mut argv = vec!["moon".to_string()];
+    if otel {
+        argv.push("--otel".into());
+    }
+    argv.push("exec".into());
+    argv.extend(targets.iter().cloned());
+    argv.extend(["--ci", "--on-failure", "continue", "--concurrency"].map(String::from));
+    argv.push(jobs.to_string());
+    if !replay {
+        argv.push("--force".into());
+    }
+    argv
 }
 
 /// 35: whether any of `targets` is a test `cold` names, by its own name
@@ -3358,6 +3365,32 @@ mod tests {
     /// 147, C.2: the version check refuses a moon below 2.6 in words that
     /// name it and the oldest the runner reads, and a version moon cannot
     /// say quoting what it said; it reads 2.6 and later.
+    /// 71, 83; the run-bound spec's "Six cores each": moon runs its
+    /// targets in its CI mode with the run's share of the cores as
+    /// `--concurrency`; `--otel` where sluice sends telemetry, and
+    /// `--force` where the gate may not replay (28).
+    #[test]
+    fn moon_runs_its_targets_on_the_runs_share_of_the_cores() {
+        let targets = ["alpha:test".to_string(), "beta:test".to_string()];
+        assert_eq!(
+            super::exec_argv(&targets, 4, true, false),
+            [
+                "moon",
+                "exec",
+                "alpha:test",
+                "beta:test",
+                "--ci",
+                "--on-failure",
+                "continue",
+                "--concurrency",
+                "4"
+            ]
+        );
+        let argv = super::exec_argv(&targets, 2, false, true);
+        assert_eq!(argv[..2], ["moon", "--otel"]);
+        assert_eq!(argv[argv.len() - 3..], ["--concurrency", "2", "--force"]);
+    }
+
     #[test]
     fn a_moon_below_the_floor_or_unread_is_refused_quoting_it() {
         assert_eq!(
