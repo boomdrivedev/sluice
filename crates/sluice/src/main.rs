@@ -463,7 +463,7 @@ fn change(cli: &Cli) -> Option<i32> {
         sluice::host_process::protocol::Request::Submit { submit, .. }
             if !submit.no_wait && !submit.status
     );
-    let process = sluice::host_process::Socketed::default();
+    let process = sluice::host_process::Socketed::over(client.clone());
     let mut waiter = sluice::subscriber::Waiter::new(&process, None, folder.clone());
     if waits {
         waiter.served(sluice::host_process::read_for());

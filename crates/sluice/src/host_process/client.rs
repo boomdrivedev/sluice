@@ -151,6 +151,11 @@ impl Client {
         &self.paths
     }
 
+    /// The environment of the command, as a process it starts is given it.
+    pub fn env(&self) -> &[(OsString, OsString)] {
+        &self.env
+    }
+
     /// The process that answers now, its connection past `hello`; `None`
     /// where none answers. It starts nothing.
     pub fn answering(&self) -> Result<Option<Connection>> {
