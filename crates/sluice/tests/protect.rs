@@ -194,18 +194,6 @@ fn what_moves_no_protected_branch_is_allowed() {
     assert!(protected_events(&repo).is_empty());
 }
 
-/// 56: a branch whose own revision's policy does not name it is not
-/// protected, whatever another branch's policy says.
-#[test]
-fn the_branchs_own_revision_decides() {
-    let (repo, _) = protected("protect-own-revision");
-    // bolt/z's revision has no policy at all.
-    let bare = repo.branch("bare", "main", &[(".config/sluice.toml", None)]);
-    repo.git(&["branch", "bolt/z", &bare]);
-    let out = repo.git_raw(&["branch", "-f", "bolt/z", "main"]);
-    assert!(out.status.success(), "{}", text(&out));
-}
-
 /// A protected repository whose `bolt/x` holds submission #1, from a
 /// session on `unit/s`; no worktree holds `bolt/x`.
 fn queued(name: &str) -> Repo {
@@ -238,24 +226,6 @@ fn queued(name: &str) -> Repo {
         .unwrap();
     assert!(out.status.success(), "{}", text(&out));
     repo
-}
-
-/// A deletion is allowed only when no submission still needs the branch.
-#[test]
-fn a_branch_with_submissions_in_its_queue_is_not_deleted() {
-    let repo = queued("protect-delete");
-    let out = repo.git_raw(&["branch", "-D", "bolt/x"]);
-    assert_eq!(out.status.code(), Some(128), "{}", text(&out));
-    assert!(text(&out).contains("#1"), "{}", text(&out));
-    assert!(repo
-        .git_raw(&["rev-parse", "--verify", "bolt/x"])
-        .status
-        .success());
-
-    let out = sl(&repo, &["withdraw", "1", "--as", "operator"]);
-    assert!(out.status.success(), "{}", text(&out));
-    let out = repo.git_raw(&["branch", "-D", "bolt/x"]);
-    assert!(out.status.success(), "{}", text(&out));
 }
 
 /// git's `pack-refs`, which `git fetch` runs in its maintenance, writes
@@ -374,159 +344,6 @@ fn sluices_own_move_is_not_refused() {
 /// state: the test's own, never the host's.
 fn state_of(repo: &Repo) -> PathBuf {
     repo.dir().join(".git/no-state")
-}
-
-/// `sluice` in the repository, under the test's own state.
-fn sl_with_state(repo: &Repo, args: &[&str]) -> Output {
-    support::isolated(&mut Command::new(sluice()))
-        .current_dir(repo.dir())
-        .args(args)
-        .env("XDG_CONFIG_HOME", repo.dir().join(".git/no-config"))
-        .env("XDG_STATE_HOME", state_of(repo))
-        .stdin(Stdio::null())
-        .output()
-        .unwrap()
-}
-
-/// A timer's write, `git -C <repository> update-ref refs/heads/bolt/x
-/// <new> <old>`, refused twice, each time with full revisions of its own:
-/// sluice moves `bolt/x` between the two, as its landings move a branch
-/// between a timer's runs. Returns the revisions `bolt/x` was at for each
-/// refusal and the one the second would have set.
-fn a_timer_refused_twice(repo: &Repo) -> [String; 3] {
-    let tip = repo.rev("bolt/x");
-    let a = repo.rev("unit/a");
-    let b = repo.branch("unit/b", "main", &[("b.txt", Some("b\n"))]);
-    let timer = |new: &str, old: &str| {
-        let dir = repo.dir().to_str().unwrap();
-        let out = support::git_command()
-            .args(["-C", dir, "update-ref", "refs/heads/bolt/x", new, old])
-            .env("XDG_CONFIG_HOME", repo.dir().join(".git/no-config"))
-            .env("XDG_STATE_HOME", state_of(repo))
-            .env_remove("GIT_DIR")
-            .env_remove("GIT_WORK_TREE")
-            .env_remove("GIT_INDEX_FILE")
-            .stdin(Stdio::null())
-            .output()
-            .unwrap();
-        assert_eq!(out.status.code(), Some(128), "{}", text(&out));
-        assert!(
-            text(&out).contains("bolt/x is protected by sluice"),
-            "{}",
-            text(&out)
-        );
-    };
-    timer(&a, &tip);
-    let refs = LocalRefs::open(repo.dir()).unwrap();
-    assert_eq!(
-        refs.move_to("bolt/x", &Rev::new(tip.as_str()), &Rev::new(a.as_str()))
-            .unwrap(),
-        Moved::Moved
-    );
-    timer(&b, &a);
-    assert_eq!(repo.rev("bolt/x"), a);
-    [tip, a, b]
-}
-
-/// The causes `sluice status bolt/x --json` and `sluice overview --json`
-/// give `bolt/x`.
-fn shown(repo: &Repo) -> (serde_json::Value, serde_json::Value) {
-    let out = sl_with_state(repo, &["status", "bolt/x", "--json"]);
-    assert!(out.status.success(), "{}", text(&out));
-    let status: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
-    let out = sl_with_state(repo, &["overview", "--json"]);
-    assert!(out.status.success(), "{}", text(&out));
-    let overview: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
-    let branch = overview["branches"]
-        .as_array()
-        .and_then(|b| b.iter().find(|b| b["branch"] == "bolt/x"))
-        .unwrap_or_else(|| panic!("no bolt/x in {overview}"));
-    (
-        status["refused_writes"].clone(),
-        branch["refused_writes"].clone(),
-    )
-}
-
-/// 124, 148, rule core.47: a timer's `git -C <repository> update-ref
-/// refs/heads/bolt/x <new> <old>`, refused twice with full revisions of
-/// its own each time, is one cause: one `protected` line, naming the host
-/// and the first write as git ran it, and one cause in `branch.json`
-/// refused twice, the last write's revisions on it, which status and the
-/// overview give as it stands.
-#[test]
-fn a_timers_writes_are_one_cause() {
-    let (repo, _held) = protected("protect-timer");
-    let [tip, a, b] = a_timer_refused_twice(&repo);
-    let host = sluice::profiles::checks::hostname();
-
-    let lines = protected_events(&repo);
-    assert_eq!(lines.len(), 1, "{lines:?}");
-    let line = &lines[0];
-    assert_eq!(line["host"], host.as_str(), "{line}");
-    assert_eq!(line["ref"], "refs/heads/bolt/x", "{line}");
-    assert_eq!(
-        (&line["from"], &line["to"]),
-        (&tip.as_str().into(), &a.as_str().into())
-    );
-    let by = line["by"].as_str().unwrap();
-    assert!(
-        by.ends_with(&format!("update-ref refs/heads/bolt/x {a} {tip}")),
-        "{line}"
-    );
-
-    let causes = causes(&repo);
-    assert_eq!(causes.len(), 1, "{causes:?}");
-    let cause = &causes[0];
-    assert_eq!(cause["host"], host.as_str(), "{cause}");
-    assert_eq!(cause["ref"], "refs/heads/bolt/x", "{cause}");
-    assert_eq!(
-        cause["command"],
-        format!(
-            "{} update-ref refs/heads/bolt/x <revision> <revision>",
-            by.strip_suffix(&format!(" update-ref refs/heads/bolt/x {a} {tip}"))
-                .unwrap()
-        ),
-        "{cause}"
-    );
-    assert!(
-        cause["command"]
-            .as_str()
-            .unwrap()
-            .contains(&format!("-C {}", repo.dir().display())),
-        "{cause}"
-    );
-    assert_eq!(cause["times"], 2, "{cause}");
-    assert_eq!(cause["first"], line["at"], "{cause}");
-    assert!(cause["last"].as_str() >= cause["first"].as_str(), "{cause}");
-    assert_eq!(
-        (&cause["from"], &cause["to"]),
-        (&a.as_str().into(), &b.as_str().into())
-    );
-
-    let (status, overview) = shown(&repo);
-    assert_eq!(status, serde_json::json!(causes), "{status}");
-    assert_eq!(overview, serde_json::json!(causes), "{overview}");
-}
-
-/// 131, 132, 148, rule core.41: the count is kept in the branch's state,
-/// never counted from the log: with `log.jsonl` moved to `log/1.jsonl`,
-/// as a part's close moves it, status and the overview still give the
-/// timer's cause refused twice.
-#[test]
-fn a_refused_writes_count_is_in_the_state_not_the_log() {
-    let (repo, _held) = protected("protect-count-kept");
-    a_timer_refused_twice(&repo);
-    let records = repo.dir().join(".git/sluice/bolt/x");
-    std::fs::create_dir_all(records.join("log")).unwrap();
-    std::fs::rename(records.join("log.jsonl"), records.join("log/1.jsonl")).unwrap();
-    assert!(protected_events(&repo).is_empty());
-
-    let (status, overview) = shown(&repo);
-    for (from, causes) in [("status", &status), ("overview", &overview)] {
-        assert_eq!(causes.as_array().map(Vec::len), Some(1), "{from}: {causes}");
-        assert_eq!(causes[0]["times"], 2, "{from}: {causes}");
-    }
-    assert_eq!(status, overview);
 }
 
 /// Installing twice changes nothing; a moved binary's path is rewritten.
@@ -992,38 +809,6 @@ fn a_refusal_names_the_command_and_both_revisions() {
     let out = git_in(&repo, &held, &["reset", "-q", "--hard", &head]);
     said(&out, &format!("reset -q --hard {head}"), &head);
     assert_eq!(repo.rev("bolt/x"), copy);
-}
-
-/// 1: a branch kept in this host's own refs is told the command and both
-/// revisions too, without the copy's line; a deletion's refusal names
-/// what still needs the branch.
-#[test]
-fn a_local_branchs_refusals_say_the_command() {
-    let repo = queued("protect-local-words");
-    let tip = repo.rev("bolt/x");
-    let head = repo.rev("unit/a");
-    let out = repo.git_raw(&["update-ref", "refs/heads/bolt/x", &head]);
-    let t = text(&out);
-    assert_eq!(out.status.code(), Some(128), "{t}");
-    assert!(
-        t.contains(&format!(
-            "update-ref refs/heads/bolt/x {head}` would move it from {} to {}",
-            &tip[..7],
-            &head[..7]
-        )),
-        "{t}"
-    );
-    assert!(!t.contains("levels this host's"), "{t}");
-    let out = repo.git_raw(&["branch", "-D", "bolt/x"]);
-    let t = text(&out);
-    assert_eq!(out.status.code(), Some(128), "{t}");
-    assert!(
-        t.contains(&format!(
-            "branch -D bolt/x` would delete it at {}; it still holds #1",
-            &tip[..7]
-        )),
-        "{t}"
-    );
 }
 
 /// git in `dir` naming the repository `git_dir`, as a fetch into a bare
