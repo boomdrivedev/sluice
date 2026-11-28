@@ -332,7 +332,7 @@ impl Sluice<'_> {
             round.record("sluice.step", "carried");
             return Ok(Step::Stepped);
         }
-        if !self.keeps(branch)? {
+        if !self.keeps_held(branch)? {
             // 75: another instance keeps the branch; this one takes, runs
             // and reports runs of its own.
             info_span!("sluice.claim").in_scope(|| self.execute(branch, releases))?;
@@ -400,7 +400,17 @@ impl Sluice<'_> {
     /// home. An instance they do not accept never writes itself as lead,
     /// and a lead they no longer accept keeps nothing from its next round,
     /// so an accepted one takes the branch once the lease passes (73).
+    ///
+    /// It holds the branch's lock, waited for, as every other write of the
+    /// records does outside a round (rule core.14). Intake asks it before
+    /// the round takes the lock, and a lead it takes is a write.
     pub fn keeps(&self, branch: &str) -> Result<bool> {
+        let _lock = self.seams.state.wait_lock(branch)?;
+        self.keeps_held(branch)
+    }
+
+    /// [`Sluice::keeps`], under the branch's lock its caller holds.
+    fn keeps_held(&self, branch: &str) -> Result<bool> {
         let line = self.read_line(branch)?;
         // 133: the round's first read of the records, answered from what was
         // last fetched, refuses the round before anything is decided.

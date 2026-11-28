@@ -67,6 +67,24 @@ fn the_first_instance_takes_the_branch_and_another_is_led() {
     assert_eq!(h.sub(one).state, State::Landed);
 }
 
+/// Intake asks whether this instance keeps the branch before any round
+/// takes the branch's lock. On a branch with no lead, the answer takes the
+/// lead, which is a write. That write holds the branch's lock, so the
+/// fakes accept it, and a round of the instance then finds it the lead.
+#[test]
+fn an_instance_asked_outside_a_round_takes_the_lead_under_the_branchs_lock() {
+    let h = peers();
+    h.work("unit/a", "agent-a", &[("a/lib", Some("a2"))]);
+    h.submit("unit/a");
+    assert_eq!(h.doc().lead, None);
+    assert!(on(&h, "a").keeps(BRANCH).unwrap());
+    assert_eq!(h.doc().lead.as_deref(), Some("a"));
+    assert_eq!(took(&h), [("a".to_string(), None)]);
+    assert_eq!(on(&h, "b").step(BRANCH).unwrap(), Step::Led);
+    assert_eq!(on(&h, "a").step(BRANCH).unwrap(), Step::Stepped);
+    assert_eq!(took(&h), [("a".to_string(), None)]);
+}
+
 /// satisfies: 72, 73, 58; the peer-lead spec's "A lead that went quiet"
 /// and "The former lead stops after a takeover"
 #[test]
