@@ -828,7 +828,8 @@ fn a_combination_only_the_remote_holds_is_fetched_and_a_place_made_at_it() {
     let user = Scratch::short();
     let places = Places::new(
         &common,
-        Runs::new(&common, env!("CARGO_BIN_EXE_sluice").into()),
+        std::rc::Rc::new(sluice::profiles::places::GitWorktrees::new(&common)),
+        std::rc::Rc::new(Runs::new(&common, env!("CARGO_BIN_EXE_sluice").into())),
     )
     .with_scratch_root(user.path().join("u"));
     let name = "sluice/try/main/7";

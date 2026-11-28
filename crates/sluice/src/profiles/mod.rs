@@ -224,17 +224,20 @@ impl Bound {
             // to make, at each engine a run's is looked for at; the binding
             // hands both over (rule core.2; record 0121).
             checkout: {
-                let places =
-                    places::Places::new(&common, crate::runs::Runs::new(&common, program.clone()))
-                        .with_release(
-                            Box::new(checks::names_release),
-                            Box::new(move |place, tests, limits, dir| {
-                                checks::release_request(place, tests, limits, jobs, &caches, dir)
-                            }),
-                        )
-                        .with_containers(Box::new(|place| {
-                            checks::end_containers(&checks::engine_endpoints(), place)
-                        }));
+                let places = places::Places::new(
+                    &common,
+                    std::rc::Rc::new(places::GitWorktrees::new(&common)),
+                    std::rc::Rc::new(crate::runs::Runs::new(&common, program.clone())),
+                )
+                .with_release(
+                    Box::new(checks::names_release),
+                    Box::new(move |place, tests, limits, dir| {
+                        checks::release_request(place, tests, limits, jobs, &caches, dir)
+                    }),
+                )
+                .with_containers(Box::new(|place| {
+                    checks::end_containers(&checks::engine_endpoints(), place)
+                }));
                 // 35 as amended: the tests' directory standing for the
                 // user's, where they name one.
                 match std::env::var_os(places::USER_SCRATCH_VAR).filter(|d| !d.is_empty()) {

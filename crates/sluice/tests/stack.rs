@@ -384,9 +384,13 @@ fn a_sessions_stack_stays_between_runs_and_goes_on_release() {
     let program = PathBuf::from(env!("CARGO_BIN_EXE_sluice"));
     let ports = Scratch::new("stack-session-ports");
     let running = Scratch::new("stack-session-running");
-    let places = Places::new(&common, Runs::new(&common, program.clone()))
-        .with_ports(ports.path().to_path_buf())
-        .with_scratch_root(support::test_user_scratch());
+    let places = Places::new(
+        &common,
+        std::rc::Rc::new(sluice::profiles::places::GitWorktrees::new(&common)),
+        std::rc::Rc::new(Runs::new(&common, program.clone())),
+    )
+    .with_ports(ports.path().to_path_buf())
+    .with_scratch_root(support::test_user_scratch());
     let checks = Checks::new(
         &common,
         program,
