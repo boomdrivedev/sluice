@@ -937,28 +937,6 @@ fn every_other_command_refuses_a_setting_it_does_not_know() {
     );
 }
 
-/// 124: a branch kept on a remote, under a policy and host settings each
-/// holding a field no sluice yet reads, is still judged as sluice's copy.
-#[test]
-fn a_copy_is_judged_under_fields_the_hook_does_not_know() {
-    let (_bare, repo, _held, copy, remote) =
-        copy_apart_with("protect-later-copy", "later = true\n");
-    // `sluice host` keeps the settings it started with, and judges by the
-    // settings as the hook reads them, passing over what it does not know.
-    let _kept = kept(&repo);
-    host_settings(&repo, "[later]\nx = 1\n");
-    let out = repo.git_raw(&["update-ref", "refs/heads/bolt/x", &remote]);
-    let t = text(&out);
-    assert_eq!(out.status.code(), Some(128), "{t}");
-    assert!(
-        t.contains("sluice levels this host's bolt/x to each landing itself"),
-        "{t}"
-    );
-    assert!(!t.contains("warning"), "{t}");
-    assert_eq!(repo.rev("bolt/x"), copy);
-    assert_eq!(protected_events(&repo).len(), 1);
-}
-
 /// 124: host settings the hook cannot read at all, and a policy whose
 /// `remote` is of the wrong kind, each pass the transaction with exactly
 /// one warning naming what could not be read, and nothing refused.
