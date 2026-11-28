@@ -26,10 +26,11 @@ use sluice::profiles::github::kept::Kept;
 use sluice::profiles::github::pulls::{self, Pulls};
 use sluice::profiles::github::request_refs::{RemoteRefs, RequestRefs};
 use sluice::profiles::github::Repo as GitHubRepo;
+use sluice::retry::{clock, Limited};
 use sluice::{run, Cli, Pause};
 use sluice_core::policy::POLICY_PATH;
 use sluice_fakes::{Fakes, World};
-use sluice_seams::{Delivery, Driver, Notification, Rev, Session, Submitter};
+use sluice_seams::{Changes, Delivery, Driver, Notification, Rev, Session, Submitter};
 use support::Scratch;
 
 /// The repository on GitHub every test's `main` is on.
@@ -147,52 +148,60 @@ impl RemoteRefs for FakeRemote<'_> {
 
 /// GitHub as a host's pull request driver reaches it: the file standing
 /// for it, each call stamped at the fakes' time as it is made, so what the
-/// driver changes on GitHub and what it records are on one clock.
+/// driver changes on GitHub and what it records are on one clock. While
+/// GitHub's allowance of calls is `spent`, every call is refused as the
+/// app refuses one under the pause it keeps, which makes no call (134;
+/// `tests/profiles/forge.rs`).
 struct Stamped {
     world: World,
     forge: Rc<FileForge>,
+    spent: Rc<RefCell<Option<Limited>>>,
 }
 
 impl Stamped {
-    fn now(&self) -> &FileForge {
-        self.forge.stamp_at(self.world.now());
-        &self.forge
+    fn now(&self) -> Result<&FileForge> {
+        let at = self.world.now();
+        if let Some(l) = self.spent.borrow().as_ref().filter(|l| at < l.until) {
+            return Err(l.clone().into());
+        }
+        self.forge.stamp_at(at);
+        Ok(&self.forge)
     }
 }
 
 impl Forge for Stamped {
     fn login(&self, repo: &GitHubRepo) -> Result<String> {
-        self.now().login(repo)
+        self.now()?.login(repo)
     }
     fn open_pulls(&self, repo: &GitHubRepo) -> Result<Vec<Pull>> {
-        self.now().open_pulls(repo)
+        self.now()?.open_pulls(repo)
     }
     fn pulls(&self, repo: &GitHubRepo, base: &str) -> Result<Vec<Pull>> {
-        self.now().pulls(repo, base)
+        self.now()?.pulls(repo, base)
     }
     fn listed(&self, repo: &GitHubRepo) -> Result<Listed> {
-        self.now().listed(repo)
+        self.now()?.listed(repo)
     }
     fn requests(&self, repo: &GitHubRepo, base: &str) -> Result<Vec<Request>> {
-        self.now().requests(repo, base)
+        self.now()?.requests(repo, base)
     }
     fn pull(&self, repo: &GitHubRepo, number: u64) -> Result<Option<Pull>> {
-        self.now().pull(repo, number)
+        self.now()?.pull(repo, number)
     }
     fn reviews(&self, repo: &GitHubRepo, number: u64) -> Result<Vec<Review>> {
-        self.now().reviews(repo, number)
+        self.now()?.reviews(repo, number)
     }
     fn checks(&self, repo: &GitHubRepo, rev: &str) -> Result<Vec<Check>> {
-        self.now().checks(repo, rev)
+        self.now()?.checks(repo, rev)
     }
     fn readied(&self, repo: &GitHubRepo, number: u64) -> Result<Vec<DateTime<Utc>>> {
-        self.now().readied(repo, number)
+        self.now()?.readied(repo, number)
     }
     fn posted(&self, repo: &GitHubRepo, rev: &str) -> Result<Option<Posted>> {
-        self.now().posted(repo, rev)
+        self.now()?.posted(repo, rev)
     }
     fn posted_all(&self, repo: &GitHubRepo, rev: &str) -> Result<Vec<Posted>> {
-        self.now().posted_all(repo, rev)
+        self.now()?.posted_all(repo, rev)
     }
     fn post(
         &self,
@@ -201,7 +210,7 @@ impl Forge for Stamped {
         existing: Option<u64>,
         posting: &Posting,
     ) -> Result<u64> {
-        self.now().post(repo, rev, existing, posting)
+        self.now()?.post(repo, rev, existing, posting)
     }
     fn post_named(
         &self,
@@ -211,19 +220,19 @@ impl Forge for Stamped {
         existing: Option<u64>,
         posting: &Posting,
     ) -> Result<u64> {
-        self.now().post_named(repo, rev, name, existing, posting)
+        self.now()?.post_named(repo, rev, name, existing, posting)
     }
     fn comments(&self, repo: &GitHubRepo, number: u64) -> Result<Vec<String>> {
-        self.now().comments(repo, number)
+        self.now()?.comments(repo, number)
     }
     fn comment_list(&self, repo: &GitHubRepo, number: u64) -> Result<Vec<Comment>> {
-        self.now().comment_list(repo, number)
+        self.now()?.comment_list(repo, number)
     }
     fn comment(&self, repo: &GitHubRepo, number: u64, body: &str) -> Result<u64> {
-        self.now().comment(repo, number, body)
+        self.now()?.comment(repo, number, body)
     }
     fn edit_comment(&self, repo: &GitHubRepo, id: u64, body: &str) -> Result<()> {
-        self.now().edit_comment(repo, id, body)
+        self.now()?.edit_comment(repo, id, body)
     }
     fn open(
         &self,
@@ -234,13 +243,13 @@ impl Forge for Stamped {
         body: &str,
         draft: bool,
     ) -> Result<Pull> {
-        self.now().open(repo, base, head_ref, title, body, draft)
+        self.now()?.open(repo, base, head_ref, title, body, draft)
     }
     fn edit(&self, repo: &GitHubRepo, number: u64, title: Option<&str>, body: &str) -> Result<()> {
-        self.now().edit(repo, number, title, body)
+        self.now()?.edit(repo, number, title, body)
     }
     fn set_draft(&self, repo: &GitHubRepo, number: u64, draft: bool) -> Result<()> {
-        Forge::set_draft(self.now(), repo, number, draft)
+        Forge::set_draft(self.now()?, repo, number, draft)
     }
 }
 
@@ -313,6 +322,8 @@ struct OnGitHub {
     /// Whether main's check is mended, so a file named `broken` no longer
     /// fails it.
     mended: Rc<Cell<bool>>,
+    /// GitHub's allowance of calls, where it is spent.
+    spent: Rc<RefCell<Option<Limited>>>,
     _dir: Scratch,
 }
 
@@ -428,6 +439,7 @@ impl OnGitHub {
             signers: RefCell::default(),
             dirs: RefCell::default(),
             mended,
+            spent: Rc::default(),
             _dir: dir,
         }
     }
@@ -462,6 +474,7 @@ impl OnGitHub {
             Some(Rc::new(Stamped {
                 world: self.f.world.clone(),
                 forge: self.forge.clone(),
+                spent: self.spent.clone(),
             })),
             Kept::new(&dir.path().join("state")),
             self.discovery.get(),
@@ -3063,6 +3076,149 @@ fn a_wait_reads_its_pull_request_once_in_a_quarter_of_the_interval() {
     // Its own asking asked at its first pass and found nothing due after
     // it; beside that, only the wait's finding of it.
     assert_eq!(g.calls("list"), lists + 2, "{out}");
+}
+
+/// GitHub's words for an installation's allowance of calls spent.
+const SPENT: &str = "API rate limit exceeded for installation ID 7.";
+
+/// The app whose allowance is spent.
+const APP: u64 = 4242;
+
+impl OnGitHub {
+    /// GitHub's allowance of calls is spent for `minutes` of the clock;
+    /// returns when it ends.
+    fn spent_for(&self, minutes: i64) -> DateTime<Utc> {
+        let until = self.f.world.now() + chrono::Duration::minutes(minutes);
+        *self.spent.borrow_mut() = Some(Limited {
+            app: APP,
+            until,
+            words: SPENT.into(),
+        });
+        until
+    }
+}
+
+/// The user, 2026-10-28: a submit that does not wait fails at once on a
+/// spent allowance, exit 3, naming when it ends, and opens nothing.
+#[test]
+fn a_submit_that_does_not_wait_fails_at_once_on_the_pause() {
+    let g = OnGitHub::new("");
+    let w = g.session("hurried", &[("h.txt", "h\n")]);
+    let until = g.spent_for(20);
+    let (code, said) = g.submit(&w, &["--no-wait"]);
+    assert_eq!(code, sluice::INTERNAL, "{said}");
+    let words = format!(
+        "GitHub's allowance of calls for app {APP} is spent until {}: {SPENT}",
+        clock(until)
+    );
+    assert!(said.contains(&words), "{said}");
+    assert!(!said.contains("waiting"), "{said}");
+    assert!(g.forge.by_ref("unit/hurried").unwrap().is_none());
+}
+
+/// The forge-allowance spec's "A landing during the pause" and "Said
+/// once": `sluice run` under a pause lands a combination that passed and
+/// says the pause once.
+#[test]
+fn a_round_lands_through_the_pause_and_says_it_once() {
+    let g = OnGitHub::new("");
+    let (n, head) = g.by_hand("unit/through", &[("t.txt", Some("t\n"))], false);
+    g.step();
+    assert_eq!(g.of(n).len(), 1, "{:?}", g.subs());
+    let until = g.spent_for(20);
+    let (code, out) = g.sluice(&["run", "--rounds", "6"]);
+    assert_eq!(code, 0, "{out}");
+    let said = format!(
+        "main's pull requests passed by: GitHub's allowance of calls for app {APP} is spent \
+         until {}: {SPENT}",
+        clock(until)
+    );
+    assert_eq!(out.matches(&said).count(), 1, "{out}");
+    let main = g.f.world.tip("main");
+    assert!(g.f.world.is_ancestor(&head, &main), "{out}");
+}
+
+impl OnGitHub {
+    /// main's record file `path` rewritten by `edit`, under the branch's
+    /// lock, as an older sluice might have left it.
+    fn rewrite(&self, path: &str, edit: impl FnOnce(Value) -> Value) {
+        let state = self.f.seams().state;
+        let _lock = state.lock("main").unwrap().unwrap();
+        let read = state.read("main").unwrap();
+        let doc: Value = serde_json::from_slice(&read.files[path]).unwrap();
+        let mut put = BTreeMap::new();
+        put.insert(path.to_string(), serde_json::to_vec(&edit(doc)).unwrap());
+        let changes = Changes {
+            put,
+            ..Changes::default()
+        };
+        state.write("main", read.version, changes).unwrap();
+    }
+
+    /// This host keeps main and took pull request `<name>` in; main's
+    /// records are then rewritten as an older sluice left them when its
+    /// hand-over to `b` withdrew that submission: its record withdrawn in
+    /// the hand-over's words, naming `b`, and its combination gone. The
+    /// request's number and head, and the submission's id.
+    fn handed_over_before(&self, name: &str) -> (u64, Rev, u64) {
+        let (n, head) = self.by_hand(name, &[("slow", Some("o\n"))], false);
+        self.f.world.hold_runs(true);
+        self.step();
+        let id = self.of(n)[0]["id"].as_u64().expect("taken in");
+        self.rewrite(&format!("submissions/{id}.json"), |mut sub| {
+            sub["state"] = "withdrawn".into();
+            sub["withdrawn"] = serde_json::json!({
+                "by": "b takes main's pull requests in",
+                "at": "2026-11-06T12:00:00Z",
+                "handed_over_to": "b",
+            });
+            sub
+        });
+        self.rewrite("branch.json", |mut doc| {
+            doc["candidates"] = serde_json::json!([]);
+            doc
+        });
+        (n, head, id)
+    }
+}
+
+/// request-intake-host, "An older hand-over" (120; record 0088 as amended;
+/// design D24): main's records hold a submission an older sluice withdrew
+/// in a hand-over to host B; the host that keeps main reads it as holding
+/// no request and takes the pull request in again at its head, with no
+/// draft made.
+#[test]
+fn an_older_hand_over_carried_onto_the_remote_is_taken_in_again() {
+    let g = OnGitHub::new("");
+    let (n, head, id) = g.handed_over_before("unit/older");
+    let said = g.round();
+    let subs = g.of(n);
+    assert_eq!(subs.len(), 2, "{said:?}{subs:?}");
+    assert_eq!(subs[0]["id"], id, "{subs:?}");
+    assert_eq!(subs[1]["head"], head.0.as_str(), "{subs:?}");
+    assert_ne!(subs[1]["state"], "withdrawn", "{subs:?}");
+    assert!(!g.pull_from("unit/older").draft, "no draft made");
+}
+
+/// request-intake-host, "A wait on an older hand-over" (120; core.48;
+/// record 0100; design D24): `sluice wait <id>` on a submission an older
+/// sluice withdrew in a hand-over follows its pull request rather than
+/// ending withdrawn.
+#[test]
+fn a_wait_on_an_older_hand_over_follows_its_pull_request() {
+    let g = OnGitHub::new("");
+    let (n, _, id) = g.handed_over_before("unit/followed");
+    // The host that keeps main takes the request in again at its head.
+    g.round();
+    let (code, out) = g.sluice(&["wait", &id.to_string(), "--timeout", "2s", "--json"]);
+    assert_ne!(code, sluice::WITHDRAWN, "{out}");
+    let doc: Value = serde_json::from_str(&out).unwrap_or_else(|e| panic!("{e}: {out}"));
+    // The request taken in again at its head carries its work.
+    let carrier = doc["carried_by"]["id"]
+        .as_u64()
+        .unwrap_or_else(|| panic!("{doc}"));
+    assert!(carrier > id, "{doc}");
+    assert_eq!(g.of(n).last().unwrap()["id"], carrier, "{doc}");
 }
 
 /// request-intake-host, "Read at its pace": a wait on host A follows its
