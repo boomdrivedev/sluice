@@ -22,7 +22,8 @@
 //!
 //! A record is of a live worker only where its pid runs and started within
 //! two seconds of the record's write. So a pid that the system gave to
-//! another process is never ended.
+//! another process is never ended. A process's start and its parent are
+//! read through sysinfo ([`started`], [`parent`]).
 //!
 //! In `sluice host`, each worker starts on its tokio edge through
 //! process-wrap, with `ProcessGroup` and `KillOnDrop`, and a task of the
@@ -57,6 +58,7 @@ use nix::sys::signal::{killpg, Signal};
 use nix::unistd::Pid;
 use process_wrap::tokio::{ChildWrapper, CommandWrap, KillOnDrop, ProcessGroup};
 use serde::{Deserialize, Serialize};
+use sysinfo::{ProcessRefreshKind, ProcessStatus, ProcessesToUpdate, System, UpdateKind};
 use tokio::io::AsyncWriteExt as _;
 use tokio_util::sync::CancellationToken;
 use tokio_util::task::TaskTracker;
@@ -1069,79 +1071,51 @@ fn signal_group(group: i32, signal: Signal) {
 }
 
 /// The start time of the process `pid`, in seconds since the epoch, where
-/// it runs.
+/// it runs. No process started at the epoch.
 pub fn started(pid: i32) -> Option<u64> {
-    platform::started(pid)
+    process(
+        pid,
+        ProcessRefreshKind::nothing(),
+        sysinfo::Process::start_time,
+    )
+    .filter(|s| *s > 0)
 }
 
 /// The parent of the process `pid`, where it runs.
 pub fn parent(pid: i32) -> Option<i32> {
-    platform::parent(pid)
+    process(pid, ProcessRefreshKind::nothing(), |p| p.parent())
+        .flatten()
+        .and_then(|p| i32::try_from(p.as_u32()).ok())
 }
 
-#[cfg(target_os = "macos")]
-mod platform {
-    fn info(pid: i32) -> Option<libc::proc_bsdinfo> {
-        // SAFETY: proc_bsdinfo is plain data; zeroed is a valid value.
-        let mut info: libc::proc_bsdinfo = unsafe { std::mem::zeroed() };
-        let size = std::mem::size_of::<libc::proc_bsdinfo>() as libc::c_int;
-        // SAFETY: the buffer is `size` bytes of this process's memory.
-        let n = unsafe {
-            libc::proc_pidinfo(
-                pid,
-                libc::PROC_PIDTBSDINFO,
-                0,
-                (&mut info as *mut libc::proc_bsdinfo).cast(),
-                size,
-            )
-        };
-        (n == size).then_some(info)
-    }
-
-    pub fn started(pid: i32) -> Option<u64> {
-        // A zombie keeps its info, but it runs no more.
-        info(pid)
-            .filter(|i| i.pbi_status != libc::SZOMB)
-            .map(|i| i.pbi_start_tvsec)
-    }
-
-    pub fn parent(pid: i32) -> Option<i32> {
-        info(pid).map(|i| i.pbi_ppid as i32)
-    }
+/// The arguments of the process `pid`, where it runs and this process may
+/// read them.
+pub fn arguments(pid: i32) -> Option<Vec<String>> {
+    let cmd = ProcessRefreshKind::nothing().with_cmd(UpdateKind::Always);
+    process(pid, cmd, |p| {
+        p.cmd()
+            .iter()
+            .map(|a| a.to_string_lossy().into_owned())
+            .collect()
+    })
 }
 
-#[cfg(target_os = "linux")]
-mod platform {
-    /// The fields of `/proc/<pid>/stat` after the command's name.
-    fn stat(pid: i32) -> Option<Vec<String>> {
-        let text = std::fs::read_to_string(format!("/proc/{pid}/stat")).ok()?;
-        let rest = &text[text.rfind(')')? + 2..];
-        Some(rest.split_whitespace().map(str::to_string).collect())
-    }
-
-    fn boot() -> Option<u64> {
-        let text = std::fs::read_to_string("/proc/stat").ok()?;
-        text.lines()
-            .find_map(|l| l.strip_prefix("btime "))
-            .and_then(|s| s.trim().parse().ok())
-    }
-
-    pub fn started(pid: i32) -> Option<u64> {
-        let fields = stat(pid)?;
-        // A zombie runs no more.
-        if fields.first().map(String::as_str) == Some("Z") {
-            return None;
-        }
-        let ticks: u64 = fields.get(19)?.parse().ok()?;
-        // SAFETY: sysconf reads its integer argument.
-        let hz = unsafe { libc::sysconf(libc::_SC_CLK_TCK) };
-        let hz = u64::try_from(hz).ok().filter(|h| *h > 0)?;
-        Some(boot()? + ticks / hz)
-    }
-
-    pub fn parent(pid: i32) -> Option<i32> {
-        stat(pid)?.get(1)?.parse().ok()
-    }
+/// What `read` takes from the process `pid`, as sysinfo reads it from the
+/// system, where it runs: a zombie runs no more. Each read asks afresh,
+/// so no answer is kept from an earlier read of a pid that the system gave
+/// to another process.
+fn process<T>(
+    pid: i32,
+    kind: ProcessRefreshKind,
+    read: impl FnOnce(&sysinfo::Process) -> T,
+) -> Option<T> {
+    let pid = sysinfo::Pid::from_u32(u32::try_from(pid).ok()?);
+    let mut system = System::new();
+    system.refresh_processes_specifics(ProcessesToUpdate::Some(&[pid]), true, kind);
+    system
+        .process(pid)
+        .filter(|p| p.status() != ProcessStatus::Zombie)
+        .map(read)
 }
 
 /// Now, in seconds since the epoch.
@@ -1172,6 +1146,27 @@ mod tests {
             parent(std::process::id() as i32),
             Some(std::os::unix::process::parent_id() as i32)
         );
+    }
+
+    /// A live child's parent is this process, its start is now and its
+    /// arguments are what started it. Once it ends, unreaped, no start and
+    /// no parent is read of it.
+    #[test]
+    fn a_live_childs_parent_start_and_arguments_are_read() {
+        let mut child = Command::new("sleep").arg("30").spawn().unwrap();
+        let pid = child.id() as i32;
+        assert_eq!(parent(pid), Some(std::process::id() as i32));
+        let s = started(pid).expect("the child's start");
+        assert!(s.abs_diff(now()) <= SAME_START, "{s}");
+        assert_eq!(
+            arguments(pid),
+            Some(vec!["sleep".to_string(), "30".to_string()])
+        );
+        child.kill().unwrap();
+        until_ended_unwaited(pid);
+        assert_eq!(started(pid), None, "a zombie runs no more");
+        assert_eq!(parent(pid), None, "a zombie runs no more");
+        child.wait().unwrap();
     }
 
     /// A record whose pid runs with another start time is not live, and a
