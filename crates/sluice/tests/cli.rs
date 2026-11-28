@@ -12124,3 +12124,197 @@ fn push_is_no_command() {
     );
     assert_eq!(d.git.count(), before, "nothing run");
 }
+
+/// `main` and `bolt/*` gated, in this host's own files or, `remote`
+/// true, on origin, `main` at its first revision.
+fn bolts(remote: bool) -> Fakes {
+    let on = if remote { "remote = \"origin\"\n" } else { "" };
+    let f = Fakes::new();
+    f.world.init(
+        "main",
+        &[(
+            ".config/sluice.toml",
+            &format!(
+                "[branches.main]\nrequired = [\"#gate\"]\n{on}\n\
+                 [branches.\"bolt/*\"]\nrequired = [\"#gate\"]\n{on}"
+            ),
+        )],
+    );
+    f.world.task("app:test", "");
+    if remote {
+        f.world.on_remote("main");
+    }
+    f
+}
+
+/// branches-1 104, 105, record 0091: a bolt is made once at `main`'s
+/// revision, takes a submission and lands it; it is refused removal
+/// until its work has landed into `main`, then removed, and its records
+/// stay to answer its status, which says it is gone and where it last
+/// was, and the overview shows it with its landing, in this host's own
+/// files. A bolt made, landed on and removed on its remote is
+/// `tests/remote_branch.rs`'s.
+#[test]
+fn a_bolt_is_made_landed_on_and_deleted() {
+    {
+        let f = bolts(false);
+        let main = f.world.tip("main");
+        let (code, out) = sluice(&f, &["branch", "create", "bolt/x", "--from", "main"]);
+        assert_eq!(code, 0, "{out}");
+        assert_eq!(f.world.tip("bolt/x"), main);
+        let (code, out) = sluice(&f, &["branch", "create", "bolt/x", "--from", "main"]);
+        assert_ne!(code, 0, "{out}");
+        assert!(out.contains("bolt/x is already there"), "{out}");
+
+        let head = f.world.work(&main, &[("a.txt", Some("a"))]);
+        f.world.session("unit/a", "agent-a", &head);
+        let (code, out) = sluice(&f, &["submit", "bolt/x", "--worktree", "unit/a"]);
+        assert_eq!(code, LANDED, "{out}");
+        let bolt = f.world.tip("bolt/x");
+        assert_ne!(bolt, main);
+        let (code, out) = sluice(&f, &["branch", "delete", "bolt/x", "--into", "main"]);
+        assert_ne!(code, 0, "{out}");
+        assert!(out.contains("has not landed into main"), "{out}");
+
+        f.world.session("land", "ops", &bolt);
+        let (code, out) = sluice(&f, &["submit", "main", "--worktree", "land"]);
+        assert_eq!(code, LANDED, "{out}");
+        let (code, out) = sluice(&f, &["branch", "delete", "bolt/x"]);
+        assert_eq!(code, 0, "{out}");
+        assert!(!f.world.branches().contains(&"bolt/x".to_string()));
+
+        let (code, out) = sluice(&f, &["status", "bolt/x", "--all", "--json"]);
+        assert_eq!(code, 0, "{out}");
+        let doc = json(&out);
+        assert_eq!(doc["gone"], true, "{doc}");
+        assert_eq!(doc["submissions"][0]["state"], "landed", "{doc}");
+        let gone = format!("bolt/x is gone, last at {}", &bolt.0[..7]);
+        let (_, out) = sluice(&f, &["status", "bolt/x"]);
+        assert!(out.starts_with(&gone), "{out}");
+        let (_, out) = sluice(&f, &["overview"]);
+        assert!(out.contains(&gone) && out.contains("landed #1"), "{out}");
+        let (_, out) = sluice(&f, &["overview", "--json"]);
+        let doc = json(&out);
+        let named = |b: &str| {
+            doc["branches"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|v| v["branch"] == b)
+                .unwrap_or_else(|| panic!("the overview names {b}: {doc}"))
+                .clone()
+        };
+        assert_eq!(named("bolt/x")["gone"], true, "{doc}");
+        assert!(named("main").get("gone").is_none(), "{doc}");
+        let (_, out) = sluice(&f, &["status", "main", "--json"]);
+        assert_eq!(json(&out)["gone"], false, "{out}");
+    }
+}
+
+/// A bolt made here and deleted with nothing submitted to it here, as when
+/// every submission to it was made in another copy of the repository, so
+/// its records hold the revision it was made at alone: `sluice status`
+/// answers it, plain and with `--all`, saying it is gone and its queue
+/// empty, and the overview names it gone, in this host's own files (26,
+/// 61, 105; record 0091); one on a remote is `tests/remote_branch.rs`'s.
+#[test]
+fn a_bolt_deleted_with_nothing_submitted_here_answers_its_status() {
+    {
+        let f = bolts(false);
+        let (code, out) = sluice(&f, &["branch", "create", "bolt/x", "--from", "main"]);
+        assert_eq!(code, 0, "{out}");
+        let (code, out) = sluice(&f, &["branch", "delete", "bolt/x"]);
+        assert_eq!(code, 0, "{out}");
+
+        let (code, out) = sluice(&f, &["status", "bolt/x"]);
+        assert_eq!(code, 0, "{out}");
+        assert!(out.starts_with("bolt/x is gone\n"), "{out}");
+        assert!(out.contains("nothing in the queue"), "{out}");
+        for args in [
+            &["status", "bolt/x", "--json"][..],
+            &["status", "bolt/x", "--all", "--json"],
+        ] {
+            let (code, out) = sluice(&f, args);
+            assert_eq!(code, 0, "{out}");
+            let doc = json(&out);
+            assert_eq!(doc["gone"], true, "{doc}");
+            assert_eq!(doc["submissions"], serde_json::json!([]), "{doc}");
+        }
+        let (_, out) = sluice(&f, &["overview", "--json"]);
+        let doc = json(&out);
+        let bolt = doc["branches"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|b| b["branch"] == "bolt/x")
+            .unwrap_or_else(|| panic!("the overview names bolt/x: {doc}"))
+            .clone();
+        assert_eq!(bolt["gone"], true, "{doc}");
+    }
+}
+
+/// 124, D2, 1, rule core.4: `bolt/x`, named from the repository with no
+/// worktree on it, is submitted to `main` at origin's revision, two
+/// landings ahead of this host's copy: no ref of it moves, here or on
+/// origin, and nothing is said of this host's copy. The forecast of it
+/// names the same head (64).
+#[test]
+fn a_branch_by_name_is_submitted_at_its_remotes_revision() {
+    let f = bolts(true);
+    let (code, out) = sluice(&f, &["branch", "create", "bolt/x", "--from", "main"]);
+    assert_eq!(code, 0, "{out}");
+    // Made on origin, as the pushed refs profile makes it.
+    f.world.on_remote("bolt/x");
+    let made = f.world.tip("bolt/x");
+    for n in ["a", "b"] {
+        let head = f.world.work(&f.world.tip("bolt/x"), &[(n, Some(n))]);
+        f.world.session(&format!("unit/{n}"), n, &head);
+        let (code, out) = sluice(
+            &f,
+            &["submit", "bolt/x", "--worktree", &format!("unit/{n}")],
+        );
+        assert_eq!(code, LANDED, "{out}");
+    }
+    let remote = f.world.tip("bolt/x");
+    assert_ne!(remote, made);
+    // This host's bolt/x stands where it was before both landings.
+    f.world.set_copy("bolt/x", Some(&made));
+    let main = f.world.tip("main");
+
+    let (code, out) = sluice(
+        &f,
+        &["submit", "main", "--check", "--head", "bolt/x", "--json"],
+    );
+    assert_eq!(code, 0, "{out}");
+    assert_eq!(json(&out)["head"], remote.0.as_str(), "{out}");
+
+    let (code, said) = sluice(&f, &["submit", "main", "--head", "bolt/x", "--no-wait"]);
+    assert_eq!(code, 0, "{said}");
+    let line = said
+        .strip_prefix("submission ")
+        .and_then(|l| l.split_once(" to main from bolt/x · nothing queued ahead\n"))
+        .filter(|(n, rest)| *rest == format!("sluice wait {n} --branch main follows it\n"));
+    assert!(line.is_some(), "{said}");
+    assert!(!said.contains("this host's"), "{said}");
+    let (_, out) = sluice(&f, &["status", "main", "--json"]);
+    let subs = json(&out)["submissions"].clone();
+    assert_eq!(subs[0]["head"], remote.0.as_str(), "{subs}");
+    assert_eq!(subs[0]["from"]["head"], "bolt/x", "{subs}");
+
+    let (code, out) = sluice(
+        &f,
+        &["submit", "main", "--head", "bolt/x", "--no-wait", "--json"],
+    );
+    assert_eq!(code, 0, "{out}");
+    let v = json(&out);
+    assert_eq!(
+        v,
+        serde_json::json!({
+            "id": v["id"], "branch": "main", "ahead": [],
+            "wait": format!("sluice wait {} --branch main", v["id"]),
+        })
+    );
+    assert_eq!(f.world.tip("bolt/x"), remote, "nothing moved on origin");
+    assert_eq!(f.world.copy_of("bolt/x"), Some(made), "nor written here");
+    assert_eq!(f.world.tip("main"), main);
+}
