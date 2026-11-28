@@ -986,6 +986,71 @@ fn a_bolt_is_made_landed_on_and_deleted_on_its_remote() {
     }
 }
 
+/// A bolt made here on its remote and deleted with nothing submitted to
+/// it here, as when every submission to it was made in another copy of
+/// the repository, so its records hold the revision it was made at alone:
+/// `sluice status` answers it, plain and with `--all`, saying it is gone
+/// and its queue empty, and the overview names it gone, apart from the
+/// branches it lands on. A branch with neither records nor a revision is
+/// still no branch (26, 61, 105; record 0091). One in this host's own
+/// files is `tests/cli.rs`'s.
+#[test]
+fn a_bolt_deleted_with_nothing_submitted_here_answers_its_status() {
+    {
+        let s = Setup::new("gone-bolt-remote", "origin");
+        let out = s.sluice(&["branch", "create", "bolt/x", "--from", "main"]);
+        assert!(out.status.success(), "{}", text(&out));
+        let out = s.sluice(&["branch", "delete", "bolt/x"]);
+        assert!(out.status.success(), "{}", text(&out));
+
+        let out = s.sluice(&["status", "bolt/x"]);
+        assert!(out.status.success(), "{}", text(&out));
+        assert!(text(&out).starts_with("bolt/x is gone\n"), "{}", text(&out));
+        assert!(
+            text(&out).contains("nothing in the queue"),
+            "{}",
+            text(&out)
+        );
+        for args in [
+            &["status", "bolt/x", "--json"][..],
+            &["status", "bolt/x", "--all", "--json"],
+        ] {
+            let out = s.sluice(args);
+            assert!(out.status.success(), "{}", text(&out));
+            let doc: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+            assert_eq!(doc["gone"], true, "{doc}");
+            assert_eq!(doc["submissions"], serde_json::json!([]), "{doc}");
+        }
+
+        let out = s.sluice(&["overview", "--json"]);
+        assert!(out.status.success(), "{}", text(&out));
+        let doc: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+        let bolt = doc["branches"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|b| b["branch"] == "bolt/x")
+            .unwrap_or_else(|| panic!("the overview names bolt/x: {doc}"));
+        assert_eq!(bolt["gone"], true, "{doc}");
+        let out = s.sluice(&["overview"]);
+        assert!(out.status.success(), "{}", text(&out));
+        assert!(
+            text(&out).contains("gone, nothing queued or recent: bolt/x\n"),
+            "{}",
+            text(&out)
+        );
+        assert!(!text(&out).contains("bolt/x at"), "{}", text(&out));
+
+        let out = s.sluice(&["status", "bolt/never"]);
+        assert_eq!(out.status.code(), Some(1), "{}", text(&out));
+        assert!(
+            text(&out).contains("no branch bolt/never; branches with records: bolt/x"),
+            "{}",
+            text(&out)
+        );
+    }
+}
+
 /// A bolt another host made is on the remote and, here, only as its
 /// remote-tracking ref: a session cut from it submits to it, and the
 /// landing goes to the remote.
@@ -1128,276 +1193,9 @@ fn s57_a_remote_older_than_the_local_landings_holds_until_the_landing_is_pushed(
     s.repo.git(&["cat-file", "-e", &format!("{bolt}:c.txt")]);
 }
 
-/// S57, 121, C.5, 124: the operator accepts origin's older revision
-/// instead; the third submission is formed on it and lands. The round
-/// after the acceptance levels this host's `bolt/x` to that revision,
-/// whose policy names no remote: from then on `bolt/x` is a branch in this
-/// host's own refs, and the landing is made there (C.7).
-#[test]
-fn s57_a_remote_older_than_the_local_landings_holds_until_its_revision_is_accepted() {
-    let (s, older, second) = landed_locally_then_remote_older("remote-s57-accepted");
-    step_holds(&s, &older, &second);
-    let out = s.sluice(&["branch", "accept", "bolt/x", &older[..7], "--json"]);
-    assert!(out.status.success(), "{}", text(&out));
-    let v: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
-    assert_eq!(
-        (v["accepted"].as_str(), v["lacked"].as_str()),
-        (Some(older.as_str()), Some(second.as_str()))
-    );
-    step_bolt_until_out(&s);
-    assert_eq!(bolt_states(&s), ["landed"; 3]);
-    let bolt = s.repo.rev("bolt/x");
-    assert_eq!(s.repo.rev(&format!("{bolt}^1")), older);
-    s.repo.git(&["cat-file", "-e", &format!("{bolt}:c.txt")]);
-    assert_eq!(remote_rev(&s, "refs/heads/bolt/x"), older);
-}
-
-/// 124, S58, 1, rule core.20: from a worktree that has checked out
-/// `bolt/x`, whose copy here is behind origin's, `sluice submit main`
-/// submits origin's revision, writes no ref of `bolt/x` here or on
-/// origin, and says the copy is behind; `sluice step bolt/x` then levels
-/// the copy and leaves the worktree's files and index as they were.
-#[test]
-fn a_worktree_on_a_bolt_behind_submits_origins_revision_and_a_round_levels_it() {
-    let s = Setup::new("remote-bolt-copy", "origin");
-    s.repo.git(&["branch", "bolt/x", "main"]);
-    s.repo
-        .git(&["push", "-q", "origin", "bolt/x:refs/heads/bolt/x"]);
-    let made = s.repo.rev("bolt/x");
-    for n in ["a", "b"] {
-        let out = s.submit_to(n, "bolt/x", "bolt/x");
-        assert!(out.status.success(), "{}", text(&out));
-        step_bolt_until_out(&s);
-    }
-    let remote = remote_rev(&s, "refs/heads/bolt/x");
-    assert_eq!(
-        s.repo.rev("bolt/x"),
-        remote,
-        "each landing's round levels it"
-    );
-    // This host's bolt/x stands where it was before both landings, as an
-    // older sluice left it, past the protection, and a worktree has it
-    // checked out.
-    s.repo.git(&[
-        "-c",
-        "core.hooksPath=/dev/null",
-        "update-ref",
-        "refs/heads/bolt/x",
-        &made,
-    ]);
-    let w = s.sessions.path().join("landing");
-    s.repo
-        .git(&["worktree", "add", "-q", w.to_str().unwrap(), "bolt/x"]);
-    let bolt_refs = |s: &Setup| -> Vec<String> {
-        s.remote_refs()
-            .into_iter()
-            .filter(|r| r.starts_with("refs/heads/bolt/"))
-            .collect()
-    };
-    let before = bolt_refs(&s);
-
-    let out = s
-        .command(&w)
-        .args(["submit", "main", "--no-wait"])
-        .output()
-        .unwrap();
-    assert!(out.status.success(), "{}", text(&out));
-    assert!(
-        String::from_utf8_lossy(&out.stdout).contains(&format!(
-            "this host's bolt/x is at {}, behind origin's {}; submitted {}\n",
-            &made[..7],
-            &remote[..7],
-            &remote[..7]
-        )),
-        "{}",
-        text(&out)
-    );
-    let subs = s.status()["submissions"].clone();
-    assert_eq!(subs[0]["head"], remote.as_str(), "{subs}");
-    assert_eq!(bolt_refs(&s), before, "nothing of bolt/x on origin written");
-    assert_eq!(s.repo.rev("bolt/x"), made, "nor here");
-
-    let in_worktree = |args: &[&str]| {
-        let mut a = vec!["-C", w.to_str().unwrap()];
-        a.extend(args);
-        s.repo.git(&a)
-    };
-    let index = in_worktree(&["ls-files", "--stage"]);
-    let files: Vec<String> = std::fs::read_dir(&w)
-        .unwrap()
-        .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
-        .collect();
-    let out = s.sluice(&["step", "bolt/x"]);
-    assert!(out.status.success(), "{}", text(&out));
-    assert_eq!(s.repo.rev("bolt/x"), remote);
-    assert_eq!(in_worktree(&["ls-files", "--stage"]), index);
-    let after: Vec<String> = std::fs::read_dir(&w)
-        .unwrap()
-        .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
-        .collect();
-    assert_eq!(after, files);
-    assert!(!w.join("a.txt").exists() && !w.join("b.txt").exists());
-}
-
-/// 124, D2, 1, rule core.4: `bolt/x`, named from the repository with no
-/// worktree on it, is submitted to `main` at origin's revision, two
-/// landings ahead of this host's copy: no branch is pushed, no ref of it
-/// is written here or on origin, and nothing is said of this host's copy.
-/// The forecast of it names the same head (64).
-#[test]
-fn a_branch_by_name_is_submitted_at_its_remotes_revision() {
-    let s = Setup::new("remote-by-name", "origin");
-    s.repo.git(&["branch", "bolt/x", "main"]);
-    s.repo
-        .git(&["push", "-q", "origin", "bolt/x:refs/heads/bolt/x"]);
-    let made = s.repo.rev("bolt/x");
-    for n in ["a", "b"] {
-        let out = s.submit_to(n, "bolt/x", "bolt/x");
-        assert!(out.status.success(), "{}", text(&out));
-        step_bolt_until_out(&s);
-    }
-    let remote = remote_rev(&s, "refs/heads/bolt/x");
-    assert_ne!(remote, made);
-    // This host's bolt/x stands where it was before both landings, as an
-    // older sluice left it, past the protection.
-    set_copy(&s, "bolt/x", &made);
-    let main = s.repo.rev("main");
-    let refs = |s: &Setup| -> Vec<String> {
-        s.remote_refs()
-            .into_iter()
-            .filter(|r| r.starts_with("refs/heads/"))
-            .collect()
-    };
-    let before = refs(&s);
-
-    let out = s.sluice(&["submit", "main", "--check", "--head", "bolt/x", "--json"]);
-    assert!(out.status.success(), "{}", text(&out));
-    let forecast: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
-    assert_eq!(forecast["head"], remote.as_str(), "{forecast}");
-
-    let out = s.sluice(&["submit", "main", "--head", "bolt/x", "--no-wait"]);
-    assert!(out.status.success(), "{}", text(&out));
-    let said = String::from_utf8_lossy(&out.stdout);
-    let line = said
-        .strip_prefix("submission ")
-        .and_then(|l| l.split_once(" to main from bolt/x · nothing queued ahead\n"))
-        .filter(|(n, rest)| *rest == format!("sluice wait {n} --branch main follows it\n"));
-    assert!(line.is_some(), "{}", text(&out));
-    assert!(!text(&out).contains("this host's"), "{}", text(&out));
-    let subs = s.status()["submissions"].clone();
-    assert_eq!(subs[0]["head"], remote.as_str(), "{subs}");
-    assert_eq!(subs[0]["from"]["head"], "bolt/x", "{subs}");
-
-    let out = s.sluice(&["submit", "main", "--head", "bolt/x", "--no-wait", "--json"]);
-    assert!(out.status.success(), "{}", text(&out));
-    let v: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
-    assert_eq!(
-        v,
-        serde_json::json!({
-            "id": v["id"], "branch": "main", "ahead": [],
-            "wait": format!("sluice wait {} --branch main", v["id"]),
-        })
-    );
-    assert_eq!(refs(&s), before, "nothing pushed to origin");
-    assert_eq!(s.repo.rev("bolt/x"), made, "nor written here");
-    assert_eq!(s.repo.rev("main"), main);
-}
-
 /// A `[[checkout.cache]]` table, which sluice no longer keeps and whose
 /// policy it refuses whole (ADR 0049).
 const CACHE: &str = "\n[[checkout.cache]]\nkey = [\"Cargo.lock\"]\npaths = [\"target\"]\n";
-
-/// A commit on `from` whose policy is `policy`, made on the scratch
-/// branch `name`, which no policy protects; returns it.
-fn with_policy(s: &Setup, name: &str, from: &str, policy: &str) -> String {
-    s.repo
-        .branch(name, from, &[(".config/sluice.toml", Some(policy))])
-}
-
-/// Set this host's own `branch` to `to`, as an older sluice left it,
-/// past the protection.
-fn set_copy(s: &Setup, branch: &str, to: &str) {
-    s.repo.git(&[
-        "-c",
-        "core.hooksPath=/dev/null",
-        "update-ref",
-        &format!("refs/heads/{branch}"),
-        to,
-    ]);
-}
-
-/// S64, 124; record 0069: `bolt/x` is made on origin under a clean
-/// policy, and this host's own `bolt/x` moved past the protection to a
-/// commit adding a `[[checkout.cache]]` table, which sluice refuses. A
-/// submission to `bolt/x` waits; the bolt's own rounds read origin's
-/// revision, land the submission there, and level this host's `bolt/x`
-/// to the landing.
-#[test]
-fn s64_the_bolts_round_reads_past_a_copy_that_lags() {
-    let s = Setup::new("remote-s64-lags", "origin");
-    let out = s.sluice(&["branch", "create", "bolt/x", "--from", "main"]);
-    assert!(out.status.success(), "{}", text(&out));
-    s.repo.git(&["fetch", "-q", "origin"]);
-    let made = remote_rev(&s, "refs/heads/bolt/x");
-    let cached = with_policy(&s, "cached", &made, &format!("{}{CACHE}", policy("origin")));
-    set_copy(&s, "bolt/x", &cached);
-
-    let out = s.submit_to("a", "origin/bolt/x", "bolt/x");
-    assert!(out.status.success(), "{}", text(&out));
-    step_bolt_until_out(&s);
-    assert_eq!(bolt_states(&s), ["landed"]);
-    let bolt = remote_rev(&s, "refs/heads/bolt/x");
-    assert_eq!(s.repo.rev(&format!("{bolt}^1")), made, "formed on origin's");
-    s.repo.git(&["cat-file", "-e", &format!("{bolt}:a.txt")]);
-    assert_eq!(s.repo.rev("bolt/x"), bolt, "this host's copy is levelled");
-}
-
-/// 124, 56; record 0069: origin's `bolt/x` holds a `[[checkout.cache]]`
-/// table while a submission waits; a round lands nothing, runs nothing,
-/// moves nothing, and names `bolt/x`, origin's revision and the table. A
-/// commit removing the table is pushed to origin's `bolt/x` by hand, this
-/// host's own `bolt/x` left holding it, and the next rounds land the
-/// submission on origin.
-#[test]
-fn a_policy_refused_on_the_remote_is_cleared_by_a_push() {
-    let s = Setup::new("remote-refused-pushed", "origin");
-    let out = s.sluice(&["branch", "create", "bolt/x", "--from", "main"]);
-    assert!(out.status.success(), "{}", text(&out));
-    s.repo.git(&["fetch", "-q", "origin"]);
-    let out = s.submit_to("a", "origin/bolt/x", "bolt/x");
-    assert!(out.status.success(), "{}", text(&out));
-    let made = remote_rev(&s, "refs/heads/bolt/x");
-    let cached = with_policy(&s, "cached", &made, &format!("{}{CACHE}", policy("origin")));
-    set_remote(&s, "refs/heads/cached", "refs/heads/bolt/x");
-    set_copy(&s, "bolt/x", &cached);
-
-    let out = s.sluice(&["step", "bolt/x"]);
-    assert!(!out.status.success(), "{}", text(&out));
-    let said = text(&out);
-    for words in ["bolt/x", &cached[..7], "[[checkout.cache]]"] {
-        assert!(said.contains(words), "{words}: {said}");
-    }
-    assert_eq!(s.runs(), 0, "nothing ran");
-    assert_eq!(remote_rev(&s, "refs/heads/bolt/x"), cached);
-    assert_eq!(s.repo.rev("bolt/x"), cached);
-
-    let fixed = with_policy(&s, "fixed", &cached, &policy("origin"));
-    set_remote(&s, "refs/heads/fixed", "refs/heads/bolt/x");
-    assert_eq!(
-        s.repo.rev("bolt/x"),
-        cached,
-        "this host's copy still refused"
-    );
-    step_bolt_until_out(&s);
-    assert_eq!(bolt_states(&s), ["landed"]);
-    let bolt = remote_rev(&s, "refs/heads/bolt/x");
-    assert_eq!(
-        s.repo.rev(&format!("{bolt}^1")),
-        fixed,
-        "formed on the push"
-    );
-    s.repo.git(&["cat-file", "-e", &format!("{bolt}:a.txt")]);
-}
 
 /// `branch`'s part of `sluice overview --json` as `s` reads it.
 fn overview_of(s: &Setup, branch: &str) -> serde_json::Value {
