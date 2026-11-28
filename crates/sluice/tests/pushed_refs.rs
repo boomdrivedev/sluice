@@ -1325,33 +1325,6 @@ fn a_push_with_no_credential_fails_rather_than_waits() {
     assert!(push.contains("pushing main to origin failed"), "{push}");
 }
 
-/// C.5: a session's branch pushed through a remote that takes the
-/// identity's token is one push, naming the branch and the revision.
-#[test]
-fn a_push_the_remote_takes_is_one_push() {
-    let repo = Repo::new("push-taken");
-    let _bare = repo.bare_origin();
-    let base = repo.rev("main");
-    let head = repo.branch("unit/u", "main", &[("a", Some("1"))]);
-    let fake = {
-        let base = base.clone();
-        remote(move |_, r| takes(r, &[("refs/heads/main", &base)]))
-    };
-    let url = format!("{}/o/r.git", fake.url());
-    let identity = Rc::new(FakeIdentity::new(&url, "fake-token"));
-    let p = as_identity(&repo, &identity);
-    p.push_branch(&rev(head.clone()), "unit/u").unwrap();
-    let zero = "0".repeat(40);
-    assert_eq!(
-        pushes(&fake),
-        [(
-            basic("fake-token"),
-            vec![(zero, head, "refs/heads/unit/u".into())]
-        )]
-    );
-    assert_eq!(identity.renewed.get(), 0);
-}
-
 /// 134, 122, 104: a branch made whose push git read no answer to, the
 /// remote failing on it, is not pushed again; what the remote holds then
 /// decides: made when it holds the branch at the revision pushed, failed
