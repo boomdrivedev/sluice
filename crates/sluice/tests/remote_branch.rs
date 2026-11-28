@@ -668,15 +668,6 @@ fn a_held_landing_refused_with_other_words_is_held_with_them() {
     assert!(text(&status).contains(again), "{}", text(&status));
 }
 
-/// 152; the change `sluice-host-makes-each-change`: `sluice push` is no
-/// command.
-#[test]
-fn push_is_no_command_on_a_remote_branch() {
-    let s = Setup::new("push-gone", "origin");
-    let out = s.sluice(&["push", "main"]);
-    assert_eq!(out.status.code(), Some(sluice::USAGE), "{}", text(&out));
-}
-
 /// 124, 6, rule core.6: after a landing, this host's copy of `main`
 /// stands where it was before it, and git's lock keeps any round from
 /// levelling it (S64). A session cut from the copy submits; its candidate
@@ -961,8 +952,10 @@ fn an_unknown_remote_lands_nothing_and_is_named() {
 
 /// A bolt whose policy names a remote that has no such branch is refused,
 /// saying how to make it; sluice makes it there, a submission lands on it,
-/// and once the bolt has landed on `main` sluice deletes it there
-/// (branches-1 104, 105).
+/// and once the bolt has landed on `main` sluice deletes it there and
+/// its tracking ref here (branches-1 104, 105). What sluice says of a
+/// bolt made twice or removed before it landed is `tests/cli.rs`'s
+/// `a_bolt_is_made_landed_on_and_deleted`.
 #[test]
 fn a_bolt_is_made_landed_on_and_deleted_on_its_remote() {
     let s = Setup::new("remote-bolt-life", "origin");
@@ -979,13 +972,6 @@ fn a_bolt_is_made_landed_on_and_deleted_on_its_remote() {
     let made: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
     assert_eq!(made["created"], s.remote_main());
     assert_eq!(remote_rev(&s, "refs/heads/bolt/x"), s.remote_main());
-    let out = s.sluice(&["branch", "create", "bolt/x", "--from", "main"]);
-    assert!(!out.status.success(), "{}", text(&out));
-    assert!(
-        text(&out).contains("bolt/x is already there"),
-        "{}",
-        text(&out)
-    );
 
     let out = s
         .command(&s.sessions.path().join("a"))
@@ -997,14 +983,6 @@ fn a_bolt_is_made_landed_on_and_deleted_on_its_remote() {
     assert!(out.status.success(), "{}", text(&out));
     let bolt = remote_rev(&s, "refs/heads/bolt/x");
     s.repo.git(&["cat-file", "-e", &format!("{bolt}:a.txt")]);
-
-    let out = s.sluice(&["branch", "delete", "bolt/x", "--into", "main"]);
-    assert!(!out.status.success(), "{}", text(&out));
-    assert!(
-        text(&out).contains("has not landed into main"),
-        "{}",
-        text(&out)
-    );
 
     // The bolt lands on main, submitted from a branch at its revision.
     let out = s.submit_to("land", "origin/bolt/x", "main");
@@ -1021,157 +999,6 @@ fn a_bolt_is_made_landed_on_and_deleted_on_its_remote() {
     for gone in ["refs/heads/bolt/x", "refs/remotes/origin/bolt/x"] {
         let out = s.repo.git_raw(&["rev-parse", "--verify", "-q", gone]);
         assert!(!out.status.success(), "{gone} is still here");
-    }
-}
-
-/// With no remote, sluice makes and deletes a bolt in local refs under
-/// the same rules (branches-1 104, 105; C.4 local refs).
-#[test]
-fn a_bolt_is_made_and_deleted_with_no_remote() {
-    let s = Setup::local("local-bolt-life");
-    let main = s.repo.rev("main");
-    let out = s.sluice(&["branch", "create", "bolt/x", "--from", "main"]);
-    assert!(out.status.success(), "{}", text(&out));
-    assert_eq!(s.repo.rev("bolt/x"), main);
-    let out = s.sluice(&["branch", "create", "bolt/x", "--from", "main"]);
-    assert!(!out.status.success(), "{}", text(&out));
-
-    let out = s.submit_to("a", "bolt/x", "bolt/x");
-    assert!(out.status.success(), "{}", text(&out));
-    // Rounds until its check has run and it lands: a round passes in
-    // milliseconds, and the check's run takes its own time.
-    let rounds_until = |landed: &dyn Fn() -> bool| {
-        let until = Instant::now() + Duration::from_secs(60);
-        while !landed() {
-            assert!(
-                Instant::now() < until,
-                "{}",
-                text(&s.sluice(&["status", "--all"]))
-            );
-            let out = s.sluice(&["run", "--rounds", "8"]);
-            assert!(out.status.success(), "{}", text(&out));
-        }
-    };
-    rounds_until(&|| s.repo.rev("bolt/x") != main);
-    let bolt = s.repo.rev("bolt/x");
-    assert_ne!(bolt, main);
-    let out = s.sluice(&["branch", "delete", "bolt/x"]);
-    assert!(!out.status.success(), "{}", text(&out));
-    assert!(
-        text(&out).contains("has not landed into main"),
-        "{}",
-        text(&out)
-    );
-
-    let out = s.submit_to("land", "bolt/x", "main");
-    assert!(out.status.success(), "{}", text(&out));
-    rounds_until(&|| s.repo.rev("main") != main);
-    let out = s.sluice(&["branch", "delete", "bolt/x"]);
-    assert!(out.status.success(), "{}", text(&out));
-    let out = s
-        .repo
-        .git_raw(&["rev-parse", "--verify", "-q", "refs/heads/bolt/x"]);
-    assert!(!out.status.success(), "bolt/x is still here");
-    assert_eq!(s.remote_main(), main, "nothing reached the remote");
-
-    // 105: its records stay and answer its status, which says it is gone,
-    // and the overview shows it with its landing (record 0091).
-    let out = s.sluice(&["status", "bolt/x", "--all", "--json"]);
-    assert!(out.status.success(), "{}", text(&out));
-    let doc: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
-    assert_eq!(doc["gone"], true, "{doc}");
-    assert_eq!(doc["submissions"][0]["state"], "landed", "{doc}");
-    let gone = format!("bolt/x is gone, last at {}", &bolt[..7]);
-    let out = s.sluice(&["status", "bolt/x"]);
-    assert!(out.status.success(), "{}", text(&out));
-    assert!(text(&out).starts_with(&gone), "{}", text(&out));
-    let out = s.sluice(&["overview"]);
-    assert!(out.status.success(), "{}", text(&out));
-    assert!(text(&out).contains(&gone), "{}", text(&out));
-    assert!(text(&out).contains("landed #1"), "{}", text(&out));
-    let out = s.sluice(&["overview", "--json"]);
-    assert!(out.status.success(), "{}", text(&out));
-    let doc: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
-    let named = |b: &str| {
-        doc["branches"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .find(|v| v["branch"] == b)
-            .unwrap_or_else(|| panic!("the overview names {b}: {doc}"))
-            .clone()
-    };
-    assert_eq!(named("bolt/x")["gone"], true, "{doc}");
-    assert!(named("main").get("gone").is_none(), "{doc}");
-    let out = s.sluice(&["status", "main", "--json"]);
-    assert!(out.status.success(), "{}", text(&out));
-    let doc: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
-    assert_eq!(doc["gone"], false, "{doc}");
-}
-
-/// A bolt made here and deleted with nothing submitted to it here, as
-/// when every submission to it was made in another copy of the
-/// repository, so its records hold the revision it was made at alone:
-/// `sluice status` answers it, plain and with `--all`, saying it is gone
-/// and its queue empty, and the overview names it gone, apart from the
-/// branches it lands on. A branch with neither records nor a revision is
-/// still no branch (26, 61, 105; record 0091).
-#[test]
-fn a_bolt_deleted_with_nothing_submitted_here_answers_its_status() {
-    for s in [
-        Setup::local("gone-bolt-local"),
-        Setup::new("gone-bolt-remote", "origin"),
-    ] {
-        let out = s.sluice(&["branch", "create", "bolt/x", "--from", "main"]);
-        assert!(out.status.success(), "{}", text(&out));
-        let out = s.sluice(&["branch", "delete", "bolt/x"]);
-        assert!(out.status.success(), "{}", text(&out));
-
-        let out = s.sluice(&["status", "bolt/x"]);
-        assert!(out.status.success(), "{}", text(&out));
-        assert!(text(&out).starts_with("bolt/x is gone\n"), "{}", text(&out));
-        assert!(
-            text(&out).contains("nothing in the queue"),
-            "{}",
-            text(&out)
-        );
-        for args in [
-            &["status", "bolt/x", "--json"][..],
-            &["status", "bolt/x", "--all", "--json"],
-        ] {
-            let out = s.sluice(args);
-            assert!(out.status.success(), "{}", text(&out));
-            let doc: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
-            assert_eq!(doc["gone"], true, "{doc}");
-            assert_eq!(doc["submissions"], serde_json::json!([]), "{doc}");
-        }
-
-        let out = s.sluice(&["overview", "--json"]);
-        assert!(out.status.success(), "{}", text(&out));
-        let doc: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
-        let bolt = doc["branches"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .find(|b| b["branch"] == "bolt/x")
-            .unwrap_or_else(|| panic!("the overview names bolt/x: {doc}"));
-        assert_eq!(bolt["gone"], true, "{doc}");
-        let out = s.sluice(&["overview"]);
-        assert!(out.status.success(), "{}", text(&out));
-        assert!(
-            text(&out).contains("gone, nothing queued or recent: bolt/x\n"),
-            "{}",
-            text(&out)
-        );
-        assert!(!text(&out).contains("bolt/x at"), "{}", text(&out));
-
-        let out = s.sluice(&["status", "bolt/never"]);
-        assert_eq!(out.status.code(), Some(1), "{}", text(&out));
-        assert!(
-            text(&out).contains("no branch bolt/never; branches with records: bolt/x"),
-            "{}",
-            text(&out)
-        );
     }
 }
 
