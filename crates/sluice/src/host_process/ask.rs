@@ -142,6 +142,15 @@ pub struct Socketed {
 }
 
 impl Socketed {
+    /// The host process `client` reaches, in place of this command's own
+    /// ([`Client::host`]): a test's state folder, or the client a command
+    /// already holds.
+    pub fn over(client: Client) -> Socketed {
+        let socketed = Socketed::default();
+        let _ = socketed.client.set(Ok(client));
+        socketed
+    }
+
     fn client(&self) -> Result<&Client> {
         self.client
             .get_or_init(|| Client::host().map_err(|e| format!("{e:#}")))
@@ -152,9 +161,12 @@ impl Socketed {
 
 impl HostProcess for Socketed {
     /// As the process this command last followed said of itself, else as
-    /// this command's own setting says (design D14).
+    /// the environment of its client says (design D14).
     fn asked_only(&self) -> bool {
-        self.mode.get().unwrap_or_else(super::asked_only)
+        self.mode.get().unwrap_or_else(|| match self.client() {
+            Ok(c) => super::asked_only_in(c.env()),
+            Err(_) => super::asked_only(),
+        })
     }
 
     fn note(&self, here: &Here<'_, '_>) -> Result<()> {

@@ -2483,6 +2483,28 @@ mod tests {
         assert!(!asked_only_in(&[]));
     }
 
+    /// Design D14: a follower over a given client, before any host process
+    /// said how it passes, passes only when asked as its client's
+    /// environment says, whatever the environment of the process it runs in.
+    #[test]
+    fn a_follower_over_a_given_client_reads_its_clients_environment() {
+        use std::ffi::OsString;
+        let dir = std::env::temp_dir().join(format!("sluice-follower-{}", std::process::id()));
+        let client = |sleep: Option<&str>| {
+            let mut env: Vec<(OsString, OsString)> = vec![
+                ("XDG_STATE_HOME".into(), dir.join("state").into()),
+                (USER_SCRATCH_VAR.into(), dir.join("scratch").into()),
+            ];
+            if let Some(v) = sleep {
+                env.push((ROUND_SLEEP_VAR.into(), v.into()));
+            }
+            client::Client::new(Path::new("/nonexistent/sluice"), env).unwrap()
+        };
+        assert!(Socketed::over(client(Some("record"))).asked_only());
+        assert!(!Socketed::over(client(None)).asked_only());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     /// resident-reads, "An older one-shot read" and "An older watch",
     /// resident-workers, "An older hold", and resident-changes, "An older
     /// step" (the change `sluice-host-answers-every-read`, design D9; the
