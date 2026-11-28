@@ -453,24 +453,9 @@ impl PushedRefs {
         to: Option<&str>,
     ) -> Result<Pushed> {
         let called = self.call(Kind::Push, args, &[refspec])?;
-        let out = match called.note {
-            Some(note) => told(called.out, &note),
-            None => called.out,
-        };
-        match called.judged {
-            None => Ok(Pushed::Done),
-            Some(Judged::Unknown) => {
-                let shown = name.strip_prefix("refs/heads/").unwrap_or(name);
-                let holds = match self.on_remote(name) {
-                    Ok(at) if at.as_deref() == to => return Ok(Pushed::Done),
-                    Ok(Some(at)) => format!("{} holds {shown} at {at}", self.remote),
-                    Ok(None) => format!("{} has no {shown}", self.remote),
-                    Err(e) => format!("{e:#}"),
-                };
-                Ok(Pushed::Unanswered(out, holds))
-            }
-            Some(_) => Ok(Pushed::Refused(out)),
-        }
+        Ok(settled(&self.remote, called, name, to, || {
+            self.on_remote(name)
+        }))
     }
 
     /// The revision the remote's ref `name` holds, listed under the retry
@@ -712,6 +697,39 @@ fn calling(
         note,
         judged: Some(stopped.judged),
     })
+}
+
+/// How a push to `remote` setting its ref `name` to `to`, or removing it
+/// where `to` is `None`, stands once `called` has made it (122, 134; ADR
+/// 0017): done where a try succeeded; refused where the remote answered,
+/// its credential refused among it; and where its answer was not read,
+/// done where the remote holds what the push set, as `holds` reads its
+/// ref once, and otherwise unanswered, saying what the remote holds.
+fn settled(
+    remote: &str,
+    called: Called,
+    name: &str,
+    to: Option<&str>,
+    holds: impl FnOnce() -> Result<Option<String>>,
+) -> Pushed {
+    let out = match called.note {
+        Some(note) => told(called.out, &note),
+        None => called.out,
+    };
+    match called.judged {
+        None => Pushed::Done,
+        Some(Judged::Unknown) => {
+            let shown = name.strip_prefix("refs/heads/").unwrap_or(name);
+            let holds = match holds() {
+                Ok(at) if at.as_deref() == to => return Pushed::Done,
+                Ok(Some(at)) => format!("{remote} holds {shown} at {at}"),
+                Ok(None) => format!("{remote} has no {shown}"),
+                Err(e) => format!("{e:#}"),
+            };
+            Pushed::Unanswered(out, holds)
+        }
+        Some(_) => Pushed::Refused(out),
+    }
 }
 
 /// A git call to the remote under the retry policy: its last try's output,
@@ -1192,8 +1210,8 @@ mod tests {
     use std::time::Duration;
 
     use super::{
-        answered_refusal, calling, lost_race, netrc_names, own_credential, withheld_read, Attempt,
-        Moved, Output, Rev, Speaker, Tried,
+        answered_refusal, calling, lost_race, netrc_names, own_credential, settled, withheld_read,
+        Attempt, Called, Moved, Output, Pushed, Rev, Speaker, Tried,
     };
     use crate::identity::{Author, Credentials, Identity, Withheld};
     use crate::retry::{Judged, Kind, Policy};
@@ -1490,6 +1508,76 @@ mod tests {
         );
         assert_eq!(called.judged, Some(Judged::Answered));
         assert_eq!(called.note, None);
+    }
+
+    /// A push's call, judged `judged`, git's words those of a connection
+    /// cut after the push was sent.
+    fn pushed(judged: Option<Judged>) -> Called {
+        let code = if judged.is_none() { 0 } else { 1 };
+        let stderr = "error: RPC failed; curl 52 Empty reply from server\n";
+        let Attempt::Ran(tried) = ran(code, "", stderr) else {
+            unreachable!()
+        };
+        Called {
+            out: tried.out,
+            note: None,
+            judged,
+        }
+    }
+
+    /// 122, 134 (ADR 0017): a push whose answer was not read is settled by
+    /// reading the remote's ref once: done where the remote holds what the
+    /// push set, a removal's absence among it, and otherwise unanswered,
+    /// saying what the remote holds; a push that went through, or that the
+    /// remote answered, asks the remote nothing.
+    #[test]
+    fn a_push_whose_answer_was_lost_is_what_the_remote_holds() {
+        let lost = || pushed(Some(Judged::Unknown));
+        let holds = |at: Option<&'static str>| move || Ok(at.map(String::from));
+        let why = |p: Pushed| p.why().expect("not done");
+        let x = "refs/heads/bolt/x";
+        let main = "refs/heads/main";
+        assert!(matches!(
+            settled("origin", lost(), x, Some("b"), holds(Some("b"))),
+            Pushed::Done
+        ));
+        assert!(matches!(
+            settled("origin", lost(), x, None, holds(None)),
+            Pushed::Done
+        ));
+        let absent = why(settled("origin", lost(), x, Some("b"), holds(None)));
+        assert!(
+            absent.ends_with("the push went unanswered, and origin has no bolt/x"),
+            "{absent}"
+        );
+        let elsewhere = why(settled("origin", lost(), main, Some("b"), holds(Some("a"))));
+        assert!(
+            elsewhere.ends_with("the push went unanswered, and origin holds main at a"),
+            "{elsewhere}"
+        );
+        let unread = why(settled("origin", lost(), main, Some("b"), || {
+            Err(anyhow::anyhow!("listing main on origin failed"))
+        }));
+        assert!(
+            unread.ends_with("and listing main on origin failed"),
+            "{unread}"
+        );
+
+        let asks = || -> anyhow::Result<Option<String>> { panic!("the remote was asked") };
+        assert!(matches!(
+            settled("origin", pushed(None), main, Some("b"), asks),
+            Pushed::Done
+        ));
+        assert!(matches!(
+            settled(
+                "origin",
+                pushed(Some(Judged::Answered)),
+                main,
+                Some("b"),
+                asks
+            ),
+            Pushed::Refused(_)
+        ));
     }
 
     /// 133, rule core.28: a read the forge gives sluice's identity no
