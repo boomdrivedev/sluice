@@ -281,6 +281,19 @@ pub fn user_scratch() -> Result<PathBuf> {
 /// directories and not `/tmp/sluice-<uid>`. A host sets none.
 pub const USER_SCRATCH_VAR: &str = "SLUICE_USER_SCRATCH";
 
+/// git's hash of `text` as a blob, as `git hash-object --stdin` gives it,
+/// computed with no process started (129), so a place's names stay what
+/// they were across sluice's builds.
+fn blob_hash(text: &str) -> Result<String> {
+    let id = gix::objs::compute_hash(
+        gix::hash::Kind::Sha1,
+        gix::objs::Kind::Blob,
+        text.as_bytes(),
+    )
+    .map_err(|e| anyhow!("hashing {text}: {e}"))?;
+    Ok(id.to_string())
+}
+
 /// 35 as amended, rule core.30: the repository's key, the first 10 hex
 /// digits of the SHA-1 of its common directory's path, so two copies of a
 /// repository keep their scratch apart, and no process is started for it
@@ -762,7 +775,7 @@ impl Places {
             "SLUICE_PLACE".to_string(),
             format!(
                 "sluice-{}",
-                &self.hash(&self.record(name).to_string_lossy())?[..10]
+                &blob_hash(&self.record(name).to_string_lossy())?[..10]
             ),
         );
         Ok(Place {
@@ -807,7 +820,7 @@ impl Places {
             "SLUICE_PLACE".to_string(),
             format!(
                 "sluice-{}",
-                &self.hash(&self.record(name).to_string_lossy())?[..10]
+                &blob_hash(&self.record(name).to_string_lossy())?[..10]
             ),
         );
         if let Some(b) = &made.branch {
@@ -879,7 +892,7 @@ impl Places {
             let mut names = BTreeMap::new();
             for p in &ports.names {
                 let whole = format!("{p}\0{}\0{branch}\0{repository}", rev.as_str());
-                let hash = &self.hash(&whole)?[..6];
+                let hash = &blob_hash(&whole)?[..6];
                 names.insert(name_env(p), label(p, short, branch, &repository, hash));
             }
             Ok(names)
@@ -1475,7 +1488,7 @@ impl Places {
         let record = self.record(name);
         let mut env = BTreeMap::from([(
             "SLUICE_PLACE".to_string(),
-            format!("sluice-{}", &self.hash(&record.to_string_lossy())?[..10]),
+            format!("sluice-{}", &blob_hash(&record.to_string_lossy())?[..10]),
         )]);
         env.extend(made.ports.clone());
         Ok(Some(Place {
@@ -1529,21 +1542,6 @@ impl Places {
             );
         }
         Ok(path)
-    }
-
-    /// git's hash of `text`: names stay the same across sluice's builds.
-    fn hash(&self, text: &str) -> Result<String> {
-        let out = crate::workers::command("git", "git")
-            .args(["hash-object", "--stdin"])
-            .worker_output_with(text.as_bytes().to_vec())
-            .context("running git hash-object")?;
-        if !out.status.success() {
-            bail!(
-                "git hash-object: {}",
-                String::from_utf8_lossy(&out.stderr).trim()
-            );
-        }
-        Ok(String::from_utf8_lossy(&out.stdout).trim().to_string())
     }
 
     /// 35: the checkout cache is gone, and so are the caches an earlier
@@ -1893,7 +1891,7 @@ impl Checkout for Places {
         self.write_record(name, &made)?;
         let mut env = BTreeMap::from([(
             "SLUICE_PLACE".to_string(),
-            format!("sluice-{}", &self.hash(&record.to_string_lossy())?[..10]),
+            format!("sluice-{}", &blob_hash(&record.to_string_lossy())?[..10]),
         )]);
         if let Some(ports) = &ports {
             made.ports = hold_ports(&self.ports()?, ports, &record)?;
@@ -2234,7 +2232,7 @@ impl Checkout for Places {
         let mut env = made.ports.clone();
         env.insert(
             "SLUICE_PLACE".to_string(),
-            format!("sluice-{}", &self.hash(&record.to_string_lossy())?[..10]),
+            format!("sluice-{}", &blob_hash(&record.to_string_lossy())?[..10]),
         );
         Ok(Place {
             name,
@@ -2578,6 +2576,20 @@ mod tests {
     /// 35, rule core.30: a scratch's name is 10 lower-case hex digits, one
     /// name's always the same and two names' different, and never a
     /// former scratch's name, which holds `+2F` or `+~`.
+    /// A place's name is git's hash of its record's path, as `git
+    /// hash-object --stdin` gives it, so names stay what they were.
+    #[test]
+    fn a_blob_hash_is_gits() {
+        assert_eq!(
+            super::blob_hash("hello").unwrap(),
+            "b6fc4c620b67d95f953a5c1c1230aaab5db5a1b0"
+        );
+        assert_eq!(
+            super::blob_hash("").unwrap(),
+            "e69de29bb2d1d6434b8b29ae775ad8c2e48c5391"
+        );
+    }
+
     #[test]
     fn a_scratch_name_is_ten_hex_digits_of_the_name() {
         let names = [
